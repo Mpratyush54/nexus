@@ -23,7 +23,98 @@ import (
 
 	"central-memory/internal/mcp"
 	"central-memory/internal/project"
+	"central-memory/internal/store"
 )
+
+type mcpStore struct {
+	mem *store.MemStore
+}
+
+var _ mcp.Store = mcpStore{}
+
+func memoryDTO(item *store.MemoryItem) *mcp.MemoryItem {
+	return &mcp.MemoryItem{
+		ID: item.ID, ProjectID: item.ProjectID, Key: item.Key, Content: item.Content,
+		ContextSnippet: item.ContextSnippet, Level: item.Level, Scope: item.Scope,
+		Tags: item.Tags, Confidence: item.Confidence, Status: item.Status, Source: item.Source,
+	}
+}
+
+func (s mcpStore) SearchMemory(ctx context.Context, projectID, query string, tags []string, limit int) ([]*mcp.MemoryItem, error) {
+	items, err := s.mem.SearchMemory(ctx, projectID, query, tags, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*mcp.MemoryItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, memoryDTO(item))
+	}
+	return out, nil
+}
+
+func (s mcpStore) CreateMemoryItem(ctx context.Context, item *mcp.MemoryItem) error {
+	row := &store.MemoryItem{
+		ID: item.ID, ProjectID: item.ProjectID, Key: item.Key, Content: item.Content,
+		ContextSnippet: item.ContextSnippet, Level: item.Level, Scope: item.Scope,
+		Tags: item.Tags, Confidence: item.Confidence, Status: item.Status, Source: item.Source,
+	}
+	if err := s.mem.CreateMemoryItem(ctx, row); err != nil {
+		return err
+	}
+	*item = *memoryDTO(row)
+	return nil
+}
+
+func episodeDTO(ep *store.Episode) *mcp.Episode {
+	return &mcp.Episode{
+		ID: ep.ID, ProjectID: ep.ProjectID, Title: ep.Title, EpisodeType: ep.EpisodeType,
+		Trigger: ep.Trigger, RootCause: ep.RootCause, Resolution: ep.Resolution,
+		Verification: ep.Verification, Tags: ep.Tags, FilesInvolved: ep.FilesInvolved,
+		ErrorPatterns: ep.ErrorPatterns, Status: ep.Status,
+	}
+}
+
+func (s mcpStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query string, limit int) ([]*mcp.Episode, error) {
+	episodes, err := s.mem.SearchEpisodes(ctx, projectID, errorPattern, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*mcp.Episode, 0, len(episodes))
+	for _, ep := range episodes {
+		out = append(out, episodeDTO(ep))
+	}
+	return out, nil
+}
+
+func (s mcpStore) CreateEpisode(ctx context.Context, ep *mcp.Episode) error {
+	row := &store.Episode{
+		ID: ep.ID, ProjectID: ep.ProjectID, Title: ep.Title, EpisodeType: ep.EpisodeType,
+		Trigger: ep.Trigger, RootCause: ep.RootCause, Resolution: ep.Resolution,
+		Verification: ep.Verification, Tags: ep.Tags, FilesInvolved: ep.FilesInvolved,
+		ErrorPatterns: ep.ErrorPatterns, Status: ep.Status,
+	}
+	if err := s.mem.CreateEpisode(ctx, row); err != nil {
+		return err
+	}
+	*ep = *episodeDTO(row)
+	return nil
+}
+
+func (s mcpStore) GetActiveWorkspace(ctx context.Context, projectID string) (*mcp.Workspace, error) {
+	ws, err := s.mem.GetActiveWorkspace(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return &mcp.Workspace{Branch: ws.Branch, CommitSHA: ws.CommitSHA, IsDirty: ws.IsDirty, Path: ws.Path}, nil
+}
+
+func (s mcpStore) GetProject(ctx context.Context, id string) (*mcp.Project, error) {
+	p, err := s.mem.GetProject(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &mcp.Project{DisplayName: p.DisplayName, FolderName: p.FolderName}, nil
+}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -96,15 +187,15 @@ func cmdMCP() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	mem := mcp.NewInMemoryMemoryStore()
-	srv := mcp.New(
-		mcp.Config{ProjectName: name},
-		mem, mem,
-		mcp.NewInMemoryEpisodeStore(),
-		mcp.DaemonWorkspaceProvider{Root: root, Project: name},
-		mcp.DaemonFileProxy{Root: root},
-	)
-	if err := srv.ServeStdio(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
+	mem := store.NewMemStore()
+	p, err := mem.ResolveProject(ctx, "", "", name)
+	if err != nil {
+		return fmt.Errorf("mem mcp: resolve project: %w", err)
+	}
+	srv := mcp.NewServer(mcpStore{mem}, mcp.Config{
+		ProjectID: p.ID, ProjectName: name, WorkspacePath: root,
+	})
+	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("mem mcp: %w", err)
 	}
 	return nil

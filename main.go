@@ -7,6 +7,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"central-memory/internal/platform"
 	"central-memory/internal/project"
@@ -87,11 +89,19 @@ func cmdDaemon(args []string) error {
 	}
 	switch args[0] {
 	case "install":
-		return platform.Install("", platform.DefaultDaemonArgs())
+		bin := strings.TrimSpace(os.Getenv("NEXUS_DAEMON_BIN"))
+		if bin == "" {
+			return fmt.Errorf("NEXUS_DAEMON_BIN must point to the daemon executable")
+		}
+		bin, err := filepath.Abs(bin)
+		if err != nil {
+			return fmt.Errorf("resolve daemon executable: %w", err)
+		}
+		return platform.Install(bin, nil)
 	case "uninstall":
 		return platform.Uninstall()
 	case "status":
-		st, err := platform.ServiceStatus()
+		st, err := platform.Status()
 		if err != nil {
 			return err
 		}
