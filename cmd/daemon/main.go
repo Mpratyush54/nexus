@@ -40,35 +40,53 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	d, err := daemon.New(*root, *serverURL, fmt.Sprintf("127.0.0.1:%d", *port))
-	if err != nil {
-		return err
+	if *port <= 0 || *port > 65535 {
+		return fmt.Errorf("daemon: invalid port %d (want 1-65535)", *port)
 	}
+	addr := fmt.Sprintf("127.0.0.1:%d", *port)
 
-	bound, err := d.Start(ctx)
+	token, err := daemon.EnsureToken(*root)
 	if err != nil {
 		return err
 	}
-	log.Printf("daemon: serving workspace root=%s addr=%s machine=%s server=%q",
-		d.Root, bound, d.MachineID, d.ServerURL)
+	d, err := daemon.NewDaemon(*root, token)
+	if err != nil {
+		return err
+	}
+	d.ServerURL = *serverURL
+
+	serveErr := make(chan error, 1)
+	go func() {
+		serveErr <- d.Start(addr)
+	}()
 
 	if d.ServerURL != "" {
-		if err := d.Register(ctx); err != nil {
-			// Registration failure must not kill the daemon: local
-			// file/git ops stay available and the heartbeat loop retries
-			// presence.
-			log.Printf("daemon: initial register failed (will retry via heartbeat): %v", err)
+		if err := d.Register(ctx, d.ServerURL); err != nil {
+			log.Printf("daemon: initial register failed: %v", err)
 		}
-		d.StartHeartbeatLoop(ctx)
-		defer d.StopHeartbeat()
+		hbCtx, hbCancel := context.WithCancel(context.Background())
+		defer hbCancel()
+		go d.StartHeartbeat(hbCtx, d.ServerURL, daemon.HeartbeatInterval)
 	} else {
 		log.Print("daemon: no server set — local-only mode (no register/heartbeat)")
 	}
 
-	<-ctx.Done()
-	log.Print("daemon: shutdown signal received, draining")
-	d.Wait()
-	if err := ctx.Err(); err != nil && !errors.Is(err, context.Canceled) {
+	log.Printf("daemon: serving workspace root=%s addr=%s machine=%s server=%q",
+		d.Root, addr, d.MachineID, d.ServerURL)
+
+	select {
+	case <-ctx.Done():
+		log.Print("daemon: shutdown signal received, draining")
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+		return nil
+	}
+	if err := d.Close(); err != nil {
+		return err
+	}
+	if err := <-serveErr; err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 	return nil
