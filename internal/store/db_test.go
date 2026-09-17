@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -18,28 +19,92 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// fakeStoreDBTX is a DBTX that records Exec calls. Query/QueryRow are
-// unimplemented — tests exercising them need scripted rows (follow-up).
+// fakeMigrationRows is a store.Rows over a list of applied migration base
+// names (single TEXT column). It lets RunMigrations exercise its
+// skip-applied path without a live Postgres.
+type fakeMigrationRows struct {
+	names []string
+	pos   int
+}
+
+func (r *fakeMigrationRows) Next() bool { r.pos++; return r.pos <= len(r.names) }
+func (r *fakeMigrationRows) Err() error { return nil }
+func (r *fakeMigrationRows) Close()     {}
+func (r *fakeMigrationRows) Scan(dest ...any) error {
+	if len(dest) != 1 {
+		return errors.New("fakeMigrationRows: arity mismatch")
+	}
+	s, ok := dest[0].(*string)
+	if !ok {
+		return errors.New("fakeMigrationRows: dest must be *string")
+	}
+	*s = r.names[r.pos-1]
+	return nil
+}
+
+// fakeStoreDBTX is a DBTX that records Exec/Query calls and simulates the
+// schema_migrations tracking table in memory: Query returns the keys of
+// applied, and Exec of an INSERT INTO schema_migrations records its $1 arg.
+// Query/QueryRow against a real database are covered by integration tests.
 type fakeStoreDBTX struct {
 	execs      []string
+	queries    []string
+	applied    map[string]struct{}
 	execErr    error
+	queryErr   error
 	failSubstr string // when set, only statements containing it fail
 }
 
-func (f *fakeStoreDBTX) Exec(_ context.Context, sql string, _ ...any) (pgconn.CommandTag, error) {
+func (f *fakeStoreDBTX) appliedNames() []string {
+	names := make([]string, 0, len(f.applied))
+	for n := range f.applied {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (f *fakeStoreDBTX) Exec(_ context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
 	f.execs = append(f.execs, sql)
 	if f.execErr != nil && (f.failSubstr == "" || strings.Contains(sql, f.failSubstr)) {
 		return pgconn.CommandTag{}, f.execErr
 	}
+	// Simulate the tracking insert: record the migration base name so a
+	// second RunMigrations with the same fake observes it via Query.
+	if strings.Contains(sql, "INSERT INTO schema_migrations") && len(args) > 0 {
+		if name, ok := args[0].(string); ok {
+			if f.applied == nil {
+				f.applied = make(map[string]struct{})
+			}
+			f.applied[name] = struct{}{}
+		}
+	}
 	return pgconn.CommandTag{}, nil
 }
 
-func (f *fakeStoreDBTX) Query(_ context.Context, _ string, _ ...any) (store.Rows, error) {
-	return nil, errors.New("fakeStoreDBTX: Query not implemented")
+func (f *fakeStoreDBTX) Query(_ context.Context, sql string, _ ...any) (store.Rows, error) {
+	f.queries = append(f.queries, sql)
+	if f.queryErr != nil {
+		return nil, f.queryErr
+	}
+	return &fakeMigrationRows{names: f.appliedNames()}, nil
 }
 
 func (f *fakeStoreDBTX) QueryRow(_ context.Context, _ string, _ ...any) pgx.Row {
 	return nil
+}
+
+// migrationBodies returns only the Execs that applied migration file bodies
+// (excluding the schema_migrations bookkeeping statements).
+func migrationBodies(exec []string) []string {
+	var out []string
+	for _, sql := range exec {
+		if strings.Contains(sql, "schema_migrations") {
+			continue
+		}
+		out = append(out, sql)
+	}
+	return out
 }
 
 func TestStore_DefaultConfigValues(t *testing.T) {
@@ -138,8 +203,17 @@ func TestStore_RunMigrationsAppliesInOrder(t *testing.T) {
 			t.Fatalf("applied = %v, want %v", applied, wantApplied)
 		}
 	}
-	if len(fake.execs) != 2 || fake.execs[0] != "SELECT 1;" || fake.execs[1] != "SELECT 2;" {
-		t.Fatalf("exec order/content wrong: %q", fake.execs)
+	// The first Exec must ensure the tracking table; migration bodies then
+	// apply in filename order (empty files record without a body Exec).
+	if len(fake.execs) == 0 || !strings.Contains(fake.execs[0], "CREATE TABLE IF NOT EXISTS schema_migrations") {
+		t.Fatalf("first exec must ensure schema_migrations, got %q", fake.execs)
+	}
+	if len(fake.queries) != 1 {
+		t.Fatalf("expected 1 applied-list query, got %q", fake.queries)
+	}
+	bodies := migrationBodies(fake.execs)
+	if len(bodies) != 2 || bodies[0] != "SELECT 1;" || bodies[1] != "SELECT 2;" {
+		t.Fatalf("exec order/content wrong: %q", bodies)
 	}
 }
 
@@ -149,8 +223,8 @@ func TestStore_RunMigrationsMissingDirIsNoop(t *testing.T) {
 	if err != nil || applied != nil {
 		t.Fatalf("expected (nil, nil), got (%v, %v)", applied, err)
 	}
-	if len(fake.execs) != 0 {
-		t.Fatalf("expected no execs, got %q", fake.execs)
+	if len(fake.execs) != 0 || len(fake.queries) != 0 {
+		t.Fatalf("expected no execs/queries, got execs=%q queries=%q", fake.execs, fake.queries)
 	}
 }
 
@@ -165,6 +239,110 @@ func TestStore_RunMigrationsPropagatesExecError(t *testing.T) {
 	}
 	if len(applied) != 1 || applied[0] != "001_ok.up.sql" {
 		t.Fatalf("expected partial applied [001_ok.up.sql], got %v", applied)
+	}
+}
+
+// TestMigrationDoubleApplyIsNoop proves the boot-twice fix: running the same
+// migration dir twice against the same tracking state applies each file once
+// and Execs no migration body on the second run.
+func TestMigrationDoubleApplyIsNoop(t *testing.T) {
+	dir := t.TempDir()
+	writeStoreFile(t, dir, "001_a.up.sql", "SELECT 1;")
+	writeStoreFile(t, dir, "002_b.up.sql", "SELECT 2;")
+	fake := &fakeStoreDBTX{}
+	first, err := store.RunMigrations(context.Background(), fake, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 2 || first[0] != "001_a.up.sql" || first[1] != "002_b.up.sql" {
+		t.Fatalf("first run applied = %v, want [001_a.up.sql 002_b.up.sql]", first)
+	}
+	bodiesAfterFirst := len(migrationBodies(fake.execs))
+	second, err := store.RunMigrations(context.Background(), fake, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("second run must be a no-op, applied = %v", second)
+	}
+	if got := len(migrationBodies(fake.execs)); got != bodiesAfterFirst {
+		t.Fatalf("second run exec'd %d bodies, want %d (no re-apply)", got, bodiesAfterFirst)
+	}
+}
+
+// TestMigrationSkipApplied proves already-recorded files are skipped while
+// new files still apply in order.
+func TestMigrationSkipApplied(t *testing.T) {
+	dir := t.TempDir()
+	writeStoreFile(t, dir, "001_a.up.sql", "SELECT 1;")
+	writeStoreFile(t, dir, "002_b.up.sql", "SELECT 2;")
+	fake := &fakeStoreDBTX{applied: map[string]struct{}{"001_a.up.sql": {}}}
+	applied, err := store.RunMigrations(context.Background(), fake, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(applied) != 1 || applied[0] != "002_b.up.sql" {
+		t.Fatalf("applied = %v, want [002_b.up.sql]", applied)
+	}
+	bodies := migrationBodies(fake.execs)
+	if len(bodies) != 1 || bodies[0] != "SELECT 2;" {
+		t.Fatalf("only 002 body must exec, got %q", bodies)
+	}
+}
+
+// TestMigrationSeedRerunIdempotent proves the 004 agents seed is safe to
+// re-encounter: its INSERT carries ON CONFLICT DO NOTHING, and the runner
+// skips the file on a second pass.
+func TestMigrationSeedRerunIdempotent(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "migrations", "004_agents.up.sql"))
+	if err != nil {
+		t.Fatalf("read real 004 migration: %v", err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, "ON CONFLICT (name) DO NOTHING") {
+		t.Fatalf("004 agents seed must carry ON CONFLICT (name) DO NOTHING for idempotent re-runs")
+	}
+	if strings.Contains(body, "when present") {
+		t.Fatalf("004 header must not claim 002/003 are optional (requires 001+002+003 in order)")
+	}
+	if !strings.Contains(body, "001 + 002 + 003 in order") {
+		t.Fatalf("004 header must state the 001+002+003 ordering requirement")
+	}
+
+	dir := t.TempDir()
+	writeStoreFile(t, dir, "004_agents.up.sql", body)
+	fake := &fakeStoreDBTX{}
+	first, err := store.RunMigrations(context.Background(), fake, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first) != 1 || first[0] != "004_agents.up.sql" {
+		t.Fatalf("first run applied = %v, want [004_agents.up.sql]", first)
+	}
+	second, err := store.RunMigrations(context.Background(), fake, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("seed re-run must be a no-op, applied = %v", second)
+	}
+}
+
+// TestMigrationQueryErrorFailsClosed proves a tracking-read failure aborts
+// the run instead of blindly re-applying every file.
+func TestMigrationQueryErrorFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	writeStoreFile(t, dir, "001_a.up.sql", "SELECT 1;")
+	fake := &fakeStoreDBTX{queryErr: errors.New("tracking unavailable")}
+	applied, err := store.RunMigrations(context.Background(), fake, dir)
+	if err == nil || !strings.Contains(err.Error(), "list applied migrations") {
+		t.Fatalf("expected tracking-read error, got applied=%v err=%v", applied, err)
+	}
+	if len(applied) != 0 {
+		t.Fatalf("failed run must report no newly applied files, got %v", applied)
+	}
+	if bodies := migrationBodies(fake.execs); len(bodies) != 0 {
+		t.Fatalf("no migration body may exec when tracking is unreadable, got %q", bodies)
 	}
 }
 

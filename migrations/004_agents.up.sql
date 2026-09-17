@@ -5,7 +5,7 @@
 -- windsurf → '.windsurfrules'/'text').
 -- Cross-platform: pure DDL, no filesystem paths, no OS-specific constructs.
 -- Target: AWS RDS Aurora Serverless v2 (PostgreSQL + pgvector).
--- Applies on top of 001 (+002/003 when present): project_agents references
+-- Applies on top of 001 + 002 + 003 in order: project_agents references
 -- projects (001). The two ALTERs complete deferred FKs left as bare UUIDs by
 -- earlier migrations — session_participants.agent_id (003, same deferred-FK
 -- pattern 001 used for episode_events.event_id → events(id)) and
@@ -34,7 +34,8 @@ INSERT INTO agents (name, adapter_type, context_budget, output_file, output_form
     ('antigravity','pull', 10000, NULL, NULL),
     ('copilot',   'push', 8000,  '.github/copilot-instructions.md', 'markdown'),
     ('cursor',    'push', 6000,  '.cursorrules', 'text'),
-    ('windsurf',  'push', 6000,  '.windsurfrules', 'text');
+    ('windsurf',  'push', 6000,  '.windsurfrules', 'text')
+ON CONFLICT (name) DO NOTHING;
 
 -- ============================================================
 -- PROJECT AGENTS — per-project enablement + config overrides

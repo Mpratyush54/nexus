@@ -69,7 +69,7 @@ CREATE TABLE memory_items (
     key             TEXT NOT NULL,                        -- machine key: "testing/framework"
 
     -- LLM-optimized content
-    content         TEXT NOT NULL                         -- natural language, 20-500 chars enforced
+    content         TEXT NOT NULL                         -- natural language, 20-2000 chars enforced
         CHECK (length(content) >= 20 AND length(content) <= 2000),
     context_snippet TEXT,                                -- 1-2 line provenance: "Decided by Alice during auth refactor"
 

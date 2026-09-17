@@ -217,10 +217,29 @@ func ListMigrationFiles(dir string) ([]string, error) {
 	return out, nil
 }
 
-// RunMigrations applies every migrations/*.up.sql file in filename order and
-// returns the applied base names. A missing directory is a no-op (nil, nil):
-// migrations are owned by another agent and may not exist yet. Each file may
-// contain multiple statements; pgx Exec runs the file body as one unit.
+// schemaMigrationsDDL tracks which migration files have already applied so
+// reboots are idempotent. The table is created with IF NOT EXISTS on every
+// run (safe under concurrent boots); each successfully applied file is
+// recorded by base name (e.g. "001_initial.up.sql").
+const schemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (filename TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())`
+
+// listAppliedMigrationsSQL returns every previously recorded migration base
+// name. Recording is by base name (not path) so MIGRATIONS_DIR moves do not
+// cause re-application.
+const listAppliedMigrationsSQL = `SELECT filename FROM schema_migrations`
+
+// recordAppliedMigrationSQL marks one file applied. ON CONFLICT DO NOTHING
+// keeps concurrent boots (two migrators racing the same file) safe.
+const recordAppliedMigrationSQL = `INSERT INTO schema_migrations (filename) VALUES ($1) ON CONFLICT DO NOTHING`
+
+// RunMigrations applies every not-yet-applied migrations/*.up.sql file in
+// filename order and returns the newly applied base names. A missing
+// directory is a no-op (nil, nil): migrations are owned by another agent and
+// may not exist yet. Files already recorded in schema_migrations are skipped
+// without Exec, so a second boot is a no-op (returns empty, nil) instead of
+// failing on duplicate CREATE TABLE / seed rows. Each file may contain
+// multiple statements; pgx Exec runs the file body as one unit. Empty files
+// are recorded as applied without Exec so they are not reconsidered.
 // There is no down-migration support by design — rollback is forward-only via
 // new migrations (Aurora Serverless DDL is transactional per file here).
 func RunMigrations(ctx context.Context, db DBTX, dir string) ([]string, error) {
@@ -233,20 +252,49 @@ func RunMigrations(ctx context.Context, db DBTX, dir string) ([]string, error) {
 		}
 		return nil, err
 	}
+	if _, err := db.Exec(ctx, schemaMigrationsDDL); err != nil {
+		return nil, fmt.Errorf("store: ensure schema_migrations: %w", err)
+	}
+	appliedSet := make(map[string]struct{}, len(files))
+	rows, err := db.Query(ctx, listAppliedMigrationsSQL)
+	if err != nil {
+		return nil, fmt.Errorf("store: list applied migrations: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("store: scan applied migration: %w", err)
+		}
+		appliedSet[name] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list applied migrations: %w", err)
+	}
 	var applied []string
 	for _, f := range files {
+		base := filepath.Base(f)
+		if _, ok := appliedSet[base]; ok {
+			continue
+		}
 		body, err := os.ReadFile(f)
 		if err != nil {
-			return applied, fmt.Errorf("store: read migration %s: %w", filepath.Base(f), err)
+			return applied, fmt.Errorf("store: read migration %s: %w", base, err)
 		}
 		if len(strings.TrimSpace(string(body))) == 0 {
-			applied = append(applied, filepath.Base(f))
+			if _, err := db.Exec(ctx, recordAppliedMigrationSQL, base); err != nil {
+				return applied, fmt.Errorf("store: record migration %s: %w", base, err)
+			}
+			applied = append(applied, base)
 			continue
 		}
 		if _, err := db.Exec(ctx, string(body)); err != nil {
-			return applied, fmt.Errorf("store: apply migration %s: %w", filepath.Base(f), err)
+			return applied, fmt.Errorf("store: apply migration %s: %w", base, err)
 		}
-		applied = append(applied, filepath.Base(f))
+		if _, err := db.Exec(ctx, recordAppliedMigrationSQL, base); err != nil {
+			return applied, fmt.Errorf("store: record migration %s: %w", base, err)
+		}
+		applied = append(applied, base)
 	}
 	return applied, nil
 }
