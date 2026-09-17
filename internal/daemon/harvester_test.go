@@ -11,35 +11,14 @@ import (
 	"time"
 )
 
-// capturedSink records emitted events for assertions.
-type capturedSink struct {
-	mu       sync.Mutex
-	types    []string
-	payloads []map[string]any
+// sliceEmitter collects events for assertions.
+type sliceEmitter struct {
+	evs *[]Event
 }
 
-func (c *capturedSink) fn() EventSink {
-	return func(eventType string, payload map[string]any) {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		c.types = append(c.types, eventType)
-		c.payloads = append(c.payloads, payload)
-	}
-}
+func (s sliceEmitter) Emit(e Event) { *s.evs = append(*s.evs, e) }
 
-func (c *capturedSink) count(typ string) int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	n := 0
-	for _, t := range c.types {
-		if t == typ {
-			n++
-		}
-	}
-	return n
-}
-
-func writeLines(t *testing.T, path string, lines []string) {
+func writeLines(t *testing.T, path string, lines ...string) {
 	t.Helper()
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
@@ -53,380 +32,206 @@ func writeLines(t *testing.T, path string, lines []string) {
 	}
 }
 
-func TestHarvestParseJSONLTurn(t *testing.T) {
-	cases := []struct {
-		name        string
-		line        string
-		wantSpeaker string
-		wantContent string
-		wantSkip    bool // expect ErrSkippedEntry or parse error
-	}{
-		{
-			name:        "claude human",
-			line:        `{"type":"human","message":{"role":"user","content":"Let's use Redis"},"timestamp":"2026-09-17T10:00:00Z"}`,
-			wantSpeaker: "user",
-			wantContent: "Let's use Redis",
-		},
-		{
-			name:        "claude assistant text parts",
-			line:        `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Redis fits."},{"type":"text","text":"Second."}]},"timestamp":"2026-09-17T10:01:00Z"}`,
-			wantSpeaker: "assistant",
-			wantContent: "Redis fits.\nSecond.",
-		},
-		{
-			name:        "generic role content",
-			line:        `{"role":"user","content":"I prefer tabs","created_at":"2026-09-17T10:02:00Z"}`,
-			wantSpeaker: "user",
-			wantContent: "I prefer tabs",
-		},
-		{
-			name:        "speaker text shape",
-			line:        `{"speaker":"assistant","text":"trade-offs below"}`,
-			wantSpeaker: "assistant",
-			wantContent: "trade-offs below",
-		},
-		{
-			name:        "opencode parts",
-			line:        `{"role":"assistant","parts":[{"type":"text","text":"hello there"}]}`,
-			wantSpeaker: "assistant",
-			wantContent: "hello there",
-		},
-		{
-			name:        "unix timestamp",
-			line:        `{"role":"user","content":"hi","timestamp":1758103200}`,
-			wantSpeaker: "user",
-			wantContent: "hi",
-		},
-		{
-			name:     "tool-only skipped",
-			line:     `{"role":"assistant","content":[{"type":"tool_use","name":"read","input":{}}]}`,
-			wantSkip: true,
-		},
-		{
-			name:     "tool role skipped",
-			line:     `{"role":"tool","content":"output text"}`,
-			wantSkip: true,
-		},
-		{
-			name:     "empty content skipped",
-			line:     `{"role":"user","content":"   "}`,
-			wantSkip: true,
-		},
-		{
-			name:     "metadata line skipped",
-			line:     `{"type":"summary","summary":"compacted"}`,
-			wantSkip: true,
-		},
-		{
-			name:     "garbage errors",
-			line:     `not json at all`,
-			wantSkip: true,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			turn, err := ParseJSONLTurn([]byte(tc.line))
-			if tc.wantSkip {
-				if err == nil {
-					t.Fatalf("expected skip/error, got %+v", turn)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if turn.Speaker != tc.wantSpeaker {
-				t.Errorf("speaker = %q, want %q", turn.Speaker, tc.wantSpeaker)
-			}
-			if turn.Content != tc.wantContent {
-				t.Errorf("content = %q, want %q", turn.Content, tc.wantContent)
-			}
-		})
-	}
-
-	// Timestamp is extracted when present.
-	turn, err := ParseJSONLTurn([]byte(`{"role":"user","content":"hi","timestamp":"2026-09-17T10:00:00Z"}`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if turn.Timestamp.IsZero() {
-		t.Error("expected non-zero timestamp")
-	}
+func collectHarvester(workspace string) (*Harvester, *[]Event) {
+	var got []Event
+	h := NewHarvester(workspace, sliceEmitter{&got})
+	return h, &got
 }
 
-func TestHarvestTailOffsetResume(t *testing.T) {
+func TestTailOffset(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "session.jsonl")
-	writeLines(t, path, []string{
-		`{"role":"user","content":"first"}`,
-		`{"role":"assistant","content":"second"}`,
-	})
-
-	turns, off, err := TailTurns(path, 0)
+	p := filepath.Join(dir, "session.jsonl")
+	writeLines(t, p,
+		`{"role":"user","content":"Let's use Redis","timestamp":"2026-09-17T10:00:00Z"}`,
+		`{"role":"assistant","content":"Agreed, pub/sub support wins","timestamp":"2026-09-17T10:01:00Z"}`,
+	)
+	h, got := collectHarvester(dir)
+	turns, err := h.TailFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(turns) != 2 {
 		t.Fatalf("got %d turns, want 2", len(turns))
 	}
-	if turns[0].Content != "first" || turns[1].Content != "second" {
-		t.Fatalf("unexpected contents: %+v", turns)
-	}
-	if off <= 0 {
-		t.Fatalf("expected positive offset, got %d", off)
+	if len(*got) != 2 || (*got)[0].Type != EventConversationTurn {
+		t.Fatalf("expected 2 CONVERSATION_TURN events, got %+v", *got)
 	}
 
-	// No re-read: same offset yields nothing and the offset is stable.
-	turns, off2, err := TailTurns(path, off)
+	// Re-tailing with no new content yields nothing (byte offset held).
+	turns, err = h.TailFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(turns) != 0 {
-		t.Fatalf("expected no turns on resume, got %d", len(turns))
-	}
-	if off2 != off {
-		t.Fatalf("offset moved without new data: %d -> %d", off, off2)
+	if len(turns) != 0 || len(*got) != 2 {
+		t.Fatalf("re-tail should be empty, got %d turns %d events", len(turns), len(*got))
 	}
 
-	// Append: only the new turn is returned.
-	writeLines(t, path, []string{`{"role":"user","content":"third"}`})
-	turns, off3, err := TailTurns(path, off)
+	// Appended lines are picked up exactly once.
+	writeLines(t, p, `{"role":"user","content":"Ship it","timestamp":"2026-09-17T10:02:00Z"}`)
+	turns, err = h.TailFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(turns) != 1 || turns[0].Content != "third" {
-		t.Fatalf("expected only the new turn, got %+v", turns)
+	if len(turns) != 1 || turns[0].Content != "Ship it" {
+		t.Fatalf("append tail got %+v", turns)
 	}
-	if off3 <= off {
-		t.Fatalf("offset did not advance: %d -> %d", off, off3)
-	}
+}
 
-	// Partial trailing line (no newline) is held back, not lost.
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+func TestNoiseFiltering(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "noisy.jsonl")
+	writeLines(t, p,
+		`{"type":"tool_use","role":"assistant","content":"read file x.go"}`,
+		`{"type":"tool_result","role":"tool","content":"file bytes..."}`,
+		`{"type":"system","content":"session started"}`,
+		`{"role":"assistant","content":[{"type":"text","text":"Use Redis for pub/sub"},{"type":"tool_use","input":{"cmd":"ls"}}],"timestamp":"2026-09-17T10:00:00Z"}`,
+		`{"role":"user","content":"I prefer tabs","timestamp":"2026-09-17T10:01:00Z"}`,
+		``,
+		`not json at all`,
+	)
+	h, got := collectHarvester(dir)
+	turns, err := h.TailFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString(`{"role":"user","content":"partial"`); err != nil {
+	if len(turns) != 2 {
+		t.Fatalf("got %d turns, want 2 (tool noise skipped): %+v", len(turns), turns)
+	}
+	if turns[0].Speaker != "assistant" || turns[0].Content != "Use Redis for pub/sub" {
+		t.Fatalf("content-block extraction wrong: %+v", turns[0])
+	}
+	if turns[1].Speaker != "user" {
+		t.Fatalf("speaker normalization wrong: %+v", turns[1])
+	}
+	if len(*got) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(*got))
+	}
+	if (*got)[0].Payload["speaker"] != "assistant" || (*got)[0].Payload["content"] != "Use Redis for pub/sub" {
+		t.Fatalf("event payload wrong: %+v", (*got)[0].Payload)
+	}
+}
+
+func TestIdleDetection(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "idle.jsonl")
+	now := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	h, _ := collectHarvester(dir)
+	h.now = func() time.Time { return now }
+	h.IdleTimeout = 5 * time.Minute
+
+	writeLines(t, p, `{"role":"user","content":"hello","timestamp":"2026-09-17T10:00:00Z"}`)
+	if _, err := h.TailFile(p); err != nil {
+		t.Fatal(err)
+	}
+	// Not idle yet: 4 minutes later, no completion.
+	now = now.Add(4 * time.Minute)
+	if evs := h.CheckIdle(); len(evs) != 0 {
+		t.Fatalf("premature completion: %+v", evs)
+	}
+	// Idle past the window: exactly one SESSION_TRANSCRIPT_COMPLETE batch.
+	now = now.Add(2 * time.Minute)
+	evs := h.CheckIdle()
+	if len(evs) != 1 || evs[0].Type != EventSessionComplete {
+		t.Fatalf("expected 1 SESSION_TRANSCRIPT_COMPLETE, got %+v", evs)
+	}
+	if evs[0].Payload["turn_count"] != 1 {
+		t.Fatalf("batch should carry turn_count=1, got %+v", evs[0].Payload)
+	}
+	// Already completed: does not refire.
+	if evs := h.CheckIdle(); len(evs) != 0 {
+		t.Fatalf("completion refired: %+v", evs)
+	}
+	// New activity re-arms; next idle window fires again.
+	now = now.Add(time.Minute)
+	writeLines(t, p, `{"role":"user","content":"back again","timestamp":"2026-09-17T10:07:00Z"}`)
+	if _, err := h.TailFile(p); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(6 * time.Minute)
+	if evs := h.CheckIdle(); len(evs) != 1 {
+		t.Fatalf("re-armed completion missing: %+v", evs)
+	}
+}
+
+func TestMatchesWorkspace(t *testing.T) {
+	h := NewHarvester(`D:\central-memory`, nil)
+	if !h.MatchesWorkspace(`C:\Users\x\.claude\projects\D---central-memory\abc.jsonl`) {
+		t.Fatal("path containing workspace folder name should match")
+	}
+	if h.MatchesWorkspace(`/home/u/.claude/projects/other-project/abc.jsonl`) {
+		t.Fatal("other project's path must not match")
+	}
+	empty := NewHarvester("", nil)
+	if !empty.MatchesWorkspace("/anything/at/all.jsonl") {
+		t.Fatal("empty workspace should match all (no filter)")
+	}
+}
+
+func TestSQLiteTracking(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "state.vscdb")
+	if err := os.WriteFile(p, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC)
+	h, _ := collectHarvester(dir)
+	h.now = func() time.Time { return now }
+	h.IdleTimeout = 5 * time.Minute
+
+	st, _ := os.Stat(p)
+	if h.TrackSQLite(p, st) {
+		t.Fatal("first sighting is baseline, not a change")
+	}
+	now = now.Add(time.Minute)
+	if err := os.WriteFile(p, []byte("v1-more-rows"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, _ = os.Stat(p)
+	if !h.TrackSQLite(p, st) {
+		t.Fatal("size/mtime change should report activity")
+	}
+	// Idle window after last change -> completion hint for sqlite source.
+	now = now.Add(6 * time.Minute)
+	evs := h.CheckIdle()
+	if len(evs) != 1 || evs[0].Type != EventSessionComplete {
+		t.Fatalf("expected sqlite completion hint, got %+v", evs)
+	}
+	if d, _ := evs[0].Payload["detail"].(string); !strings.Contains(d, "sqlite") {
+		t.Fatalf("sqlite hint missing from detail payload: %+v", evs[0].Payload)
+	}
+}
+
+func TestTornWriteHeldBack(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "torn.jsonl")
+	writeLines(t, p, `{"role":"user","content":"full line","timestamp":"2026-09-17T10:00:00Z"}`)
+	// Append a partial line with no trailing newline (mid-write torn record).
+	f, err := os.OpenFile(p, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`{"role":"user","content":"part`); err != nil {
 		t.Fatal(err)
 	}
 	f.Close()
-	turns, off4, err := TailTurns(path, off3)
+
+	h, _ := collectHarvester(dir)
+	turns, err := h.TailFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(turns) != 0 {
-		t.Fatalf("partial line should be held back, got %+v", turns)
+	if len(turns) != 1 || turns[0].Content != "full line" {
+		t.Fatalf("torn line must be held back, got %+v", turns)
 	}
-	if off4 != off3 {
-		t.Fatalf("offset must not advance past partial line: %d -> %d", off3, off4)
-	}
-
-	// Truncation (rotation) re-reads from zero.
-	if err := os.WriteFile(path, []byte("{\"role\":\"user\",\"content\":\"fresh\"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	turns, _, err = TailTurns(path, off3)
+	// Completing the line ("part" + "ial encore" = "partial encore") delivers
+	// it on the next tail as one valid turn.
+	writeLines(t, p, `ial encore","timestamp":"2026-09-17T10:01:00Z"}`)
+	turns, err = h.TailFile(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(turns) != 1 || turns[0].Content != "fresh" {
-		t.Fatalf("expected re-read after truncation, got %+v", turns)
-	}
-}
-
-func TestHarvestIdleDetector(t *testing.T) {
-	now := time.Now()
-	clock := func() time.Time { return now }
-	d := NewIdleDetector(5*time.Minute, clock)
-
-	d.Touch("s1")
-	if got := d.IdleSessions(); len(got) != 0 {
-		t.Fatalf("fresh session should not be idle: %v", got)
-	}
-	now = now.Add(4 * time.Minute)
-	if got := d.IdleSessions(); len(got) != 0 {
-		t.Fatalf("4m should not be idle: %v", got)
-	}
-	now = now.Add(2 * time.Minute) // 6m total
-	got := d.IdleSessions()
-	if len(got) != 1 || got[0] != "s1" {
-		t.Fatalf("expected s1 idle after 6m, got %v", got)
-	}
-	// New activity clears idleness.
-	d.Touch("s1")
-	if got := d.IdleSessions(); len(got) != 0 {
-		t.Fatalf("touched session should not be idle: %v", got)
-	}
-}
-
-func TestHarvestIdleCompleteEmits(t *testing.T) {
-	now := time.Now()
-	clock := func() time.Time { return now }
-	cap := &capturedSink{}
-	h := NewHarvester(t.TempDir(), cap.fn(), WithClock(clock))
-
-	// Register a tracked file directly (it lives outside source dirs).
-	dir := t.TempDir()
-	path := filepath.Join(dir, "conv.jsonl")
-	writeLines(t, path, []string{`{"role":"user","content":"decided on redis"}`})
-	tf := TrackedFile{
-		Path:      path,
-		Agent:     "claude",
-		Format:    "jsonl",
-		SessionID: SessionIDFor("claude", path),
-		Project:   "test-proj",
-	}
-	h.files[path] = tf
-	h.sessFile[tf.SessionID] = tf
-
-	if err := h.processFile(path); err != nil {
-		t.Fatal(err)
-	}
-	if cap.count(EventConversationTurn) != 1 {
-		t.Fatalf("expected 1 CONVERSATION_TURN, got %d", cap.count(EventConversationTurn))
-	}
-	got := cap.payloads[0]
-	if got["speaker"] != "user" || got["content"] != "decided on redis" {
-		t.Fatalf("unexpected turn payload: %v", got)
-	}
-	if got["session_id"] != tf.SessionID || got["agent"] != "claude" {
-		t.Fatalf("unexpected identity fields: %v", got)
-	}
-
-	// Reprocessing without new data emits nothing (offset resume).
-	if err := h.processFile(path); err != nil {
-		t.Fatal(err)
-	}
-	if cap.count(EventConversationTurn) != 1 {
-		t.Fatalf("reprocess must not re-emit, got %d", cap.count(EventConversationTurn))
-	}
-
-	// Still active before 5 minutes.
-	now = now.Add(4 * time.Minute)
-	if n := h.CheckIdle(); n != 0 {
-		t.Fatalf("expected no completion at 4m, got %d", n)
-	}
-
-	// Idle past threshold triggers exactly one SESSION_TRANSCRIPT_COMPLETE.
-	now = now.Add(2 * time.Minute)
-	if n := h.CheckIdle(); n != 1 {
-		t.Fatalf("expected 1 completion, got %d", n)
-	}
-	if cap.count(EventSessionTranscriptComplete) != 1 {
-		t.Fatalf("expected 1 complete event, got %d", cap.count(EventSessionTranscriptComplete))
-	}
-	last := cap.payloads[len(cap.payloads)-1]
-	if last["turn_count"] != 1 {
-		t.Fatalf("expected turn_count=1, got %v", last["turn_count"])
-	}
-
-	// No duplicate completion on the next sweep.
-	if n := h.CheckIdle(); n != 0 {
-		t.Fatalf("completion must fire once, got %d", n)
-	}
-
-	// A resumed session re-arms and can complete again.
-	writeLines(t, path, []string{`{"role":"assistant","content":"ack"}`})
-	if err := h.processFile(path); err != nil {
-		t.Fatal(err)
-	}
-	if cap.count(EventConversationTurn) != 2 {
-		t.Fatalf("expected resumed turn emitted, got %d", cap.count(EventConversationTurn))
-	}
-	now = now.Add(6 * time.Minute)
-	if n := h.CheckIdle(); n != 1 {
-		t.Fatalf("expected re-completion after resume, got %d", n)
-	}
-}
-
-func TestHarvestWorkspaceMatching(t *testing.T) {
-	home := t.TempDir()
-	ws := t.TempDir()
-
-	// Transcript whose embedded cwd points at the workspace matches.
-	matching := filepath.Join(t.TempDir(), "conv.jsonl")
-	cwd := strings.ReplaceAll(ws, `\`, `\\`)
-	if err := os.WriteFile(matching,
-		[]byte("{\"cwd\":\""+cwd+"\",\"role\":\"user\",\"content\":\"hi\"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !WorkspaceMatchesFile(ws, matching, home) {
-		t.Error("transcript with workspace cwd should match")
-	}
-
-	// Transcript pointing elsewhere does not match.
-	other := filepath.Join(t.TempDir(), "other.jsonl")
-	if err := os.WriteFile(other,
-		[]byte("{\"cwd\":\"C:\\\\unrelated\\\\proj\",\"role\":\"user\",\"content\":\"hi\"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if WorkspaceMatchesFile(ws, other, home) {
-		t.Error("transcript with foreign cwd should not match")
-	}
-
-	// A transcript inside the workspace always matches.
-	inside := filepath.Join(ws, ".opencode", "session.jsonl")
-	if err := os.MkdirAll(filepath.Dir(inside), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(inside, []byte("{\"role\":\"user\",\"content\":\"hi\"}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if !WorkspaceMatchesFile(ws, inside, home) {
-		t.Error("transcript inside workspace should match")
-	}
-}
-
-func TestHarvestTranscriptSources(t *testing.T) {
-	home := t.TempDir()
-	appData := t.TempDir()
-	srcs := TranscriptSources(home, appData)
-	want := map[string]string{
-		"claude": "jsonl", "opencode": "jsonl",
-		"cursor": "sqlite", "copilot": "sqlite", "antigravity": "sqlite",
-	}
-	if len(srcs) != len(want) {
-		t.Fatalf("got %d sources, want %d", len(srcs), len(want))
-	}
-	for _, s := range srcs {
-		wf, ok := want[s.Agent]
-		if !ok {
-			t.Errorf("unexpected source %q", s.Agent)
-			continue
-		}
-		if s.Format != wf {
-			t.Errorf("source %q format = %q, want %q", s.Agent, s.Format, wf)
-		}
-		if len(s.Dirs) == 0 {
-			t.Errorf("source %q has no dirs", s.Agent)
-		}
-	}
-}
-
-func TestHarvestConversationFilesClassifyFilter(t *testing.T) {
-	// JSONL transcripts are found; caches/credentials are excluded via
-	// adapters.ClassifyPath (fail-closed reuse).
-	dir := t.TempDir()
-	good := filepath.Join(dir, "projects", "s.jsonl")
-	if err := os.MkdirAll(filepath.Dir(good), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(good, []byte("{}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	bad := filepath.Join(dir, "projects", "cache", "c.jsonl")
-	if err := os.MkdirAll(filepath.Dir(bad), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(bad, []byte("{}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	files, err := ConversationFiles(TranscriptSource{Agent: "claude", Dirs: []string{dir}, Format: "jsonl"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(files) != 1 || files[0] != good {
-		t.Fatalf("expected only the transcript, got %v", files)
+	if len(turns) != 1 || turns[0].Content != "partial encore" {
+		t.Fatalf("completed torn line should parse, got %+v", turns)
 	}
 }
 
@@ -465,136 +270,164 @@ func (f *fakeSQLiteExtractor) ncalls() int {
 	return len(f.calls)
 }
 
+func countTurns(evs []Event) int {
+	n := 0
+	for _, e := range evs {
+		if e.Type == EventConversationTurn {
+			n++
+		}
+	}
+	return n
+}
+
 func TestHarvestSQLiteNilExtractorLiveness(t *testing.T) {
 	// Default (no extractor registered): sqlite files never emit
 	// CONVERSATION_TURN but still refresh idle timers, with the explicit
 	// liveness-only reason logged.
 	now := time.Now()
-	clock := func() time.Time { return now }
+	var got []Event
+	h := NewHarvesterWithPoll(t.TempDir(), sliceEmitter{&got}, time.Second, time.Minute)
+	h.now = func() time.Time { return now }
+
 	var logs bytes.Buffer
-	cap := &capturedSink{}
-	h := NewHarvester(t.TempDir(), cap.fn(),
-		WithClock(clock), WithLogger(log.New(&logs, "", 0)))
+	prevOut := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prevOut)
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.vscdb")
 	if err := os.WriteFile(path, []byte("sqlite-format-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tf := TrackedFile{
-		Path:      path,
-		Agent:     "cursor",
-		Format:    "sqlite",
-		SessionID: SessionIDFor("cursor", path),
-		Project:   "test-proj",
-	}
-	h.files[path] = tf
-	h.sessFile[tf.SessionID] = tf
-
-	if err := h.processFile(path); err != nil {
+	h.agents[path] = "cursor"
+	st, err := os.Stat(path)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if cap.count(EventConversationTurn) != 0 {
-		t.Fatalf("nil extractor must not emit CONVERSATION_TURN, got %d",
-			cap.count(EventConversationTurn))
+	if h.TrackSQLite(path, st) {
+		t.Fatal("first sight must only record state, want false")
 	}
-	if _, ok := h.idle.Last(tf.SessionID); !ok {
+	// Grow the file so the signature changes.
+	if err := os.WriteFile(path, []byte("sqlite-format-data-more"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.TrackSQLite(path, st) {
+		t.Fatal("changed sqlite file must report activity, want true")
+	}
+	if n := countTurns(got); n != 0 {
+		t.Fatalf("nil extractor must not emit CONVERSATION_TURN, got %d", n)
+	}
+	h.mu.Lock()
+	_, ok := h.lastActive[path]
+	h.mu.Unlock()
+	if !ok {
 		t.Fatal("nil-extractor sqlite file must still refresh liveness")
 	}
-	if got := logs.String(); !strings.Contains(got, "liveness-only") {
-		t.Fatalf("expected explicit liveness-only reason in logs, got %q", got)
-	}
-
-	// Registry default: sqlite sources carry a nil extractor slot.
-	for _, s := range h.Sources() {
-		if s.Format == "sqlite" && s.Extractor != nil {
-			t.Fatalf("source %q: default extractor must be nil, got %T", s.Agent, s.Extractor)
-		}
+	if out := logs.String(); !strings.Contains(out, "liveness-only") {
+		t.Fatalf("expected explicit liveness-only reason in logs, got %q", out)
 	}
 }
 
 func TestHarvestSQLiteFakeExtractorEmitsTurns(t *testing.T) {
 	// A registered extractor turns sqlite changes into CONVERSATION_TURN
-	// events, via both processFile and the poller; the registry wires the
-	// extractor onto its agent's source row only.
+	// events; unregistered agents stay liveness-only.
 	now := time.Now()
-	clock := func() time.Time { return now }
-	cap := &capturedSink{}
-	fake := &fakeSQLiteExtractor{epoch: now, turns: []Turn{
+	var got []Event
+	h := NewHarvesterWithPoll(t.TempDir(), sliceEmitter{&got}, time.Second, time.Minute)
+	h.now = func() time.Time { return now }
+	// The fake only returns rows newer than `since`; with a frozen test
+	// clock the first sight records lastActive == now, so the epoch must
+	// sit ahead of now for rows to count as new.
+	fake := &fakeSQLiteExtractor{epoch: now.Add(time.Hour), turns: []Turn{
 		{Speaker: "user", Content: "cursor turn one", Timestamp: now},
 		{Speaker: "assistant", Content: "cursor reply", Timestamp: now},
 	}}
-	h := NewHarvester(t.TempDir(), cap.fn(),
-		WithClock(clock), WithSQLiteExtractor("cursor", fake))
+	h.SetSQLiteExtractor("cursor", fake)
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "state.vscdb")
 	if err := os.WriteFile(path, []byte("sqlite-format-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tf := TrackedFile{
-		Path:      path,
-		Agent:     "cursor",
-		Format:    "sqlite",
-		SessionID: SessionIDFor("cursor", path),
-		Project:   "test-proj",
-	}
-	h.files[path] = tf
-	h.sessFile[tf.SessionID] = tf
-
-	if err := h.processFile(path); err != nil {
+	h.agents[path] = "cursor"
+	st, err := os.Stat(path)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if h.TrackSQLite(path, st) {
+		t.Fatal("first sight must only record state, want false")
+	}
+	// Grow the file so the signature changes, then track again.
+	if err := os.WriteFile(path, []byte("sqlite-format-data-more"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.TrackSQLite(path, st) {
+		t.Fatal("changed sqlite file must report activity, want true")
 	}
 	if fake.ncalls() != 1 {
 		t.Fatalf("expected 1 extractor call, got %d", fake.ncalls())
 	}
-	if cap.count(EventConversationTurn) != 2 {
-		t.Fatalf("expected 2 CONVERSATION_TURN, got %d", cap.count(EventConversationTurn))
+	if n := countTurns(got); n != 2 {
+		t.Fatalf("expected 2 CONVERSATION_TURN, got %d", n)
 	}
-	got := cap.payloads[0]
-	if got["speaker"] != "user" || got["content"] != "cursor turn one" {
-		t.Fatalf("unexpected turn payload: %v", got)
+	first := got[0].Payload
+	if first["speaker"] != "user" || first["content"] != "cursor turn one" {
+		t.Fatalf("unexpected turn payload: %v", first)
 	}
-	if got["session_id"] != tf.SessionID || got["agent"] != "cursor" {
-		t.Fatalf("unexpected identity fields: %v", got)
+	if first["session_id"] != sessionID(path) || first["agent"] != "cursor" {
+		t.Fatalf("unexpected identity fields: %v", first)
 	}
-	if got["transcript_path"] != path || got["project"] != "test-proj" {
-		t.Fatalf("unexpected attribution fields: %v", got)
+	if first["path"] != path {
+		t.Fatalf("unexpected attribution fields: %v", first)
 	}
 
-	// The poller also extracts: an unseen sqlite file is treated as changed.
+	// A second sqlite file extracts independently through the same seam.
 	path2 := filepath.Join(dir, "other.vscdb")
 	if err := os.WriteFile(path2, []byte("more-sqlite-data"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tf2 := TrackedFile{
-		Path:      path2,
-		Agent:     "cursor",
-		Format:    "sqlite",
-		SessionID: SessionIDFor("cursor", path2),
-		Project:   "test-proj",
+	h.agents[path2] = "cursor"
+	st2, err := os.Stat(path2)
+	if err != nil {
+		t.Fatal(err)
 	}
-	h.mu.Lock()
-	h.files[path2] = tf2
-	h.sessFile[tf2.SessionID] = tf2
-	h.mu.Unlock()
-	h.pollSQLite()
-	if cap.count(EventConversationTurn) != 4 {
-		t.Fatalf("expected poller to emit 2 more turns (total 4), got %d",
-			cap.count(EventConversationTurn))
+	h.TrackSQLite(path2, st2) // first sight: record only
+	if err := os.WriteFile(path2, []byte("more-sqlite-data-changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st2, err = os.Stat(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.TrackSQLite(path2, st2)
+	if n := countTurns(got); n != 4 {
+		t.Fatalf("expected 2 more turns (total 4), got %d", n)
 	}
 
-	// Registry wiring: only the cursor source row carries the extractor.
-	wired := map[string]bool{}
-	for _, s := range h.Sources() {
-		wired[s.Agent] = s.Extractor != nil
+	// Unregistering restores liveness-only for that agent.
+	h.SetSQLiteExtractor("cursor", nil)
+	if err := os.WriteFile(path, []byte("sqlite-format-data-third"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if !wired["cursor"] {
-		t.Error("cursor source should carry the registered extractor")
+	st, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, agent := range []string{"copilot", "antigravity"} {
-		if wired[agent] {
-			t.Errorf("%s source must stay nil-extractor (liveness-only)", agent)
-		}
+	if !h.TrackSQLite(path, st) {
+		t.Fatal("changed file must still report activity after unregister")
+	}
+	if n := countTurns(got); n != 4 {
+		t.Fatalf("unregistered extractor must not emit, got %d total", n)
+	}
+	if fake.ncalls() != 2 {
+		t.Fatalf("unregistered extractor must not be called, calls = %d", fake.ncalls())
 	}
 }

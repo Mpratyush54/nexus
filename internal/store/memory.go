@@ -1,308 +1,209 @@
-// Package store provides Postgres data access for central-memory.
-//
-// memory.go implements issue #6 (plan §§1.5–1.7): the memory-item search
-// seam — types mirroring the memory_items table, a pgvector cosine-search
-// SQL builder, and pure DB-free rerank math:
-//
-//	final = similarity*0.7 + tag_match*0.2 + recency*0.1
-//
-// DB OWNERSHIP NOTE (parallel-agent constraint): internal/store/db.go,
-// projects.go and workspaces.go are owned by issues #1/#2 and are NOT
-// touched here. This file defines the minimal Querier/Rows interfaces it
-// needs; the pool owner wires *pgxpool.Pool behind Querier with a thin
-// adapter (pgx rows already satisfy Rows). See ADR-006.
 package store
+
+// memory.go — Postgres memory-item CRUD + hybrid search (Phase 1.5).
+//
+// SearchMemory is the keyword/tag fallback (works with zero embeddings);
+// SearchMemoryVector is the primary semantic path once the Memory Processor
+// backfills embedding vector(1536). Both honor project scoping: rows with a
+// NULL project_id are org-level and visible to every project.
 
 import (
 	"context"
-	"fmt"
-	"math"
-	"sort"
-	"strconv"
-	"strings"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
-// Memory levels (CHECK constraint in migrations/001, plan §1.1).
-const (
-	LevelOrganization = "organization"
-	LevelProject      = "project"
-	LevelPersonal     = "personal"
-	LevelSession      = "session"
-)
+const memoryColumns = `id, project_id, user_id, session_id, org_id,
+	"key", content, context_snippet, level, scope, embedding::text,
+	tags, confidence, status, source, source_event_id,
+	proposed_by, confirmed_by, superseded_by,
+	use_count, last_used_at, created_at, updated_at`
 
-// Lifecycle states (CHECK constraint in migrations/001, plan §1.1).
-const (
-	StatusProposed   = "PROPOSED"
-	StatusConfirmed  = "CONFIRMED"
-	StatusRejected   = "REJECTED"
-	StatusSuperseded = "SUPERSEDED"
-)
-
-// Search guards from plan §1.5: only confirmed, non-stale memories compete.
-const (
-	MinSearchConfidence = 0.3
-	DefaultSearchLimit  = 20
-	MaxSearchLimit      = 100
-)
-
-// Rerank weights from plan §1.5.
-const (
-	WeightSimilarity = 0.7
-	WeightTagMatch   = 0.2
-	WeightRecency    = 0.1
-)
-
-// DecayBase/DecayWindowDays mirror the confidence-decay curve in plan §1.7
-// so recency scoring and decay share one time constant (see ADR-006).
-const (
-	DecayBase       = 0.95
-	DecayWindowDays = 30.0
-)
-
-// MemoryItem mirrors a memory_items row (plan §1.1). Embedding is
-// intentionally NOT selected: search returns the similarity scalar, so this
-// file stays stdlib-only (no pgvector-go) and cannot break `go build` for
-// the agents owning db.go/projects.go/workspaces.go.
-type MemoryItem struct {
-	ID             string
-	ProjectID      string
-	UserID         string
-	SessionID      string
-	OrgID          string
-	Key            string
-	Content        string
-	ContextSnippet string
-	Level          string
-	Scope          string
-	Tags           []string
-	Confidence     float64
-	Status         string
-	Source         string
-	UseCount       int
-	LastUsedAt     time.Time // COALESCE(last_used_at, created_at), see BuildSearchSQL
-	CreatedAt      time.Time
+func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
+	var m MemoryItem
+	var projectID, userID, sessionID, orgID *string
+	var contextSnippet, source *string
+	var embeddingText *string
+	var sourceEventID *int64
+	var proposedBy, confirmedBy, supersededBy *string
+	var lastUsedAt *time.Time
+	if err := row.Scan(&m.ID, &projectID, &userID, &sessionID, &orgID,
+		&m.Key, &m.Content, &contextSnippet, &m.Level, &m.Scope, &embeddingText,
+		&m.Tags, &m.Confidence, &m.Status, &source, &sourceEventID,
+		&proposedBy, &confirmedBy, &supersededBy,
+		&m.UseCount, &lastUsedAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if projectID != nil {
+		m.ProjectID = *projectID
+	}
+	if userID != nil {
+		m.UserID = *userID
+	}
+	if sessionID != nil {
+		m.SessionID = *sessionID
+	}
+	if orgID != nil {
+		m.OrgID = *orgID
+	}
+	if contextSnippet != nil {
+		m.ContextSnippet = *contextSnippet
+	}
+	if source != nil {
+		m.Source = *source
+	}
+	if sourceEventID != nil {
+		m.SourceEventID = *sourceEventID
+	}
+	if proposedBy != nil {
+		m.ProposedBy = *proposedBy
+	}
+	if confirmedBy != nil {
+		m.ConfirmedBy = *confirmedBy
+	}
+	if supersededBy != nil {
+		m.SupersededBy = *supersededBy
+	}
+	if lastUsedAt != nil {
+		m.LastUsedAt = *lastUsedAt
+	}
+	m.Embedding = parseEmbedding(embeddingText)
+	return &m, nil
 }
 
-// SearchQuery scopes one semantic search (plan §1.5).
-type SearchQuery struct {
-	ProjectID      string
-	QueryEmbedding []float32
-	Tags           []string // optional: exact tag boost/filter
-	Key            string   // optional: exact key filter
-	Level          string   // optional: level filter
-	Limit          int      // optional: defaults to DefaultSearchLimit, capped at MaxSearchLimit
+// CreateMemoryItem inserts one memory, applying MemStore-identical defaults.
+func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) error {
+	if item.Confidence == 0 {
+		item.Confidence = 1.0
+	}
+	if item.Status == "" {
+		item.Status = "PROPOSED"
+	}
+	if item.Level == "" {
+		item.Level = "project"
+	}
+	if item.Scope == "" {
+		item.Scope = "fact"
+	}
+	if len(item.Tags) == 0 {
+		item.Tags = []string{}
+	}
+	row := s.pool.QueryRow(ctx,
+		`INSERT INTO memory_items
+			(project_id, user_id, session_id, org_id, "key", content,
+			 context_snippet, level, scope, embedding, tags, confidence,
+			 status, source, source_event_id, proposed_by)
+		 VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6,
+		         NULLIF($7,''), $8, $9, $10::vector, $11, $12,
+		         $13, NULLIF($14,''), $15, $16::uuid)
+		 RETURNING id, created_at, updated_at`,
+		nullText(item.ProjectID), nullText(item.UserID),
+		nullText(item.SessionID), nullText(item.OrgID),
+		item.Key, item.Content, item.ContextSnippet,
+		item.Level, item.Scope, encodeEmbedding(item.Embedding),
+		item.Tags, item.Confidence, item.Status, item.Source,
+		nullEventID(item.SourceEventID), nullText(item.ProposedBy))
+	return row.Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
 }
 
-// RankedMemory pairs an item with its interpretable search scores.
-type RankedMemory struct {
-	Item       MemoryItem
-	Similarity float64 // cosine similarity of query embedding vs item
-	TagScore   float64 // fraction of query tags present on the item
-	Recency    float64 // 0..1 freshness of LastUsedAt
-	Score      float64 // final rerank score
+func nullEventID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
 }
 
-// LimitOrDefault clamps Limit into [1, MaxSearchLimit].
-func (q SearchQuery) LimitOrDefault() int {
-	if q.Limit <= 0 {
-		return DefaultSearchLimit
+// GetMemoryItem fetches one memory by id.
+func (s *PostgresStore) GetMemoryItem(ctx context.Context, id string) (*MemoryItem, error) {
+	m, err := scanMemoryItem(s.pool.QueryRow(ctx,
+		`SELECT `+memoryColumns+` FROM memory_items WHERE id = $1::uuid`, id))
+	if err == pgx.ErrNoRows {
+		return nil, ErrNotFound
 	}
-	if q.Limit > MaxSearchLimit {
-		return MaxSearchLimit
-	}
-	return q.Limit
+	return m, err
 }
 
-// FormatEmbedding renders a vector in pgvector text-input format
-// ("[0.1,0.2,...]") so it can be passed as a plain query arg — no
-// pgvector-go dependency required to run a search.
-func FormatEmbedding(vec []float32) string {
-	var b strings.Builder
-	b.WriteByte('[')
-	for i, v := range vec {
-		if i > 0 {
-			b.WriteByte(',')
-		}
-		b.WriteString(strconv.FormatFloat(float64(v), 'g', -1, 32))
-	}
-	b.WriteByte(']')
-	return b.String()
-}
-
-// BuildSearchSQL renders the plan §1.5 vector search: cosine ordering via
-// `embedding <=> $2`, hard guards `status = 'CONFIRMED'` and
-// `confidence > 0.3`, optional tag/key/level filters, LIMIT clamp.
-// Placeholders are numbered sequentially ($1..$N); the embedding arg is the
-// FormatEmbedding string so any driver works.
-func BuildSearchSQL(q SearchQuery) (string, []any) {
-	args := []any{q.ProjectID, FormatEmbedding(q.QueryEmbedding)}
-	var b strings.Builder
-	b.WriteString(`SELECT id, key, content, level, scope, confidence, ` +
-		`COALESCE(tags, '{}') AS tags, COALESCE(context_snippet, '') AS context_snippet, ` +
-		`COALESCE(last_used_at, created_at) AS effective_used, created_at, ` +
-		`1 - (embedding <=> $2) AS similarity ` +
-		`FROM memory_items ` +
-		`WHERE project_id = $1 ` +
-		`AND status = 'CONFIRMED' ` +
-		`AND confidence > 0.3`)
-	next := 3
-	if len(q.Tags) > 0 {
-		fmt.Fprintf(&b, ` AND tags && $%d`, next)
-		args = append(args, q.Tags)
-		next++
-	}
-	if q.Key != "" {
-		fmt.Fprintf(&b, ` AND key = $%d`, next)
-		args = append(args, q.Key)
-		next++
-	}
-	if q.Level != "" {
-		fmt.Fprintf(&b, ` AND level = $%d`, next)
-		args = append(args, q.Level)
-		next++
-	}
-	fmt.Fprintf(&b, ` ORDER BY embedding <=> $2 LIMIT $%d`, next)
-	args = append(args, q.LimitOrDefault())
-	return b.String(), args
-}
-
-// CosineSimilarity is cosine similarity in [-1, 1]. It returns 0 for empty,
-// mismatched, or zero-norm inputs (never NaN) so Rank stays total.
-func CosineSimilarity(a, b []float32) float64 {
-	if len(a) == 0 || len(a) != len(b) {
-		return 0
-	}
-	var dot, na, nb float64
-	for i := range a {
-		x, y := float64(a[i]), float64(b[i])
-		dot += x * y
-		na += x * x
-		nb += y * y
-	}
-	if na == 0 || nb == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(na) * math.Sqrt(nb))
-}
-
-// TagMatchScore is |itemTags ∩ queryTags| / |queryTags|, 0 when the query
-// carries no tags (no boost without signal).
-func TagMatchScore(itemTags, queryTags []string) float64 {
-	if len(queryTags) == 0 {
-		return 0
-	}
-	set := make(map[string]struct{}, len(itemTags))
-	for _, t := range itemTags {
-		set[t] = struct{}{}
-	}
-	hits := 0
-	for _, t := range queryTags {
-		if _, ok := set[t]; ok {
-			hits++
-		}
-	}
-	return float64(hits) / float64(len(queryTags))
-}
-
-// RecencyScore maps freshness to 0..1 on the same decay curve as plan §1.7
-// (0.95^(days/30)): fresh ≈ 1, 90d ≈ 0.86, 180d ≈ 0.74. A zero timestamp
-// means "unknown age" and scores 1 so fixtures/legacy rows are not
-// penalized (Search always COALESCEs to created_at, so this only triggers
-// for hand-built items).
-func RecencyScore(lastUsed, now time.Time) float64 {
-	if lastUsed.IsZero() {
-		return 1
-	}
-	days := now.Sub(lastUsed).Hours() / 24
-	if days < 0 {
-		days = 0
-	}
-	return math.Pow(DecayBase, days/DecayWindowDays)
-}
-
-// RerankScore is the plan §1.5 blend: similarity*0.7 + tag*0.2 + recency*0.1.
-func RerankScore(similarity, tagMatch, recency float64) float64 {
-	return similarity*WeightSimilarity + tagMatch*WeightTagMatch + recency*WeightRecency
-}
-
-// Rank is the pure, DB-free rerank: it scores every item and sorts
-// descending by Score (ties broken by Key for determinism). similarities[i]
-// aligns with items[i]; short slices read as 0. now anchors recency — pass
-// a fixed clock in tests.
-func Rank(items []MemoryItem, similarities []float64, queryTags []string, now time.Time) []RankedMemory {
-	out := make([]RankedMemory, len(items))
-	for i, it := range items {
-		sim := 0.0
-		if i < len(similarities) {
-			sim = similarities[i]
-		}
-		tag := TagMatchScore(it.Tags, queryTags)
-		rec := RecencyScore(it.LastUsedAt, now)
-		out[i] = RankedMemory{
-			Item:       it,
-			Similarity: sim,
-			TagScore:   tag,
-			Recency:    rec,
-			Score:      RerankScore(sim, tag, rec),
-		}
-	}
-	sort.SliceStable(out, func(a, b int) bool {
-		if out[a].Score == out[b].Score {
-			return out[a].Item.Key < out[b].Item.Key
-		}
-		return out[a].Score > out[b].Score
-	})
-	return out
-}
-
-// Rows is the minimal result-set surface Search needs. pgx rows satisfy it
-// method-for-method, so the pool owner (issue #2) needs no adapter here.
-type Rows interface {
-	Next() bool
-	Scan(dest ...any) error
-	Err() error
-	Close()
-}
-
-// Querier is the minimal query surface Search needs (see Rows). The pool
-// owner exposes Query on their pool/transaction type; Search never imports
-// a driver, keeping this file stdlib-only.
-type Querier interface {
-	Query(ctx context.Context, sql string, args ...any) (Rows, error)
-}
-
-// Search runs the plan §1.5 vector search through db and reranks in memory.
-// The SQL pre-filters (CONFIRMED, confidence > 0.3, top-LIMIT by cosine
-// distance); Rank then applies the 0.7/0.2/0.1 blend. Stored-base
-// confidence is filtered in SQL; time decay is applied at serve time by
-// context.EffectiveConfidence (issue #6 split; archival flagging is a
-// follow-up for the Memory Processor, issue #10).
-func Search(ctx context.Context, db Querier, q SearchQuery) ([]RankedMemory, error) {
-	query, args := BuildSearchSQL(q)
-	rows, err := db.Query(ctx, query, args...)
+// ConfirmMemory flips PROPOSED -> CONFIRMED and records who confirmed.
+func (s *PostgresStore) ConfirmMemory(ctx context.Context, id string, confirmedBy string) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE memory_items SET status = 'CONFIRMED',
+			confirmed_by = $2::uuid, updated_at = now()
+		 WHERE id = $1::uuid`, id, nullText(confirmedBy))
 	if err != nil {
-		return nil, fmt.Errorf("store: memory search query: %w", err)
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SearchMemory is the text fallback: substring match on key/content, exact
+// tag hit, or empty query (list). MemStore parity: same CONFIRMED/PROPOSED
+// visibility, org-level rows included.
+func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+memoryColumns+` FROM memory_items
+		  WHERE (project_id = $1::uuid OR project_id IS NULL)
+		    AND status IN ('CONFIRMED','PROPOSED')
+		    AND ($2 = '' OR content ILIKE '%'||$2||'%'
+		         OR "key" ILIKE '%'||$2||'%' OR $2 = ANY(tags))
+		    AND ($3::text[] IS NULL OR tags && $3)
+		  ORDER BY confidence DESC, created_at DESC
+		  LIMIT $4`,
+		nullText(projectID), query, nilTextArray(tags), limit)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
-	var items []MemoryItem
-	var sims []float64
+	var out []*MemoryItem
 	for rows.Next() {
-		var it MemoryItem
-		var sim float64
-		if err := rows.Scan(
-			&it.ID, &it.Key, &it.Content, &it.Level, &it.Scope,
-			&it.Confidence, &it.Tags, &it.ContextSnippet,
-			&it.LastUsedAt, &it.CreatedAt, &sim,
-		); err != nil {
-			return nil, fmt.Errorf("store: memory search scan: %w", err)
+		m, err := scanMemoryItem(rows)
+		if err != nil {
+			return nil, err
 		}
-		it.ProjectID = q.ProjectID
-		items = append(items, it)
-		sims = append(sims, sim)
+		out = append(out, m)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: memory search rows: %w", err)
+	return out, rows.Err()
+}
+
+func nilTextArray(tags []string) any {
+	if len(tags) == 0 {
+		return nil
 	}
-	return Rank(items, sims, q.Tags, time.Now()), nil
+	return tags
+}
+
+// SearchMemoryVector is the primary semantic path (plan §1.5): cosine
+// similarity over pgvector, CONFIRMED only, confidence floor 0.3.
+func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+memoryColumns+` FROM memory_items
+		  WHERE (project_id = $1::uuid OR project_id IS NULL)
+		    AND status = 'CONFIRMED'
+		    AND confidence > 0.3
+		    AND embedding IS NOT NULL
+		  ORDER BY embedding <=> $2::vector
+		  LIMIT $3`,
+		nullText(projectID), encodeEmbedding(queryVec), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*MemoryItem
+	for rows.Next() {
+		m, err := scanMemoryItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
 }
