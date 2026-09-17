@@ -26,10 +26,12 @@ const maxFileBytes = 1 << 20
 type MemoryItem struct {
 	ID             string
 	ProjectID      string
+	UserID         string
+	SessionID      string
 	Key            string
 	Content        string
 	ContextSnippet string
-	Level          string // organization | project | personal | session
+	Level          string // organization | project | personal | session | ephemeral
 	Scope          string // fact | preference | decision | constraint | pattern | episode_summary
 	Tags           []string
 	Confidence     float32
@@ -113,10 +115,11 @@ func ListTools() []Tool {
 		},
 		{
 			Name:        "memory_write",
-			Description: "Record a fact, decision, preference, constraint, or pattern as a PROPOSED memory. Content must be natural language, 20-2000 chars.",
+			Description: "Record a fact, decision, preference, constraint, or pattern as a PROPOSED memory. Content must be natural language, 20-2000 chars. level=personal requires user_id; level=session requires session_id. Referenced user/session existence is enforced by the session flow, not by this tool.",
 			InputSchema: schema([]string{"key", "content"}, map[string]any{
 				"key": str, "content": str, "scope": str, "level": str,
 				"tags": strArr, "context_snippet": str, "project_id": str,
+				"user_id": str, "session_id": str,
 			}),
 		},
 		{
@@ -310,7 +313,7 @@ func buildContextXML(project, branch string, items []*MemoryItem) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("<project_memory project=%q branch=%q>\n",
 		xmlEscape(project), xmlEscape(branch)))
-	for _, lvl := range []string{"organization", "project", "personal", "session"} {
+	for _, lvl := range []string{"organization", "project", "personal", "session", "ephemeral"} {
 		mems := groups[lvl]
 		if len(mems) == 0 {
 			continue
@@ -341,6 +344,7 @@ var validScopes = map[string]bool{
 
 var validLevels = map[string]bool{
 	"organization": true, "project": true, "personal": true, "session": true,
+	"ephemeral": true,
 }
 
 type memoryWriteArgs struct {
@@ -351,6 +355,8 @@ type memoryWriteArgs struct {
 	Tags           []string `json:"tags"`
 	ContextSnippet string   `json:"context_snippet"`
 	ProjectID      string   `json:"project_id"`
+	UserID         string   `json:"user_id"`
+	SessionID      string   `json:"session_id"`
 }
 
 func (s *Server) handleMemoryWrite(ctx context.Context, raw json.RawMessage) (any, *RPCError) {
@@ -377,19 +383,28 @@ func (s *Server) handleMemoryWrite(ctx context.Context, raw json.RawMessage) (an
 		level = "project"
 	}
 	if !validLevels[strings.ToLower(level)] {
-		return nil, invalidParams("invalid level %q: want organization|project|personal|session", a.Level)
+		return nil, invalidParams("invalid level %q: want organization|project|personal|session|ephemeral", a.Level)
 	}
 	projectID := a.ProjectID
 	if projectID == "" {
 		projectID = s.cfg.ProjectID
 	}
+	normLevel := strings.ToLower(level)
+	if normLevel == "personal" && strings.TrimSpace(a.UserID) == "" {
+		return nil, invalidParams("level \"personal\" requires user_id")
+	}
+	if normLevel == "session" && strings.TrimSpace(a.SessionID) == "" {
+		return nil, invalidParams("level \"session\" requires session_id")
+	}
 
 	item := &MemoryItem{
 		ProjectID:      projectID,
+		UserID:         strings.TrimSpace(a.UserID),
+		SessionID:      strings.TrimSpace(a.SessionID),
 		Key:            strings.TrimSpace(a.Key),
 		Content:        a.Content,
 		ContextSnippet: a.ContextSnippet,
-		Level:          strings.ToLower(level),
+		Level:          normLevel,
 		Scope:          strings.ToLower(scope),
 		Tags:           a.Tags,
 		Confidence:     1.0,

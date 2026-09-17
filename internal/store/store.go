@@ -282,7 +282,13 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 	terms := strings.Fields(strings.ToLower(query))
 
 	for _, item := range s.memories {
-		if item.ProjectID != "" && item.ProjectID != projectID {
+		if item.ProjectID != "" {
+			if item.ProjectID != projectID {
+				continue
+			}
+		} else if item.Level != "organization" {
+			// NULL-project rows are globally readable only on the
+			// org tier; personal/session/project rows stay hidden.
 			continue
 		}
 		if item.Status != "CONFIRMED" && item.Status != "PROPOSED" {

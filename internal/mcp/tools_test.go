@@ -30,6 +30,9 @@ func TestMemoryWriteValidation(t *testing.T) {
 		{"bad level", map[string]any{
 			"key": "a/b", "content": strings.Repeat("z", 40), "level": "galaxy",
 		}, true},
+		{"ephemeral level", map[string]any{
+			"key": "a/b", "content": strings.Repeat("e", 40), "level": "ephemeral",
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,6 +68,60 @@ func TestMemoryWriteBoundaryLengths(t *testing.T) {
 		if !valid && (r.Error == nil || r.Error.Code != ErrInvalidParams) {
 			t.Errorf("n=%d: got %+v, want code %d", n, r.Error, ErrInvalidParams)
 		}
+	}
+}
+
+func TestMemoryWriteScopeIdentity(t *testing.T) {
+	long := strings.Repeat("c", 40)
+
+	// personal without user_id is rejected.
+	s, _ := newTestServerWithT(t)
+	r := callTool(t, s, "memory_write", map[string]any{
+		"key": "u/theme", "content": long, "level": "personal",
+	})
+	if r.Error == nil || r.Error.Code != ErrInvalidParams {
+		t.Fatalf("personal without user_id: got %+v, want code %d", r.Error, ErrInvalidParams)
+	}
+
+	// session without session_id is rejected.
+	r = callTool(t, s, "memory_write", map[string]any{
+		"key": "s/note", "content": long, "level": "session",
+	})
+	if r.Error == nil || r.Error.Code != ErrInvalidParams {
+		t.Fatalf("session without session_id: got %+v, want code %d", r.Error, ErrInvalidParams)
+	}
+
+	// Blank user_id is equally rejected.
+	r = callTool(t, s, "memory_write", map[string]any{
+		"key": "u/theme", "content": long, "level": "personal", "user_id": "   ",
+	})
+	if r.Error == nil || r.Error.Code != ErrInvalidParams {
+		t.Fatalf("personal with blank user_id: got %+v, want code %d", r.Error, ErrInvalidParams)
+	}
+
+	// With IDs: accepted, and IDs land on the stored item.
+	r = callTool(t, s, "memory_write", map[string]any{
+		"key": "u/theme", "content": long, "level": "personal", "user_id": "u_alice",
+	})
+	resultMap(t, r)
+	r = callTool(t, s, "memory_write", map[string]any{
+		"key": "s/note", "content": long, "level": "session", "session_id": "sess_1",
+	})
+	resultMap(t, r)
+
+	items, err := s.store.SearchMemory(context.Background(), "proj_test", "u/theme s/note", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byKey := map[string]*MemoryItem{}
+	for _, it := range items {
+		byKey[it.Key] = it
+	}
+	if byKey["u/theme"] == nil || byKey["u/theme"].UserID != "u_alice" {
+		t.Errorf("personal item UserID = %+v, want u_alice", byKey["u/theme"])
+	}
+	if byKey["s/note"] == nil || byKey["s/note"].SessionID != "sess_1" {
+		t.Errorf("session item SessionID = %+v, want sess_1", byKey["s/note"])
 	}
 }
 

@@ -4,8 +4,10 @@ package store
 //
 // SearchMemory is the keyword/tag fallback (works with zero embeddings);
 // SearchMemoryVector is the primary semantic path once the Memory Processor
-// backfills embedding vector(1536). Both honor project scoping: rows with a
-// NULL project_id are org-level and visible to every project.
+// backfills embedding vector(1536). Both honor project scoping: only rows
+// with a matching project_id, or NULL-project rows explicitly marked
+// level='organization' (the org tier is the global tier by design), are
+// visible. NULL-project personal/session rows never leak across projects.
 
 import (
 	"context"
@@ -141,14 +143,14 @@ func (s *PostgresStore) ConfirmMemory(ctx context.Context, id string, confirmedB
 
 // SearchMemory is the text fallback: substring match on key/content, exact
 // tag hit, or empty query (list). MemStore parity: same CONFIRMED/PROPOSED
-// visibility, org-level rows included.
+// visibility; NULL-project rows match only when level='organization'.
 func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items
-		  WHERE (project_id = $1::uuid OR project_id IS NULL)
+		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
 		    AND status IN ('CONFIRMED','PROPOSED')
 		    AND ($2 = '' OR content ILIKE '%'||$2||'%'
 		         OR "key" ILIKE '%'||$2||'%' OR $2 = ANY(tags))
@@ -186,7 +188,7 @@ func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items
-		  WHERE (project_id = $1::uuid OR project_id IS NULL)
+		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
 		    AND status = 'CONFIRMED'
 		    AND confidence > 0.3
 		    AND embedding IS NOT NULL

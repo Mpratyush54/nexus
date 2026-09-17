@@ -326,17 +326,24 @@ func (s *MemStore) ListSessionParticipants(ctx context.Context, sessionID string
 }
 
 // CreateSessionMemory stores a memory as session-scoped: session_id is
-// required, level is forced to 'session' regardless of caller input.
+// required, level is forced to 'session' regardless of caller input. The
+// session must exist (else ErrNotFound) and the item's project — when set —
+// must match the session's project, so a session of Project A can never
+// adopt a memory tagged with Project B.
 func (s *MemStore) CreateSessionMemory(ctx context.Context, item *MemoryItem) error {
 	if strings.TrimSpace(item.SessionID) == "" {
 		return fmt.Errorf("session_id is required for session memory")
 	}
 	b := memSessionsOf(s)
 	b.mu.RLock()
-	_, ok := b.sessions[item.SessionID]
+	sess, ok := b.sessions[item.SessionID]
 	b.mu.RUnlock()
 	if !ok {
 		return ErrNotFound
+	}
+	if item.ProjectID != "" && item.ProjectID != sess.ProjectID {
+		return fmt.Errorf("session %s belongs to project %s, cannot store memory for project %s",
+			item.SessionID, sess.ProjectID, item.ProjectID)
 	}
 	item.Level = "session"
 	return s.CreateMemoryItem(ctx, item)
@@ -655,9 +662,19 @@ func (s *PostgresStore) ListSessionParticipants(ctx context.Context, sessionID s
 }
 
 // CreateSessionMemory stores a memory as session-scoped (level forced).
+// The session must exist (else ErrNotFound) and the item's project — when
+// set — must match the session's project (cross-project adoption rejected).
 func (s *PostgresStore) CreateSessionMemory(ctx context.Context, item *MemoryItem) error {
 	if strings.TrimSpace(item.SessionID) == "" {
 		return fmt.Errorf("session_id is required for session memory")
+	}
+	sess, err := s.GetSession(ctx, item.SessionID)
+	if err != nil {
+		return err
+	}
+	if item.ProjectID != "" && item.ProjectID != sess.ProjectID {
+		return fmt.Errorf("session %s belongs to project %s, cannot store memory for project %s",
+			item.SessionID, sess.ProjectID, item.ProjectID)
 	}
 	item.Level = "session"
 	return s.CreateMemoryItem(ctx, item)

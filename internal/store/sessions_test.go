@@ -6,6 +6,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -227,5 +229,36 @@ func TestSessionPromotionFlow(t *testing.T) {
 	}
 	if !seen {
 		t.Fatal("promoted memory not inherited by new session")
+	}
+}
+
+func TestCreateSessionMemoryCrossProjectRejected(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	pA := mustProject(t, s, "xproj-a")
+	pB := mustProject(t, s, "xproj-b")
+	sessA := mustSession(t, s, pA, "A1")
+
+	// Same-project session memory is accepted.
+	ok := &MemoryItem{ProjectID: pA.ID, SessionID: sessA.ID, Key: "ok/fact",
+		Content: memContent("ok/fact", "belongs to the same project here")}
+	if err := s.CreateSessionMemory(ctx, ok); err != nil {
+		t.Fatalf("same-project CreateSessionMemory: %v", err)
+	}
+
+	// Cross-project: session of A + memory tagged B is rejected.
+	bad := &MemoryItem{ProjectID: pB.ID, SessionID: sessA.ID, Key: "bad/fact",
+		Content: memContent("bad/fact", "tagged with the other project here")}
+	if err := s.CreateSessionMemory(ctx, bad); err == nil {
+		t.Fatal("cross-project CreateSessionMemory must fail")
+	} else if !strings.Contains(err.Error(), pA.ID) || !strings.Contains(err.Error(), pB.ID) {
+		t.Fatalf("error must name both projects, got: %v", err)
+	}
+
+	// Unknown session stays ErrNotFound.
+	ghost := &MemoryItem{ProjectID: pA.ID, SessionID: "sess_missing", Key: "ghost/fact",
+		Content: memContent("ghost/fact", "references a missing session here")}
+	if err := s.CreateSessionMemory(ctx, ghost); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unknown session: got %v, want ErrNotFound", err)
 	}
 }
