@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -10,23 +11,35 @@ import (
 	"strings"
 	"sync"
 
+	"central-memory/internal/platform"
 	"central-memory/internal/project"
 )
 
 // RootsFor builds candidate native dirs: home-level + per-project dot dirs.
-// Leaf projects come from project.Leaves so nested repos (D:\gitlab-test/X)
+// Leaf projects come from project.Leaves so nested repos (<root>/gitlab-test/X)
 // each get their own dot-dir roots, not just the top folder.
 func RootsFor(home string, agentDirs []string, projectDotDirs []string) []string {
-	var roots []string
+	return RootsForIn(home, agentDirs, projectDotDirs, project.CachedLeaves(), platform.ProjectRoots())
+}
+
+// RootsForIn is RootsFor over explicit leaves/roots (testability seam;
+// production passes project.CachedLeaves + platform.ProjectRoots).
+func RootsForIn(home string, agentDirs []string, projectDotDirs []string, leaves []string, roots []string) []string {
+	var rootsOut []string
 	for _, d := range agentDirs {
-		roots = append(roots, filepath.Join(home, d))
+		rootsOut = append(rootsOut, filepath.Join(home, d))
 	}
-	for _, leaf := range project.CachedLeaves() {
+	for _, leaf := range leaves {
 		for _, dot := range projectDotDirs {
-			roots = append(roots, filepath.Join(`D:\`, filepath.FromSlash(leaf), dot))
+			for _, root := range roots {
+				if strings.TrimSpace(root) == "" {
+					continue
+				}
+				rootsOut = append(rootsOut, filepath.Join(root, filepath.FromSlash(leaf), dot))
+			}
 		}
 	}
-	return roots
+	return rootsOut
 }
 
 // ClassifyPath applies BACKUP/IGNORE/NEVER rules shared by all adapters.
@@ -117,12 +130,16 @@ func resolveUncached(nativePath, home string) (string, string) {
 	if leaf, was := claudeDirSuffix(nativePath); leaf != "" {
 		return leaf, was
 	}
-	if strings.HasPrefix(nativePath, `D:\`) {
-		rel := strings.TrimPrefix(nativePath, `D:\`)
-		if i := strings.Index(rel, string(filepath.Separator)); i > 0 {
+	// Fallback: first segment under any configured project root
+	// (replaces the old hardcoded D:\ prefix rule; set NEXUS_PROJECT_ROOTS
+	// on machines whose projects live outside the home dir).
+	if rel, ok := project.RootRel(nativePath); ok {
+		if i := strings.Index(rel, "/"); i > 0 {
 			return rel[:i], ""
 		}
-		return rel, ""
+		if rel != "" {
+			return rel, ""
+		}
 	}
 	if proj := workspaceProject(nativePath); proj != "" {
 		return proj, ""
@@ -224,8 +241,8 @@ func workspaceFolder(p string) string {
 }
 
 // claudeDirSuffix handles pre-move Claude dir names (D--SERVER-automation
-// for a repo now at D:\a\SERVER-automation): the encoded name must end with
-// "-" + the leaf's encoded base, and exactly one leaf may match.
+// for a repo now at <root>/a/SERVER-automation): the encoded name must end
+// with "-" + the leaf's encoded base, and exactly one leaf may match.
 func claudeDirSuffix(nativePath string) (string, string) {
 	marker := string(filepath.Separator) + "projects" + string(filepath.Separator)
 	i := strings.LastIndex(strings.ToLower(nativePath), marker)
@@ -268,7 +285,10 @@ func claudeDirProject(nativePath string) string {
 	}
 	enc = strings.ToLower(enc)
 	for _, leaf := range project.CachedLeaves() {
-		full := `D:\` + filepath.FromSlash(leaf)
+		full := project.LeafDir(leaf)
+		if full == "" {
+			continue
+		}
 		var b strings.Builder
 		for _, r := range full {
 			if r == ':' || r == '\\' || r == '/' {
@@ -301,13 +321,15 @@ func workspaceProject(p string) string {
 					if leaf := project.ForPath(decoded); leaf != "" {
 						return leaf
 					}
-					if strings.HasPrefix(strings.ToLower(decoded), `d:\`) {
-						rel := strings.TrimPrefix(decoded, `D:\`)
-						rel = strings.TrimPrefix(rel, `d:\`)
-						if j := strings.Index(rel, `\`); j > 0 {
+					// Same-absolute-path fallback under any configured root
+					// (replaces the old hardcoded d:\ rule).
+					if rel, ok := project.RootRel(decoded); ok {
+						if j := strings.Index(rel, "/"); j > 0 {
 							return rel[:j]
 						}
-						return rel
+						if rel != "" {
+							return rel
+						}
 					}
 				}
 			}
@@ -327,11 +349,23 @@ func workspaceProject(p string) string {
 // pointer rule: record, don't copy). Resumable: a destination file with the
 // same size and equal-or-newer modtime is counted without re-copying, so an
 // interrupted 16K-file harvest finishes on re-run instead of restarting.
+// Missing roots are skipped (agent dirs that were never created); any walk,
+// relativize, or copy failure aborts and is returned — callers must not
+// report a clean export when files failed to copy.
 // Returns copied + skipped lists.
 func CopyFiltered(roots []string, destRoot string, maxBytes int64, projectFilter string, home string) (copied, skipped []Artifact, err error) {
 	for ri, r := range roots {
-		_ = filepath.Walk(r, func(p string, info os.FileInfo, werr error) error {
-			if werr != nil || info.IsDir() {
+		if _, serr := os.Stat(r); serr != nil {
+			if os.IsNotExist(serr) {
+				continue
+			}
+			return copied, skipped, fmt.Errorf("adapters: stat root %q: %w", r, serr)
+		}
+		werr := filepath.Walk(r, func(p string, info os.FileInfo, werr error) error {
+			if werr != nil {
+				return werr
+			}
+			if info.IsDir() {
 				return nil
 			}
 			switch ClassifyPath(p) {
@@ -345,34 +379,46 @@ func CopyFiltered(roots []string, destRoot string, maxBytes int64, projectFilter
 				skipped = append(skipped, Artifact{NativePath: p, Project: ProjectOf(p, home)})
 				return nil
 			}
-			rel, _ := filepath.Rel(r, p)
+			rel, rerr := filepath.Rel(r, p)
+			if rerr != nil {
+				return rerr
+			}
 			dst := filepath.Join(destRoot, safeName(r, ri), rel)
 			if st, serr := os.Stat(dst); serr == nil && st.Size() == info.Size() && !st.ModTime().Before(info.ModTime()) {
 				copied = append(copied, Artifact{NativePath: p, RawPath: dst, Project: ProjectOf(p, home), Was: ProjectWas(p, home)})
 				return nil
 			}
 			if err := copyFile(p, dst); err != nil {
-				return nil
+				return fmt.Errorf("adapters: copy %q: %w", p, err)
 			}
-			copied = append(copied, Artifact{NativePath: p, RawPath: dst, Project: ProjectOf(p, home)})
+			copied = append(copied, Artifact{NativePath: p, RawPath: dst, Project: ProjectOf(p, home), Was: ProjectWas(p, home)})
 			return nil
 		})
+		if werr != nil {
+			return copied, skipped, fmt.Errorf("adapters: walk %q: %w", r, werr)
+		}
 	}
 	return copied, skipped, nil
 }
 
 func safeName(root string, i int) string {
 	b := filepath.Base(root)
-	if b == "." || b == "" {
+	if b == "." || b == "" || b == string(filepath.Separator) {
 		b = "root"
 	}
-	// Prefix with index to avoid collisions between same-named project dirs.
-	return filepath.Clean(strings.Map(func(r rune) rune {
-		if r == ':' || r == ' ' {
+	// Prefix with the root index so same-named dirs from different roots
+	// (two checkouts of "app" under different parents) never collide.
+	safe := strings.Map(func(r rune) rune {
+		switch r {
+		case ':', ' ', '/', '\\':
 			return '_'
 		}
 		return r
-	}, b))
+	}, b)
+	if safe == "." || safe == "" {
+		safe = "root"
+	}
+	return filepath.Clean(fmt.Sprintf("%d_%s", i, safe))
 }
 
 func copyFile(src, dst string) error {

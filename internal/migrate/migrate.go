@@ -146,7 +146,9 @@ func normalizeGitURL(raw string) string {
 func Run(vaultPath string, dryRun bool) (Counts, error) {
 	var dirs []string
 	for _, leaf := range project.Leaves() {
-		dirs = append(dirs, filepath.Join(`D:\`, filepath.FromSlash(leaf)))
+		if dir := project.LeafDir(leaf); dir != "" {
+			dirs = append(dirs, dir)
+		}
 	}
 	return RunWith(vaultPath, dirs, dryRun, project.Fingerprint)
 }

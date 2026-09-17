@@ -1,10 +1,20 @@
-// Package project detects leaf projects on D:\. A top-level folder like
-// D:\gitlab-test can hold several real repos — the folder itself is not the
-// project, each repo underneath is. A directory is a leaf project when it
-// carries a repo marker (.git, package.json, go.mod, ...). A top-level dir
-// without markers but with marked children contributes each marked child as
-// "parent/child". Scan depth is capped at 2 to stay fast. OS-level dirs
-// ($RECYCLE.BIN, ...) are never projects.
+// Package project detects leaf projects under configurable roots. A
+// top-level folder like <root>/gitlab-test can hold several real repos —
+// the folder itself is not the project, each repo underneath is. A
+// directory is a leaf project when it carries a repo marker (.git,
+// package.json, go.mod, ...). A top-level dir without markers but with
+// marked children contributes each marked child as "parent/child". Scan
+// depth is capped at 2 to stay fast. OS-level dirs ($RECYCLE.BIN, ...)
+// are never projects.
+//
+// Roots come from internal/platform ProjectRoots (NEXUS_PROJECT_ROOTS or
+// the user home dir) — never a hardcoded drive letter — so this package
+// works on Windows, macOS, Linux, and containers. Leaf IDs stay portable
+// forward-slash paths relative to their containing root
+// ("gitlab-test/2/Campus-Navigator"). The zero-arg Leaves/CachedLeaves/
+// ResolveLeaf/ForPath wrappers use the configured roots; the *In variants
+// take explicit roots/leaves and exist for tests and callers that already
+// resolved them.
 package project
 
 import (
@@ -13,6 +23,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"central-memory/internal/platform"
 )
 
 // Markers that make a directory a project root.
@@ -61,12 +73,20 @@ var skipDirs = map[string]bool{
 	"coverage": true, "testresults": true, ".idea": true, ".vscode": true,
 }
 
-// Leaves returns project IDs as paths relative to D:\ using forward
-// slashes ("gitlab-test/2/Campus-Navigator"). A directory with markers is a
-// leaf (descent stops — no fragmenting monorepos or node_modules); an
-// unmarked dir contributes marked descendants, or itself when nothing below
-// is marked. Depth is capped (D:\ = 0, max 4). OS-level dirs are excluded.
+// Leaves returns project IDs as portable forward-slash paths relative to
+// their containing root ("gitlab-test/2/Campus-Navigator"), scanning the
+// configured platform.ProjectRoots. A directory with markers is a leaf
+// (descent stops — no fragmenting monorepos or node_modules); an unmarked
+// dir contributes marked descendants, or itself when nothing below is
+// marked. Depth is capped (root = 0, max 4). OS-level dirs are excluded.
+// Missing/unreadable roots are skipped, never fatal.
 func Leaves() []string {
+	return LeavesIn(platform.ProjectRoots())
+}
+
+// LeavesIn is Leaves over explicit roots (testability seam; production
+// passes platform.ProjectRoots via Leaves).
+func LeavesIn(roots []string) []string {
 	var out []string
 	var emit func(abs, rel string, depth int)
 	emit = func(abs, rel string, depth int) {
@@ -104,17 +124,78 @@ func Leaves() []string {
 			emit(filepath.Join(abs, k), rel+"/"+k, depth+1)
 		}
 	}
-	entries, err := os.ReadDir(`D:\`)
-	if err != nil {
-		return nil
-	}
-	for _, e := range entries {
-		if !e.IsDir() || SystemDir(e.Name()) || skipDirs[strings.ToLower(e.Name())] {
+	for _, root := range roots {
+		entries, err := os.ReadDir(root)
+		if err != nil {
 			continue
 		}
-		emit(filepath.Join(`D:\`, e.Name()), e.Name(), 1)
+		for _, e := range entries {
+			if !e.IsDir() || SystemDir(e.Name()) || skipDirs[strings.ToLower(e.Name())] {
+				continue
+			}
+			emit(filepath.Join(root, e.Name()), e.Name(), 1)
+		}
 	}
 	return out
+}
+
+// LeafDir maps a leaf ID ("a/b" or "a") to its absolute directory: the
+// first configured root that actually contains it, else the first root
+// joined with the leaf (best guess for messaging), else "" when no roots
+// are configured or the leaf is global/empty.
+func LeafDir(leaf string) string {
+	return LeafDirIn(leaf, platform.ProjectRoots())
+}
+
+// LeafDirIn is LeafDir over explicit roots (testability seam).
+func LeafDirIn(leaf string, roots []string) string {
+	if leaf == "" || leaf == "global" {
+		return ""
+	}
+	rel := filepath.FromSlash(leaf)
+	var first string
+	for _, root := range roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		if first == "" {
+			first = root
+		}
+		abs := filepath.Join(root, rel)
+		if st, err := os.Stat(abs); err == nil && st.IsDir() {
+			return abs
+		}
+	}
+	if first == "" {
+		return ""
+	}
+	return filepath.Join(first, rel)
+}
+
+// RootRel returns nativePath relative (forward-slash form) to its
+// containing configured root. ok is false when the path sits under no
+// known root. Comparison is case-insensitive so Windows volume roots
+// match regardless of case.
+func RootRel(nativePath string) (rel string, ok bool) {
+	return RootRelIn(nativePath, platform.ProjectRoots())
+}
+
+// RootRelIn is RootRel over explicit roots (testability seam).
+func RootRelIn(nativePath string, roots []string) (string, bool) {
+	norm := filepath.ToSlash(strings.ToLower(nativePath))
+	for _, root := range roots {
+		if strings.TrimSpace(root) == "" {
+			continue
+		}
+		base := strings.TrimRight(filepath.ToSlash(strings.ToLower(root)), "/")
+		if norm == base {
+			return "", true
+		}
+		if strings.HasPrefix(norm, base+"/") {
+			return norm[len(base)+1:], true
+		}
+	}
+	return "", false
 }
 
 // subtreeMarked reports whether dir or any descendant (within depth cap)
@@ -194,13 +275,23 @@ func gitOut(dir string, args ...string) (string, error) {
 // a leaf path ("a/b"), a git origin URL, or a root-commit hash (both survive
 // moves/renames). Returns "" when nothing matches.
 func ResolveLeaf(ref string) string {
-	for _, leaf := range CachedLeaves() {
+	return ResolveLeafIn(ref, CachedLeaves(), platform.ProjectRoots())
+}
+
+// ResolveLeafIn is ResolveLeaf over explicit leaves/roots (testability
+// seam; production passes CachedLeaves + platform.ProjectRoots).
+func ResolveLeafIn(ref string, leaves []string, roots []string) string {
+	for _, leaf := range leaves {
 		if leaf == ref {
 			return leaf
 		}
 	}
-	for _, leaf := range CachedLeaves() {
-		origin, root := Fingerprint(filepath.Join(`D:\`, filepath.FromSlash(leaf)))
+	for _, leaf := range leaves {
+		dir := LeafDirIn(leaf, roots)
+		if dir == "" {
+			continue
+		}
+		origin, root := Fingerprint(dir)
 		if ref != "" && (ref == origin || ref == root) {
 			return leaf
 		}
@@ -209,18 +300,30 @@ func ResolveLeaf(ref string) string {
 }
 
 // ForPath maps an absolute native path to the deepest matching leaf ("a/b"
-// beats "a"). Returns "" when nothing matches.
+// beats "a"). A leaf matches when the path is its directory (or under it)
+// below any configured root. Returns "" when nothing matches.
 func ForPath(nativePath string) string {
+	return ForPathIn(nativePath, CachedLeaves(), platform.ProjectRoots())
+}
+
+// ForPathIn is ForPath over explicit leaves/roots (testability seam).
+func ForPathIn(nativePath string, leaves []string, roots []string) string {
 	norm := filepath.ToSlash(strings.ToLower(nativePath))
 	best := ""
-	for _, leaf := range CachedLeaves() {
-		prefix := "d:/" + strings.ToLower(leaf) + "/"
-		if strings.HasPrefix(norm, prefix) && len(leaf) > len(best) {
-			best = leaf
-		}
-		// Exact dir itself (e.g. the leaf root file listing).
-		if norm == "d:/"+strings.ToLower(leaf) {
-			best = leaf
+	for _, leaf := range leaves {
+		rel := filepath.ToSlash(strings.ToLower(filepath.FromSlash(leaf)))
+		for _, root := range roots {
+			if strings.TrimSpace(root) == "" {
+				continue
+			}
+			prefix := strings.TrimRight(filepath.ToSlash(strings.ToLower(root)), "/") + "/" + rel
+			if strings.HasPrefix(norm, prefix+"/") && len(leaf) > len(best) {
+				best = leaf
+			}
+			// Exact dir itself (e.g. the leaf root file listing).
+			if norm == prefix {
+				best = leaf
+			}
 		}
 	}
 	return best

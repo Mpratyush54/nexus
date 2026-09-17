@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"central-memory/internal/platform"
 	projectpkg "central-memory/internal/project"
 )
 
@@ -14,7 +15,7 @@ import (
 type genericAdapter struct {
 	name       string
 	agentDirs  []string // relative to %USERPROFILE%
-	projectDot []string // relative to D:\<proj>\
+	projectDot []string // relative to <project root>\<proj>\
 	absRoots   []string // absolute dirs (env-expanded at use)
 	maxBytes   int64    // large-file cap (50MB pointer rule)
 }
@@ -62,9 +63,14 @@ func (g genericAdapter) indexPath(vault string) string {
 
 // Export copies BACKUP files to vault + writes index.json (native->raw)
 // so Restore can map back. Skipped large files are recorded, not copied.
+// Copy/walk failures abort the export with an error and index.json is NOT
+// written, so callers never mistake a partial copy for a clean export.
 func (g genericAdapter) Export(vault string) error {
 	home, _ := os.UserHomeDir()
-	copied, skipped, _ := CopyFiltered(g.roots(), g.rawDir(vault), g.maxBytes, "", home)
+	copied, skipped, err := CopyFiltered(g.roots(), g.rawDir(vault), g.maxBytes, "", home)
+	if err != nil {
+		return fmt.Errorf("%s: export: %w", g.name, err)
+	}
 	for i := range copied {
 		copied[i].Agent = g.name
 		copied[i].Kind = kindOf(copied[i].NativePath)
@@ -74,7 +80,9 @@ func (g genericAdapter) Export(vault string) error {
 			copied[i].Repo, copied[i].Root = projectpkg.Fingerprint(leafDir)
 		}
 	}
-	_ = os.MkdirAll(filepath.Join(vault, "agents", g.name), 0o755)
+	if err := os.MkdirAll(filepath.Join(vault, "agents", g.name), 0o755); err != nil {
+		return fmt.Errorf("%s: create agent dir: %w", g.name, err)
+	}
 	b, _ := json.MarshalIndent(map[string]any{
 		"agent": g.name, "at": time.Now().UTC().Format(time.RFC3339),
 		"files": copied, "skipped_large": skipped,
@@ -88,7 +96,8 @@ func (g genericAdapter) Export(vault string) error {
 // Restore copies vault raw files back to native paths. Project filter:
 // empty = all agents' files everywhere; set = only that project's files
 // across this adapter. Same-absolute-path enforced: project restores require
-// D:\<project> to exist; existing files are backed up to
+// <project root>\<project> to exist (first configured platform root holding
+// the leaf); existing files are backed up to
 // <path>.pre-restore-TIMESTAMP before overwrite. `at` is accepted for future
 // restic snapshots (P3); P2 only holds latest and warns.
 func (g genericAdapter) Restore(vault, project, at string) error {
@@ -101,8 +110,12 @@ func (g genericAdapter) Restore(vault, project, at string) error {
 		if leaf := projectpkg.ResolveLeaf(project); leaf != "" {
 			project = leaf
 		}
-		if _, err := os.Stat(filepath.Join(`D:\`, filepath.FromSlash(project))); os.IsNotExist(err) {
-			return errNoTarget{project, filepath.Join(`D:\`, filepath.FromSlash(project))}
+		target := leafDirOf(project)
+		if target == "" {
+			return errNoTarget{project, "(no project roots configured)"}
+		}
+		if _, err := os.Stat(target); os.IsNotExist(err) {
+			return errNoTarget{project, target}
 		}
 	}
 	data, err := os.ReadFile(g.indexPath(vault))
@@ -157,9 +170,14 @@ func (g genericAdapter) Normalize(vault string) error {
 	}
 	defer f.Close()
 	enc := json.NewEncoder(f)
-	md, _ := os.Create(filepath.Join(ndir, "transcript.md"))
+	md, err := os.Create(filepath.Join(ndir, "transcript.md"))
+	if err != nil {
+		return err
+	}
 	defer md.Close()
-	md.WriteString("# " + g.name + " normalized index\n\n")
+	if _, err := md.WriteString("# " + g.name + " normalized index\n\n"); err != nil {
+		return fmt.Errorf("%s: write transcript.md: %w", g.name, err)
+	}
 	for _, a := range arts {
 		info, _ := os.Stat(a.NativePath)
 		var size int64
@@ -172,22 +190,29 @@ func (g genericAdapter) Normalize(vault string) error {
 		if leafDir := leafDirOf(a.Project); leafDir != "" {
 			repo, root = projectpkg.Fingerprint(leafDir)
 		}
-		enc.Encode(map[string]any{
+		if err := enc.Encode(map[string]any{
 			"session_id": a.NativePath, "agent": g.name, "project": a.Project,
 			"kind": a.Kind, "updated": mod, "size": size,
 			"repo": repo, "root": root, "was": a.Was,
-		})
-		md.WriteString("- [" + a.Project + "/" + a.Kind + "] " + a.NativePath + "\n")
+		}); err != nil {
+			return fmt.Errorf("%s: encode sessions.jsonl: %w", g.name, err)
+		}
+		if _, err := md.WriteString("- [" + a.Project + "/" + a.Kind + "] " + a.NativePath + "\n"); err != nil {
+			return fmt.Errorf("%s: write transcript.md: %w", g.name, err)
+		}
 	}
 	return nil
 }
 
-// leafDirOf maps a project ID ("a/b" or "a") to its D:\ directory.
+// leafDirOf maps a project ID ("a/b" or "a") to its absolute directory
+// under the configured platform roots (first root holding the leaf).
 func leafDirOf(leaf string) string {
-	if leaf == "" || leaf == "global" {
-		return ""
-	}
-	return filepath.Join(`D:\`, filepath.FromSlash(leaf))
+	return leafDirOfIn(leaf, platform.ProjectRoots())
+}
+
+// leafDirOfIn is leafDirOf over explicit roots (testability seam).
+func leafDirOfIn(leaf string, roots []string) string {
+	return projectpkg.LeafDirIn(leaf, roots)
 }
 
 func kindOf(p string) string {

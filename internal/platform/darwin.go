@@ -74,11 +74,28 @@ func (s darwinService) Uninstall() error {
 	if err != nil {
 		return err
 	}
-	_ = exec.Command("launchctl", "bootout", "gui/"+uid(), path).Run()
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("platform: remove launchd plist: %w", err)
+	// Idempotent: no plist means already uninstalled. Otherwise a bootout
+	// failure must surface — silently dropping it leaves the daemon running
+	// while reporting success.
+	if _, serr := os.Stat(path); serr != nil {
+		if os.IsNotExist(serr) {
+			return nil
+		}
+		return fmt.Errorf("platform: stat launchd plist: %w", serr)
 	}
-	return nil
+	bootOut, bootErr := exec.Command("launchctl", "bootout", "gui/"+uid(), path).CombinedOutput()
+	removeErr := error(nil)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		removeErr = fmt.Errorf("platform: remove launchd plist: %w", err)
+	}
+	switch {
+	case bootErr != nil && removeErr != nil:
+		return fmt.Errorf("platform: launchctl bootout: %w: %s; %v", bootErr, strings.TrimSpace(string(bootOut)), removeErr)
+	case bootErr != nil:
+		return fmt.Errorf("platform: launchctl bootout: %w: %s", bootErr, strings.TrimSpace(string(bootOut)))
+	default:
+		return removeErr
+	}
 }
 
 func (s darwinService) Status() (ServiceStatus, error) {

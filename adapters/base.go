@@ -2,8 +2,9 @@
 // Each agent implements discover/classify/export/restore/normalize with
 // BACKUP (sessions, plans, todos, instructions, skills) / IGNORE (cache,
 // logs, tmp) / NEVER (credentials, tokens, keys — fail closed) handling.
-// Restore enforces same-absolute-path (D:\X -> D:\X); mismatched layouts
-// restore side-by-side with manual re-link steps, never silent rewrite.
+// Restore enforces same-absolute-path (<project root>\<project> -> the same
+// path); mismatched layouts restore side-by-side with manual re-link steps,
+// never silent rewrite.
 package adapters
 
 type Classification int
