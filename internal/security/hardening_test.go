@@ -203,11 +203,11 @@ func TestSecretMatchesDaemonSemantics(t *testing.T) {
 // fail-closed normalization of unknown visibility values.
 func TestVisibilityEnforce(t *testing.T) {
 	cases := []struct {
-		name    string
-		viewer  string
-		owner   string
-		vis     Visibility
-		wantOK  bool
+		name   string
+		viewer string
+		owner  string
+		vis    Visibility
+		wantOK bool
 	}{
 		{"owner reads private", "alice", "alice", VisibilityPrivate, true},
 		{"owner reads shared", "alice", "alice", VisibilityShared, true},

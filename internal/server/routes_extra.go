@@ -516,14 +516,14 @@ func (s *Server) handleBranchMerge(w http.ResponseWriter, r *http.Request) {
 	// conflicts and an explicit note. A real merge must apply
 	// internal/branches.MergeResult at the store layer (see decision doc).
 	writeJSON(w, http.StatusOK, map[string]any{
-		"source":    source.Name,
-		"source_id": source.ID,
-		"target":    target.Name,
-		"target_id": target.ID,
+		"source":     source.Name,
+		"source_id":  source.ID,
+		"target":     target.Name,
+		"target_id":  target.ID,
 		"project_id": projectID,
-		"merged":    true,
-		"conflicts": []any{},
-		"note":      "no rows copied: the Store interface exposes no merge/apply method; implement merge by applying internal/branches.MergeResult in the store layer",
+		"merged":     true,
+		"conflicts":  []any{},
+		"note":       "no rows copied: the Store interface exposes no merge/apply method; implement merge by applying internal/branches.MergeResult in the store layer",
 	})
 }
 
@@ -627,9 +627,9 @@ func (s *Server) handleMemoryReject(w http.ResponseWriter, r *http.Request) {
 // --- episodes ---
 
 type episodeResolveRequest struct {
-	Resolution  string `json:"resolution"`
+	Resolution   string `json:"resolution"`
 	Verification string `json:"verification"`
-	ResolvedBy  string `json:"resolved_by"`
+	ResolvedBy   string `json:"resolved_by"`
 }
 
 func (s *Server) handleEpisodeResolve(w http.ResponseWriter, r *http.Request) {

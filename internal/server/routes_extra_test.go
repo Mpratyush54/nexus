@@ -169,7 +169,7 @@ func TestBranchListForkCheckoutDiffMerge(t *testing.T) {
 		t.Fatalf("merge status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var merge struct {
-		Merged    bool `json:"merged"`
+		Merged    bool  `json:"merged"`
 		Conflicts []any `json:"conflicts"`
 	}
 	decodeBody(t, rec, &merge)

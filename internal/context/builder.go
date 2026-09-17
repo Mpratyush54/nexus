@@ -84,17 +84,17 @@ func ResolveOverrides(items []*store.MemoryItem) []*store.MemoryItem {
 // should already be relevance-ordered (e.g. HybridSearch output);
 // same-key collisions across slices resolve with lower levels winning.
 type ContextInput struct {
-	ProjectName  string
-	Branch       string
-	Updated      time.Time
-	Task         *store.Task
-	SessionTitle string
-	PersonalUser string
-	SessionItems []*store.MemoryItem
-	Episodes     []*store.Episode
+	ProjectName   string
+	Branch        string
+	Updated       time.Time
+	Task          *store.Task
+	SessionTitle  string
+	PersonalUser  string
+	SessionItems  []*store.MemoryItem
+	Episodes      []*store.Episode
 	PersonalItems []*store.MemoryItem
-	ProjectItems []*store.MemoryItem
-	OrgItems     []*store.MemoryItem
+	ProjectItems  []*store.MemoryItem
+	OrgItems      []*store.MemoryItem
 	// Budget caps the XML in characters; <= 0 selects DefaultBudget.
 	Budget int
 	// Now anchors confidence decay and date rendering; zero means UTC now.
@@ -104,10 +104,10 @@ type ContextInput struct {
 // AssembledContext is the builder result: well-formed XML plus the
 // accounting the MCP layer returns next to it.
 type AssembledContext struct {
-	XML              string
-	TokenCount       int
-	BudgetRemaining  int
-	ItemsIncluded    int
+	XML             string
+	TokenCount      int
+	BudgetRemaining int
+	ItemsIncluded   int
 }
 
 func esc(s string) string {

@@ -543,7 +543,8 @@ func wsReadLoop(conn net.Conn, rw *bufio.ReadWriter, h *Hub, c *Client) {
 			return
 		}
 		switch op {
-		case wsOpText, wsOpContinuation:			if op == wsOpText {
+		case wsOpText, wsOpContinuation:
+			if op == wsOpText {
 				if frag != nil {
 					// New data frame while reassembly is in progress:
 					// protocol error per RFC 6455 §5.4 (a new message
