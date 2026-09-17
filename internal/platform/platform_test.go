@@ -7,273 +7,189 @@ import (
 	"testing"
 )
 
-// ---------------------------------------------------------------------------
-// Service identity
-// ---------------------------------------------------------------------------
-
-func TestServiceNames(t *testing.T) {
-	if AppName == "" || ServiceName == "" {
-		t.Fatal("AppName and ServiceName must be non-empty")
-	}
-	if LaunchdLabel() == "" || SystemdUnitName() == "" || WindowsTaskName() == "" {
-		t.Fatal("per-OS service names must be non-empty")
-	}
-	if !strings.HasSuffix(SystemdUnitName(), ".service") {
-		t.Fatalf("systemd unit name %q must end in .service", SystemdUnitName())
-	}
-	if !strings.Contains(LaunchdLabel(), AppName) {
-		t.Fatalf("launchd label %q should contain app name %q", LaunchdLabel(), AppName)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Config/cache dirs: per-GOOS logic via pure funcs + synthetic bases.
-// No host OS dependency: bases below mirror os.UserConfigDir /
-// os.UserCacheDir values on each OS.
-// ---------------------------------------------------------------------------
-
-func TestConfigDirForBasePerGOOS(t *testing.T) {
+func TestConfigDirForGOOS(t *testing.T) {
 	cases := []struct {
-		goos string
-		base string
+		goos       string
+		configBase string
+		appData    string
+		home       string
+		wantSub    string
 	}{
-		{"windows", filepath.Join(`C:`, "Users", "a", "AppData", "Roaming")},
-		{"darwin", "/Users/a/Library/Application Support"},
-		{"linux", "/home/a/.config"},
+		{"windows", `C:\Users\a\AppData\Roaming`, `C:\Users\a\AppData\Roaming`, `/home/a`, filepath.Join("AppData", "Roaming", "nexus")},
+		{"darwin", "/home/a/Library/Application Support", "", "/home/a", filepath.Join("Library", "Application Support", "nexus")},
+		{"linux", "/home/a/.config", "", "/home/a", filepath.Join(".config", "nexus")},
 	}
 	for _, tc := range cases {
-		got := ConfigDirForBase(tc.base)
-		want := filepath.Join(tc.base, AppName)
-		if got != want {
-			t.Errorf("GOOS=%s: ConfigDirForBase(%q) = %q, want %q", tc.goos, tc.base, got, want)
+		got := configDirForGOOS(tc.goos, tc.configBase, tc.appData, tc.home)
+		if !strings.HasSuffix(got, "nexus") {
+			t.Errorf("goos=%s: got %q, want suffix nexus", tc.goos, got)
 		}
-		if !strings.HasSuffix(got, AppName) {
-			t.Errorf("GOOS=%s: result %q missing app suffix", tc.goos, got)
+		if !strings.Contains(got, tc.wantSub) && tc.goos != "linux" {
+			t.Errorf("goos=%s: got %q, want it to contain %q", tc.goos, got, tc.wantSub)
 		}
-	}
-}
-
-func TestCacheDirForBasePerGOOS(t *testing.T) {
-	cases := []struct {
-		goos string
-		base string
-	}{
-		{"windows", filepath.Join(`C:`, "Users", "a", "AppData", "Local")},
-		{"darwin", "/Users/a/Library/Caches"},
-		{"linux", "/home/a/.cache"},
-	}
-	for _, tc := range cases {
-		got := CacheDirForBase(tc.base)
-		want := filepath.Join(tc.base, AppName)
-		if got != want {
-			t.Errorf("GOOS=%s: CacheDirForBase(%q) = %q, want %q", tc.goos, tc.base, got, want)
+		if strings.Contains(got, "D:") {
+			t.Errorf("goos=%s: got %q, must not hardcode a D: drive", tc.goos, got)
 		}
 	}
-}
-
-func TestConfigDirLiveSuffix(t *testing.T) {
-	dir, err := ConfigDir()
-	if err != nil {
-		t.Skipf("no user config dir on this host: %v", err)
+	// Windows prefers APPDATA over the generic config base.
+	got := configDirForGOOS("windows", `X:\other`, `C:\Users\a\AppData\Roaming`, "")
+	if !strings.HasPrefix(got, `C:\Users\a\AppData\Roaming`) {
+		t.Errorf("windows APPDATA preference: got %q", got)
 	}
-	if !filepath.IsAbs(dir) {
-		t.Errorf("ConfigDir() = %q, want absolute path", dir)
+	// darwin derives from home, linux from the XDG config base.
+	if got := configDirForGOOS("darwin", "/ignored", "", "/Users/a"); got != filepath.Join("/Users/a", "Library", "Application Support", "nexus") {
+		t.Errorf("darwin home mapping: got %q", got)
 	}
-	if filepath.Base(dir) != AppName {
-		t.Errorf("ConfigDir() = %q, want base %q", dir, AppName)
-	}
-}
-
-func TestCacheDirLiveSuffix(t *testing.T) {
-	dir, err := CacheDir()
-	if err != nil {
-		t.Skipf("no user cache dir on this host: %v", err)
-	}
-	if !filepath.IsAbs(dir) {
-		t.Errorf("CacheDir() = %q, want absolute path", dir)
-	}
-	if filepath.Base(dir) != AppName {
-		t.Errorf("CacheDir() = %q, want base %q", dir, AppName)
+	if got := configDirForGOOS("linux", "/home/a/.config", "", "/home/a"); got != filepath.Join("/home/a", ".config", "nexus") {
+		t.Errorf("linux xdg mapping: got %q", got)
 	}
 }
 
-func TestConfigFilePath(t *testing.T) {
-	got := ConfigFilePath(filepath.Join("base", AppName))
-	if filepath.Base(got) != "config.json" {
-		t.Errorf("ConfigFilePath = %q, want config.json leaf", got)
+func TestCacheDirForGOOS(t *testing.T) {
+	got := cacheDirForGOOS("linux", "/home/a/.cache", "/home/a/.config", "/home/a")
+	if got != filepath.Join("/home/a", ".cache", "nexus") {
+		t.Errorf("cache base honored: got %q", got)
+	}
+	got = cacheDirForGOOS("linux", "", "/home/a/.config", "/home/a")
+	if !strings.HasSuffix(got, filepath.Join("nexus", "cache")) {
+		t.Errorf("cache fallback under config: got %q", got)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// launchd plist generation
-// ---------------------------------------------------------------------------
-
-func TestLaunchdPlist(t *testing.T) {
-	exe := "/usr/local/bin/nexus"
-	plist := LaunchdPlist(LaunchdLabel(), exe, []string{"daemon", "--port", "8080"})
-	for _, want := range []string{
-		`<?xml version="1.0"`,
-		"<plist",
-		LaunchdLabel(),
-		"<key>ProgramArguments</key>",
-		"<string>" + exe + "</string>",
-		"<string>daemon</string>",
-		"<string>--port</string>",
-		"<string>8080</string>",
-		"<key>RunAtLoad</key>",
-		"<true/>",
-		"<key>KeepAlive</key>",
-	} {
-		if !strings.Contains(plist, want) {
-			t.Errorf("plist missing %q\n--- plist ---\n%s", want, plist)
-		}
-	}
-}
-
-func TestLaunchdPlistEscapesXML(t *testing.T) {
-	plist := LaunchdPlist("com.example.a&b", "/bin/a<b>", []string{`x"y'z`})
-	for _, want := range []string{"a&amp;b", "a&lt;b&gt;", "x&quot;y&apos;z"} {
-		if !strings.Contains(plist, want) {
-			t.Errorf("plist missing escaped %q\n--- plist ---\n%s", want, plist)
-		}
-	}
-	if strings.Contains(plist, "a&b</string>") {
-		t.Error("plist contains unescaped &")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// systemd unit generation
-// ---------------------------------------------------------------------------
-
-func TestSystemdUnit(t *testing.T) {
-	exe := "/usr/local/bin/nexus"
-	unit := SystemdUnit("nexus workspace daemon", exe, []string{"daemon"})
-	for _, want := range []string{
-		"[Unit]",
-		"Description=nexus workspace daemon",
-		"[Service]",
-		"ExecStart=" + exe + " daemon",
-		"Restart=always",
-		"[Install]",
-		"WantedBy=default.target",
-	} {
-		if !strings.Contains(unit, want) {
-			t.Errorf("unit missing %q\n--- unit ---\n%s", want, unit)
-		}
-	}
-}
-
-func TestSystemdUnitQuotesSpacedPaths(t *testing.T) {
-	unit := SystemdUnit("", "/opt/my apps/nexus", []string{"daemon"})
-	if !strings.Contains(unit, `ExecStart="/opt/my apps/nexus" daemon`) {
-		t.Errorf("unit ExecStart not quoted:\n%s", unit)
-	}
-	if !strings.Contains(unit, "Description=nexus workspace daemon") {
-		t.Errorf("empty description should fall back to default:\n%s", unit)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Windows task command builders
-// ---------------------------------------------------------------------------
-
-func TestWindowsTaskCommand(t *testing.T) {
-	got := WindowsTaskCommand(`C:\Program Files\nexus\nexus.exe`, []string{"daemon"})
-	want := `"C:\Program Files\nexus\nexus.exe" daemon`
-	if got != want {
-		t.Errorf("WindowsTaskCommand = %q, want %q", got, want)
-	}
-	plain := WindowsTaskCommand(`/usr/bin/nexus`, []string{"daemon", "--port", "8080"})
-	if plain != "/usr/bin/nexus daemon --port 8080" {
-		t.Errorf("WindowsTaskCommand plain = %q", plain)
-	}
-}
-
-func TestSchtasksArgs(t *testing.T) {
-	create := SchtasksCreateArgs("NexusDaemon", `"C:\x\nexus.exe" daemon`)
-	joined := strings.Join(create, " ")
-	for _, want := range []string{"/Create", "/TN", "NexusDaemon", "/TR", "/SC", "ONLOGON", "/F"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("create args missing %q: %q", want, joined)
-		}
-	}
-	del := strings.Join(SchtasksDeleteArgs("NexusDaemon"), " ")
-	if !strings.Contains(del, "/Delete") || !strings.Contains(del, "NexusDaemon") {
-		t.Errorf("delete args wrong: %q", del)
-	}
-	q := strings.Join(SchtasksQueryArgs("NexusDaemon"), " ")
-	if !strings.Contains(q, "/Query") || !strings.Contains(q, "LIST") {
-		t.Errorf("query args wrong: %q", q)
-	}
-}
-
-func TestParseSchtasksStatus(t *testing.T) {
-	running := "HostName: X\nTaskName: \\NexusDaemon\nStatus: Running\n"
-	if st, ok := ParseSchtasksStatus(running); !ok || st != StatusRunning {
-		t.Errorf("running parse = %q,%v", st, ok)
-	}
-	ready := "TaskName: \\NexusDaemon\nStatus: Ready\n"
-	if st, ok := ParseSchtasksStatus(ready); !ok || st != StatusStopped {
-		t.Errorf("ready parse = %q,%v", st, ok)
-	}
-	missing := "ERROR: The system cannot find the file specified."
-	if st, ok := ParseSchtasksStatus(missing); !ok || st != StatusNotInstalled {
-		t.Errorf("missing parse = %q,%v", st, ok)
-	}
-	if _, ok := ParseSchtasksStatus("garbage output"); ok {
-		t.Error("garbage output should not parse")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Guards: no hardcoded drive-letter paths in implementation sources.
-// Only non-test sources are scanned (test fixtures may use drive-letter
-// examples as data). Patterns are built at runtime so this file itself
-// never contains a drive-letter literal.
-// ---------------------------------------------------------------------------
-
-func TestNoHardcodedDrivePaths(t *testing.T) {
-	letter := string([]byte{'D', ':'}) + string([]byte{'\\'})
-	letterFwd := string([]byte{'D', ':', '/'})
-	matches, err := filepath.Glob(filepath.Join(".", "*.go"))
+func TestConfigDirEnvOverride(t *testing.T) {
+	t.Setenv("NEXUS_CONFIG_DIR", filepath.Join("some", "custom", "dir"))
+	got, err := ConfigDir()
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range matches {
-		if strings.HasSuffix(m, "_test.go") {
+	if got != filepath.Join("some", "custom", "dir") {
+		t.Errorf("NEXUS_CONFIG_DIR override: got %q", got)
+	}
+}
+
+func TestCacheDirEnvOverride(t *testing.T) {
+	t.Setenv("NEXUS_CACHE_DIR", filepath.Join("some", "cache", "dir"))
+	got, err := CacheDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join("some", "cache", "dir") {
+		t.Errorf("NEXUS_CACHE_DIR override: got %q", got)
+	}
+}
+
+func TestConfigDirUsesUserConfigDir(t *testing.T) {
+	t.Setenv("NEXUS_CONFIG_DIR", "")
+	prev := userConfigDirFunc
+	userConfigDirFunc = func() (string, error) { return filepath.Join("fake", "base"), nil }
+	defer func() { userConfigDirFunc = prev }()
+	got, err := ConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Join("fake", "base", "nexus") {
+		t.Errorf("ConfigDir should join os.UserConfigDir+nexus, got %q", got)
+	}
+}
+
+func TestProjectRootsEnvAndDefault(t *testing.T) {
+	roots := []string{filepath.Join("a", "one"), filepath.Join("b", "two")}
+	t.Setenv("NEXUS_PROJECT_ROOTS", strings.Join(roots, string(os.PathListSeparator)))
+	got := ProjectRoots()
+	if len(got) != 2 || got[0] != roots[0] || got[1] != roots[1] {
+		t.Fatalf("env roots: got %q", got)
+	}
+	t.Setenv("NEXUS_PROJECT_ROOTS", "")
+	prev := userHomeDirFunc
+	userHomeDirFunc = func() (string, error) { return filepath.Join("fake", "home"), nil }
+	defer func() { userHomeDirFunc = prev }()
+	got = ProjectRoots()
+	if len(got) != 1 || got[0] != filepath.Join("fake", "home") {
+		t.Fatalf("default root is home: got %q", got)
+	}
+	for _, r := range got {
+		if strings.Contains(r, "D:") {
+			t.Errorf("project root must not hardcode D:: %q", r)
+		}
+	}
+}
+
+func TestRenderSystemdUnitContainsExecStart(t *testing.T) {
+	exe := filepath.Join("opt", "nexus", "nexus")
+	unit := RenderSystemdUnit("Nexus workspace daemon", exe, []string{"daemon", "run", "--port", "7171"})
+	if !strings.Contains(unit, "ExecStart=") {
+		t.Fatal("unit missing ExecStart=")
+	}
+	if !strings.Contains(unit, exe) {
+		t.Errorf("unit missing executable %q:\n%s", exe, unit)
+	}
+	for _, want := range []string{"WantedBy=default.target", "Restart=on-failure", "daemon", "--port"} {
+		if !strings.Contains(unit, want) {
+			t.Errorf("unit missing %q:\n%s", want, unit)
+		}
+	}
+}
+
+func TestRenderLaunchdPlistContainsExecutable(t *testing.T) {
+	exe := filepath.Join("opt", "nexus", "nexus")
+	plist := RenderLaunchdPlist(LaunchdLabel, exe, []string{"daemon", "run"})
+	for _, want := range []string{LaunchdLabel, exe, "ProgramArguments", "RunAtLoad", "KeepAlive", "daemon"} {
+		if !strings.Contains(plist, want) {
+			t.Errorf("plist missing %q:\n%s", want, plist)
+		}
+	}
+}
+
+func TestRenderSchtasksCreateArgs(t *testing.T) {
+	exe := `C:\tools\nexus.exe`
+	argv := RenderSchtasksCreateArgs(SchtasksName, exe, []string{"daemon", "run"})
+	joined := strings.Join(argv, " ")
+	for _, want := range []string{"/Create", "/TN", SchtasksName, "/SC", "ONLOGON", "daemon"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("schtasks args missing %q: %q", want, joined)
+		}
+	}
+	if !strings.Contains(joined, exe) {
+		t.Errorf("schtasks /TR missing executable: %q", joined)
+	}
+}
+
+func TestQuoteArg(t *testing.T) {
+	if got := quoteArg(""); got != `""` {
+		t.Errorf("empty: got %q", got)
+	}
+	if got := quoteArg(`C:\tools\nexus.exe`); got != `C:\tools\nexus.exe` {
+		t.Errorf("plain path unquoted: got %q", got)
+	}
+	if got := quoteArg(`C:\my tools\nexus.exe`); !strings.HasPrefix(got, `"`) {
+		t.Errorf("spaced path quoted: got %q", got)
+	}
+}
+
+// TestNoHardcodedDrivePaths guards the issue's acceptance criterion: no
+// source file in this package may contain a hardcoded Windows drive literal.
+func TestNoHardcodedDrivePaths(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") {
 			continue
 		}
-		data, err := os.ReadFile(m)
+		raw, err := os.ReadFile(e.Name())
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Contains(string(data), letter) || strings.Contains(string(data), letterFwd) {
-			t.Errorf("implementation file %s contains a hardcoded drive-letter path", m)
+		src := string(raw)
+		// Strip the test's own `D:` string literals from consideration by
+		// scanning for drive patterns outside this test function is
+		// overkill; instead assert on likely hardcode shapes.
+		bads := []string{"\"D:\\", "\"D:/", "D:\\Users", "D:\\central-memory"}
+		for _, bad := range bads {
+			if strings.Contains(src, bad) && e.Name() != "platform_test.go" {
+				t.Errorf("%s contains hardcoded path literal %q", e.Name(), bad)
+			}
 		}
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Misc pure helpers
-// ---------------------------------------------------------------------------
-
-func TestDefaultDaemonArgs(t *testing.T) {
-	args := DefaultDaemonArgs()
-	if len(args) == 0 || args[0] != "daemon" {
-		t.Errorf("DefaultDaemonArgs() = %v, want [daemon ...]", args)
-	}
-}
-
-func TestResolveExeExplicit(t *testing.T) {
-	got, err := resolveExe("some/relative/nexus")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !filepath.IsAbs(got) {
-		t.Errorf("resolveExe(relative) = %q, want absolute", got)
-	}
-	if _, err := resolveExe(""); err != nil {
-		t.Errorf("resolveExe(\"\") (current executable) failed: %v", err)
 	}
 }

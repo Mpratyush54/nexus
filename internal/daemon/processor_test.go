@@ -2,365 +2,379 @@ package daemon
 
 import (
 	"context"
-	"errors"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 )
 
-// fakeStore is the ProcessorStore fake: in-memory CONFIRMED set + recorded
-// writes. No network, no database.
-type fakeStore struct {
-	mu        sync.Mutex
-	confirmed []ConfirmedMemory
-	proposed  []ProposedMemory
-	episodes  []EpisodeDraft
-	epRefs    [][]EpisodeEventRef
-	listErr   error
-	saveErr   error
-}
+// ---------------------------------------------------------------------------
+// Classification (plan §2.6)
+// ---------------------------------------------------------------------------
 
-func (f *fakeStore) ListConfirmed(_ context.Context) ([]ConfirmedMemory, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.listErr != nil {
-		return nil, f.listErr
+func TestClassifyLevel(t *testing.T) {
+	cases := []struct {
+		text string
+		want MemoryLevel
+	}{
+		{"I prefer verbose error messages with full stack context", LevelPersonal},
+		{"I always write table-driven tests", LevelPersonal},
+		{"Don't touch payments/ right now, we're mid-refactor", LevelSession},
+		{"For now, skip the migration step during this task", LevelSession},
+		{"All APIs must use JWT authentication across all projects", LevelOrganization},
+		{"Company policy: every service ships an audit log", LevelOrganization},
+		{"We use pytest with fixture-based setup for this codebase", LevelProject},
+		{"The team decided on Redis over Memcached due to pub/sub needs", LevelProject},
+		{"The cache TTL is 300 seconds", LevelSession}, // unsure ⇒ safe default
 	}
-	return append([]ConfirmedMemory(nil), f.confirmed...), nil
-}
-
-func (f *fakeStore) SaveProposed(_ context.Context, m ProposedMemory) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.saveErr != nil {
-		return f.saveErr
+	for _, c := range cases {
+		if got := ClassifyLevel(c.text); got != c.want {
+			t.Errorf("ClassifyLevel(%q) = %q, want %q", c.text, got, c.want)
+		}
 	}
-	f.proposed = append(f.proposed, m)
-	return nil
 }
 
-func (f *fakeStore) SaveEpisode(_ context.Context, e EpisodeDraft, refs []EpisodeEventRef) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.episodes = append(f.episodes, e)
-	f.epRefs = append(f.epRefs, refs)
-	return nil
+func TestClassifyScope(t *testing.T) {
+	cases := []struct {
+		text string
+		want MemoryScope
+	}{
+		{"All APIs must use JWT. No API key auth.", ScopeConstraint},
+		{"Do not modify payments/ during this session", ScopeConstraint},
+		{"Team decided on Redis over Memcached due to pub/sub", ScopeDecision},
+		{"Alice prefers detailed error messages", ScopePreference},
+		{"We follow the repository pattern for all stores", ScopePattern},
+		{"Root cause: pool lifetime too short; how we fixed it", ScopeEpisodeSummary},
+		{"The server listens on port 8080", ScopeFact},
+	}
+	for _, c := range cases {
+		if got := ClassifyScope(c.text); got != c.want {
+			t.Errorf("ClassifyScope(%q) = %q, want %q", c.text, got, c.want)
+		}
+	}
 }
 
-func turnEvent(session, speaker, content string, at time.Time) ProcessorEvent {
-	return ProcessorEvent{
+// ---------------------------------------------------------------------------
+// Deduplication (issue #10: similarity > 0.9 discarded)
+// ---------------------------------------------------------------------------
+
+func TestIsDuplicate(t *testing.T) {
+	existing := []MemoryRecord{
+		{Key: "testing/framework", Content: "The team uses pytest with fixture-based setup and testcontainers for Postgres"},
+	}
+	dup, score := IsDuplicate("The team uses pytest with fixture-based setup and testcontainers for Postgres!", existing)
+	if !dup {
+		t.Errorf("near-identical memory not flagged duplicate (score=%v)", score)
+	}
+	dup, _ = IsDuplicate("The team uses pytest with fixture-based setup and testcontainers for Postgres", existing)
+	if !dup {
+		t.Error("identical memory not flagged duplicate")
+	}
+	dup, _ = IsDuplicate("We deploy on Fridays using blue-green releases", existing)
+	if dup {
+		t.Error("unrelated memory flagged duplicate")
+	}
+}
+
+func TestDeduplicateDropsBatchInternalDupes(t *testing.T) {
+	proposals := []Proposal{
+		{Key: "a/b", Content: "The team uses pytest with fixtures"},
+		{Key: "a/b", Content: "The team uses pytest with fixtures"},
+	}
+	if got := Deduplicate(proposals, nil); len(got) != 1 {
+		t.Errorf("expected 1 survivor, got %d", len(got))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Promotion (plan §2.7: SESSION → PROJECT after 3 sessions)
+// ---------------------------------------------------------------------------
+
+func TestPromotionThreshold(t *testing.T) {
+	if ShouldPromoteSessionToProject(2) {
+		t.Error("2 sessions must not promote")
+	}
+	if !ShouldPromoteSessionToProject(3) {
+		t.Error("3 sessions must promote")
+	}
+	if got := PromotionFor(MemoryRecord{Level: LevelSession}, 3); got != LevelProject {
+		t.Errorf("PromotionFor(session, 3) = %q, want project", got)
+	}
+	if got := PromotionFor(MemoryRecord{Level: LevelSession}, 2); got != "" {
+		t.Errorf("PromotionFor(session, 2) = %q, want no promotion", got)
+	}
+	if got := PromotionFor(MemoryRecord{Level: LevelProject}, 5); got != "" {
+		t.Errorf("PromotionFor(project, 5) = %q, want no promotion", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation timers (plan §2.8)
+// ---------------------------------------------------------------------------
+
+func TestConfirmationDelay(t *testing.T) {
+	if got := ConfirmationDelay(Proposal{Confidence: 0.7}); got != 24*time.Hour {
+		t.Errorf("default = %v, want 24h", got)
+	}
+	if got := ConfirmationDelay(Proposal{Confidence: 0.95}); got != 4*time.Hour {
+		t.Errorf("high-confidence = %v, want 4h", got)
+	}
+	if got := ConfirmationDelay(Proposal{Confidence: 0.5, Explicit: true}); got != time.Hour {
+		t.Errorf("explicit = %v, want 1h", got)
+	}
+	// Boundary: exactly 0.9 is NOT "high confidence" (> 0.9 required).
+	if got := ConfirmationDelay(Proposal{Confidence: 0.9}); got != 24*time.Hour {
+		t.Errorf("confidence=0.9 = %v, want 24h", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Episode auto-detection (plan §2.3: fail → reads → fix → pass → commit)
+// ---------------------------------------------------------------------------
+
+func toolCmd(command string, exit int, output string) ToolEvent {
+	return ToolEvent{
+		Type: ToolEventCommandExecuted,
+		Payload: map[string]any{
+			"command": command, "args": []string{"./..."},
+			"exit_code": exit, "output": output,
+		},
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
+func fullEpisodeArc() []ToolEvent {
+	return []ToolEvent{
+		toolCmd("go test", 1, "FAIL: TestPool exhausted connections"),
+		{Type: ToolEventFileRead, Payload: map[string]any{"path": "internal/store/db.go"}},
+		{Type: ToolEventFileRead, Payload: map[string]any{"path": "internal/server/ws.go"}},
+		{Type: ToolEventFileModified, Payload: map[string]any{"path": "internal/store/db.go", "diff": "+ lifetime 30m"}},
+		toolCmd("go test", 0, "ok all passed"),
+		{Type: ToolEventGitCommitted, Payload: map[string]any{"commit": "abc123", "message": "fix pool lifetime"}},
+	}
+}
+
+func TestDetectEpisodePatternFullArc(t *testing.T) {
+	ep := DetectEpisodePattern(fullEpisodeArc())
+	if ep == nil {
+		t.Fatal("expected episode, got nil")
+	}
+	if ep.Type != "bug_fix" {
+		t.Errorf("type = %q, want bug_fix", ep.Type)
+	}
+	if ep.Status != "RESOLVED" {
+		t.Errorf("status = %q, want RESOLVED (commit present)", ep.Status)
+	}
+	if len(ep.FilesInvolved) != 1 || ep.FilesInvolved[0] != "internal/store/db.go" {
+		t.Errorf("files = %v, want [internal/store/db.go]", ep.FilesInvolved)
+	}
+	if len(ep.ErrorPatterns) == 0 {
+		t.Error("expected error pattern captured from trigger")
+	}
+	if ep.Trigger == "" || ep.Verification == "" || ep.Resolution == "" {
+		t.Error("expected trigger/verification/resolution to be filled")
+	}
+}
+
+func TestDetectEpisodePatternOpenWithoutCommit(t *testing.T) {
+	arc := fullEpisodeArc()[:5] // drop the commit
+	ep := DetectEpisodePattern(arc)
+	if ep == nil {
+		t.Fatal("expected episode, got nil")
+	}
+	if ep.Status != "OPEN" {
+		t.Errorf("status = %q, want OPEN (no commit yet)", ep.Status)
+	}
+}
+
+func TestDetectEpisodePatternRejects(t *testing.T) {
+	// Never fixed: no FILE_MODIFIED, no green re-run.
+	noFix := []ToolEvent{
+		toolCmd("go test", 1, "FAIL boom"),
+		{Type: ToolEventFileRead, Payload: map[string]any{"path": "a.go"}},
+	}
+	if ep := DetectEpisodePattern(noFix); ep != nil {
+		t.Errorf("expected nil (no fix), got %+v", ep)
+	}
+	// Fixed but never verified green.
+	noVerify := []ToolEvent{
+		toolCmd("go test", 1, "FAIL boom"),
+		{Type: ToolEventFileModified, Payload: map[string]any{"path": "a.go"}},
+		toolCmd("go test", 1, "FAIL still broken"),
+	}
+	if ep := DetectEpisodePattern(noVerify); ep != nil {
+		t.Errorf("expected nil (no green re-run), got %+v", ep)
+	}
+	// Different command re-run green does not count as verification.
+	wrongCmd := []ToolEvent{
+		toolCmd("go test", 1, "FAIL boom"),
+		{Type: ToolEventFileModified, Payload: map[string]any{"path": "a.go"}},
+		{
+			Type: ToolEventCommandExecuted,
+			Payload: map[string]any{
+				"command": "go vet", "args": []string{"./..."},
+				"exit_code": 0, "output": "ok",
+			},
+		},
+	}
+	if ep := DetectEpisodePattern(wrongCmd); ep != nil {
+		t.Errorf("expected nil (different command), got %+v", ep)
+	}
+	// All-green history: no trigger at all.
+	if ep := DetectEpisodePattern([]ToolEvent{toolCmd("go test", 0, "ok")}); ep != nil {
+		t.Errorf("expected nil (no failure), got %+v", ep)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Processor wiring: designated gate, batching, budgets, flush
+// ---------------------------------------------------------------------------
+
+func turnEvent(content string) Event {
+	return Event{
 		Type:      EventConversationTurn,
-		SessionID: session,
-		At:        at,
-		Payload:   map[string]any{"session_id": session, "speaker": speaker, "content": content},
+		Payload:   map[string]any{"speaker": "user", "content": content},
+		CreatedAt: time.Now().UTC(),
 	}
 }
 
-func TestProcessClassificationDefaults(t *testing.T) {
-	ctx := context.Background()
-	// Missing level/scope, bogus labels, out-of-range confidence.
-	stub := &StubLLMClient{Response: `[
-	  {"key": "a/x", "content": "The team decided to use Redis for caching pubsub.", "level": "", "scope": ""},
-	  {"key": "b/y", "content": "Alice said she always wants verbose test output enabled.", "level": "nonsense", "scope": "nonsense", "confidence": 0.5},
-	  {"key": "c/z", "content": "Do not touch the payments directory during this task please.", "confidence": 9.5}
-	]`}
-	store := &fakeStore{}
-	p := NewProcessor("proj", true, stub, store)
-	p.Ingest(turnEvent("s1", "user", "we decided on redis", time.Now()))
-	res, err := p.FlushSession(ctx, "s1")
+func TestProcessorNonDesignatedIsNoop(t *testing.T) {
+	p := NewProcessor(NewInMemoryStore(nil), 0, 0, false, nil)
+	got, err := p.ProcessEvents(context.Background(), "proj",
+		[]Event{turnEvent("I prefer verbose error messages with full stack traces everywhere")})
 	if err != nil {
-		t.Fatalf("FlushSession: %v", err)
+		t.Fatal(err)
 	}
-	if len(res.Proposed) != 3 {
-		t.Fatalf("want 3 proposed, got %d", len(res.Proposed))
+	if len(got) != 0 {
+		t.Errorf("non-designated daemon proposed %d memories, want 0", len(got))
 	}
-	// Empty labels → SESSION + fact.
-	if got := res.Proposed[0].Level; got != LevelSession {
-		t.Errorf("empty level: want session, got %q", got)
+}
+
+func TestProcessorExtractClassifyConfirm(t *testing.T) {
+	p := NewProcessor(NewInMemoryStore(nil), 0, 0, true, nil)
+	got, err := p.ProcessEvents(context.Background(), "proj", []Event{
+		turnEvent("I prefer verbose error messages with full stack context for debugging sessions"),
+		turnEvent("The sky is blue"),
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := res.Proposed[0].Scope; got != "fact" {
-		t.Errorf("empty scope: want fact, got %q", got)
+	if len(got) != 1 {
+		t.Fatalf("expected 1 proposal (short sentence skipped), got %d", len(got))
 	}
-	// Bogus labels → SESSION + fact.
-	if got := res.Proposed[1].Level; got != LevelSession {
-		t.Errorf("bogus level: want session, got %q", got)
+	pr := got[0]
+	if pr.Level != LevelPersonal {
+		t.Errorf("level = %q, want personal", pr.Level)
 	}
-	if got := res.Proposed[1].Scope; got != "fact" {
-		t.Errorf("bogus scope: want fact, got %q", got)
+	if pr.Scope != ScopePreference {
+		t.Errorf("scope = %q, want preference", pr.Scope)
 	}
-	// Confidence clamps to [0,1].
-	if got := res.Proposed[2].Confidence; got != 1 {
-		t.Errorf("confidence clamp: want 1, got %v", got)
+	if !pr.Explicit || pr.ConfirmAfter != time.Hour {
+		t.Errorf("explicit statement should confirm in 1h, got explicit=%v after=%v", pr.Explicit, pr.ConfirmAfter)
 	}
-	// Prompt carries the §2.6 contract markers.
-	if len(stub.Prompts) != 1 {
-		t.Fatalf("want 1 LLM call, got %d", len(stub.Prompts))
+	if pr.ProposedAt.IsZero() || pr.Key == "" {
+		t.Error("expected stamped ProposedAt and derived Key")
 	}
-	for _, want := range []string{"Default to SESSION level", "do not duplicate", "explicit_user_statement"} {
-		if !strings.Contains(stub.Prompts[0], want) {
+}
+
+func TestProcessorDedupsAgainstStore(t *testing.T) {
+	seed := []MemoryRecord{{
+		Key: "team/cache", Content: "The team decided on Redis over Memcached due to pub/sub needs",
+		Level: LevelProject, Scope: ScopeDecision, Confidence: 1,
+	}}
+	p := NewProcessor(NewInMemoryStore(seed), 0, 0, true, nil)
+	got, err := p.ProcessEvents(context.Background(), "proj", []Event{
+		turnEvent("The team decided on Redis over Memcached due to pub/sub needs exactly"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("duplicate of seeded memory proposed: %+v", got)
+	}
+}
+
+func TestProcessorCaps(t *testing.T) {
+	p := NewProcessor(NewInMemoryStore(nil), 100, 10, true, nil) // tiny budget: first ~70-char proposal fits, two do not
+	events := []Event{
+		turnEvent("First long decision statement about caching with Redis for sessions"),
+		turnEvent("Second long decision statement about queues with NATS for messaging"),
+	}
+	got, err := p.ProcessEvents(context.Background(), "proj", events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Errorf("budget should cap to 1 proposal, got %d", len(got))
+	}
+
+	p2 := NewProcessor(NewInMemoryStore(nil), 0, 1, true, nil) // batch size 1
+	var many []Event
+	for i := 0; i < 5; i++ {
+		many = append(many, turnEvent("Independent statement number about testing approach and fixtures"))
+	}
+	got2, err := p2.ProcessEvents(context.Background(), "proj", many)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got2) != 1 {
+		t.Errorf("batch size should cap to 1 proposal, got %d", len(got2))
+	}
+}
+
+func TestShouldFlush(t *testing.T) {
+	now := time.Now().UTC()
+	complete := Event{Type: EventSessionComplete}
+	if !ShouldFlush(complete, time.Time{}, now) {
+		t.Error("SESSION_TRANSCRIPT_COMPLETE must flush immediately")
+	}
+	turn := Event{Type: EventConversationTurn}
+	if !ShouldFlush(turn, now.Add(-6*time.Minute), now) {
+		t.Error("6min idle must flush")
+	}
+	if ShouldFlush(turn, now.Add(-4*time.Minute), now) {
+		t.Error("4min idle must not flush yet")
+	}
+	if ShouldFlush(turn, time.Time{}, now) {
+		t.Error("zero lastActive must not flush on plain turns")
+	}
+}
+
+func TestHeuristicSkipsSQLiteHintAsContent(t *testing.T) {
+	// sqlite/vscdb completion detail is a driver hint, not a memory.
+	ev := Event{
+		Type: EventSessionComplete,
+		Payload: map[string]any{
+			"turns":  []any{},
+			"detail": "sqlite/vscdb source: rows not parsed (no driver); deep extraction must read the store out-of-band",
+		},
+	}
+	var hp HeuristicProvider
+	got, err := hp.Extract(context.Background(), "proj", []Event{ev}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("sqlite hint extracted as memory: %+v", got)
+	}
+}
+
+func TestBuildExtractionPromptMentionsHeuristics(t *testing.T) {
+	prompt := BuildExtractionPrompt("central-memory",
+		[]MemoryRecord{{Level: LevelProject, Scope: ScopeDecision, Content: "we use pytest"}},
+		[]Event{turnEvent("hello world discussion about caching")})
+	for _, want := range []string{"I prefer", "for now", "do not duplicate", "SESSION level if unsure"} {
+		if !contains(prompt, want) {
 			t.Errorf("prompt missing %q", want)
 		}
 	}
-	// Valid labels survive untouched.
-	stub2 := &StubLLMClient{Response: `[{"key": "k", "content": "All APIs in this org must use JWT authentication now.", "level": "organization", "scope": "constraint", "confidence": 0.8}]`}
-	p2 := NewProcessor("proj", true, stub2, &fakeStore{})
-	p2.Ingest(turnEvent("s", "user", "x", time.Now()))
-	res2, err := p2.FlushSession(ctx, "s")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res2.Proposed[0].Level != LevelOrganization || res2.Proposed[0].Scope != "constraint" {
-		t.Errorf("valid labels rewritten: %+v", res2.Proposed[0].ExtractedMemory)
-	}
 }
 
-func TestProcessDedupThreshold(t *testing.T) {
-	ctx := context.Background()
-	// Near-identical to CONFIRMED (token-cosine 1.0 > 0.9) must skip;
-	// the novel fact must persist.
-	stub := &StubLLMClient{Response: `[
-	  {"key": "testing/framework", "content": "The team uses pytest with fixture-based setup.", "level": "project", "scope": "decision", "confidence": 0.8},
-	  {"key": "cache/choice", "content": "Completely unrelated note about office lunch menus today.", "level": "session", "scope": "fact", "confidence": 0.6}
-	]`}
-	store := &fakeStore{confirmed: []ConfirmedMemory{
-		{Key: "testing/framework", Content: "The team uses pytest with fixture-based setup."},
-	}}
-	p := NewProcessor("proj", true, stub, store)
-	p.Ingest(turnEvent("s1", "assistant", "pytest it is", time.Now()))
-	res, err := p.FlushSession(ctx, "s1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.SkippedDuplicates != 1 {
-		t.Errorf("want 1 dedup skip, got %d", res.SkippedDuplicates)
-	}
-	if len(res.Proposed) != 1 || res.Proposed[0].Key != "cache/choice" {
-		t.Errorf("want only cache/choice proposed, got %+v", res.Proposed)
-	}
-
-	// Vector path: orthogonal embeddings keep, identical embeddings skip.
-	if IsNearDuplicate("anything", []float32{1, 0}, []ConfirmedMemory{{Content: "other", Embedding: []float32{0, 1}}}) {
-		t.Error("orthogonal vectors must not dedup")
-	}
-	if !IsNearDuplicate("anything", []float32{1, 0}, []ConfirmedMemory{{Content: "other", Embedding: []float32{1, 0}}}) {
-		t.Error("identical vectors must dedup")
-	}
-	// Below-threshold pair ([1,0] vs [1,1] ≈ 0.707) must not dedup.
-	if IsNearDuplicate("anything", []float32{1, 0}, []ConfirmedMemory{{Content: "other", Embedding: []float32{1, 1}}}) {
-		t.Error("0.707-similar vectors must not dedup (threshold 0.9)")
-	}
-}
-
-func TestProcessTimerRules(t *testing.T) {
-	cases := []struct {
-		name string
-		mem  ExtractedMemory
-		want time.Duration
-	}{
-		{"default 24h", ExtractedMemory{Confidence: 0.5}, ConfirmAfterDefault},
-		{"zero confidence 24h", ExtractedMemory{}, ConfirmAfterDefault},
-		{"high confidence 4h", ExtractedMemory{Confidence: 0.95}, ConfirmAfterHighConfidence},
-		{"boundary 0.9 stays 24h", ExtractedMemory{Confidence: 0.9}, ConfirmAfterDefault},
-		{"explicit user 1h", ExtractedMemory{Confidence: 0.4, Explicit: true}, ConfirmAfterExplicitUser},
-		{"explicit beats high-conf", ExtractedMemory{Confidence: 0.99, Explicit: true}, ConfirmAfterExplicitUser},
-	}
-	for _, c := range cases {
-		if got := ConfirmAfterFor(c.mem); got != c.want {
-			t.Errorf("%s: want %v, got %v", c.name, c.want, got)
+func contains(s, sub string) bool {
+	return len(s) >= len(sub) && (func() bool {
+		for i := 0; i+len(sub) <= len(s); i++ {
+			if s[i:i+len(sub)] == sub {
+				return true
+			}
 		}
-	}
-
-	// End-to-end: the timer rides along on the saved proposal.
-	ctx := context.Background()
-	stub := &StubLLMClient{Response: `[{"key": "style/errors", "content": "Alice prefers verbose error messages with full stack.", "level": "personal", "scope": "preference", "confidence": 0.97, "explicit_user_statement": true}]`}
-	store := &fakeStore{}
-	p := NewProcessor("proj", true, stub, store)
-	p.Ingest(turnEvent("s", "user", "I prefer verbose errors", time.Now()))
-	res, err := p.FlushSession(ctx, "s")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.Proposed) != 1 {
-		t.Fatalf("want 1 proposed, got %d", len(res.Proposed))
-	}
-	if res.Proposed[0].ConfirmAfter != ConfirmAfterExplicitUser {
-		t.Errorf("want 1h explicit timer, got %v", res.Proposed[0].ConfirmAfter)
-	}
-}
-
-func TestProcessBatching(t *testing.T) {
-	ctx := context.Background()
-	now := time.Now()
-	clock := &manualClock{at: now}
-	stub := &StubLLMClient{Response: `[]`}
-	store := &fakeStore{}
-	p := NewProcessor("proj", true, stub, store,
-		WithProcessorClock(clock.fn()),
-		WithProcessorIdleAfter(5*time.Minute))
-
-	p.Ingest(turnEvent("s1", "user", "hello", now))
-	p.Ingest(turnEvent("s1", "assistant", "hi there", now))
-
-	// Fresh activity: nothing due.
-	if n, err := p.CheckIdle(ctx); err != nil || n != 0 {
-		t.Fatalf("fresh: want 0 flushed, got %d, err %v", n, err)
-	}
-	if got := len(p.PendingSessions()); got != 1 {
-		t.Fatalf("want 1 pending session, got %d", got)
-	}
-	if stub.Calls != 0 {
-		t.Fatalf("LLM must not be called before idle/complete, got %d calls", stub.Calls)
-	}
-
-	// 5-min idle triggers the batch.
-	clock.advance(5 * time.Minute)
-	if n, err := p.CheckIdle(ctx); err != nil || n != 1 {
-		t.Fatalf("idle: want 1 flushed, got %d, err %v", n, err)
-	}
-	if stub.Calls != 1 {
-		t.Errorf("want 1 LLM call after idle flush, got %d", stub.Calls)
-	}
-
-	// SESSION_TRANSCRIPT_COMPLETE flushes immediately, no waiting.
-	p.Ingest(turnEvent("s2", "user", "second session", clock.now()))
-	p.Ingest(ProcessorEvent{Type: EventSessionTranscriptComplete,
-		Payload: map[string]any{"session_id": "s2"}})
-	if n, err := p.CheckIdle(ctx); err != nil || n != 1 {
-		t.Fatalf("complete: want 1 flushed, got %d, err %v", n, err)
-	}
-	if stub.Calls != 2 {
-		t.Errorf("want 2 LLM calls total, got %d", stub.Calls)
-	}
-	if got := len(p.PendingSessions()); got != 0 {
-		t.Errorf("want empty buffer after flush, got %v", p.PendingSessions())
-	}
-}
-
-func TestProcessEpisodeAutoDetect(t *testing.T) {
-	ctx := context.Background()
-	// failure → reads → patch → verify → commit (§2.3).
-	events := []ProcessorEvent{
-		{Type: EventCommandExecuted, SessionID: "s", Payload: map[string]any{
-			"cmdline": "go test ./...", "exit_code": 1, "stderr": "ConnectionTimeout in ws.go:142"}},
-		{Type: EventFileRead, SessionID: "s", Payload: map[string]any{"path": "internal/store/db.go"}},
-		{Type: EventFileRead, SessionID: "s", Payload: map[string]any{"path": "internal/server/ws.go"}},
-		{Type: EventFileModified, SessionID: "s", Payload: map[string]any{"path": "internal/store/db.go"}},
-		{Type: EventCommandExecuted, SessionID: "s", Payload: map[string]any{
-			"cmdline": "go test ./...", "exit_code": 0}},
-		{Type: EventGitCommitted, SessionID: "s", Payload: map[string]any{
-			"hash": "abc123", "message": "fix pool lifetime"}},
-	}
-	draft, refs := DetectEpisode(events)
-	if draft == nil {
-		t.Fatal("want episode draft, got nil")
-	}
-	if draft.EpisodeType != "bug_fix" {
-		t.Errorf("want bug_fix, got %q", draft.EpisodeType)
-	}
-	if len(draft.FilesInvolved) == 0 || len(draft.ErrorPatterns) == 0 {
-		t.Errorf("want files + error patterns, got %+v", draft)
-	}
-	if draft.Verification == "" || draft.Trigger == "" {
-		t.Errorf("want trigger + verification text, got %+v", draft)
-	}
-	roles := map[string]bool{}
-	for _, r := range refs {
-		roles[r.Role] = true
-	}
-	for _, want := range []string{"trigger", "investigation", "fix", "verification"} {
-		if !roles[want] {
-			t.Errorf("missing episode role %q in %v", want, refs)
-		}
-	}
-
-	// No failure → no episode. Bare failure → no episode (noise, not an arc).
-	if d, _ := DetectEpisode([]ProcessorEvent{
-		{Type: EventFileRead, Payload: map[string]any{"path": "x"}},
-	}); d != nil {
-		t.Error("no trigger must yield no episode")
-	}
-	if d, _ := DetectEpisode([]ProcessorEvent{
-		{Type: EventCommandExecuted, Payload: map[string]any{"cmdline": "go test ./...", "exit_code": 2}},
-	}); d != nil {
-		t.Error("bare failure with no follow-up must yield no episode")
-	}
-
-	// End-to-end: the draft is delegated to the store, not persisted inline.
-	stub := &StubLLMClient{Response: `[]`}
-	store := &fakeStore{}
-	p := NewProcessor("proj", true, stub, store)
-	for _, ev := range events {
-		p.Ingest(ev)
-	}
-	res, err := p.FlushSession(ctx, "s")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if res.Episode == nil {
-		t.Fatal("want episode saved through flush, got nil")
-	}
-	if len(store.episodes) != 1 || store.episodes[0].EpisodeType != "bug_fix" {
-		t.Errorf("store saw %d episodes, want 1 bug_fix", len(store.episodes))
-	}
-}
-
-func TestProcessNotDesignated(t *testing.T) {
-	ctx := context.Background()
-	stub := &StubLLMClient{Response: `[{"key": "k", "content": "This fact is long enough to be valid content.", "level": "project"}]`}
-	store := &fakeStore{}
-	p := NewProcessor("proj", false, stub, store)
-	if p.IsDesignated() {
-		t.Error("want IsDesignated false")
-	}
-	p.Ingest(turnEvent("s", "user", "hello", time.Now()))
-	if got := len(p.PendingSessions()); got != 0 {
-		t.Errorf("non-designated must buffer nothing, got %d sessions", got)
-	}
-	if err := p.Start(ctx); err != nil {
-		t.Errorf("non-designated Start must return nil immediately, got %v", err)
-	}
-	if res, err := p.FlushSession(ctx, "s"); err != nil || len(res.Proposed) != 0 {
-		t.Errorf("non-designated flush: want zero result, got %+v, err %v", res, err)
-	}
-	if stub.Calls != 0 || len(store.proposed) != 0 {
-		t.Error("non-designated must never touch LLM or store")
-	}
-}
-
-func TestProcessFailureRetention(t *testing.T) {
-	ctx := context.Background()
-	boom := errors.New("llm down")
-	stub := &StubLLMClient{Err: boom}
-	store := &fakeStore{}
-	p := NewProcessor("proj", true, stub, store)
-	p.Ingest(turnEvent("s", "user", "hello", time.Now()))
-	if _, err := p.FlushSession(ctx, "s"); err == nil {
-		t.Fatal("want LLM error propagated")
-	}
-	if got := len(p.PendingSessions()); got != 1 {
-		t.Error("failed flush must retain the buffer for retry")
-	}
-}
-
-// manualClock is an injectable Clock for idle tests.
-type manualClock struct {
-	mu sync.Mutex
-	at time.Time
-}
-
-func (m *manualClock) now() time.Time {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.at
-}
-
-func (m *manualClock) fn() Clock {
-	return func() time.Time { return m.now() }
-}
-
-func (m *manualClock) advance(d time.Duration) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.at = m.at.Add(d)
+		return false
+	})()
 }

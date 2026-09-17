@@ -19,21 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// User mirrors a users row (migration 001). Empty Email means SQL NULL;
-// Settings is the raw JSON document ('{}' when never set).
-type User struct {
-	ID        string
-	Username  string
-	Email     string
-	Settings  string
-	CreatedAt time.Time
-}
-
+// User rows use the shared User model (models.go); Settings arrives as
+// settings::TEXT and is decoded into the Settings map (never nil).
 // UserParams carries user identity for Create.
 type UserParams struct {
 	Username string
@@ -52,9 +43,11 @@ const userColumns = `id::TEXT AS id, ` +
 // scanUser scans a full userColumns row.
 func scanUser(row pgx.Row) (*User, error) {
 	var u User
-	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.Settings, &u.CreatedAt); err != nil {
+	var settings string
+	if err := row.Scan(&u.ID, &u.Username, &u.Email, &settings, &u.CreatedAt); err != nil {
 		return nil, err
 	}
+	u.Settings = unmarshalPayload([]byte(settings))
 	return &u, nil
 }
 
@@ -179,11 +172,11 @@ func (s *UserStore) List(ctx context.Context, limit, offset int) ([]User, error)
 	defer rows.Close()
 	var out []User
 	for rows.Next() {
-		var u User
-		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Settings, &u.CreatedAt); err != nil {
+		u, err := scanUser(rows)
+		if err != nil {
 			return nil, fmt.Errorf("store: list users scan: %w", err)
 		}
-		out = append(out, u)
+		out = append(out, *u)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: list users rows: %w", err)

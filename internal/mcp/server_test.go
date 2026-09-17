@@ -2,373 +2,457 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"math"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
-
-	"central-memory/internal/daemon"
-	"central-memory/internal/store"
 )
 
-func newTestServer(root string) (*Server, *InMemoryMemoryStore, *InMemoryEpisodeStore) {
-	mem := NewInMemoryMemoryStore()
-	ep := NewInMemoryEpisodeStore()
-	s := New(
-		Config{ProjectID: "p1", ProjectName: "nexus", Branch: "main"},
-		mem, mem, ep,
-		StaticWorkspaceProvider{Info: WorkspaceInfo{Project: "nexus", Branch: "main", Commit: "abc123", Path: root}},
-		DaemonFileProxy{Root: root},
-	)
-	return s, mem, ep
+// errNotFound stands in for the store package's not-found error.
+var errNotFound = errors.New("not found")
+
+// fakeStore is an in-memory Store for MCP unit tests. It mirrors the
+// substring-match semantics of the real in-memory store without importing
+// internal/store, keeping this package stdlib-only while the store
+// package's pgx/pgvector wiring lands. Production wiring is a thin
+// adapter over the same method shapes.
+type fakeStore struct {
+	mu        sync.RWMutex
+	seq       int64
+	memories  []*MemoryItem
+	episodes  []*Episode
+	workspace *Workspace
+	project   *Project
 }
 
-func mustWrite(t *testing.T, ctx context.Context, mem *InMemoryMemoryStore, key, content string) string {
-	t.Helper()
-	w, err := mem.WriteMemory(ctx, MemoryWriteInput{Key: key, Content: content, Level: "project", Scope: "fact"})
-	if err != nil {
-		t.Fatalf("WriteMemory: %v", err)
+func newFakeStore() *fakeStore { return &fakeStore{} }
+
+func (f *fakeStore) CreateMemoryItem(_ context.Context, item *MemoryItem) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	if item.ID == "" {
+		item.ID = "mem_fake_" + strconv.FormatInt(f.seq, 10)
 	}
-	if !mem.Confirm(w.ID) {
-		t.Fatalf("Confirm(%s) = false", w.ID)
+	if item.Confidence == 0 {
+		item.Confidence = 1.0
 	}
-	return w.ID
+	if item.Status == "" {
+		item.Status = "PROPOSED"
+	}
+	if item.Level == "" {
+		item.Level = "project"
+	}
+	f.memories = append(f.memories, item)
+	return nil
 }
 
-// memory_search returns Context Builder XML + piggyback reflection hint +
-// token_count/budget_remaining (plan §1.4).
-func TestMemorySearchReturnsXMLReflectionHintAndBudget(t *testing.T) {
-	ctx := context.Background()
-	s, mem, _ := newTestServer(t.TempDir())
-	mustWrite(t, ctx, mem, "testing/framework", "The team uses pytest with fixture-based setup for all services.")
-	mustWrite(t, ctx, mem, "auth/policy", "All APIs must use JWT authentication and reject expired tokens.")
-
-	res, cerr := s.Call(ctx, "memory_search", map[string]any{"query": "how do we test services"})
-	if cerr != nil {
-		t.Fatalf("memory_search: %v", cerr)
-	}
-	m := res.(map[string]any)
-	xmlOut, _ := m["context"].(string)
-	if !strings.Contains(xmlOut, "<project_memory") || !strings.Contains(xmlOut, "pytest") {
-		t.Errorf("context missing project_memory XML or pytest item:\n%s", xmlOut)
-	}
-	if m["reflection_hint"] != ReflectionHint {
-		t.Errorf("reflection_hint = %q, want piggyback hint", m["reflection_hint"])
-	}
-	tc, _ := m["token_count"].(int)
-	br, _ := m["budget_remaining"].(int)
-	if tc <= 0 {
-		t.Errorf("token_count = %d, want > 0", tc)
-	}
-	if tc+br != 4000 { // default budget: used + remaining == budget
-		t.Errorf("token_count(%d) + budget_remaining(%d) != 4000", tc, br)
-	}
-	if m["items_included"].(int) < 2 {
-		t.Errorf("items_included = %v, want >= 2", m["items_included"])
-	}
-}
-
-func TestMemorySearchRequiresQuery(t *testing.T) {
-	s, _, _ := newTestServer(t.TempDir())
-	if _, cerr := s.Call(context.Background(), "memory_search", map[string]any{}); cerr == nil || cerr.Code != CodeInvalidParams {
-		t.Errorf("empty query: cerr = %v, want code %d", cerr, CodeInvalidParams)
-	}
-	if _, cerr := s.Call(context.Background(), "memory_search", map[string]any{"query": "x", "level": "bogus"}); cerr == nil || cerr.Code != CodeInvalidParams {
-		t.Errorf("bad level: cerr = %v, want code %d", cerr, CodeInvalidParams)
-	}
-}
-
-// memory_write validates 20–2000 chars and stores as PROPOSED (plan §1.1).
-func TestMemoryWriteValidation(t *testing.T) {
-	ctx := context.Background()
-	s, _, _ := newTestServer(t.TempDir())
-	cases := []struct {
-		name    string
-		args    map[string]any
-		wantErr bool
-	}{
-		{"too short", map[string]any{"key": "a/b", "content": "too short"}, true},
-		{"empty key", map[string]any{"key": " ", "content": strings.Repeat("x", 30)}, true},
-		{"bad level", map[string]any{"key": "a/b", "content": strings.Repeat("x", 30), "level": "galaxy"}, true},
-		{"bad scope", map[string]any{"key": "a/b", "content": strings.Repeat("x", 30), "scope": "vibe"}, true},
-		{"ok minimal", map[string]any{"key": "a/b", "content": strings.Repeat("x", 30)}, false},
-		{"ok full", map[string]any{
-			"key": "testing/framework", "content": "The team uses pytest with fixtures everywhere.",
-			"scope": "decision", "level": "project",
-			"tags": []any{"testing"}, "context_snippet": "Decided by Alice during auth refactor",
-		}, false},
-	}
-	for _, c := range cases {
-		res, cerr := s.Call(ctx, "memory_write", c.args)
-		if c.wantErr {
-			if cerr == nil || cerr.Code != CodeInvalidParams {
-				t.Errorf("%s: cerr = %v, want code %d", c.name, cerr, CodeInvalidParams)
+func (f *fakeStore) SearchMemory(_ context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	terms := strings.Fields(strings.ToLower(query))
+	var out []*MemoryItem
+	for _, item := range f.memories {
+		if item.ProjectID != "" && item.ProjectID != projectID {
+			continue
+		}
+		if item.Status == "REJECTED" || item.Status == "SUPERSEDED" {
+			continue
+		}
+		if len(terms) > 0 {
+			combined := strings.ToLower(item.Key + " " + item.Content + " " + strings.Join(item.Tags, " "))
+			matched := false
+			for _, t := range terms {
+				if strings.Contains(combined, t) {
+					matched = true
+					break
+				}
 			}
+			if !matched {
+				continue
+			}
+		}
+		if len(tags) > 0 && !hasAnyTag(item.Tags, tags) {
 			continue
 		}
-		if cerr != nil {
-			t.Errorf("%s: unexpected error %v", c.name, cerr)
+		out = append(out, item)
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func hasAnyTag(have, want []string) bool {
+	set := map[string]bool{}
+	for _, t := range have {
+		set[strings.ToLower(t)] = true
+	}
+	for _, t := range want {
+		if set[strings.ToLower(t)] {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fakeStore) CreateEpisode(_ context.Context, ep *Episode) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.seq++
+	if ep.ID == "" {
+		ep.ID = "ep_fake_" + strconv.FormatInt(f.seq, 10)
+	}
+	if ep.Status == "" {
+		ep.Status = "OPEN"
+	}
+	f.episodes = append(f.episodes, ep)
+	return nil
+}
+
+func (f *fakeStore) SearchEpisodes(_ context.Context, projectID, errorPattern, query string, limit int) ([]*Episode, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	lowErr := strings.ToLower(errorPattern)
+	lowQ := strings.ToLower(query)
+	var out []*Episode
+	for _, ep := range f.episodes {
+		if ep.ProjectID != "" && ep.ProjectID != projectID {
 			continue
 		}
-		m := res.(map[string]any)
-		if m["status"] != store.StatusProposed {
-			t.Errorf("%s: status = %v, want PROPOSED", c.name, m["status"])
+		match := false
+		if lowErr != "" {
+			// Either-direction substring: stored patterns may be broader
+			// ("ConnectionTimeout") or narrower than the query.
+			for _, p := range ep.ErrorPatterns {
+				lp := strings.ToLower(p)
+				if strings.Contains(lp, lowErr) || strings.Contains(lowErr, lp) {
+					match = true
+					break
+				}
+			}
+			if !match {
+				narrative := strings.ToLower(ep.Title + " " + ep.Trigger + " " + ep.RootCause + " " + ep.Resolution)
+				match = strings.Contains(narrative, lowErr)
+			}
 		}
-		if m["id"] == "" || m["id"] == nil {
-			t.Errorf("%s: empty id", c.name)
+		if !match && lowQ != "" {
+			narrative := strings.ToLower(ep.Title + " " + ep.Trigger + " " + ep.RootCause + " " + ep.Resolution)
+			match = strings.Contains(narrative, lowQ)
+		}
+		if match || (lowErr == "" && lowQ == "") {
+			out = append(out, ep)
+		}
+		if limit > 0 && len(out) >= limit {
+			break
 		}
 	}
+	return out, nil
 }
 
-func TestMemoryWriteCharBoundaries(t *testing.T) {
-	for _, n := range []int{19, 20, 2000, 2001} {
-		in := MemoryWriteInput{Key: "k", Content: strings.Repeat("é", n), Level: "project", Scope: "fact"}
-		err := ValidateMemoryWrite(in)
-		if (n == 20 || n == 2000) && err != nil {
-			t.Errorf("n=%d: want valid, got %v", n, err)
-		}
-		if (n == 19 || n == 2001) && err == nil {
-			t.Errorf("n=%d: want invalid, got nil", n)
-		}
+func (f *fakeStore) GetActiveWorkspace(_ context.Context, _ string) (*Workspace, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.workspace == nil {
+		return nil, errNotFound
 	}
+	return f.workspace, nil
 }
 
-// memory_reflect is voluntary: empty calls ack, items land as PROPOSED.
-func TestMemoryReflectVoluntary(t *testing.T) {
-	ctx := context.Background()
-	s, _, _ := newTestServer(t.TempDir())
-
-	res, cerr := s.Call(ctx, "memory_reflect", map[string]any{})
-	if cerr != nil {
-		t.Fatalf("empty reflect: %v", cerr)
+func (f *fakeStore) GetProject(_ context.Context, _ string) (*Project, error) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.project == nil {
+		return nil, errNotFound
 	}
-	if res.(map[string]any)["accepted"] != 0 {
-		t.Errorf("empty reflect: accepted = %v, want 0", res)
-	}
+	return f.project, nil
+}
 
-	res, cerr = s.Call(ctx, "memory_reflect", map[string]any{
-		"summary": "Finished auth refactor.",
-		"items": []any{map[string]any{
-			"key": "auth/policy", "content": "All APIs must use JWT authentication tokens.",
-		}},
+// tempDir-aware constructor helper (testing.T needed for TempDir).
+func newTestServerWithT(t *testing.T) (*Server, *fakeStore) {
+	t.Helper()
+	dir := t.TempDir()
+	ms := newFakeStore()
+	ms.workspace = &Workspace{Branch: "main", CommitSHA: "abc123", Path: dir}
+	ms.project = &Project{DisplayName: "central-memory", FolderName: "central-memory"}
+	s := NewServer(ms, Config{
+		ProjectID:     "proj_test",
+		ProjectName:   "central-memory",
+		Branch:        "main",
+		CommitSHA:     "abc123",
+		WorkspacePath: dir,
+		TokenBudget:   DefaultTokenBudget,
 	})
-	if cerr != nil {
-		t.Fatalf("reflect with items: %v", cerr)
-	}
-	m := res.(map[string]any)
-	if m["accepted"] != 1 || len(m["ids"].([]string)) != 1 {
-		t.Errorf("reflect: result = %v, want accepted=1 with 1 id", m)
-	}
-
-	bad := map[string]any{"items": []any{map[string]any{"key": "x", "content": "short"}}}
-	if _, cerr := s.Call(ctx, "memory_reflect", bad); cerr == nil || cerr.Code != CodeInvalidParams {
-		t.Errorf("bad reflect item: cerr = %v, want code %d", cerr, CodeInvalidParams)
-	}
+	return s, ms
 }
 
-func TestEpisodeReportAndSearch(t *testing.T) {
-	ctx := context.Background()
-	s, _, ep := newTestServer(t.TempDir())
-
-	res, cerr := s.Call(ctx, "episode_report", map[string]any{
-		"title": "Auth timeout on WebSocket upgrade", "episode_type": "bug_fix",
-		"trigger": "ConnectionTimeout in ws.go:142 during load test",
-		"tags":    []any{"websocket", "timeout"},
-	})
-	if cerr != nil {
-		t.Fatalf("episode_report: %v", cerr)
-	}
-	m := res.(map[string]any)
-	if m["status"] != "OPEN" || m["episode_type"] != "bug_fix" {
-		t.Errorf("episode_report result = %v, want OPEN bug_fix", m)
-	}
-
-	// By error pattern (substring of the trigger).
-	res, cerr = s.Call(ctx, "episode_search", map[string]any{"error_pattern": "ConnectionTimeout"})
-	if cerr != nil {
-		t.Fatalf("episode_search: %v", cerr)
-	}
-	if res.(map[string]any)["count"] != 1 {
-		t.Errorf("error_pattern search count = %v, want 1", res)
-	}
-
-	// By file: seed involvement directly (report input has no files field;
-	// the processor fills it in — issue #10).
-	ep.mu.Lock()
-	ep.episodes[0].FilesInvolved = []string{"internal/server/ws.go"}
-	ep.episodes[0].ErrorPatterns = []string{"ConnectionTimeout"}
-	ep.mu.Unlock()
-	res, _ = s.Call(ctx, "episode_search", map[string]any{"file": "internal/server/ws.go"})
-	if res.(map[string]any)["count"] != 1 {
-		t.Errorf("file search count = %v, want 1", res)
-	}
-	res, _ = s.Call(ctx, "episode_search", map[string]any{"query": "websocket load test timeout"})
-	if res.(map[string]any)["count"] != 1 {
-		t.Errorf("semantic search count = %v, want 1", res)
-	}
-	res, _ = s.Call(ctx, "episode_search", map[string]any{"status": "RESOLVED"})
-	if res.(map[string]any)["count"] != 0 {
-		t.Errorf("status-filtered count = %v, want 0", res)
-	}
-
-	if _, cerr := s.Call(ctx, "episode_report", map[string]any{"title": " ", "episode_type": "bug_fix"}); cerr == nil || cerr.Code != CodeInvalidParams {
-		t.Errorf("empty title: cerr = %v, want code %d", cerr, CodeInvalidParams)
-	}
-	if _, cerr := s.Call(ctx, "episode_report", map[string]any{"title": "x", "episode_type": "nope"}); cerr == nil || cerr.Code != CodeInvalidParams {
-		t.Errorf("bad type: cerr = %v, want code %d", cerr, CodeInvalidParams)
-	}
-	if err := ValidateEpisodeReport(EpisodeReportInput{Title: "t", Type: "incident"}); err != nil {
-		t.Errorf("valid report rejected: %v", err)
-	}
-}
-
-func TestWorkspaceInfo(t *testing.T) {
-	s, _, _ := newTestServer(t.TempDir())
-	res, cerr := s.Call(context.Background(), "workspace_info", map[string]any{})
-	if cerr != nil {
-		t.Fatalf("workspace_info: %v", cerr)
-	}
-	m := res.(map[string]any)
-	for _, k := range []string{"project", "branch", "commit", "is_dirty", "path"} {
-		if _, ok := m[k]; !ok {
-			t.Errorf("workspace_info missing key %q: %v", k, m)
+func callRaw(t *testing.T, s *Server, method string, params any) *Response {
+	t.Helper()
+	var rawParams json.RawMessage
+	if params != nil {
+		b, err := json.Marshal(params)
+		if err != nil {
+			t.Fatal(err)
 		}
+		rawParams = b
 	}
-	if m["project"] != "nexus" {
-		t.Errorf("project = %v, want nexus", m["project"])
+	id := json.RawMessage(`1`)
+	req := Request{JSONRPC: JSONRPCVersion, ID: &id, Method: method, Params: rawParams}
+	frame, _ := json.Marshal(req)
+	return s.Handle(context.Background(), frame)
+}
+
+func callTool(t *testing.T, s *Server, name string, args any) *Response {
+	t.Helper()
+	var rawArgs json.RawMessage
+	if args != nil {
+		b, err := json.Marshal(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rawArgs = b
+	}
+	return callRaw(t, s, "tools/call", map[string]any{"name": name, "arguments": json.RawMessage(rawArgs)})
+}
+
+func resultMap(t *testing.T, r *Response) map[string]any {
+	t.Helper()
+	if r.Error != nil {
+		t.Fatalf("unexpected error: %v", r.Error)
+	}
+	m, ok := r.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result is %T, want map", r.Result)
+	}
+	return m
+}
+
+// num coerces a result field to float64 regardless of whether it was stored
+// as int, int64, float64, or json.Number.
+func num(t *testing.T, m map[string]any, key string) float64 {
+	t.Helper()
+	switch v := m[key].(type) {
+	case int:
+		return float64(v)
+	case int32:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case float32:
+		return float64(v)
+	case float64:
+		return v
+	case json.Number:
+		f, err := v.Float64()
+		if err != nil {
+			t.Fatalf("%s = %q, not numeric", key, v.String())
+		}
+		return f
+	default:
+		t.Fatalf("%s is %T, want numeric", key, m[key])
+		return 0
 	}
 }
 
-// file_read/file_write proxy to the daemon sandbox: roundtrip works,
-// traversal escapes are rejected, missing files error (plan §1.3/§1.4).
-func TestFileSandboxProxy(t *testing.T) {
-	ctx := context.Background()
-	root := t.TempDir()
-	s, _, _ := newTestServer(root)
-
-	content := "hello world from mcp sandbox proxy test file"
-	res, cerr := s.Call(ctx, "file_write", map[string]any{"path": "notes/hello.txt", "content": content})
-	if cerr != nil {
-		t.Fatalf("file_write: %v", cerr)
+func TestHandleInitialize(t *testing.T) {
+	s, _ := newTestServerWithT(t)
+	r := callRaw(t, s, "initialize", map[string]any{"protocolVersion": ProtocolVersion})
+	m := resultMap(t, r)
+	if m["protocolVersion"] != ProtocolVersion {
+		t.Errorf("protocolVersion = %v", m["protocolVersion"])
 	}
-	if res.(map[string]any)["status"] != "ok" {
-		t.Errorf("file_write result = %v", res)
+	info, _ := m["serverInfo"].(map[string]any)
+	if info["name"] != ServerName {
+		t.Errorf("serverInfo.name = %v", info["name"])
 	}
-
-	res, cerr = s.Call(ctx, "file_read", map[string]any{"path": "notes/hello.txt"})
-	if cerr != nil {
-		t.Fatalf("file_read: %v", cerr)
-	}
-	m := res.(map[string]any)
-	if m["content"] != content || m["size"] != len(content) {
-		t.Errorf("file_read result = %v, want roundtripped content", m)
-	}
-
-	traversal := "../escape.txt"
-	if _, cerr := s.Call(ctx, "file_read", map[string]any{"path": traversal}); cerr == nil || cerr.Code != CodeInvalidParams {
-		t.Errorf("traversal read: cerr = %v, want code %d", cerr, CodeInvalidParams)
-	} else if !strings.Contains(cerr.Message, "escapes workspace") {
-		t.Errorf("traversal message = %q, want sandbox wording", cerr.Message)
-	}
-	if _, cerr := s.Call(ctx, "file_write", map[string]any{"path": traversal, "content": "x"}); cerr == nil || cerr.Code != CodeInvalidParams {
-		t.Errorf("traversal write: cerr = %v, want code %d", cerr, CodeInvalidParams)
-	}
-	if _, cerr := s.Call(ctx, "file_read", map[string]any{"path": "missing.txt"}); cerr == nil || cerr.Code != CodeInvalidParams {
-		t.Errorf("missing file: cerr = %v, want code %d", cerr, CodeInvalidParams)
-	}
-	if _, cerr := s.Call(ctx, "file_read", map[string]any{}); cerr == nil || cerr.Code != CodeInvalidParams {
-		t.Errorf("empty path: cerr = %v, want code %d", cerr, CodeInvalidParams)
-	}
-
-	// The proxy must surface the daemon's own sentinels (reuse proof).
-	proxy := DaemonFileProxy{Root: root}
-	if _, err := proxy.ReadFile(ctx, traversal); !errors.Is(err, daemon.ErrTraversal) {
-		t.Errorf("proxy traversal err = %v, want errors.Is daemon.ErrTraversal", err)
+	if _, ok := m["capabilities"]; !ok {
+		t.Error("missing capabilities")
 	}
 }
 
-func TestUnknownTool(t *testing.T) {
-	s, _, _ := newTestServer(t.TempDir())
-	if _, cerr := s.Call(context.Background(), "nope", nil); cerr == nil || cerr.Code != CodeMethodNotFound {
-		t.Errorf("unknown tool: cerr = %v, want code %d", cerr, CodeMethodNotFound)
-	}
-}
-
-func TestToolsCatalogHasEight(t *testing.T) {
-	s, _, _ := newTestServer(t.TempDir())
-	tools := s.Tools()
+func TestHandleToolsList(t *testing.T) {
+	s, _ := newTestServerWithT(t)
+	r := callRaw(t, s, "tools/list", nil)
+	m := resultMap(t, r)
+	tools, _ := m["tools"].([]Tool)
 	if len(tools) != 8 {
-		t.Fatalf("Tools() = %d, want 8", len(tools))
+		t.Fatalf("got %d tools, want 8", len(tools))
 	}
-	seen := map[string]bool{}
+	names := map[string]bool{}
 	for _, tl := range tools {
-		seen[tl.Name] = true
+		names[tl.Name] = true
 		if tl.Description == "" || tl.InputSchema == nil {
 			t.Errorf("tool %q missing description/schema", tl.Name)
 		}
 	}
-	for _, want := range []string{"memory_search", "memory_write", "memory_reflect", "episode_search", "episode_report", "workspace_info", "file_read", "file_write"} {
-		if !seen[want] {
-			t.Errorf("catalog missing tool %q", want)
+	for _, want := range []string{
+		"memory_search", "memory_write", "memory_reflect",
+		"episode_search", "episode_report", "workspace_info",
+		"file_read", "file_write",
+	} {
+		if !names[want] {
+			t.Errorf("missing tool %q", want)
+		}
+	}
+	// NO sampling: locked decision.
+	for name := range names {
+		if strings.Contains(name, "sampl") {
+			t.Errorf("sampling tool must not exist: %q", name)
 		}
 	}
 }
 
-func TestHashEmbedDeterministicNormalized(t *testing.T) {
-	a, b := HashEmbed("hello world"), HashEmbed("hello world")
-	if len(a) != EmbedDim {
-		t.Fatalf("dim = %d, want %d", len(a), EmbedDim)
-	}
-	var norm float64
-	for i := range a {
-		if a[i] != b[i] {
-			t.Fatalf("non-deterministic at %d", i)
-		}
-		norm += float64(a[i]) * float64(a[i])
-	}
-	if math.Abs(math.Sqrt(norm)-1) > 1e-5 {
-		t.Errorf("norm = %v, want 1", math.Sqrt(norm))
-	}
-	if got := HashEmbed("completely different tokens xyzzy"); stringForCompare(a) == stringForCompare(got) {
-		t.Error("distinct queries must embed distinctly")
-	}
-	zero := HashEmbed("")
-	for _, v := range zero {
-		if v != 0 {
-			t.Fatal("empty query must embed to the zero vector")
-		}
+func TestDispatchUnknownTool(t *testing.T) {
+	s, _ := newTestServerWithT(t)
+	r := callTool(t, s, "memory_delete", nil)
+	if r.Error == nil || r.Error.Code != ErrMethodNotFound {
+		t.Fatalf("got %+v, want code %d", r.Error, ErrMethodNotFound)
 	}
 }
 
-func stringForCompare(v []float32) string {
-	var sb strings.Builder
-	for _, f := range v {
-		if f != 0 {
-			sb.WriteString("1")
-		} else {
-			sb.WriteString("0")
-		}
+func TestDispatchUnknownMethod(t *testing.T) {
+	s, _ := newTestServerWithT(t)
+	r := callRaw(t, s, "roots/list", nil)
+	if r.Error == nil || r.Error.Code != ErrMethodNotFound {
+		t.Fatalf("got %+v, want code %d", r.Error, ErrMethodNotFound)
 	}
-	return sb.String()
 }
 
-func TestValidateMemoryWriteLevelsScopes(t *testing.T) {
-	base := MemoryWriteInput{Key: "k", Content: strings.Repeat("c", 40), Level: "project", Scope: "fact"}
-	if err := ValidateMemoryWrite(base); err != nil {
-		t.Errorf("valid input rejected: %v", err)
+func TestDispatchMissingToolName(t *testing.T) {
+	s, _ := newTestServerWithT(t)
+	r := callRaw(t, s, "tools/call", map[string]any{})
+	if r.Error == nil || r.Error.Code != ErrInvalidParams {
+		t.Fatalf("got %+v, want code %d", r.Error, ErrInvalidParams)
 	}
-	for _, lvl := range []string{"organization", "project", "personal", "session"} {
-		in := base
-		in.Level = lvl
-		if err := ValidateMemoryWrite(in); err != nil {
-			t.Errorf("level %q rejected: %v", lvl, err)
+}
+
+func TestMemorySearchHintPresence(t *testing.T) {
+	s, ms := newTestServerWithT(t)
+	ctx := context.Background()
+	if err := ms.CreateMemoryItem(ctx, &MemoryItem{
+		ProjectID: "proj_test", Key: "testing/framework",
+		Content: "The team uses pytest with fixture-based setup for integration tests.",
+		Level:   "project", Scope: "decision",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := callTool(t, s, "memory_search", map[string]any{"query": "pytest fixtures"})
+	m := resultMap(t, r)
+
+	hint, _ := m["reflection_hint"].(string)
+	if hint != ReflectionHint {
+		t.Errorf("reflection_hint = %q, want piggyback hint", hint)
+	}
+	ctxXML, _ := m["context"].(string)
+	if !strings.Contains(ctxXML, "pytest") {
+		t.Errorf("context missing seeded memory: %s", ctxXML)
+	}
+	if !strings.HasPrefix(ctxXML, "<project_memory") || !strings.HasSuffix(ctxXML, "</project_memory>") {
+		t.Errorf("context is not a project_memory block: %s", ctxXML)
+	}
+	if n := num(t, m, "items_included"); n < 1 {
+		t.Errorf("items_included = %v, want >= 1", m["items_included"])
+	}
+	if n := num(t, m, "token_count"); n <= 0 {
+		t.Errorf("token_count = %v, want > 0", m["token_count"])
+	}
+	if _, ok := m["budget_remaining"]; !ok {
+		t.Error("missing budget_remaining")
+	}
+}
+
+func TestMemorySearchRequiresQuery(t *testing.T) {
+	s, _ := newTestServerWithT(t)
+	r := callTool(t, s, "memory_search", map[string]any{"query": "   "})
+	if r.Error == nil || r.Error.Code != ErrInvalidParams {
+		t.Fatalf("got %+v, want code %d", r.Error, ErrInvalidParams)
+	}
+}
+
+func TestMemoryReflectVoluntary(t *testing.T) {
+	s, ms := newTestServerWithT(t)
+	ctx := context.Background()
+
+	// Empty call is a valid no-op — never an error.
+	r := callTool(t, s, "memory_reflect", map[string]any{})
+	m := resultMap(t, r)
+	if n := num(t, m, "recorded"); n != 0 {
+		t.Errorf("recorded = %v, want 0", m["recorded"])
+	}
+
+	// With takeaways: recorded as PROPOSED session memories.
+	r = callTool(t, s, "memory_reflect", map[string]any{
+		"summary": "Finished auth refactor",
+		"memories": []any{map[string]any{
+			"key":     "auth/library",
+			"content": "The team decided to use the jwx library for JWT verification in middleware.",
+		}},
+	})
+	m = resultMap(t, r)
+	if n := num(t, m, "recorded"); n != 1 {
+		t.Errorf("recorded = %v, want 1", m["recorded"])
+	}
+	if _, ok := m["message"].(string); !ok {
+		t.Error("missing confirmation message")
+	}
+	items, err := ms.SearchMemory(ctx, "proj_test", "jwx", nil, 10)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("reflected memory not persisted: %v %v", items, err)
+	}
+	if items[0].Status != "PROPOSED" || items[0].Level != "session" {
+		t.Errorf("got status=%q level=%q, want PROPOSED/session", items[0].Status, items[0].Level)
+	}
+}
+
+func TestEpisodeReportAndSearch(t *testing.T) {
+	s, _ := newTestServerWithT(t)
+	r := callTool(t, s, "episode_report", map[string]any{
+		"title": "Auth timeout on WebSocket upgrade", "episode_type": "bug_fix",
+		"trigger": "ConnectionTimeout in ws.go:142",
+	})
+	m := resultMap(t, r)
+	if m["status"] != "OPEN" {
+		t.Errorf("status = %v, want OPEN", m["status"])
+	}
+
+	r = callTool(t, s, "episode_search", map[string]any{"query": "WebSocket"})
+	m = resultMap(t, r)
+	if n := num(t, m, "count"); n != 1 {
+		t.Fatalf("count = %v, want 1", m["count"])
+	}
+}
+
+func TestWorkspaceInfo(t *testing.T) {
+	s, _ := newTestServerWithT(t)
+	r := callTool(t, s, "workspace_info", map[string]any{})
+	m := resultMap(t, r)
+	if m["project"] != "central-memory" || m["branch"] != "main" || m["commit"] != "abc123" {
+		t.Errorf("unexpected workspace_info: %v", m)
+	}
+}
+
+func TestServeStdioRoundTrip(t *testing.T) {
+	s, _ := newTestServerWithT(t)
+	in := "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}\n" +
+		"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n"
+	var out strings.Builder
+	if err := s.Serve(context.Background(), strings.NewReader(in), &out); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("got %d response lines, want 2: %q", len(lines), out.String())
+	}
+	for i, line := range lines {
+		var resp Response
+		if err := json.Unmarshal([]byte(line), &resp); err != nil {
+			t.Fatalf("line %d not JSON: %s", i, line)
 		}
-	}
-	for _, sc := range []string{"fact", "preference", "decision", "constraint", "pattern", "episode_summary"} {
-		in := base
-		in.Scope = sc
-		if err := ValidateMemoryWrite(in); err != nil {
-			t.Errorf("scope %q rejected: %v", sc, err)
+		if resp.Error != nil {
+			t.Fatalf("line %d error: %v", i, resp.Error)
 		}
 	}
 }

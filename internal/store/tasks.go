@@ -17,7 +17,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -84,20 +83,7 @@ func CanTransitionTaskStatus(from, to string) bool {
 
 // Task mirrors a tasks row (migration 001). Empty EpisodeID/SessionID/
 // Description/AssignedTo mean SQL NULL.
-type Task struct {
-	ID          string
-	ProjectID   string
-	EpisodeID   string
-	SessionID   string
-	Title       string
-	Description string
-	Status      string
-	AssignedTo  string
-	CreatedBy   string
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
-}
-
+// Task rows use the shared Task model (models.go).
 // TaskParams carries task identity for Create.
 type TaskParams struct {
 	ProjectID   string

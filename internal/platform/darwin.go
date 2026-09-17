@@ -3,104 +3,86 @@
 package platform
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"time"
 )
 
-// commandTimeout bounds launchctl invocations so Install/Uninstall/Status
-// never hang the CLI.
-const commandTimeout = 30 * time.Second
+func init() { registerBackend("darwin", func() Service { return darwinService{} }) }
 
-type darwinManager struct{}
-
-// currentManager returns the launchd manager.
-func currentManager() Manager { return darwinManager{} }
-
-// PlistPath returns ~/Library/LaunchAgents/<label>.plist. It creates
-// nothing; Install creates the parent directory as needed.
-func PlistPath() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("platform: home dir: %w", err)
-	}
-	if strings.TrimSpace(home) == "" {
-		return "", fmt.Errorf("platform: home dir is empty")
-	}
-	return filepath.Join(home, "Library", "LaunchAgents", LaunchdLabel()+".plist"), nil
+// darwinService manages the daemon via launchd: a plist at
+// ~/Library/LaunchAgents/<label>.plist written by RenderLaunchdPlist and
+// loaded with launchctl bootstrap/bootout. Stdlib only (os/exec).
+type darwinService struct {
+	// label and agentsDir are overridable for tests.
+	label    string
+	agentsDir string
 }
 
-// currentUID returns the numeric uid for launchctl bootstrap/bootout
-// targets (gui/<uid>/<label>).
-func currentUID() string { return strconv.Itoa(os.Getuid()) }
-
-func runLaunchctl(ctx context.Context, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "launchctl", args...)
-	return cmd.CombinedOutput()
+func (s darwinService) effectiveLabel() string {
+	if strings.TrimSpace(s.label) != "" {
+		return s.label
+	}
+	return LaunchdLabel
 }
 
-// Install writes the launchd agent plist and bootstraps it in the current
-// GUI session so the daemon auto-starts at login (RunAtLoad) and is kept
-// alive (KeepAlive). Bootstrapping an already-bootstrapped label is
-// tolerated by booting out first (errors ignored).
-func (darwinManager) Install(exePath string, args []string) error {
-	exe, err := resolveExe(exePath)
-	if err != nil {
-		return err
+func (s darwinService) plistPath() (string, error) {
+	dir := s.agentsDir
+	if strings.TrimSpace(dir) == "" {
+		home, err := userHomeDirFunc()
+		if err != nil {
+			return "", fmt.Errorf("platform: launchd agents dir: %w", err)
+		}
+		if strings.TrimSpace(home) == "" {
+			return "", fmt.Errorf("platform: launchd agents dir: empty home")
+		}
+		dir = filepath.Join(home, "Library", "LaunchAgents")
 	}
-	if args == nil {
-		args = DefaultDaemonArgs()
+	return filepath.Join(dir, s.effectiveLabel()+".plist"), nil
+}
+
+func (s darwinService) Install(executable string, args []string) error {
+	if strings.TrimSpace(executable) == "" {
+		var err error
+		executable, err = defaultExecutable()
+		if err != nil {
+			return err
+		}
 	}
-	path, err := PlistPath()
+	path, err := s.plistPath()
 	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("platform: create LaunchAgents dir: %w", err)
 	}
-	if err := os.WriteFile(path, []byte(LaunchdPlist(LaunchdLabel(), exe, args)), 0o644); err != nil {
-		return fmt.Errorf("platform: write plist: %w", err)
+	if err := os.WriteFile(path, []byte(RenderLaunchdPlist(s.effectiveLabel(), executable, args)), 0o644); err != nil {
+		return fmt.Errorf("platform: write launchd plist: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-	target := "gui/" + currentUID() + "/" + LaunchdLabel()
-	// Best-effort bootout so re-install replaces the old definition.
-	_, _ = runLaunchctl(ctx, "bootout", "gui/"+currentUID(), path)
-	if out, err := runLaunchctl(ctx, "bootstrap", "gui/"+currentUID(), path); err != nil {
-		return fmt.Errorf("platform: launchctl bootstrap %s: %w (output: %s)", target, err, strings.TrimSpace(string(out)))
-	}
-	if out, err := runLaunchctl(ctx, "enable", target); err != nil {
-		return fmt.Errorf("platform: launchctl enable %s: %w (output: %s)", target, err, strings.TrimSpace(string(out)))
+	// Best effort: unload a stale job before (re)loading.
+	_ = exec.Command("launchctl", "bootout", "gui/"+uid(), path).Run()
+	if out, err := exec.Command("launchctl", "bootstrap", "gui/"+uid(), path).CombinedOutput(); err != nil {
+		return fmt.Errorf("platform: launchctl bootstrap: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// Uninstall boots the agent out and removes the plist. A missing plist is
-// success (idempotent).
-func (darwinManager) Uninstall() error {
-	path, err := PlistPath()
+func (s darwinService) Uninstall() error {
+	path, err := s.plistPath()
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-	_, _ = runLaunchctl(ctx, "bootout", "gui/"+currentUID()+"/"+LaunchdLabel())
+	_ = exec.Command("launchctl", "bootout", "gui/"+uid(), path).Run()
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("platform: remove plist: %w", err)
+		return fmt.Errorf("platform: remove launchd plist: %w", err)
 	}
 	return nil
 }
 
-// Status inspects the launchd job without mutating anything: a missing
-// plist means not-installed; otherwise `launchctl print` reveals whether
-// the job is running.
-func (darwinManager) Status() (Status, error) {
-	path, err := PlistPath()
+func (s darwinService) Status() (ServiceStatus, error) {
+	path, err := s.plistPath()
 	if err != nil {
 		return StatusUnknown, err
 	}
@@ -108,17 +90,23 @@ func (darwinManager) Status() (Status, error) {
 		if os.IsNotExist(err) {
 			return StatusNotInstalled, nil
 		}
-		return StatusUnknown, fmt.Errorf("platform: stat plist: %w", err)
+		return StatusUnknown, fmt.Errorf("platform: stat launchd plist: %w", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-	out, err := runLaunchctl(ctx, "print", "gui/"+currentUID()+"/"+LaunchdLabel())
+	out, err := exec.Command("launchctl", "print", "gui/"+uid()+"/"+s.effectiveLabel()).CombinedOutput()
 	if err != nil {
-		// Plist exists but job is not loaded/started.
+		// Plist on disk but job not loaded => stopped.
 		return StatusStopped, nil
 	}
 	if strings.Contains(strings.ToLower(string(out)), "state = running") {
 		return StatusRunning, nil
 	}
 	return StatusStopped, nil
+}
+
+func uid() string {
+	out, err := exec.Command("id", "-u").Output()
+	if err != nil {
+		return "501"
+	}
+	return strings.TrimSpace(string(out))
 }

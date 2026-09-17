@@ -133,7 +133,7 @@ func TestUserCreateDefaultsSettingsToEmptyObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.ID != "u1" || u.Username != "alice" || u.Settings != "{}" {
+	if u.ID != "u1" || u.Username != "alice" || len(u.Settings) != 0 {
 		t.Errorf("unexpected user: %+v", u)
 	}
 	if !strings.Contains(fake.queries[0], "INSERT INTO users") {
@@ -150,7 +150,7 @@ func TestUserGetByUsername(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Email != "a@x.io" || u.Settings != `{"theme":"dark"}` {
+	if u.Email != "a@x.io" || u.Settings["theme"] != "dark" {
 		t.Errorf("unexpected user: %+v", u)
 	}
 	if !strings.Contains(fake.queries[0], "WHERE username = $1") {
@@ -182,7 +182,7 @@ func TestUserUpdateSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if u.Settings != `{"provider":"bedrock"}` {
+	if u.Settings["provider"] != "bedrock" {
 		t.Errorf("settings not updated: %+v", u)
 	}
 	if !strings.Contains(fake.queries[0], "UPDATE users SET settings") {

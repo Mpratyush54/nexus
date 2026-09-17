@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -59,15 +58,7 @@ func NormalizeWatchedFileType(fileType string) (string, bool) {
 
 // WatchedFile mirrors a watched_files row (migration 001). Path is
 // workspace-relative; LastHash is "" until the first content scan.
-type WatchedFile struct {
-	ID          string
-	WorkspaceID string
-	Path        string
-	LastHash    string
-	FileType    string
-	CreatedAt   time.Time
-}
-
+// WatchedFile rows use the shared WatchedFile model (models.go).
 // WatchedFileParams carries the identity and hash for Upsert.
 type WatchedFileParams struct {
 	WorkspaceID string
