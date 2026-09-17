@@ -1,80 +1,169 @@
-// File sandbox for the workspace daemon (issue #3).
+// Sandboxed file operations for the workspace daemon.
 //
-// Every read/write resolves the caller-supplied path with filepath.Clean and
-// requires the result to stay under the workspace root (strings.HasPrefix on
-// the root + separator). Traversal escapes (.., absolute paths outside the
-// root) are rejected with 403. Content and paths matching
-// internal/scan NeverPatterns (secret regexes) are also rejected with 403,
-// fail-closed. Reads are capped at 1MB (413 over the cap).
+// Every path goes through SecureJoin: lexical cleaning, containment inside
+// the workspace root, ADS/colon rejection, and symlink-escape detection.
+// Reads/writes additionally fail closed on secret-pattern matches
+// (internal/scan.NeverPatterns) and enforce a 1MB size cap.
 package daemon
 
 import (
-	"encoding/json"
 	"errors"
-	"io"
-	"net/http"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"central-memory/internal/scan"
 )
 
-// MaxReadBytes caps POST /file/read responses at 1MB per the plan (§1.3).
-const MaxReadBytes = 1 << 20
+// MaxFileBytes caps single file reads and writes (1MB, per Phase 1.3).
+const MaxFileBytes = 1 << 20
 
-// ErrTraversal is returned when a path escapes the workspace sandbox.
-var ErrTraversal = errors.New("path escapes workspace")
+var (
+	// ErrTraversal is returned when a path escapes the workspace sandbox.
+	ErrTraversal = errors.New("daemon: path escapes workspace sandbox")
+	// ErrSecretBlocked is returned when content matches a NeverPattern
+	// (fail-closed: the operation is refused without returning content).
+	ErrSecretBlocked = errors.New("daemon: content matches secret pattern")
+	// ErrTooLarge is returned when content exceeds MaxFileBytes.
+	ErrTooLarge = errors.New("daemon: file exceeds 1MB cap")
+	// ErrNotFile is returned when the target is not a regular file.
+	ErrNotFile = errors.New("daemon: not a regular file")
+)
 
-// ErrSecretHit is returned when a path or content matches a NeverPattern.
-var ErrSecretHit = errors.New("secret pattern match")
-
-// ResolveInSandbox maps a caller-supplied path to an absolute path confined
-// under root. It applies filepath.Clean and a HasPrefix check against
-// root + separator so that:
+// SecureJoin resolves a workspace-relative (or absolute) unsafePath against
+// root and returns the absolute target. It rejects:
 //
-//   - "a/b.txt"            → <root>/a/b.txt            (allowed)
-//   - "../../etc/passwd"   → escapes                   (ErrTraversal)
-//   - "/etc/passwd"        → absolute escape           (ErrTraversal)
-//   - "C:\Windows\..."     → absolute escape           (ErrTraversal)
-//   - root itself          → allowed (dir listing callers handle EISDIR)
-//
-// The check is lexical (Clean + HasPrefix), exactly as the plan prescribes.
-// Symlink escapes (a link inside root pointing outside) are NOT resolved
-// here — see ADR-003 for why that is deferred to issue #19 hardening.
-func ResolveInSandbox(root, userPath string) (string, error) {
-	clean := filepath.Clean(userPath)
-	// Cross-platform absolute-escape guard: on Windows a path like
-	// "/etc/passwd" cleans to `\etc\passwd`, which IsAbs reports as false
-	// (rooted, no volume) yet refers to the current drive's root — not the
-	// workspace. Join would silently confine it inside root, but the intent
-	// is unambiguously "outside the workspace", so reject rooted paths that
-	// are not absolute outright. (On Unix this branch is dead code because
-	// IsAbs already covers separator-rooted paths.)
-	if !filepath.IsAbs(clean) && strings.HasPrefix(clean, string(filepath.Separator)) {
-		return "", ErrTraversal
+//   - NUL bytes and blank paths
+//   - Windows ADS streams ("notes.txt:hidden"): any ':' in the path
+//     *after* stripping the volume name is rejected. (Legitimate relative
+//     paths never contain ':' — it is illegal in Windows file names — while
+//     absolute paths keep their "C:" volume prefix.)
+//   - absolute paths outside root and ".." escapes (filepath.Clean +
+//     filepath.Rel containment, belt-and-braces HasPrefix check)
+//   - symlink escapes: the deepest existing ancestor is resolved with
+//     resolveExisting and re-checked for containment. The root itself is
+//     also canonicalized first, so Windows 8.3 short names (PRATYU~1) and
+//     junctions never cause false positives. (On Windows, resolution goes
+//     through GetFinalPathNameByHandle because EvalSymlinks does not
+//     follow junctions.)
+func SecureJoin(root, unsafePath string) (string, error) {
+	if strings.ContainsRune(unsafePath, 0) {
+		return "", fmt.Errorf("%w: NUL byte", ErrTraversal)
 	}
-	var abs string
-	if filepath.IsAbs(clean) {
-		abs = clean
+	if strings.TrimSpace(unsafePath) == "" {
+		return "", fmt.Errorf("%w: empty path", ErrTraversal)
+	}
+
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	rootAbs = filepath.Clean(rootAbs)
+	// Canonicalize the root (resolves 8.3 short names, junctions, and
+	// case variants) so later comparisons are canonical-vs-canonical.
+	rootReal := rootAbs
+	if resolved, evalErr := resolveExisting(rootAbs); evalErr == nil {
+		rootReal = filepath.Clean(resolved)
+	}
+
+	var candidate string
+	if filepath.IsAbs(unsafePath) {
+		candidate = filepath.Clean(unsafePath)
 	} else {
-		abs = filepath.Join(root, clean)
+		// Relative paths must not contain ':' at all: it is illegal in
+		// Windows file names and is the ADS marker ("notes.txt:hidden").
+		// Drive-relative oddities ("C:foo") are rejected here too.
+		if strings.Contains(unsafePath, ":") {
+			return "", fmt.Errorf("%w: colon not allowed (ADS/absolute)", ErrTraversal)
+		}
+		candidate = filepath.Join(rootReal, unsafePath)
 	}
-	abs = filepath.Clean(abs)
 
-	if abs == root {
-		return abs, nil
+	// Canonicalize the candidate via its deepest existing ancestor so
+	// comparisons below are canonical-vs-canonical (kills 8.3 short-name
+	// and case false positives, and exposes symlink/junction escapes).
+	// The filesystem root always exists, so the climb always terminates
+	// with a resolvable ancestor.
+	anc := candidate
+	for {
+		if _, statErr := os.Lstat(anc); statErr == nil {
+			break
+		}
+		parent := filepath.Dir(anc)
+		if parent == anc {
+			break
+		}
+		anc = parent
 	}
-	prefix := root + string(filepath.Separator)
-	if !strings.HasPrefix(abs, prefix) {
-		return "", ErrTraversal
+	canonical := candidate
+	if resolved, evalErr := resolveExisting(anc); evalErr == nil {
+		rem, relErr := filepath.Rel(anc, candidate)
+		if relErr != nil {
+			return "", fmt.Errorf("%w: %v", ErrTraversal, relErr)
+		}
+		canonical = filepath.Clean(resolved)
+		if rem != "." {
+			canonical = filepath.Join(canonical, rem)
+		}
+		canonical = filepath.Clean(canonical)
 	}
-	return abs, nil
+
+	// ADS / alternate-stream check on the volume-stripped canonical path.
+	// (Covers absolute ADS forms like `C:\root\file.txt:hidden`.)
+	rest := strings.TrimPrefix(canonical, filepath.VolumeName(canonical))
+	if strings.Contains(rest, ":") {
+		return "", fmt.Errorf("%w: colon not allowed (ADS/absolute)", ErrTraversal)
+	}
+
+	if err := checkContained(rootReal, canonical); err != nil {
+		// Distinguish symlink escapes for clearer errors: if the lexical
+		// candidate was inside but the canonical one is not, a link
+		// redirected it.
+		if checkContained(rootReal, candidate) == nil {
+			return "", fmt.Errorf("%w: symlink escape", ErrTraversal)
+		}
+		return "", err
+	}
+
+	return canonical, nil
 }
 
-// ContainsSecret reports whether s matches any internal/scan NeverPattern
-// (tokens, keys, env values). Used fail-closed on both paths and content.
-func ContainsSecret(s string) bool {
+// foldPath normalizes a path for containment comparison: on Windows the
+// filesystem is case-insensitive, so compare lowercased; elsewhere exact.
+func foldPath(p string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(p)
+	}
+	return p
+}
+
+// checkContained reports ErrTraversal unless candidate == root or lies
+// strictly inside root.
+func checkContained(rootAbs, candidate string) error {
+	r, c := foldPath(rootAbs), foldPath(candidate)
+	rel, err := filepath.Rel(r, c)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrTraversal, err)
+	}
+	if rel == "." {
+		return nil
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%w: %q", ErrTraversal, rel)
+	}
+	// Belt-and-braces prefix check required by the implementation plan.
+	if !(c == r || strings.HasPrefix(c, r+string(filepath.Separator))) {
+		return fmt.Errorf("%w: %q", ErrTraversal, rel)
+	}
+	return nil
+}
+
+// containsSecret reports whether data matches any NeverPattern.
+// Fail-closed: any match blocks the operation.
+func containsSecret(data []byte) bool {
+	s := string(data)
 	for _, re := range scan.NeverPatterns {
 		if re.MatchString(s) {
 			return true
@@ -83,148 +172,58 @@ func ContainsSecret(s string) bool {
 	return false
 }
 
-// ReadFileSandboxed reads userPath confined to root, enforcing the sandbox,
-// the secret check, and the 1MB cap. Over-cap files yield an error that the
-// handler maps to 413.
-func ReadFileSandboxed(root, userPath string) ([]byte, error) {
-	abs, err := ResolveInSandbox(root, userPath)
+// ReadFile returns the file at workspace-relative path after sandbox,
+// size-cap, and secret checks.
+func ReadFile(root, unsafePath string) ([]byte, error) {
+	p, err := SecureJoin(root, unsafePath)
 	if err != nil {
 		return nil, err
 	}
-	if ContainsSecret(abs) {
-		return nil, ErrSecretHit
-	}
-	f, err := os.Open(abs)
+	st, err := os.Stat(p)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
-	if st, err := f.Stat(); err == nil {
-		if st.IsDir() {
-			return nil, errors.New("is a directory")
-		}
-		if st.Size() > MaxReadBytes {
-			return nil, errors.New("file exceeds 1MB read cap")
-		}
+	if !st.Mode().IsRegular() {
+		return nil, ErrNotFile
 	}
-	// LimitReader guards against size races between Stat and Read.
-	data, err := io.ReadAll(io.LimitReader(f, MaxReadBytes+1))
+	if st.Size() > MaxFileBytes {
+		return nil, ErrTooLarge
+	}
+	data, err := os.ReadFile(p)
 	if err != nil {
 		return nil, err
 	}
-	if len(data) > MaxReadBytes {
-		return nil, errors.New("file exceeds 1MB read cap")
+	if len(data) > MaxFileBytes {
+		return nil, ErrTooLarge
 	}
-	if ContainsSecret(string(data)) {
-		return nil, ErrSecretHit
+	if containsSecret(data) {
+		return nil, ErrSecretBlocked
 	}
 	return data, nil
 }
 
-// WriteFileSandboxed writes content to userPath confined to root, enforcing
-// the sandbox and the secret check on both path and content.
-func WriteFileSandboxed(root, userPath string, content []byte) error {
-	abs, err := ResolveInSandbox(root, userPath)
+// WriteFile writes content to the workspace-relative path after sandbox,
+// size-cap, and secret checks. Parents are created as needed.
+func WriteFile(root, unsafePath string, content []byte) error {
+	if len(content) > MaxFileBytes {
+		return ErrTooLarge
+	}
+	if containsSecret(content) {
+		return ErrSecretBlocked
+	}
+	p, err := SecureJoin(root, unsafePath)
 	if err != nil {
 		return err
 	}
-	if ContainsSecret(abs) {
-		return ErrSecretHit
-	}
-	if ContainsSecret(string(content)) {
-		return ErrSecretHit
-	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
 		return err
 	}
-	return os.WriteFile(abs, content, 0o644)
-}
-
-type fileReadRequest struct {
-	Path string `json:"path"`
-}
-
-type fileReadResponse struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-	Size    int    `json:"size"`
-}
-
-type fileWriteRequest struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
-}
-
-func (d *Daemon) handleFileRead(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+	if filepath.Clean(p) == filepath.Clean(rootAbs) {
+		return ErrNotFile
 	}
-	var req fileReadRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxReadBytes)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
 	}
-	if strings.TrimSpace(req.Path) == "" {
-		writeError(w, http.StatusBadRequest, "path is required")
-		return
-	}
-	data, err := ReadFileSandboxed(d.Root, req.Path)
-	switch {
-	case errors.Is(err, ErrTraversal):
-		writeError(w, http.StatusForbidden, "path escapes workspace")
-		return
-	case errors.Is(err, ErrSecretHit):
-		writeError(w, http.StatusForbidden, "refused: secret pattern match")
-		return
-	case err != nil && strings.Contains(err.Error(), "1MB"):
-		writeError(w, http.StatusRequestEntityTooLarge, "file exceeds 1MB read cap")
-		return
-	case err != nil && strings.Contains(err.Error(), "directory"):
-		writeError(w, http.StatusBadRequest, "path is a directory")
-		return
-	case err != nil:
-		if os.IsNotExist(err) {
-			writeError(w, http.StatusNotFound, "file not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "read failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, fileReadResponse{Path: req.Path, Content: string(data), Size: len(data)})
-	d.Interceptor.OnFileRead(req.Path, int64(len(data)), string(data))
-}
-
-func (d *Daemon) handleFileWrite(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var req fileWriteRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, MaxReadBytes*2)).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON body")
-		return
-	}
-	if strings.TrimSpace(req.Path) == "" {
-		writeError(w, http.StatusBadRequest, "path is required")
-		return
-	}
-	var oldContent []byte
-	if abs, rerr := ResolveInSandbox(d.Root, req.Path); rerr == nil {
-		oldContent, _ = os.ReadFile(abs)
-	}
-	err := WriteFileSandboxed(d.Root, req.Path, []byte(req.Content))
-	switch {
-	case errors.Is(err, ErrTraversal):
-		writeError(w, http.StatusForbidden, "path escapes workspace")
-		return
-	case errors.Is(err, ErrSecretHit):
-		writeError(w, http.StatusForbidden, "refused: secret pattern match")
-		return
-	case err != nil:
-		writeError(w, http.StatusInternalServerError, "write failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "path": req.Path})
-	d.Interceptor.OnFileWrite(req.Path, oldContent, []byte(req.Content))
+	return os.WriteFile(p, content, 0o644)
 }

@@ -1,129 +1,28 @@
-// Passive tool-call interceptor for the workspace daemon (issue #4).
+// Package daemon implements the local workspace daemon.
 //
-// Every tool call that flows through the daemon is silently logged as an
-// event for the server. The agent has no idea this is happening: emission is
-// fire-and-forget from the caller's perspective — a nil sink is a no-op, a
-// panicking sink is isolated via recover, and the sink itself is expected to
-// be non-blocking (queue + background sender) once the daemon core injects
-// the real server client. The interceptor never fails the underlying tool
-// call.
+// interceptor.go is Layer 1 (Tool Interception) of the passive extraction
+// pipeline (implementation-plan.md §1.3, §2.2): every tool call that flows
+// through the daemon is silently logged as an event. The agent has no idea
+// this is happening.
 //
-// Event types transcribe implementation-plan.md §§1.3 (interceptor table)
-// and 2.1 (event store), Layer 1 (tool interception) side:
-//
-//	FILE_READ        file_read       path, size, first 200 chars
-//	FILE_MODIFIED    file_write      path, diff (before/after), size
-//	COMMAND_EXECUTED command_run     cmdline, exit code, stdout/stderr (4KB cap each)
-//	GIT_DIFF_VIEWED  git diff        ref, diff stat
-//	GIT_COMMITTED    git commit      SHA, message, diff stat
-//	(see watcher.go for INSTRUCTION_FILE_CHANGED, Layer 3)
-//
-// All diff/hash/cap helpers are pure functions over strings/bytes so they
-// are unit-testable without filesystem or network access.
+// Ownership note: daemon.go / fileops.go are owned by another agent. This
+// file therefore defines its own minimal ToolEventEmitter interface and its own
+// ToolEvent type, and coordinates with the rest of the daemon via async channels
+// and file existence checks — never by editing foreign files. Importing
+// internal/store here would also be cycle-free (store does not import
+// daemon), but the interceptor deliberately stays dependency-free so unit
+// tests and the daemon skeleton compile with stdlib only.
 package daemon
 
 import (
 	"fmt"
 	"strings"
-	"unicode/utf8"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"central-memory/internal/scan"
 )
-
-// Event type constants (plan §2.1). Kept as plain strings so the sink
-// payload stays JSON-serializable without a translation layer.
-const (
-	EventFileRead               = "FILE_READ"
-	EventFileModified           = "FILE_MODIFIED"
-	EventCommandExecuted        = "COMMAND_EXECUTED"
-	EventGitDiffViewed          = "GIT_DIFF_VIEWED"
-	EventGitCommitted           = "GIT_COMMITTED"
-	EventInstructionFileChanged = "INSTRUCTION_FILE_CHANGED"
-)
-
-// Emission and payload caps.
-const (
-	// MaxEventOutputBytes caps COMMAND_EXECUTED stdout/stderr at 4KB each
-	// (plan §1.3: "stdout/stderr (capped 4KB)").
-	MaxEventOutputBytes = 4 << 10
-	// MaxReadHeadChars caps the FILE_READ content preview at 200 chars
-	// (plan §1.3: "first 200 chars").
-	MaxReadHeadChars = 200
-	// MaxEventDiffBytes caps rendered diffs so a huge file rewrite cannot
-	// blow up the event payload or daemon memory.
-	MaxEventDiffBytes = 8 << 10
-	// MaxDiffInputLines bounds each side of DiffLines; beyond it the diff
-	// degrades to a one-line summary instead of an O(m*n) LCS table.
-	MaxDiffInputLines = 2000
-	// maxDiffCells bounds the LCS dynamic-programming table.
-	maxDiffCells = 250_000
-)
-
-// Note on EventSink: the passive-emission contract
-// (type EventSink func(eventType string, payload map[string]any)) is
-// declared once for the package in harvester.go (Layer 2, Wave 1 #5) with
-// the identical signature this issue specified. It is deliberately NOT
-// redeclared here — Go forbids duplicate top-level definitions. Everything
-// below takes or returns that shared EventSink: the daemon core injects the
-// real server client later without touching this file, e.g.:
-//
-//	daemon.NewInterceptor(func(t string, p map[string]any) {
-//	    client.Enqueue(t, p) // non-blocking queue + background sender
-//	})
-//
-// A nil EventSink is a valid no-op sink (local-only mode, tests).
-// Follow-up: hoist EventSink into a shared daemon file (e.g. events.go)
-// once Wave 1 lands, as harvester.go's own comment already anticipates.
-
-// Interceptor wraps daemon tool calls with silent event emission.
-type Interceptor struct {
-	Sink EventSink
-}
-
-// NewInterceptor builds an Interceptor around sink (nil allowed).
-func NewInterceptor(sink EventSink) *Interceptor { return &Interceptor{Sink: sink} }
-
-// Emit delivers one event. It is nil-receiver and nil-sink safe, and it
-// recovers from sink panics: passive observation must never break the tool
-// call it observes. Emit is synchronous and ordered; the injected sink is
-// responsible for staying non-blocking (see EventSink).
-func (i *Interceptor) Emit(eventType string, payload map[string]any) {
-	if i == nil || i.Sink == nil {
-		return
-	}
-	defer func() { _ = recover() }()
-	i.Sink(eventType, payload)
-}
-
-// OnFileRead emits FILE_READ {path, size, head}. head should be the first
-// MaxReadHeadChars of the file content; HeadChars builds it.
-func (i *Interceptor) OnFileRead(path string, size int64, head string) {
-	i.Emit(EventFileRead, FileReadPayload(path, size, head))
-}
-
-// OnFileWrite emits FILE_MODIFIED {path, size, diff} by diffing oldContent
-// against newContent. It is called after a successful write; file mods are
-// therefore emitted without client awareness — the writer never opts in.
-func (i *Interceptor) OnFileWrite(path string, oldContent, newContent []byte) {
-	i.Emit(EventFileModified, FileModifiedPayload(path, oldContent, newContent))
-}
-
-// OnCommand emits COMMAND_EXECUTED {cmdline, exit_code, stdout, stderr}
-// with both streams capped at MaxEventOutputBytes.
-func (i *Interceptor) OnCommand(cmdline string, exitCode int, stdout, stderr []byte) {
-	i.Emit(EventCommandExecuted, CommandPayload(cmdline, exitCode, stdout, stderr))
-}
-
-// OnGitDiff emits GIT_DIFF_VIEWED {ref, stat}.
-func (i *Interceptor) OnGitDiff(ref, stat string) {
-	i.Emit(EventGitDiffViewed, GitDiffPayload(ref, stat))
-}
-
-// OnGitCommit emits GIT_COMMITTED {hash, message, stat}. Daemon core detects
-// commits via heartbeat (HEAD change) and calls this to record them.
-func (i *Interceptor) OnGitCommit(hash, message, stat string) {
-	i.Emit(EventGitCommitted, GitCommitPayload(hash, message, stat))
-}
 
 // RedactedPlaceholder replaces secret matches in event payloads (issue #32).
 // Payloads are redacted, never dropped: the event is still emitted so the
@@ -151,68 +50,7 @@ func redact(s string) string {
 	return out
 }
 
-// FileReadPayload builds the FILE_READ payload (pure). The head preview is
-// secret-screened via RedactSecrets before the 200-rune cap so a secret
-// straddling the cap boundary cannot leak a partial match; redaction never
-// drops the event.
-func FileReadPayload(path string, size int64, head string) map[string]any {
-	return map[string]any{
-		"path": redact(path),
-		"size": size,
-		"head": HeadChars(redact(head), MaxReadHeadChars),
-	}
-}
-
-// FileModifiedPayload builds the FILE_MODIFIED payload (pure). The diff is
-// secret-screened via RedactSecrets and capped at MaxEventDiffBytes;
-// identical content yields an empty diff but the write is still recorded.
-func FileModifiedPayload(path string, oldContent, newContent []byte) map[string]any {
-	diff, truncated := CapString(redact(DiffLines(string(oldContent), string(newContent))), MaxEventDiffBytes)
-	return map[string]any{
-		"path":      redact(path),
-		"size":      int64(len(newContent)),
-		"old_size":  int64(len(oldContent)),
-		"diff":      diff,
-		"truncated": truncated,
-	}
-}
-
-// CommandPayload builds the COMMAND_EXECUTED payload (pure). stdout and
-// stderr are secret-screened via RedactSecrets before the 4KB caps (a secret
-// split by the cap would otherwise leak a partial match) with explicit flags.
-func CommandPayload(cmdline string, exitCode int, stdout, stderr []byte) map[string]any {
-	out, outTrunc := CapBytes([]byte(redact(string(stdout))), MaxEventOutputBytes)
-	errBytes, errTrunc := CapBytes([]byte(redact(string(stderr))), MaxEventOutputBytes)
-	return map[string]any{
-		"cmdline":          redact(cmdline),
-		"exit_code":        exitCode,
-		"stdout":           string(out),
-		"stderr":           string(errBytes),
-		"stdout_truncated": outTrunc,
-		"stderr_truncated": errTrunc,
-	}
-}
-
-// GitCommitPayload builds the GIT_COMMITTED payload (pure). Message and stat
-// are secret-screened; the hash is a hex SHA and passes through untouched.
-func GitCommitPayload(hash, message, stat string) map[string]any {
-	return map[string]any{
-		"hash":    hash,
-		"message": redact(message),
-		"stat":    redact(stat),
-	}
-}
-
-// GitDiffPayload builds the GIT_DIFF_VIEWED payload (pure). The stat is
-// secret-screened; the ref is a validated revision string and passes through.
-func GitDiffPayload(ref, stat string) map[string]any {
-	return map[string]any{
-		"ref":  ref,
-		"stat": redact(stat),
-	}
-}
-
-// DiffStat summarizes a git diff for the GIT_DIFF_VIEWED stat field (pure):
+// DiffStat summarizes a diff for GIT_DIFF_VIEWED-style stat fields (pure):
 // "<added> added / <removed> removed / <n> lines, <m> bytes". Counts ignore
 // the "+++"/"---" file-header lines. Empty diffs report "(empty diff)".
 func DiffStat(diff string) string {
@@ -220,7 +58,7 @@ func DiffStat(diff string) string {
 		return "(empty diff)"
 	}
 	var added, removed int
-	lines := splitDiffLines(diff)
+	lines := splitLines(diff)
 	for _, ln := range lines {
 		switch {
 		case strings.HasPrefix(ln, "+++"), strings.HasPrefix(ln, "---"):
@@ -234,186 +72,463 @@ func DiffStat(diff string) string {
 	return fmt.Sprintf("%d added / %d removed / %d lines, %d bytes", added, removed, len(lines), len(diff))
 }
 
-// JoinCmdline renders cmd + args as a single shell-readable command line,
-// quoting args that contain whitespace or quotes (pure).
-func JoinCmdline(cmd string, args []string) string {
-	parts := make([]string, 0, len(args)+1)
-	parts = append(parts, quoteArg(cmd))
-	for _, a := range args {
-		parts = append(parts, quoteArg(a))
-	}
-	return strings.Join(parts, " ")
+// ToolEventType is the wire-visible type of a daemon-emitted event.
+// Names match the event store vocabulary (plan §2.1).
+type ToolEventType string
+
+const (
+	ToolEventFileRead               ToolEventType = "FILE_READ"
+	ToolEventFileModified           ToolEventType = "FILE_MODIFIED"
+	ToolEventCommandExecuted        ToolEventType = "COMMAND_EXECUTED"
+	ToolEventGitDiffViewed          ToolEventType = "GIT_DIFF_VIEWED"
+	ToolEventGitCommitted           ToolEventType = "GIT_COMMITTED"
+	ToolEventInstructionFileChanged ToolEventType = "INSTRUCTION_FILE_CHANGED"
+)
+
+// Tool action names accepted by LogAction. They mirror the daemon operation
+// names from plan §1.3 so call sites in fileops.go/commands.go/gitops.go can
+// pass through their op name verbatim.
+const (
+	ActionFileRead    = "file_read"
+	ActionFileWrite   = "file_write"
+	ActionFileModifed = "file_modified" // accepted alias of file_write
+	ActionCommandRun  = "command_run"
+	ActionGitDiff     = "git_diff"
+	ActionGitCommit   = "git_commit"
+)
+
+// Payload size caps. Rationale is documented in
+// docs/decisions/2026-09-17-interceptor-watcher.md.
+const (
+	// MaxPreviewBytes caps the FILE_READ preview ("first 200 chars", plan §1.3).
+	MaxPreviewBytes = 200
+	// MaxOutputBytes caps COMMAND_EXECUTED stdout/stderr (issue #4: 4KB cap).
+	MaxOutputBytes = 4 * 1024
+	// MaxDiffBytes caps FILE_MODIFIED / GIT_* diffs so a huge generated file
+	// or vendored lockfile cannot blow up the events table.
+	MaxDiffBytes = 8 * 1024
+	// MaxMessageBytes caps commit messages / command lines in payloads.
+	MaxMessageBytes = 2 * 1024
+	// DefaultToolEventBuffer is the default async queue depth.
+	DefaultToolEventBuffer = 256
+)
+
+// ToolEvent is the daemon-local event envelope. It mirrors store.Event's
+// essential fields without importing internal/store, keeping this file
+// stdlib-only and free of import cycles with daemon.go/fileops.go owners.
+// (Named ToolEvent — not Event — because Layer 2's harvester.go already owns
+// the `Event` identifier in this package.)
+type ToolEvent struct {
+	Type      ToolEventType  `json:"event_type"`
+	Payload   map[string]any `json:"payload"`
+	CreatedAt time.Time      `json:"created_at"`
 }
 
-func quoteArg(s string) string {
-	if s == "" {
-		return `""`
-	}
-	if !strings.ContainsAny(s, " \t\n\"'") {
-		return s
-	}
-	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+// ToolEventEmitter is the minimal sink interface for daemon events. The real
+// daemon wires this to the server POST path; tests use a fake or ChanEmitter.
+// Defined locally (not imported) so parallel agents can implement it without
+// touching this file's owners.
+type ToolEventEmitter interface {
+	Emit(ev ToolEvent)
 }
 
-// CapBytes truncates b to at most limit bytes, backing off over UTF-8
-// continuation bytes so the result stays valid UTF-8 (pure). It reports
-// whether truncation happened.
-func CapBytes(b []byte, limit int) ([]byte, bool) {
-	if limit < 0 {
-		limit = 0
-	}
-	if len(b) <= limit {
-		return b, false
-	}
-	cut := limit
-	for cut > 0 && !utf8.Valid(b[:cut]) {
-		cut--
-	}
-	return b[:cut], true
+// ChanEmitter is a non-blocking ToolEventEmitter backed by a channel. Emits never
+// block the tool-call hot path: when the buffer is full the event is dropped
+// and counted instead of stalling the agent's file/command operation.
+type ChanEmitter struct {
+	Ch      chan ToolEvent
+	dropped atomic.Int64
 }
 
-// CapString truncates s to at most limit bytes with a "[truncated]" marker
-// on truncation (pure). Marker text matches commands.go's convention.
-func CapString(s string, limit int) (string, bool) {
-	capped, truncated := CapBytes([]byte(s), limit)
-	if !truncated {
-		return s, false
+// NewChanEmitter returns a ChanEmitter with the given buffer depth.
+func NewChanEmitter(buffer int) *ChanEmitter {
+	if buffer <= 0 {
+		buffer = DefaultToolEventBuffer
 	}
-	return string(capped) + "\n... [truncated]", true
+	return &ChanEmitter{Ch: make(chan ToolEvent, buffer)}
 }
 
-// HeadChars returns the first n runes of s (pure). Rune-based (not byte)
-// so the FILE_READ preview is always exactly bounded in visible chars.
-func HeadChars(s string, n int) string {
-	if n < 0 {
-		n = 0
+// Emit enqueues ev without blocking; drops + counts when full.
+func (c *ChanEmitter) Emit(ev ToolEvent) {
+	select {
+	case c.Ch <- ev:
+	default:
+		c.dropped.Add(1)
 	}
-	r := []rune(s)
-	if len(r) <= n {
-		return s
-	}
-	return string(r[:n])
 }
 
-// DiffLines renders a line-oriented diff between oldText and newText (pure):
-//
-//	"  ctx"  unchanged line
-//	"- old"  removed line
-//	"+ new"  added line
-//
-// CRLF is normalized to LF before comparison so Windows-edited files diff
-// cleanly. Identical inputs yield "". Oversized inputs degrade to a one-line
-// summary instead of an O(m*n) LCS table; the rendered diff is capped at
-// MaxEventDiffBytes with a truncation marker.
-func DiffLines(oldText, newText string) string {
-	// Normalize first so a pure line-ending rewrite yields "" (no event
-	// noise for a zero-content change); splitDiffLines repeats the
-	// normalization idempotently.
-	oldText = strings.ReplaceAll(oldText, "\r\n", "\n")
-	newText = strings.ReplaceAll(newText, "\r\n", "\n")
-	if oldText == newText {
-		return ""
+// Dropped reports how many events were shed under backpressure.
+func (c *ChanEmitter) Dropped() int64 { return c.dropped.Load() }
+
+// Interceptor logs tool calls as events and forwards them asynchronously.
+// LogAction never blocks: it builds the ToolEvent, attempts a non-blocking send
+// on the internal queue, and returns the ToolEvent either way.
+type Interceptor struct {
+	queue chan ToolEvent
+	// downstream is optional; drained by background goroutine. Atomic so
+	// SetEventSink-style swaps are race-free against the forwarder.
+	downstream atomic.Pointer[ToolEventEmitter]
+	fwdRunning atomic.Bool
+
+	dropped atomic.Int64
+
+	quit chan struct{}
+	wg   sync.WaitGroup
+	once sync.Once
+}
+
+// NewInterceptor creates an Interceptor. bufferSize <= 0 selects
+// DefaultToolEventBuffer. downstream may be nil (events stay queued and can be
+// consumed via Events()).
+func NewInterceptor(bufferSize int, downstream ToolEventEmitter) *Interceptor {
+	if bufferSize <= 0 {
+		bufferSize = DefaultToolEventBuffer
 	}
-	a := splitDiffLines(oldText)
-	b := splitDiffLines(newText)
-	if len(a) > MaxDiffInputLines || len(b) > MaxDiffInputLines ||
-		int64(len(a))*int64(len(b)) > maxDiffCells {
-		return fmt.Sprintf("(diff omitted: %d -> %d lines, too large)", len(a), len(b))
+	in := &Interceptor{
+		queue: make(chan ToolEvent, bufferSize),
+		quit:  make(chan struct{}),
 	}
-	ops := diffOps(lcsTable(a, b), a, b)
-	var sb strings.Builder
-	for _, op := range ops {
-		switch op.kind {
-		case diffSame:
-			sb.WriteString("  " + op.line + "\n")
-		case diffDel:
-			sb.WriteString("- " + op.line + "\n")
-		case diffAdd:
-			sb.WriteString("+ " + op.line + "\n")
+	if downstream != nil {
+		in.setDownstream(downstream)
+	}
+	return in
+}
+
+// setDownstream atomically swaps the forward sink. A nil sink pauses
+// forwarding (events stay queued); the forwarder goroutine is nil-safe.
+func (in *Interceptor) setDownstream(downstream ToolEventEmitter) {
+	if downstream == nil {
+		in.downstream.Store(nil)
+		return
+	}
+	in.downstream.Store(&downstream)
+	in.ensureForwarder()
+}
+
+// ensureForwarder starts the background drain exactly once.
+func (in *Interceptor) ensureForwarder() {
+	if in.fwdRunning.CompareAndSwap(false, true) {
+		in.wg.Add(1)
+		go in.run()
+	}
+}
+
+// run drains the queue into downstream. Nil-safe: with no sink the event is
+// dropped (counted) instead of dereferencing a nil interface.
+func (in *Interceptor) run() {
+	defer in.wg.Done()
+	for {
+		select {
+		case <-in.quit:
+			return
+		case ev := <-in.queue:
+			if d := in.downstream.Load(); d != nil {
+				(*d).Emit(ev)
+			} else {
+				in.dropped.Add(1)
+			}
 		}
 	}
-	out := sb.String()
-	if len(out) > MaxEventDiffBytes {
-		cut := MaxEventDiffBytes
-		for cut > 0 && !utf8.ValidString(out[:cut]) {
-			cut--
+}
+
+// Close stops the background forwarder. Queued events remain readable.
+func (in *Interceptor) Close() {
+	in.once.Do(func() { close(in.quit) })
+	in.wg.Wait()
+}
+
+// Events exposes the internal queue for consumers when no downstream sink is
+// wired (tests, daemon skeleton wiring).
+func (in *Interceptor) Events() <-chan ToolEvent { return in.queue }
+
+// Dropped reports events shed because the queue was full.
+func (in *Interceptor) Dropped() int64 { return in.dropped.Load() }
+
+// emitTry is the non-blocking enqueue used by every Log path.
+func (in *Interceptor) emitTry(ev ToolEvent) {
+	select {
+	case in.queue <- ev:
+	default:
+		in.dropped.Add(1)
+	}
+}
+
+// LogAction builds an ToolEvent for a daemon tool action and enqueues it without
+// blocking. payload keys are normalized per action (truncation/diff caps
+// applied); unknown actions pass through with an empty-type-tolerant envelope
+// so future ops do not break the interceptor.
+//
+// Accepted actions: file_read, file_write/file_modified, command_run,
+// git_diff, git_commit. Returns the constructed ToolEvent.
+func (in *Interceptor) LogAction(action string, payload map[string]any) ToolEvent {
+	if payload == nil {
+		payload = map[string]any{}
+	}
+	ev := ToolEvent{
+		Type:      eventTypeForAction(action),
+		Payload:   normalizePayload(action, payload),
+		CreatedAt: time.Now().UTC(),
+	}
+	ev.Payload["action"] = action
+	in.emitTry(ev)
+	return ev
+}
+
+// eventTypeForAction maps a tool action name to its event type.
+func eventTypeForAction(action string) ToolEventType {
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case ActionFileRead:
+		return ToolEventFileRead
+	case ActionFileWrite, ActionFileModifed:
+		return ToolEventFileModified
+	case ActionCommandRun:
+		return ToolEventCommandExecuted
+	case ActionGitDiff:
+		return ToolEventGitDiffViewed
+	case ActionGitCommit:
+		return ToolEventGitCommitted
+	default:
+		return ToolEventType("UNKNOWN:" + action)
+	}
+}
+
+// normalizePayload applies secret redaction (issue #32) then per-action
+// caps so oversized tool outputs cannot flood the event stream. Redaction
+// runs before truncation so a secret straddling a cap boundary cannot leak
+// a partial match. It copies the input map (never mutates caller's).
+func normalizePayload(action string, payload map[string]any) map[string]any {
+	out := make(map[string]any, len(payload)+2)
+	for k, v := range payload {
+		out[k] = v
+	}
+	// Secret-screen every free-text field; hashes/SHAs pass through.
+	for _, k := range []string{"path", "preview", "before", "after", "diff", "output", "stdout", "stderr", "command", "message", "stat", "stats"} {
+		if s, ok := out[k].(string); ok && s != "" {
+			out[k] = redact(s)
 		}
-		out = out[:cut] + "\n... [diff truncated]"
+	}
+	// Argument vectors may carry secrets (tokens, -password values).
+	if args, ok := out["args"].([]string); ok {
+		redacted := make([]string, len(args))
+		for i, a := range args {
+			redacted[i] = redact(a)
+		}
+		out["args"] = redacted
+	}
+	switch strings.ToLower(strings.TrimSpace(action)) {
+	case ActionFileRead:
+		if s, ok := out["preview"].(string); ok {
+			out["preview"] = Truncate(s, MaxPreviewBytes)
+		}
+	case ActionFileWrite, ActionFileModifed:
+		// Prefer an explicit diff; else synthesize from before/after.
+		if d, ok := out["diff"].(string); ok {
+			out["diff"] = Truncate(d, MaxDiffBytes)
+			out["diff_truncated"] = len(d) > MaxDiffBytes
+		} else {
+			before, _ := out["before"].(string)
+			after, _ := out["after"].(string)
+			if before != "" || after != "" {
+				diff := BuildDiff(before, after, MaxDiffBytes)
+				out["diff"] = diff
+				out["diff_truncated"] = diffTruncated(before, after, diff)
+				delete(out, "before")
+				delete(out, "after")
+			}
+		}
+	case ActionCommandRun:
+		for _, k := range []string{"output", "stdout", "stderr"} {
+			if s, ok := out[k].(string); ok {
+				capped := Truncate(s, MaxOutputBytes)
+				out[k] = capped
+				if len(s) > MaxOutputBytes {
+					out[k+"_truncated"] = true
+				}
+			}
+		}
+		if s, ok := out["command"].(string); ok {
+			out["command"] = Truncate(s, MaxMessageBytes)
+		}
+	case ActionGitDiff:
+		if s, ok := out["diff"].(string); ok {
+			out["diff"] = Truncate(s, MaxDiffBytes)
+			out["diff_truncated"] = len(s) > MaxDiffBytes
+		}
+	case ActionGitCommit:
+		if s, ok := out["message"].(string); ok {
+			out["message"] = Truncate(s, MaxMessageBytes)
+		}
+		if s, ok := out["stat"].(string); ok {
+			out["stat"] = Truncate(s, MaxDiffBytes)
+		}
 	}
 	return out
 }
 
-func splitDiffLines(s string) []string {
-	s = strings.ReplaceAll(s, "\r\n", "\n")
-	if s == "" {
-		return nil
+// Truncate cuts s to at most max bytes on a UTF-8 rune boundary and appends
+// a "[truncated]" marker when capped. max <= 0 returns "".
+func Truncate(s string, max int) string {
+	if max <= 0 {
+		return ""
 	}
-	lines := strings.Split(s, "\n")
-	// A trailing newline terminates the last line; it is not an extra line.
-	if lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
+	if len(s) <= max {
+		return s
 	}
-	return lines
+	cut := max
+	for cut > 0 && !isRuneBoundary(s, cut) {
+		cut--
+	}
+	return s[:cut] + "\n[truncated]"
 }
 
-type diffKind int
-
-const (
-	diffSame diffKind = iota
-	diffDel
-	diffAdd
-)
-
-type diffOp struct {
-	kind diffKind
-	line string
+func isRuneBoundary(s string, i int) bool {
+	if i <= 0 || i >= len(s) {
+		return i == len(s)
+	}
+	c := s[i]
+	return c < 0x80 || c >= 0xC0
 }
 
-// lcsTable builds the classic LCS length table for a/b.
-func lcsTable(a, b []string) [][]int {
-	m, n := len(a), len(b)
-	t := make([][]int, m+1)
-	for i := range t {
-		t[i] = make([]int, n+1)
+// BuildDiff renders a simple line-oriented diff between before and after,
+// capped at maxBytes (Truncate marker appended when capped). Lines only in
+// before get a "- " prefix, lines only in after get "+ ". Common lines are
+// elided except for a short context window so instruction-file and source
+// diffs stay small. Stdlib only — no external diff dependency.
+func BuildDiff(before, after string, maxBytes int) string {
+	if before == after {
+		return ""
 	}
-	for i := m - 1; i >= 0; i-- {
-		for j := n - 1; j >= 0; j-- {
-			if a[i] == b[j] {
-				t[i][j] = t[i+1][j+1] + 1
-			} else if t[i+1][j] >= t[i][j+1] {
-				t[i][j] = t[i+1][j]
-			} else {
-				t[i][j] = t[i][j+1]
+	if maxBytes <= 0 {
+		return ""
+	}
+	var sb strings.Builder
+	beforeLines := splitLines(before)
+	afterLines := splitLines(after)
+
+	// LCS-lite via longest common prefix/suffix elision: keeps the diff
+	// readable without an O(n*m) table for large files.
+	pre := commonPrefixLen(beforeLines, afterLines)
+	post := commonSuffixLen(beforeLines[pre:], afterLines[pre:])
+
+	removed := beforeLines[pre : len(beforeLines)-post]
+	added := afterLines[pre : len(afterLines)-post]
+
+	writeLines := func(prefix string, lines []string) {
+		for _, l := range lines {
+			sb.WriteString(prefix)
+			sb.WriteString(l)
+			sb.WriteByte('\n')
+			if sb.Len() > maxBytes {
+				break
 			}
 		}
 	}
-	return t
+	writeLines("- ", removed)
+	writeLines("+ ", added)
+
+	out := sb.String()
+	if len(out) > maxBytes || len(removed)+len(added) > countLines(out) {
+		return Truncate(out, maxBytes)
+	}
+	return out
 }
 
-// diffOps backtracks the LCS table into an edit script. Deletions sort
-// before additions at the same position (stable, deterministic output).
-func diffOps(t [][]int, a, b []string) []diffOp {
-	var ops []diffOp
-	i, j := 0, 0
-	for i < len(a) && j < len(b) {
-		switch {
-		case a[i] == b[j]:
-			ops = append(ops, diffOp{diffSame, a[i]})
-			i++
-			j++
-		case t[i+1][j] >= t[i][j+1]:
-			ops = append(ops, diffOp{diffDel, a[i]})
-			i++
-		default:
-			ops = append(ops, diffOp{diffAdd, b[j]})
-			j++
-		}
+func diffTruncated(before, after, diff string) bool {
+	return strings.Contains(diff, "[truncated]")
+}
+
+func splitLines(s string) []string {
+	if s == "" {
+		return nil
 	}
-	for ; i < len(a); i++ {
-		ops = append(ops, diffOp{diffDel, a[i]})
+	return strings.Split(s, "\n")
+}
+
+func commonPrefixLen(a, b []string) int {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
 	}
-	for ; j < len(b); j++ {
-		ops = append(ops, diffOp{diffAdd, b[j]})
+	i := 0
+	for i < n && a[i] == b[i] {
+		i++
 	}
-	return ops
+	return i
+}
+
+func commonSuffixLen(a, b []string) int {
+	i := 0
+	for i < len(a) && i < len(b) && a[len(a)-1-i] == b[len(b)-1-i] {
+		i++
+	}
+	return i
+}
+
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+// Convenience constructors — thin wrappers over LogAction so call sites in
+// fileops.go / commands.go / gitops.go stay one-liners. Each applies the
+// documented caps and returns the emitted ToolEvent.
+
+// LogFileRead records a FILE_READ event: path, size, first-200-char preview.
+func (in *Interceptor) LogFileRead(path string, size int64, preview string) ToolEvent {
+	return in.LogAction(ActionFileRead, map[string]any{
+		"path":    path,
+		"size":    size,
+		"preview": preview,
+	})
+}
+
+// LogFileModified records a FILE_MODIFIED event with a capped diff.
+func (in *Interceptor) LogFileModified(path string, before, after string, newSize int64) ToolEvent {
+	return in.LogAction(ActionFileWrite, map[string]any{
+		"path":   path,
+		"before": before,
+		"after":  after,
+		"size":   newSize,
+	})
+}
+
+// LogFileModifiedDiff records a FILE_MODIFIED event when the caller already
+// computed a diff string.
+func (in *Interceptor) LogFileModifiedDiff(path, diff string, newSize int64) ToolEvent {
+	return in.LogAction(ActionFileWrite, map[string]any{
+		"path": path,
+		"diff": diff,
+		"size": newSize,
+	})
+}
+
+// LogCommand records a COMMAND_EXECUTED event; output capped at 4KB.
+func (in *Interceptor) LogCommand(command string, args []string, exitCode int, output string) ToolEvent {
+	return in.LogAction(ActionCommandRun, map[string]any{
+		"command":   command,
+		"args":      args,
+		"exit_code": exitCode,
+		"output":    output,
+	})
+}
+
+// LogGitDiff records a GIT_DIFF_VIEWED event with capped diff/stats.
+func (in *Interceptor) LogGitDiff(ref, diff, stats string) ToolEvent {
+	return in.LogAction(ActionGitDiff, map[string]any{
+		"ref":   ref,
+		"diff":  diff,
+		"stats": stats,
+	})
+}
+
+// LogGitCommitted records a GIT_COMMITTED event (detected via heartbeat per
+// plan §1.3): commit SHA, message, diff stat.
+func (in *Interceptor) LogGitCommitted(sha, message, stat string) ToolEvent {
+	return in.LogAction(ActionGitCommit, map[string]any{
+		"commit":  sha,
+		"message": message,
+		"stat":    stat,
+	})
 }
