@@ -12,10 +12,14 @@
 // the delimiters.
 //
 // DECOUPLING NOTE: this package does NOT import internal/store (no event
-// bus, no memory rows) and does NOT import internal/daemon (no sandbox).
-// The daemon/server layers map store events onto Event and inject their
-// sandboxed fileops behind FileWriter at the boundary (their call). This
-// keeps the materializer dependency-free and unit-testable. See ADR-016.
+// bus, no memory rows). It imports internal/daemon ONLY for
+// daemon.ResolveInSandbox, used as a fail-fast config check in AddTarget
+// when a sandbox root is set (issue #41) — no sandbox writes happen here;
+// all file I/O still goes through the injected FileStore, which remains
+// the enforcement point (the daemon injects its sandboxed fileops behind
+// FileWriter at the boundary). Safe from cycles: internal/daemon imports
+// only internal/scan (+ internal/project in harvester.go), never this
+// package. See ADR-016, ADR-041.
 //
 // Data flow:
 //
@@ -35,10 +39,13 @@ package materializer
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"central-memory/internal/daemon"
 )
 
 // Event types this package subscribes to (plan §4.2). Declared locally —
@@ -181,6 +188,12 @@ type Materializer struct {
 	debounce time.Duration
 	targets  map[string][]Target  // projectID → targets
 	pending  map[string]time.Time // projectID → last dirty time
+	// sandboxRoot, when non-empty, confines AddTarget OutputPaths via
+	// daemon.ResolveInSandbox (issue #41). Set with SetSandboxRoot
+	// (production passes the daemon workspace root); empty keeps the
+	// legacy behaviour (trim + blank check only, enforcement left to the
+	// injected FileStore). Guarded by mu.
+	sandboxRoot string
 }
 
 // New wires a Materializer. A nil clock selects SystemClock; a non-positive
@@ -208,23 +221,50 @@ func New(source MemorySource, files FileStore, clock Clock, debounce time.Durati
 	}, nil
 }
 
+// SetSandboxRoot sets the workspace root AddTarget validates OutputPaths
+// against (daemon.ResolveInSandbox: traversal escapes and absolute paths
+// outside the root are rejected). Empty clears it (legacy behaviour).
+// The value is cleaned lexically; it need not exist — validation is the
+// same Clean + HasPrefix confinement the daemon serves.
+func (m *Materializer) SetSandboxRoot(root string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if strings.TrimSpace(root) == "" {
+		m.sandboxRoot = ""
+		return
+	}
+	m.sandboxRoot = filepath.Clean(root)
+}
+
 // AddTarget registers one push-model output file. Multiple targets per
 // project are allowed (e.g. copilot + cursor files for one repo). Adding a
 // target does not mark the project dirty — only memory events do.
-func (m *Materializer) AddTarget(t Target) {
+//
+// It returns false (and registers nothing) when the target is blank, a
+// duplicate output path for the project, or escapes the sandbox root set
+// with SetSandboxRoot (traversal/absolute escapes fail fast here instead
+// of surfacing as write errors at Regenerate). Existing callers ignore
+// the result — registration of valid targets is unchanged.
+func (m *Materializer) AddTarget(t Target) bool {
 	t.ProjectID = strings.TrimSpace(t.ProjectID)
 	t.OutputPath = strings.TrimSpace(t.OutputPath)
 	if t.ProjectID == "" || t.OutputPath == "" {
-		return
+		return false
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.sandboxRoot != "" {
+		if _, err := daemon.ResolveInSandbox(m.sandboxRoot, t.OutputPath); err != nil {
+			return false
+		}
+	}
 	for _, cur := range m.targets[t.ProjectID] {
 		if cur.OutputPath == t.OutputPath {
-			return // idempotent: one entry per output path
+			return false // idempotent: one entry per output path
 		}
 	}
 	m.targets[t.ProjectID] = append(m.targets[t.ProjectID], t)
+	return true
 }
 
 // RemoveTarget unregisters one output file. Pending state is kept: if the

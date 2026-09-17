@@ -213,6 +213,27 @@ type FileBackend interface {
 }
 
 // ---------------------------------------------------------------------------
+// Budget resolution (issue #41, plan §§1.6/4.1)
+//
+// Per-agent context budgets live in the agent registry (store/agents.go:
+// seed budgets, per-project config overrides). The MCP layer consumes them
+// through the narrow BudgetResolver seam below — production wiring passes a
+// *store.AgentStore (which already implements BudgetForProject), tests pass
+// a fake or nothing. No new import was needed: this package already imports
+// internal/store and store imports nothing from mcp (no cycle).
+// ---------------------------------------------------------------------------
+
+// BudgetResolver resolves the Context Builder char budget for a named agent
+// inside a project (project config override wins, else the agent default,
+// else the builder default). *store.AgentStore implements it.
+type BudgetResolver interface {
+	BudgetForProject(ctx context.Context, projectID, agentName string) (int, error)
+}
+
+// compile-time proof the production registry satisfies the narrow seam.
+var _ BudgetResolver = (*store.AgentStore)(nil)
+
+// ---------------------------------------------------------------------------
 // Validation (pure, unit-tested)
 // ---------------------------------------------------------------------------
 
@@ -277,7 +298,20 @@ type Config struct {
 	ProjectID   string
 	ProjectName string
 	Branch      string
-	// BudgetChars caps memory_search XML output; <=0 selects
+	// AgentName selects the per-agent context budget (issue #41, plan
+	// §4.1): when set, budget resolution consults Budgets (project-scoped)
+	// then the store seed default for the named agent, instead of the
+	// static BudgetChars below. Empty means "no agent" — BudgetChars (or
+	// the builder default) applies, preserving pre-#41 behaviour.
+	AgentName string
+	// Budgets resolves the project-scoped budget for AgentName
+	// (store.BudgetForProject via *store.AgentStore in production). Nil
+	// skips project overrides and falls through to the seed default. A
+	// resolver error also falls through — a budget must never fail a
+	// search.
+	Budgets BudgetResolver
+	// BudgetChars is the static memory_search XML cap, honoured only when
+	// no seed budget applies (AgentName empty or unknown); <=0 selects
 	// builder.DefaultBudgetChars (4000, plan §1.6).
 	BudgetChars int
 	// Embed maps a search query to a vector; nil selects HashEmbed
@@ -302,11 +336,41 @@ func New(cfg Config, mem MemoryBackend, w MemoryWriter, ep EpisodeBackend, ws Wo
 	return &Server{cfg: cfg, Memories: mem, Writer: w, Episodes: ep, Workspace: ws, Files: f}
 }
 
-func (s *Server) budget() int {
-	if s == nil || s.cfg.BudgetChars <= 0 {
-		return builder.DefaultBudgetChars
+func (s *Server) budget(ctx context.Context) int {
+	if s != nil {
+		if agent := strings.TrimSpace(s.cfg.AgentName); agent != "" {
+			// Project-scoped override first (per-project config wins).
+			if s.cfg.Budgets != nil && strings.TrimSpace(s.cfg.ProjectID) != "" {
+				if b, err := s.cfg.Budgets.BudgetForProject(ctx, s.cfg.ProjectID, agent); err == nil && b > 0 {
+					return b
+				}
+			}
+			// Seed default for known agents (claude/opencode 10k, copilot
+			// 8k, cursor/windsurf 6k). Unknown names skip this so an
+			// explicit BudgetChars is honoured instead of being shadowed
+			// by the seed fallback (which equals the builder default).
+			if isSeedAgent(agent) {
+				return store.BudgetFor(agent)
+			}
+		}
+		if s.cfg.BudgetChars > 0 {
+			return s.cfg.BudgetChars
+		}
 	}
-	return s.cfg.BudgetChars
+	return builder.DefaultBudgetChars
+}
+
+// isSeedAgent reports whether name matches a registry seed row
+// (case/whitespace-insensitive). Local scan over the exported seed table —
+// no store API change needed (store/agents.go untouched per issue #41).
+func isSeedAgent(name string) bool {
+	norm := store.NormalizeAgentName(name)
+	for _, a := range store.SeedAgents {
+		if store.NormalizeAgentName(a.Name) == norm {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) embed() func(string) []float32 {
@@ -393,7 +457,7 @@ func (s *Server) handleMemorySearch(ctx context.Context, args map[string]any) (a
 			in.Project = append(in.Project, it)
 		}
 	}
-	xmlOut, stats := builder.BuildXML(in, s.budget())
+	xmlOut, stats := builder.BuildXML(in, s.budget(ctx))
 	return map[string]any{
 		"context":          xmlOut,
 		"token_count":      stats.CharsUsed,

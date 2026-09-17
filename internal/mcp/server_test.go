@@ -372,3 +372,103 @@ func TestValidateMemoryWriteLevelsScopes(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue #41: per-agent budget resolution
+// ---------------------------------------------------------------------------
+
+// fakeBudgets is a scripted BudgetResolver: scripted per-agent budgets,
+// an optional error, and 0/unknown falling through to the seed default.
+type fakeBudgets struct {
+	budgets map[string]int
+	err     error
+}
+
+func (f fakeBudgets) BudgetForProject(_ context.Context, _, agentName string) (int, error) {
+	if f.err != nil {
+		return 0, f.err
+	}
+	return f.budgets[agentName], nil
+}
+
+// AgentName must resolve to the registry seed budgets (claude/opencode
+// 10k, copilot 8k, cursor/windsurf 6k); unknown/empty names keep the
+// static BudgetChars (or the 4000 builder default).
+func TestBudgetResolvesSeedAgent(t *testing.T) {
+	ctx := context.Background()
+	cases := []struct {
+		name string
+		cfg  Config
+		want int
+	}{
+		{"claude seed", Config{ProjectID: "p1", AgentName: "claude"}, 10000},
+		{"case-insensitive", Config{ProjectID: "p1", AgentName: " Claude "}, 10000},
+		{"copilot seed", Config{ProjectID: "p1", AgentName: "copilot"}, 8000},
+		{"cursor seed", Config{ProjectID: "p1", AgentName: "cursor"}, 6000},
+		{"windsurf seed", Config{ProjectID: "p1", AgentName: "windsurf"}, 6000},
+		{"unknown keeps static", Config{ProjectID: "p1", AgentName: "nope", BudgetChars: 1234}, 1234},
+		{"unknown defaults", Config{ProjectID: "p1", AgentName: "nope"}, 4000},
+		{"empty agent keeps static", Config{ProjectID: "p1", BudgetChars: 1234}, 1234},
+		{"empty agent defaults", Config{ProjectID: "p1"}, 4000},
+		{"seed beats static", Config{ProjectID: "p1", AgentName: "claude", BudgetChars: 1234}, 10000},
+	}
+	for _, c := range cases {
+		s := New(c.cfg, nil, nil, nil, nil, nil)
+		if got := s.budget(ctx); got != c.want {
+			t.Errorf("%s: budget = %d, want %d", c.name, got, c.want)
+		}
+	}
+	if got := (*Server)(nil).budget(ctx); got != 4000 {
+		t.Errorf("nil server: budget = %d, want 4000", got)
+	}
+}
+
+// A project-scoped resolver wins over the seed; resolver errors and
+// non-positive results fall through to the seed (budgets never fail a
+// search).
+func TestBudgetResolverOverrideWins(t *testing.T) {
+	ctx := context.Background()
+	base := Config{ProjectID: "p1", AgentName: "claude"}
+
+	s := New(base, nil, nil, nil, nil, nil)
+	s.cfg.Budgets = fakeBudgets{budgets: map[string]int{"claude": 7777}}
+	if got := s.budget(ctx); got != 7777 {
+		t.Errorf("resolver override: budget = %d, want 7777", got)
+	}
+
+	s.cfg.Budgets = fakeBudgets{err: errors.New("db down")}
+	if got := s.budget(ctx); got != 10000 {
+		t.Errorf("resolver error: budget = %d, want seed fallthrough 10000", got)
+	}
+
+	s.cfg.Budgets = fakeBudgets{}
+	if got := s.budget(ctx); got != 10000 {
+		t.Errorf("resolver zero: budget = %d, want seed fallthrough 10000", got)
+	}
+}
+
+// End to end: memory_search output must be capped by the agent budget, not
+// the static 4000 (the issue #41 bug: used + remaining == agent budget).
+func TestMemorySearchUsesAgentBudget(t *testing.T) {
+	ctx := context.Background()
+	mem := NewInMemoryMemoryStore()
+	s := New(
+		Config{ProjectID: "p1", ProjectName: "nexus", Branch: "main", AgentName: "claude"},
+		mem, mem, NewInMemoryEpisodeStore(),
+		StaticWorkspaceProvider{Info: WorkspaceInfo{Project: "nexus", Branch: "main"}},
+		DaemonFileProxy{Root: t.TempDir()},
+	)
+	mustWrite(t, ctx, mem, "testing/framework", "The team uses pytest with fixture-based setup for all services.")
+	mustWrite(t, ctx, mem, "auth/policy", "All APIs must use JWT authentication and reject expired tokens.")
+
+	res, cerr := s.Call(ctx, "memory_search", map[string]any{"query": "how do we test services"})
+	if cerr != nil {
+		t.Fatalf("memory_search: %v", cerr)
+	}
+	m := res.(map[string]any)
+	tc, _ := m["token_count"].(int)
+	br, _ := m["budget_remaining"].(int)
+	if tc+br != 10000 {
+		t.Errorf("token_count(%d) + budget_remaining(%d) != 10000 (claude seed budget)", tc, br)
+	}
+}

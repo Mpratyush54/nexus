@@ -4,29 +4,41 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // fakeClock is the injectable clock/timer: tests pin Now and advance it
 // manually, so debounce tests never sleep. After returns a channel fed by
-// advance (only Run uses it; Flush tests ignore it).
+// advance (only Run uses it; Flush tests ignore it). The mutex keeps
+// Now/advance and the After poller race-free under -race (issue #41).
 type fakeClock struct {
+	mu  sync.Mutex
 	now time.Time
 }
 
 func newFakeClock() *fakeClock { return &fakeClock{now: time.Now()} }
 
-func (c *fakeClock) Now() time.Time { return c.now }
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
 
 func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	ch := make(chan time.Time, 1)
+	c.mu.Lock()
 	deadline := c.now.Add(d)
+	c.mu.Unlock()
 	go func() {
 		for {
 			time.Sleep(time.Millisecond)
-			if !c.now.Before(deadline) {
-				ch <- c.now
+			c.mu.Lock()
+			now := c.now
+			c.mu.Unlock()
+			if !now.Before(deadline) {
+				ch <- now
 				return
 			}
 		}
@@ -34,7 +46,11 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	return ch
 }
 
-func (c *fakeClock) advance(d time.Duration) { c.now = c.now.Add(d) }
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
 
 // fakeSource serves scripted confirmed memories per project.
 type fakeSource struct {
@@ -330,5 +346,51 @@ func TestDebounceDefaultAndValidation(t *testing.T) {
 	m.AddTarget(Target{ProjectID: "", OutputPath: ""})
 	if len(m.targets) != 0 {
 		t.Error("blank target must be ignored")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Issue #41: AddTarget sandbox validation (fail fast via ResolveInSandbox)
+// ---------------------------------------------------------------------------
+
+func TestAddTargetSandboxValidation(t *testing.T) {
+	_, _, _, m := testSetup()
+	m.SetSandboxRoot(t.TempDir())
+
+	if !m.AddTarget(Target{ProjectID: "p1", OutputPath: ".cursorrules", ContextBudget: 4000}) {
+		t.Fatal("relative path inside the sandbox must be accepted")
+	}
+	if !m.AddTarget(Target{ProjectID: "p1", OutputPath: ".github/copilot-instructions.md"}) {
+		t.Fatal("nested relative path inside the sandbox must be accepted")
+	}
+	if m.AddTarget(Target{ProjectID: "p1", OutputPath: ".cursorrules"}) {
+		t.Error("duplicate output path for the project must be rejected")
+	}
+	for _, bad := range []string{"../escape.txt", "a/../../escape.txt", "/abs/path.txt", ""} {
+		if m.AddTarget(Target{ProjectID: "p1", OutputPath: bad}) {
+			t.Errorf("sandbox escape %q must be rejected", bad)
+		}
+	}
+	if got := len(m.TargetsFor("p1")); got != 2 {
+		t.Errorf("TargetsFor = %d, want 2 (only the valid targets)", got)
+	}
+}
+
+func TestAddTargetWithoutRootSkipsSandboxCheck(t *testing.T) {
+	// Legacy behaviour preserved: with no sandbox root set, AddTarget only
+	// trims and blank-checks; enforcement stays with the injected
+	// FileStore (which the daemon wires to the real sandbox).
+	_, _, _, m := testSetup()
+	if !m.AddTarget(Target{ProjectID: "p1", OutputPath: "../escape.txt"}) {
+		t.Error("without a sandbox root, a relative escape is accepted (FileStore enforces)")
+	}
+	if m.AddTarget(Target{ProjectID: "", OutputPath: ""}) {
+		t.Error("blank target must still be rejected")
+	}
+	// Clearing the root restores the legacy behaviour.
+	m.SetSandboxRoot(t.TempDir())
+	m.SetSandboxRoot("  ")
+	if !m.AddTarget(Target{ProjectID: "p1", OutputPath: "sub/ok.txt"}) {
+		t.Error("cleared root must accept plain relative paths")
 	}
 }
