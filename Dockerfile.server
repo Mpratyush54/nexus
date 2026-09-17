@@ -1,0 +1,36 @@
+# Dockerfile.server — central API server (issue #20).
+#
+# Multi-stage: Go builder compiles deploy/server-bootstrap (CGO-free static
+# binary), runtime is minimal Alpine with CA certs + tzdata. migrations/ is
+# copied into the image so the entrypoint runs migrations on boot
+# (MIGRATIONS_DIR=/app/migrations) BEFORE serving traffic.
+#
+# Runtime env (injected by ECS from Secrets Manager — never baked in):
+#   DATABASE_URL  _or_ DB_HOST/DB_PORT/DB_NAME/DB_USER/DB_PASSWORD
+#   JWT_SECRET    (>= 32 chars, from Secrets Manager random_password)
+#   PORT          (default 8080)
+#
+# Probes:  GET /healthz (liveness, open)   GET /readyz (DB pool, open)
+# Build:   docker build -f Dockerfile.server -t central-memory-server .
+# Run:     docker run -e DATABASE_URL=... -e JWT_SECRET=... -p 8080:8080 central-memory-server
+
+# go.mod requires go >= 1.26.1 — pin the toolchain explicitly.
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# Static binary (no cglibc in runtime image); deploy/ is additive-only code.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/server ./deploy/server-bootstrap
+
+FROM alpine:3.21
+RUN apk add --no-cache ca-certificates tzdata \
+    && adduser -D -H -u 10001 appuser
+WORKDIR /app
+COPY --from=build /out/server /app/server
+# Migrations ship with the image so boot-time migrate needs no sidecar.
+COPY migrations/ /app/migrations/
+USER appuser
+EXPOSE 8080
+ENV PORT=8080 MIGRATIONS_DIR=/app/migrations
+ENTRYPOINT ["/app/server"]
