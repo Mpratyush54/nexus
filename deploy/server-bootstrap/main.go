@@ -35,46 +35,14 @@ import (
 
 	"central-memory/internal/server"
 	"central-memory/internal/store"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// errStorePending fails closed on every data route until the Postgres-backed
-// server.Store adapter lands (follow-up; see ADR-020 Consequences).
-var errStorePending = errors.New("central-memory: postgres store adapter pending (infra issue #20 ships boot+migrate; data routes land with the adapter follow-up)")
-
-// stubStore satisfies server.Store with explicit failures. It exists only so
-// the container boots, migrates, and serves health probes today.
-type stubStore struct{}
-
-func (stubStore) Authenticate(ctx context.Context, username, password string) (string, error) {
-	return "", errStorePending
-}
-func (stubStore) ResolveProject(ctx context.Context, p store.ProjectParams) (*store.Project, error) {
-	return nil, errStorePending
-}
-func (stubStore) RegisterWorkspace(ctx context.Context, p store.WorkspaceParams) (*store.Workspace, error) {
-	return nil, errStorePending
-}
-func (stubStore) HeartbeatWorkspace(ctx context.Context, id string, hb store.HeartbeatParams) (*store.Workspace, error) {
-	return nil, errStorePending
-}
-func (stubStore) ListWorkspaces(ctx context.Context, projectID string) ([]store.Workspace, error) {
-	return nil, errStorePending
-}
-func (stubStore) CreateMemory(ctx context.Context, m server.Memory) (*server.Memory, error) {
-	return nil, errStorePending
-}
-func (stubStore) SearchMemory(ctx context.Context, q server.MemoryFilter) ([]server.Memory, error) {
-	return nil, errStorePending
-}
-func (stubStore) CreateEpisode(ctx context.Context, e server.Episode) (*server.Episode, error) {
-	return nil, errStorePending
-}
-func (stubStore) SearchEpisodes(ctx context.Context, q server.EpisodeFilter) ([]server.Episode, error) {
-	return nil, errStorePending
-}
-
-// Compile-time proof the stub satisfies the server seam.
-var _ server.Store = stubStore{}
+// Data-route persistence (issue #40 wiring the issue #37 adapter): the
+// Postgres-backed server.Store is server.NewPostgresStore(db) — *store.DB
+// satisfies store.DBTX, so the migrated pool backs every data route. The
+// stubStore that used to fail closed here is gone; see ADR-040.
 
 // getenv returns env key or fallback when unset/blank.
 func getenv(key, fallback string) string {
@@ -180,10 +148,14 @@ func run() error {
 	}
 	log.Printf("server-bootstrap: migrations applied=%d dir=%s files=%v", len(applied), migrationsDir, applied)
 
-	// Boot step 3: serve. Data routes fail closed via stubStore until the
-	// Postgres adapter follow-up lands; /healthz + /readyz are fully live.
-	srv := server.New(stubStore{}, server.Options{JWTSecret: []byte(jwtSecret)})
+	// Boot step 3: serve. Data routes are backed by the issue #37
+	// PostgresStore over the migrated pool; /healthz + /readyz are fully
+	// live. WebSocket (/ws) and the static dashboard are enabled here
+	// (issue #40); the store → hub event bridge runs as a goroutine below.
+	srv := server.New(server.NewPostgresStore(db), server.Options{JWTSecret: []byte(jwtSecret)})
+	srv.EnableWS()
 	mux := http.NewServeMux()
+	srv.RegisterWebRoutes(mux)
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		if err := db.Health(r.Context()); err != nil {
 			http.Error(w, fmt.Sprintf(`{"ok":false,"error":%q}`, err.Error()), http.StatusServiceUnavailable)
@@ -193,6 +165,28 @@ func run() error {
 		fmt.Fprintf(w, `{"ok":true,"migrations_applied":%d}`, len(applied))
 	})
 	mux.Handle("/", srv.Handler())
+
+	// Boot step 4: bridge store.Subscribe (LISTEN/NOTIFY) → hub fan-out
+	// (issue #40). Subscribe needs a *pgxpool.Pool, but *store.DB keeps its
+	// pool private with no accessor (ownership constraint — see ADR-040), so
+	// the bridge opens a small dedicated pool from the same DSN: one
+	// connection is held by LISTEN, the second covers reconnect overlap.
+	bridgePoolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("parse bridge pool DSN: %w", err)
+	}
+	bridgePoolCfg.MaxConns = 2
+	bridgePoolCfg.MinConns = 1
+	bridgePool, err := pgxpool.NewWithConfig(ctx, bridgePoolCfg)
+	if err != nil {
+		return fmt.Errorf("open bridge pool: %w", err)
+	}
+	defer bridgePool.Close()
+	go func() {
+		if berr := server.BridgeEvents(ctx, bridgePool, srv.Hub()); berr != nil {
+			log.Printf("server-bootstrap: ws bridge ended: %v", berr)
+		}
+	}()
 
 	httpSrv := &http.Server{
 		Addr:              ":" + port,
@@ -205,7 +199,7 @@ func run() error {
 		defer cancel()
 		_ = httpSrv.Shutdown(shCtx)
 	}()
-	log.Printf("server-bootstrap: listening on :%s (healthz, readyz open; data routes pending adapter)", port)
+	log.Printf("server-bootstrap: listening on :%s (healthz, readyz, ws, web, data routes live)", port)
 	if err := httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("serve: %w", err)
 	}
