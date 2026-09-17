@@ -1,52 +1,66 @@
--- Migration 005_branches — Phase 5 memory branching (copy-on-write).
--- Source of truth: implementation-plan.md §§5.1–5.2 (transcribed exactly,
--- with documented operational additions, see below).
--- Cross-platform: pure DDL, no filesystem paths, no OS-specific constructs.
--- Target: AWS RDS Aurora Serverless v2 (PostgreSQL + pgvector).
--- Applies on top of 001_initial + 002_events: memory_branches references
--- projects/users (001), memory_items (001), and events(id) for
--- forked_at_event_id (002, BIGSERIAL → BIGINT FK). Apply 002 before 005.
--- Forward-only step 5 of N; rollback in 005_branches.down.sql.
+-- 005_branches.up.sql: Copy-on-Write memory branching (Phase 5, nexus issue #17).
 --
--- OPERATIONAL ADDITIONS beyond the plan text (all index/constraint naming):
--- 1. Three indexes (plan names none): per-project branch lookup, parent-chain
---    walk, and branch-scoped item lookup — the exact predicates
---    internal/store/branches.go issues.
--- 2. The memory_items.branch_id FK is NAMED (fk_memory_branch) instead of the
---    plan's inline REFERENCES, so the down migration can drop it explicitly —
---    same pattern as 003's fk_memory_session.
+-- Depends on: 001_initial (projects, users, memory_items),
+--             002_events (events, for forked_at_event_id provenance).
+-- Idempotent: CREATE IF NOT EXISTS + guarded ALTERs + ON CONFLICT seeds.
 --
--- AUTO-CREATE MAIN (plan: "Every project gets a 'main' branch
--- automatically"): implemented at the application layer via
--- BranchStore.EnsureMainBranch (INSERT ... ON CONFLICT (project_id, name)
--- DO NOTHING, visibility 'shared'), NOT via a DB trigger — triggers add
--- hidden write paths and privilege surface on Aurora, and an explicit call
--- keeps branch creation testable without a live database. See ADR-017.
+-- Design (plan §5.1/§5.2): branches are lightweight pointer rows. Forking
+-- inserts ONE row (parent_branch_id = source); zero memory rows are copied.
+-- Reads resolve copy-on-write: walk branch -> parent -> ... -> main, first
+-- key match wins. Writes always insert into the current branch, never mutate
+-- parents. See docs/decisions/2026-09-17-branches.md for rationale.
+--
+-- Episodes are NOT branched (plan §5.3): a bug fix is a project-scoped fact.
+-- Only memory_items carry branch_id.
 
 -- ============================================================
--- MEMORY BRANCHES — copy-on-write branch heads (plan §5.1, exact)
+-- MEMORY_BRANCHES — branch pointers, not data copies
 -- ============================================================
-CREATE TABLE memory_branches (
+CREATE TABLE IF NOT EXISTS memory_branches (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id          UUID NOT NULL REFERENCES projects(id),
+    project_id          UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     name                TEXT NOT NULL,
-    owner_id            UUID REFERENCES users(id),
-    parent_branch_id    UUID REFERENCES memory_branches(id),
-    forked_at_event_id  BIGINT REFERENCES events(id),
-    visibility          TEXT DEFAULT 'private'
+    owner_id            UUID REFERENCES users(id) ON DELETE SET NULL,
+    parent_branch_id    UUID REFERENCES memory_branches(id) ON DELETE SET NULL,
+    forked_at_event_id  BIGINT REFERENCES events(id) ON DELETE SET NULL,
+    visibility          TEXT NOT NULL DEFAULT 'private'
         CHECK (visibility IN ('private', 'shared')),
-    created_at          TIMESTAMPTZ DEFAULT now(),
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(project_id, name)
 );
 
-CREATE INDEX idx_memory_branches_project ON memory_branches(project_id);
-CREATE INDEX idx_memory_branches_parent ON memory_branches(parent_branch_id);
+CREATE INDEX IF NOT EXISTS idx_branches_project ON memory_branches(project_id);
+CREATE INDEX IF NOT EXISTS idx_branches_parent ON memory_branches(parent_branch_id)
+    WHERE parent_branch_id IS NOT NULL;
 
--- Every project gets a "main" branch automatically (application-layer;
--- see header note + EnsureMainBranch). Branch-scoped items follow:
-ALTER TABLE memory_items
-    ADD COLUMN branch_id UUID,
-    ADD CONSTRAINT fk_memory_branch
-    FOREIGN KEY (branch_id) REFERENCES memory_branches(id);
+-- ============================================================
+-- MEMORY_ITEMS.branch_id — CoW overlay pointer
+-- ============================================================
+-- NULL (or pointing at the project's "main" branch) means main-line memory.
+-- Branch writes insert new rows tagged with the branch id; parent rows are
+-- never updated, so the parent view is unchanged by construction.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'memory_items' AND column_name = 'branch_id'
+    ) THEN
+        ALTER TABLE memory_items
+            ADD COLUMN branch_id UUID
+            REFERENCES memory_branches(id) ON DELETE SET NULL;
+    END IF;
+END
+$$;
 
-CREATE INDEX idx_memory_branch ON memory_items(branch_id);
+CREATE INDEX IF NOT EXISTS idx_memory_branch ON memory_items(branch_id)
+    WHERE branch_id IS NOT NULL;
+
+-- ============================================================
+-- MAIN AUTO-BRANCH — every project gets a shared "main"
+-- ============================================================
+-- New projects get theirs from EnsureMainBranch in
+-- internal/store/branches.go (get-or-create at write time); this seed covers
+-- projects that already exist when the migration lands.
+INSERT INTO memory_branches (project_id, name, visibility)
+SELECT id, 'main', 'shared' FROM projects
+ON CONFLICT (project_id, name) DO NOTHING;
