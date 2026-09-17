@@ -198,6 +198,9 @@ func New(st Store, opts Options) *Server {
 	s := &Server{store: st, secret: opts.JWTSecret, ttl: ttl, now: now}
 	s.mux = http.NewServeMux()
 	s.registerRoutes(s.mux)
+	s.mux.HandleFunc("POST /memory/{id}/confirm", s.handleConfirmMemory)
+	s.mux.HandleFunc("POST /memory/{id}/reject", s.handleRejectMemory)
+	s.mux.HandleFunc("POST /memory/{id}/promote", s.handlePromoteMemory)
 	return s
 }
 
