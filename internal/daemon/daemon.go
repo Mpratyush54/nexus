@@ -580,9 +580,44 @@ func heartbeatBackoff(failures int) time.Duration {
 	return backoff
 }
 
-// StartHeartbeat POSTs heartbeat snapshots every interval until ctx ends.
-// The first beat fires immediately; failures are logged (previously
-// swallowed) and retried with exponential backoff while they persist.
+// isUnknownRegistration reports whether a heartbeat error means the server
+// does not know this workspace: either HeartbeatOnce fired without an ID
+// ("register first") or postJSON surfaced a 404 ("server status 404").
+// Issue #106.
+func isUnknownRegistration(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "register first") || strings.Contains(msg, "404")
+}
+
+// heartbeatDelay scales heartbeatBackoff to a custom base interval so tests
+// can inject small intervals without wall-clock sleeps (issue #106). A
+// non-positive base or HeartbeatInterval returns heartbeatBackoff exactly;
+// a smaller base doubles per failure from that base, capped at
+// maxHeartbeatBackoff.
+func heartbeatDelay(base time.Duration, failures int) time.Duration {
+	if base <= 0 || base == HeartbeatInterval {
+		return heartbeatBackoff(failures)
+	}
+	if failures <= 1 {
+		return base
+	}
+	d := base << (failures - 1)
+	if d <= 0 || d > maxHeartbeatBackoff {
+		return maxHeartbeatBackoff
+	}
+	return d
+}
+
+// StartHeartbeat POSTs heartbeat snapshots until ctx ends, recovering via
+// Register when unregistered (issue #106). The first beat fires
+// immediately; the wait after every beat is heartbeatDelay(interval,
+// failures) so consecutive errors back off instead of hot-looping. When no
+// workspace ID is known, or a heartbeat fails with unknown registration
+// (see isUnknownRegistration), it calls Register instead: success resets
+// the failure count (Register persists the new ID); failure increments it.
 func (d *Daemon) StartHeartbeat(ctx context.Context, serverURL string, interval time.Duration) {
 	if interval <= 0 {
 		interval = HeartbeatInterval
@@ -598,22 +633,41 @@ func (d *Daemon) StartHeartbeat(ctx context.Context, serverURL string, interval 
 	}
 	failures := 0
 	beat := func() {
+		if strings.TrimSpace(d.getWorkspaceID()) == "" {
+			if err := d.Register(ctx, base); err != nil {
+				failures++
+				log.Printf("daemon: heartbeat: register: %v (retry in %s)", err, heartbeatDelay(interval, failures))
+			} else {
+				failures = 0
+			}
+			return
+		}
 		if err := d.HeartbeatOnce(ctx, base); err != nil {
+			if isUnknownRegistration(err) {
+				if rerr := d.Register(ctx, base); rerr != nil {
+					failures++
+					log.Printf("daemon: heartbeat: re-register: %v (retry in %s)", rerr, heartbeatDelay(interval, failures))
+				} else {
+					failures = 0
+				}
+				return
+			}
 			failures++
-			log.Printf("daemon: heartbeat: %v (retry in %s)", err, heartbeatBackoff(failures))
+			log.Printf("daemon: heartbeat: %v (retry in %s)", err, heartbeatDelay(interval, failures))
 		} else {
 			failures = 0
 		}
 	}
 	beat()
-	t := time.NewTicker(interval)
-	defer t.Stop()
+	timer := time.NewTimer(heartbeatDelay(interval, failures))
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.C:
+		case <-timer.C:
 			beat()
+			timer.Reset(heartbeatDelay(interval, failures))
 		}
 	}
 }
