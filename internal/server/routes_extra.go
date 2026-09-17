@@ -26,11 +26,14 @@ package server
 //   - RejectMemory does not exist on store.Store, so reject falls back to
 //     mutating the fetched item (persists on MemStore, which returns a live
 //     pointer; a PostgresStore needs a real RejectMemory method).
-//   - Diff/merge have no Store methods (no branch content enumeration), so
-//     they validate + resolve branches and return an explicit stub shape
-//     with a "note" field instead of fabricated data.
-//   - Branch checkout is resolve-only: the server keeps no per-client
-//     "current branch" state; the CLI/daemon tracks it locally.
+//   - Diff/merge enumerate each branch's OWN rows (ListBranchItems):
+//     inherited parent/main-line keys are not included, so a fresh child
+//     diffs empty until it is written to (CoW zero-copy consequence).
+//   - Merge reports source deletions without removing target rows: no
+//     branch-item delete primitive exists. Superseded target values are
+//     shadowed by the new PROPOSED row, not marked SUPERSEDED.
+//   - Branch checkout persists only when ?workspace_id= is given; without it
+//     the endpoint is resolve-only and says so in the note field.
 
 import (
 	"context"
@@ -39,6 +42,7 @@ import (
 	"strings"
 	"time"
 
+	"central-memory/internal/branches"
 	"central-memory/internal/store"
 )
 
@@ -367,26 +371,82 @@ func (s *Server) handleBranchCheckout(w http.ResponseWriter, r *http.Request) {
 	// Prefer an ID lookup (IDs are unambiguous across projects); fall back
 	// to a name lookup scoped by ?project_id=. The request body ({} from the
 	// CLI) carries no scope and is intentionally ignored.
-	if br, err := bs.GetBranch(r.Context(), name); err == nil {
-		writeJSON(w, http.StatusOK, br)
+	var br *store.MemoryBranch
+	if b, err := bs.GetBranch(r.Context(), name); err == nil {
+		br = b
+	} else {
+		projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
+		if projectID == "" {
+			writeError(w, http.StatusNotFound, "branch "+name+" not found (pass ?project_id= to resolve by name)")
+			return
+		}
+		branches, err := bs.ListBranches(r.Context(), projectID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not list branches: "+err.Error())
+			return
+		}
+		if b := findBranchByName(branches, name); b != nil {
+			br = b
+		} else {
+			writeError(w, http.StatusNotFound, "branch "+name+" not found")
+			return
+		}
+	}
+	// Workspace-scoped checkout mutation (issue #104): with ?workspace_id=
+	// the branch name is persisted on the workspace row via
+	// SetWorkspaceBranch. Without it the lookup stays resolve-only and the
+	// note says so explicitly.
+	workspaceID := strings.TrimSpace(r.URL.Query().Get("workspace_id"))
+	if workspaceID == "" {
+		writeJSON(w, http.StatusOK, branchCheckoutView(br, "",
+			"resolve-only: no ?workspace_id= given, nothing was persisted; pass ?workspace_id= to persist the active branch on a workspace"))
 		return
 	}
-	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
-	if projectID == "" {
-		writeError(w, http.StatusNotFound, "branch "+name+" not found (pass ?project_id= to resolve by name)")
+	if err := bs.SetWorkspaceBranch(r.Context(), workspaceID, br.Name); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace "+workspaceID+" not found")
+			return
+		}
+		if isInputError(err) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not persist checkout: "+err.Error())
 		return
 	}
-	branches, err := bs.ListBranches(r.Context(), projectID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not list branches: "+err.Error())
-		return
+	writeJSON(w, http.StatusOK, branchCheckoutView(br, workspaceID,
+		"active branch persisted on workspace "+workspaceID))
+}
+
+// branchCheckoutView flattens the branch fields so clients decoding the body
+// as a MemoryBranch (the pre-#104 shape) keep working; the sibling
+// workspace_id/note fields carry the mutation outcome.
+func branchCheckoutView(br *store.MemoryBranch, workspaceID, note string) map[string]any {
+	return map[string]any{
+		"id":                 br.ID,
+		"project_id":         br.ProjectID,
+		"name":               br.Name,
+		"owner_id":           br.OwnerID,
+		"parent_branch_id":   br.ParentBranchID,
+		"forked_at_event_id": br.ForkedAtEventID,
+		"visibility":         br.Visibility,
+		"created_at":         br.CreatedAt,
+		"workspace_id":       workspaceID,
+		"note":               note,
 	}
-	if br := findBranchByName(branches, name); br != nil {
-		writeJSON(w, http.StatusOK, br)
-		return
+}
+
+// branchEntries adapts store rows to the stdlib-only branches.Entry shape
+// (branch semantics need only key + content).
+func branchEntries(items []*store.MemoryItem) []branches.Entry {
+	out := make([]branches.Entry, 0, len(items))
+	for _, m := range items {
+		if m == nil {
+			continue
+		}
+		out = append(out, branches.Entry{Key: m.Key, Content: m.Content})
 	}
-	writeError(w, http.StatusNotFound, "branch "+name+" not found")
-	return
+	return out
 }
 
 func (s *Server) handleBranchDiff(w http.ResponseWriter, r *http.Request) {
@@ -410,19 +470,19 @@ func (s *Server) handleBranchDiff(w http.ResponseWriter, r *http.Request) {
 	if sourceName == "" {
 		sourceName = store.MainBranchName
 	}
-	branches, err := bs.ListBranches(r.Context(), projectID)
+	branchesList, err := bs.ListBranches(r.Context(), projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not list branches: "+err.Error())
 		return
 	}
-	source := findBranchByName(branches, sourceName)
+	source := findBranchByName(branchesList, sourceName)
 	if source == nil {
 		// Accept raw branch IDs too (dashboard holds IDs, CLI holds names).
 		if b, gerr := bs.GetBranch(r.Context(), sourceName); gerr == nil && b.ProjectID == projectID {
 			source = b
 		}
 	}
-	target := findBranchByName(branches, targetName)
+	target := findBranchByName(branchesList, targetName)
 	if target == nil {
 		if b, gerr := bs.GetBranch(r.Context(), targetName); gerr == nil && b.ProjectID == projectID {
 			target = b
@@ -436,20 +496,43 @@ func (s *Server) handleBranchDiff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "target branch "+targetName+" not found")
 		return
 	}
-	// No Store method enumerates branch contents, so a real key-level diff
-	// (internal/branches.Diff over snapshots) cannot be computed here.
-	// Return the resolved endpoints with empty change lists and an explicit
-	// note rather than fabricated data.
+	// Real key-level diff over each branch's own rows (ListBranchItems):
+	// added = keys only on target, removed = keys only on source, modified
+	// = same key with different content hash. Slices are normalized to []
+	// (never null) to preserve the endpoint shape.
+	sourceItems, err := bs.ListBranchItems(r.Context(), source.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list source branch items: "+err.Error())
+		return
+	}
+	targetItems, err := bs.ListBranchItems(r.Context(), target.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list target branch items: "+err.Error())
+		return
+	}
+	d := branches.DiffBranches(branchEntries(sourceItems), branchEntries(targetItems))
+	if d.Added == nil {
+		d.Added = []branches.Entry{}
+	}
+	if d.Removed == nil {
+		d.Removed = []branches.Entry{}
+	}
+	if d.Modified == nil {
+		d.Modified = []branches.Change{}
+	}
+	if d.Unchanged == nil {
+		d.Unchanged = []string{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project_id": projectID,
 		"source":     source.Name,
 		"source_id":  source.ID,
 		"target":     target.Name,
 		"target_id":  target.ID,
-		"added":      []any{},
-		"removed":    []any{},
-		"modified":   []any{},
-		"note":       "key-level diff needs branch content enumeration, which the Store interface does not expose; wire internal/branches.Diff once a list-contents method exists",
+		"added":      d.Added,
+		"removed":    d.Removed,
+		"modified":   d.Modified,
+		"unchanged":  d.Unchanged,
 	})
 }
 
@@ -512,19 +595,69 @@ func (s *Server) handleBranchMerge(w http.ResponseWriter, r *http.Request) {
 	if projectID == "" {
 		projectID = source.ProjectID
 	}
-	// No Store merge method exists and branch contents are not enumerable,
-	// so no rows are copied: report the resolved endpoints with zero
-	// conflicts and an explicit note. A real merge must apply
-	// internal/branches.MergeResult at the store layer (see decision doc).
+	// Real 3-way merge: base is the source's parent-branch snapshot when the
+	// source was forked from another branch, else empty (every source key
+	// then counts as a source-side addition). Auto-merged keys are written
+	// to the target as PROPOSED rows via WriteToBranch; conflicts are
+	// returned verbatim and nothing is written for them.
+	sourceItems, err := bs.ListBranchItems(r.Context(), source.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list source branch items: "+err.Error())
+		return
+	}
+	targetItems, err := bs.ListBranchItems(r.Context(), target.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list target branch items: "+err.Error())
+		return
+	}
+	var baseItems []*store.MemoryItem
+	if strings.TrimSpace(source.ParentBranchID) != "" {
+		baseItems, err = bs.ListBranchItems(r.Context(), source.ParentBranchID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not list base branch items: "+err.Error())
+			return
+		}
+	}
+	res := branches.Merge(branchEntries(baseItems), branchEntries(sourceItems), branchEntries(targetItems))
+	mergedKeys := make([]string, 0, len(res.Merged))
+	for _, m := range res.Merged {
+		if werr := bs.WriteToBranch(r.Context(), target.ID, &store.MemoryItem{
+			Key:     m.Key,
+			Content: m.Content,
+			Status:  branches.StatusProposed,
+		}); werr != nil {
+			writeError(w, http.StatusInternalServerError, "could not write merged item "+m.Key+": "+werr.Error())
+			return
+		}
+		mergedKeys = append(mergedKeys, m.Key)
+	}
+	conflicts := res.Conflicts
+	if conflicts == nil {
+		conflicts = []branches.Conflict{}
+	}
+	superseded := res.Superseded
+	if superseded == nil {
+		superseded = []branches.SupersededMark{}
+	}
+	deleted := res.Deleted
+	if deleted == nil {
+		deleted = []string{}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"source":     source.Name,
-		"source_id":  source.ID,
-		"target":     target.Name,
-		"target_id":  target.ID,
-		"project_id": projectID,
-		"merged":     true,
-		"conflicts":  []any{},
-		"note":       "no rows copied: the Store interface exposes no merge/apply method; implement merge by applying internal/branches.MergeResult in the store layer",
+		"source":       source.Name,
+		"source_id":    source.ID,
+		"target":       target.Name,
+		"target_id":    target.ID,
+		"project_id":   projectID,
+		"merged":       true,
+		"merged_count": len(mergedKeys),
+		"merged_keys":  mergedKeys,
+		"conflicts":    conflicts,
+		"superseded":   superseded,
+		"deleted":      deleted,
+		"note": "wrote merged keys to target as PROPOSED rows; " +
+			"superseded target values are shadowed by the new row, not marked SUPERSEDED; " +
+			"deleted keys are reported, not removed (no branch-item delete primitive exists)",
 	})
 }
 
