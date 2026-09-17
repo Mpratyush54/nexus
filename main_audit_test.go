@@ -56,7 +56,7 @@ func TestAuditRootProjectsStatus(t *testing.T) {
 
 func TestAuditRootUsageOutput(t *testing.T) {
 	out := captureRootStdoutAudit(t, usage)
-	for _, want := range []string{"mem projects", "mem status", "mem daemon"} {
+	for _, want := range []string{"mem projects", "mem status", "mem daemon", "nexus"} {
 		if !containsAudit(out, want) {
 			t.Errorf("usage() missing %q:\n%s", want, out)
 		}

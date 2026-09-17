@@ -12,6 +12,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -57,9 +58,8 @@ func TestAuditAppendEventSessionEmptyRoundTrip(t *testing.T) {
 	}
 }
 
-// BUG(#110): MemStore preserves nil Payload; Postgres marshals nil to
-// '{}' (column NOT NULL). Regression documents the current MemStore
-// behavior (nil round-trips as nil).
+// FIXED(#110): MemStore normalises nil Payload to an empty map, matching
+// Postgres (column NOT NULL marshals nil to '{}').
 func TestAuditAppendEventNilPayloadDivergence(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -70,8 +70,8 @@ func TestAuditAppendEventNilPayloadDivergence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res[0].Payload != nil {
-		t.Errorf("MemStore should preserve nil Payload, got %+v", res[0].Payload)
+	if res[0].Payload == nil {
+		t.Error("nil Payload must round-trip as an empty map (Postgres parity)")
 	}
 }
 
@@ -94,9 +94,20 @@ func TestAuditSubscribeFanOutDropContract(t *testing.T) {
 	if n := len(ch); n > 64 {
 		t.Errorf("subscriber buffer holds %d events, want <= 64 (drop contract)", n)
 	}
-	all, err := s.ListEvents(ctx, "p1", 0, 0)
-	if err != nil {
-		t.Fatal(err)
+	// Backfill pages explicitly: unbounded reads clamp at MaxEventsLimit
+	// (issue #119), so page through.
+	var all []*Event
+	var since int64
+	for {
+		page, err := s.ListEvents(ctx, "p1", since, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		all = append(all, page...)
+		since = page[len(page)-1].ID
 	}
 	if len(all) != 200 {
 		t.Errorf("backfill via ListEvents = %d, want all 200 appended", len(all))
@@ -183,31 +194,32 @@ func TestAuditCreateEpisodeOnboardingAccepted(t *testing.T) {
 	}
 }
 
-// BUG(#103): episode_type CHECK unenforced — garbage accepted. Regression
-// documents current MemStore behavior (no validation).
+// FIXED(#103 + #119): episode_type CHECK enforced — garbage rejected, and
+// the empty type (NOT NULL intent) rejected too. onboarding (in the SQL
+// CHECK) stays accepted.
 func TestAuditCreateEpisodeBogusTypeAccepted(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	ep := &Episode{ProjectID: "p1", Title: "weird", EpisodeType: "teleport"}
-	if err := s.CreateEpisode(ctx, ep); err != nil {
-		t.Fatal(err)
+	if err := s.CreateEpisode(ctx, ep); err == nil {
+		t.Fatal("MemStore must reject bogus episode_type (CHECK)")
 	}
-	if ep.EpisodeType != "teleport" {
-		t.Errorf("EpisodeType = %q, want preserved %q (MemStore does no CHECK validation)", ep.EpisodeType, "teleport")
+	if err := ValidateEpisodeType("teleport"); err == nil {
+		t.Error("validator itself missed bogus type")
+	}
+	for _, good := range ValidEpisodeTypes {
+		if err := ValidateEpisodeType(good); err != nil {
+			t.Errorf("ValidEpisodeTypes %q rejected: %v", good, err)
+		}
 	}
 }
 
-// BUG(#103): empty episode_type violates NOT NULL/CHECK intent yet accepted.
-// Regression documents current MemStore behavior (no validation).
 func TestAuditCreateEpisodeEmptyTypeAccepted(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	ep := &Episode{ProjectID: "p1", Title: "typeless"}
-	if err := s.CreateEpisode(ctx, ep); err != nil {
-		t.Fatal(err)
-	}
-	if ep.EpisodeType != "" {
-		t.Errorf("EpisodeType = %q, want preserved empty (MemStore does no CHECK validation)", ep.EpisodeType)
+	if err := s.CreateEpisode(ctx, ep); err == nil {
+		t.Fatal("MemStore must reject empty episode_type")
 	}
 }
 
@@ -252,9 +264,8 @@ func TestAuditResolveEpisodeNotFound(t *testing.T) {
 	}
 }
 
-// BUG(#103): RESOLVED is terminal but re-resolve silently overwrites
-// resolution/verification (last-write-wins, no guard). Regression documents
-// current MemStore behavior.
+// FIXED(#103): RESOLVED is terminal — re-resolve fails with ErrConflict
+// instead of silently overwriting resolution/verification.
 func TestAuditResolveEpisodeTerminalGuard(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -265,64 +276,99 @@ func TestAuditResolveEpisodeTerminalGuard(t *testing.T) {
 	if err := s.ResolveEpisode(ctx, ep.ID, "first fix", "v1", "u1"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ResolveEpisode(ctx, ep.ID, "second fix", "v2", "u2"); err != nil {
-		t.Fatalf("MemStore re-resolve succeeds (last-write-wins), got err %v", err)
+	if err := s.ResolveEpisode(ctx, ep.ID, "second fix", "v2", "u2"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("re-resolve must fail with ErrConflict, got %v", err)
 	}
 	got, _ := s.GetEpisode(ctx, ep.ID)
-	if got.Resolution != "second fix" {
-		t.Errorf("re-resolve should overwrite resolution to %q (last-write-wins), got %q", "second fix", got.Resolution)
+	if got.Resolution != "first fix" {
+		t.Errorf("terminal re-resolve overwrote resolution: %q", got.Resolution)
 	}
 }
 
-// BUG(#103): episodes in a non-OPEN status (e.g. INVESTIGATING) resolve
-// without any status-machine check; WONT_FIX is unreachable via any API.
-// Regression documents current MemStore behavior (no from-state check).
+// FIXED(#103): INVESTIGATING arcs resolve (OPEN and INVESTIGATING are the
+// resolvable states); WONT_FIX is terminal and unreachable via resolve.
 func TestAuditResolveEpisodeFromInvestigating(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
-	ep := &Episode{ProjectID: "p1", Title: "under investigation", EpisodeType: "incident"}
+	ep := &Episode{ProjectID: "p1", Title: "under investigation", EpisodeType: "incident", Status: "INVESTIGATING"}
 	if err := s.CreateEpisode(ctx, ep); err != nil {
 		t.Fatal(err)
 	}
-	stored, _ := s.GetEpisode(ctx, ep.ID)
-	stored.Status = "INVESTIGATING"
 	if err := s.ResolveEpisode(ctx, ep.ID, "r", "v", "u"); err != nil {
-		t.Fatalf("MemStore ResolveEpisode ignores the status machine, got err %v", err)
+		t.Fatalf("INVESTIGATING -> RESOLVED must succeed, got %v", err)
 	}
 	got, _ := s.GetEpisode(ctx, ep.ID)
 	if got.Status != "RESOLVED" {
-		t.Errorf("Status = %q, want RESOLVED (MemStore overwrites unconditionally)", got.Status)
+		t.Errorf("Status = %q, want RESOLVED", got.Status)
+	}
+	wont := &Episode{ProjectID: "p1", Title: "wontfix", EpisodeType: "incident", Status: "WONT_FIX"}
+	if err := s.CreateEpisode(ctx, wont); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ResolveEpisode(ctx, wont.ID, "r", "v", "u"); !errors.Is(err, ErrConflict) {
+		t.Errorf("WONT_FIX resolve must fail with ErrConflict, got %v", err)
 	}
 }
 
-// BUG(#102): level='session' with NULL session_id accepted — migration 003
-// intent is session-scoped memories carry session_id. Regression documents
-// current MemStore behavior (invariant unenforced).
+// FIXED(#102 + #119): the level/session-NULL invariant is enforced —
+// level='session' without session_id is rejected (it would create an
+// invisible row matched by neither own nor inherited visibility).
 func TestAuditMemoryLevelSessionNullInvariant(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	item := &MemoryItem{ProjectID: "p1", Key: "k-sess", Content: "content with enough length here", Level: "session"}
-	if err := s.CreateMemoryItem(ctx, item); err != nil {
-		t.Fatalf("MemStore accepts level=session with empty session_id, got err %v", err)
-	}
-	if item.Level != "session" || item.SessionID != "" {
-		t.Errorf("stored row = level %q session %q, want session/empty (accepted as-is)", item.Level, item.SessionID)
+	if err := s.CreateMemoryItem(ctx, item); err == nil {
+		t.Fatal("level=session with empty session_id must fail")
 	}
 }
 
-// BUG(#102): project-level memory carrying a session_id accepted — scope
-// leak: it is invisible to ListSessionVisibleMemories inheritance (which
-// requires session_id NULL) yet claims project scope. Regression documents
-// current MemStore behavior (invariant unenforced).
+// FIXED(#102): project-level rows must not carry a session_id (scope leak:
+// invisible to inheritance yet claiming project scope).
 func TestAuditMemoryLevelProjectWithSession(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	item := &MemoryItem{ProjectID: "p1", Key: "k-leak", Content: "content with enough length here", Level: "project", SessionID: "sess-1"}
-	if err := s.CreateMemoryItem(ctx, item); err != nil {
-		t.Fatalf("MemStore accepts level=project with session_id set, got err %v", err)
+	if err := s.CreateMemoryItem(ctx, item); err == nil {
+		t.Fatal("level=project with session_id set must fail")
 	}
-	if item.Level != "project" || item.SessionID != "sess-1" {
-		t.Errorf("stored row = level %q session %q, want project/sess-1 (accepted as-is)", item.Level, item.SessionID)
+}
+
+// FIXED(#102): personal rows require an owner — ownerless personal rows
+// would leak through the NULL-project scope predicate.
+func TestAuditMemoryLevelPersonalRequiresUser(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	ownerless := &MemoryItem{ProjectID: "p1", Key: "k-priv", Content: "content with enough length here", Level: "personal"}
+	if err := s.CreateMemoryItem(ctx, ownerless); err == nil {
+		t.Fatal("level=personal without user_id must fail")
+	}
+	owned := &MemoryItem{ProjectID: "p1", UserID: "u1", Key: "k-priv", Content: "content with enough length here", Level: "personal"}
+	if err := s.CreateMemoryItem(ctx, owned); err != nil {
+		t.Fatalf("owned personal memory must be accepted: %v", err)
+	}
+}
+
+// FIXED(#102): session memories bind to their session's project — a
+// cross-project link fails instead of leaking Project B's memory into
+// Project A's session.
+func TestAuditCreateSessionMemoryCrossProjectRejected(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	pa, err := s.ResolveProject(ctx, "", "", "sess-x-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pb, err := s.ResolveProject(ctx, "", "", "sess-x-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := &Session{ProjectID: pa.ID, CreatedBy: "u1"}
+	if err := s.CreateSession(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	cross := &MemoryItem{ProjectID: pb.ID, SessionID: sess.ID, Key: "k-x", Content: "content with enough length here"}
+	if err := s.CreateSessionMemory(ctx, cross); !errors.Is(err, ErrConflict) {
+		t.Fatalf("cross-project session memory must fail with ErrConflict, got %v", err)
 	}
 }
 
@@ -347,5 +393,53 @@ func TestAuditCreateSessionMemoryRequiresSessionAndForcesLevel(t *testing.T) {
 	}
 	if item.Level != "session" {
 		t.Errorf("Level = %q, want forced session", item.Level)
+	}
+}
+
+// FIXED(#119): ListEvents is bounded — limit<=0 pages (20) and oversized
+// limits clamp at MaxEventsLimit instead of reading the whole log.
+func TestAuditListEventsBounded(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	for i := 0; i < 30; i++ {
+		if err := s.AppendEvent(ctx, &Event{ProjectID: "p1", EventType: "X"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := s.ListEvents(ctx, "p1", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page) != 20 {
+		t.Errorf("default page = %d, want 20", len(page))
+	}
+	if got := ClampEventsLimit(5000); got != MaxEventsLimit {
+		t.Errorf("ClampEventsLimit(5000) = %d, want MaxEventsLimit %d", got, MaxEventsLimit)
+	}
+	if got := ClampEventsLimit(-1); got != 20 {
+		t.Errorf("ClampEventsLimit(-1) = %d, want 20", got)
+	}
+}
+
+// FIXED(#119): plan §6.2 retention tiers are explicit — 0-30d hot,
+// 30-180d warm, 180d+ cold (payload-drop candidate). The sweeper policy
+// (cold prune to Glacier) is a daemon follow-up; the tier mapping lives
+// here so both backends agree.
+func TestAuditRetentionTiers(t *testing.T) {
+	if got := RetentionTierForAge(24 * time.Hour); got != RetentionHot {
+		t.Errorf("1d = %q, want hot", got)
+	}
+	if got := RetentionTierForAge(30 * 24 * time.Hour); got != RetentionWarm {
+		t.Errorf("30d = %q, want warm", got)
+	}
+	if got := RetentionTierForAge(179 * 24 * time.Hour); got != RetentionWarm {
+		t.Errorf("179d = %q, want warm", got)
+	}
+	if got := RetentionTierForAge(180 * 24 * time.Hour); got != RetentionCold {
+		t.Errorf("180d = %q, want cold", got)
+	}
+	now := time.Now().UTC()
+	if got := RetentionTierForAge(now.Sub(now)); got != RetentionHot {
+		t.Errorf("now = %q, want hot", got)
 	}
 }

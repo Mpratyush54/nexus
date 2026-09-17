@@ -160,27 +160,53 @@ func TestAuditAuthUsesConstantTimeCompare(t *testing.T) {
 	}
 }
 
-// Dev-fallback key: env unset yields the insecure default (present by
-// design); env set yields a distinct keyID. Production must set the env var.
-func TestAuditAuthDevFallbackKeyPresence(t *testing.T) {
+// No secret configured: the authenticator fails closed (issue #85). Token
+// minting refuses, validation rejects, and IsConfigured is false. The
+// insecure dev default exists only behind an explicit ALLOW_DEV_JWT=1
+// opt-in; production (env unset) never mints forgeable tokens.
+func TestAuditAuthFailClosedWithoutSecret(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
 	t.Setenv("CENTRAL_MEMORY_JWT_KEY", "")
+	t.Setenv("ALLOW_DEV_JWT", "")
 	a := NewAuthenticatorFromEnv()
-	if a == nil || len(a.key) == 0 {
-		t.Fatal("dev fallback must produce a non-empty key")
+	if a.IsConfigured() {
+		t.Fatal("unconfigured authenticator must report IsConfigured()==false")
 	}
-	if got := string(a.key); got != "dev-only-insecure-key-replace-via-env" {
+	if _, err := a.Generate("alice", time.Hour); err == nil {
+		t.Fatal("Generate without a key must fail closed")
+	}
+	if _, err := a.Validate("anything.at.all"); err == nil {
+		t.Fatal("Validate without a key must fail")
+	}
+
+	// Explicit dev opt-in restores the documented insecure default.
+	t.Setenv("ALLOW_DEV_JWT", "1")
+	dev := NewAuthenticatorFromEnv()
+	if !dev.IsConfigured() {
+		t.Fatal("ALLOW_DEV_JWT=1 must enable the dev fallback key")
+	}
+	if got := string(dev.key); got != "dev-only-insecure-key-replace-via-env" {
 		t.Fatalf("fallback key = %q, want documented dev default", got)
 	}
-	if id := a.keyID(); !strings.HasPrefix(id, "hmac-sha256:") {
+	if id := dev.keyID(); !strings.HasPrefix(id, "hmac-sha256:") {
 		t.Fatalf("keyID = %q, want hmac-sha256: prefix", id)
 	}
 
-	t.Setenv("CENTRAL_MEMORY_JWT_KEY", "prod-secret-xyz-1234567890")
-	b := NewAuthenticatorFromEnv()
-	if string(b.key) == string(a.key) {
-		t.Fatal("env-set key must differ from dev fallback")
+	// Canonical JWT_SECRET wins over the legacy CENTRAL_MEMORY_JWT_KEY.
+	t.Setenv("JWT_SECRET", "canonical-secret-xyz-1234567890")
+	t.Setenv("CENTRAL_MEMORY_JWT_KEY", "legacy-secret-abc-0987654321")
+	canon := NewAuthenticatorFromEnv()
+	if string(canon.key) != "canonical-secret-xyz-1234567890" {
+		t.Fatal("JWT_SECRET must take precedence over the legacy variable")
 	}
-	if b.keyID() == a.keyID() {
+
+	// Legacy fallback still works when only it is set.
+	t.Setenv("JWT_SECRET", "")
+	legacy := NewAuthenticatorFromEnv()
+	if string(legacy.key) != "legacy-secret-abc-0987654321" {
+		t.Fatalf("legacy key = %q, want legacy env value", string(legacy.key))
+	}
+	if legacy.keyID() == dev.keyID() {
 		t.Fatal("keyID must differ when key differs")
 	}
 }
@@ -196,10 +222,21 @@ func TestAuditAuthKeyIDHygiene(t *testing.T) {
 	}
 }
 
-// handleLogin with no users table: any non-empty username+password mints a
-// token (stub). Documents TODO(auth): must become 401 for unknown users.
+// handleLogin without a configured secret fails closed (issue #85): no
+// token is minted. With a key configured, the v1 stub still mints for any
+// non-empty username+password — user-table validation (401 for unknown
+// users) is a follow-up outside internal/server/auth.go's scope.
 func TestAuditAuthLoginNoUsersCheck(t *testing.T) {
 	s := newTestServer()
+	s.Auth = NewAuthenticator(nil) // force unconfigured: fail closed
+	rec := doJSON(t, s, http.MethodPost, "/auth/login", "", map[string]string{
+		"username": "anyone", "password": "whatever",
+	})
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("unconfigured login status = %d, want 500 (fail closed)", rec.Code)
+	}
+
+	s.Auth = NewAuthenticator([]byte("audit-login-key-1234567890"))
 	for _, creds := range []map[string]string{
 		{"username": "anyone", "password": "whatever"},
 		{"username": "ghost-user", "password": "x"},
@@ -222,6 +259,7 @@ func TestAuditAuthLoginNoUsersCheck(t *testing.T) {
 // Expired bearer on a protected route must 401 with "token expired".
 func TestAuditAuthExpiredBearerMessage(t *testing.T) {
 	s := newTestServer()
+	s.Auth = NewAuthenticator([]byte("audit-expired-key-1234567890"))
 	expired, err := s.Auth.Generate("alice", -time.Hour)
 	if err != nil {
 		t.Fatalf("Generate: %v", err)

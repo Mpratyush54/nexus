@@ -36,6 +36,9 @@ type Session struct {
 	IsActive  bool      `json:"is_active"`
 	CreatedAt time.Time `json:"created_at"`
 	EndedAt   time.Time `json:"ended_at,omitempty"`
+	// ExpiresAt optionally overrides DefaultSessionTTL for the expiry
+	// sweeper (migration 010, issue #119). Zero means "created_at + TTL".
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }
 
 // SessionParticipant is one user-or-agent membership in a session.
@@ -326,17 +329,27 @@ func (s *MemStore) ListSessionParticipants(ctx context.Context, sessionID string
 }
 
 // CreateSessionMemory stores a memory as session-scoped: session_id is
-// required, level is forced to 'session' regardless of caller input.
+// required, level is forced to 'session' regardless of caller input. The
+// session must exist and belong to the memory's project (issue #102
+// cross-project invariant): an empty memory project is filled from the
+// session, a mismatched one fails instead of linking Project B's memory to
+// Project A's session.
 func (s *MemStore) CreateSessionMemory(ctx context.Context, item *MemoryItem) error {
 	if strings.TrimSpace(item.SessionID) == "" {
 		return fmt.Errorf("session_id is required for session memory")
 	}
 	b := memSessionsOf(s)
 	b.mu.RLock()
-	_, ok := b.sessions[item.SessionID]
+	sess, ok := b.sessions[item.SessionID]
 	b.mu.RUnlock()
 	if !ok {
 		return ErrNotFound
+	}
+	if strings.TrimSpace(item.ProjectID) == "" {
+		item.ProjectID = sess.ProjectID
+	} else if item.ProjectID != sess.ProjectID {
+		return fmt.Errorf("store: session %s belongs to project %s, not %s: %w",
+			item.SessionID, sess.ProjectID, item.ProjectID, ErrConflict)
 	}
 	item.Level = "session"
 	return s.CreateMemoryItem(ctx, item)
@@ -359,7 +372,7 @@ func (s *MemStore) ListSessionVisibleMemories(ctx context.Context, sessionID str
 	for _, m := range s.memories {
 		if m.SessionID == sessionID {
 			if m.Status == "CONFIRMED" || m.Status == "PROPOSED" {
-				own = append(own, m)
+				own = append(own, cloneMemoryItem(m))
 			}
 			continue
 		}
@@ -370,7 +383,7 @@ func (s *MemStore) ListSessionVisibleMemories(ctx context.Context, sessionID str
 			continue
 		}
 		if NewSessionInherits(m) {
-			inherited = append(inherited, m)
+			inherited = append(inherited, cloneMemoryItem(m))
 		}
 	}
 	return applySessionOverride(own, inherited), nil
@@ -389,7 +402,10 @@ func (s *MemStore) PromotionCandidates(ctx context.Context, projectID string, mi
 		if m.Level != "session" || m.SessionID == "" {
 			continue
 		}
-		if m.ProjectID != "" && m.ProjectID != projectID {
+		// Strict project scoping like Postgres (WHERE project_id = $1):
+		// org-level (NULL-project) session rows are NOT candidates of any
+		// project (issue #110).
+		if m.ProjectID != projectID {
 			continue
 		}
 		if m.Status == "REJECTED" {
@@ -439,14 +455,14 @@ func (s *MemStore) PromoteSessionMemory(ctx context.Context, id, confirmedBy str
 // PostgresStore implementation
 // ----------------------------------------------------------------------------
 
-const sessionColumns = `id, project_id, title, created_by, is_active, created_at, ended_at`
+const sessionColumns = `id, project_id, title, created_by, is_active, created_at, ended_at, expires_at`
 
 func scanSession(row pgx.Row) (*Session, error) {
 	var s Session
 	var title *string
-	var endedAt *time.Time
+	var endedAt, expiresAt *time.Time
 	if err := row.Scan(&s.ID, &s.ProjectID, &title, &s.CreatedBy,
-		&s.IsActive, &s.CreatedAt, &endedAt); err != nil {
+		&s.IsActive, &s.CreatedAt, &endedAt, &expiresAt); err != nil {
 		return nil, err
 	}
 	if title != nil {
@@ -454,6 +470,9 @@ func scanSession(row pgx.Row) (*Session, error) {
 	}
 	if endedAt != nil {
 		s.EndedAt = *endedAt
+	}
+	if expiresAt != nil {
+		s.ExpiresAt = *expiresAt
 	}
 	return &s, nil
 }
@@ -489,10 +508,10 @@ func (s *PostgresStore) CreateSession(ctx context.Context, sess *Session) error 
 		return fmt.Errorf("created_by is required")
 	}
 	row := s.pool.QueryRow(ctx,
-		`INSERT INTO sessions (project_id, title, created_by)
-		 VALUES ($1::uuid, NULLIF($2,''), $3::uuid)
+		`INSERT INTO sessions (project_id, title, created_by, expires_at)
+		 VALUES ($1::uuid, NULLIF($2,''), $3::uuid, $4)
 		 RETURNING `+sessionColumns,
-		sess.ProjectID, sess.Title, sess.CreatedBy)
+		sess.ProjectID, sess.Title, sess.CreatedBy, nullTime(sess.ExpiresAt))
 	got, err := scanSession(row)
 	if err != nil {
 		return err
@@ -655,9 +674,22 @@ func (s *PostgresStore) ListSessionParticipants(ctx context.Context, sessionID s
 }
 
 // CreateSessionMemory stores a memory as session-scoped (level forced).
+// The session must exist and belong to the memory's project (issue #102):
+// an empty memory project is filled from the session, a mismatched one
+// fails instead of cross-linking projects.
 func (s *PostgresStore) CreateSessionMemory(ctx context.Context, item *MemoryItem) error {
 	if strings.TrimSpace(item.SessionID) == "" {
 		return fmt.Errorf("session_id is required for session memory")
+	}
+	sess, err := s.GetSession(ctx, item.SessionID)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(item.ProjectID) == "" {
+		item.ProjectID = sess.ProjectID
+	} else if item.ProjectID != sess.ProjectID {
+		return fmt.Errorf("store: session %s belongs to project %s, not %s: %w",
+			item.SessionID, sess.ProjectID, item.ProjectID, ErrConflict)
 	}
 	item.Level = "session"
 	return s.CreateMemoryItem(ctx, item)

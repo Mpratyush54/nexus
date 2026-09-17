@@ -23,16 +23,15 @@ func auditMemItem(project, key, content string, tags []string, conf float32, cre
 	}
 }
 
-// BUG(#110) (headline regression): the tags parameter is silently ignored —
-// MemStore never filters on tags, unlike Postgres `tags && $3`. Regression
-// documents current MemStore behavior (no tag filtering).
+// FIXED(#110): the tags parameter filters (Postgres `tags && $3` parity) —
+// only rows sharing a tag match.
 func TestAuditSearchMemoryTagFilterRegression(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	now := time.Now().UTC()
 	for _, m := range []*MemoryItem{
-		auditMemItem("p1", "alpha-key", "alpha content about caching", []string{"alpha"}, 0.9, now),
-		auditMemItem("p1", "beta-key", "beta content about retries", []string{"beta"}, 0.9, now),
+		auditMemItem("p1", "alpha-key", "alpha content about caching here", []string{"alpha"}, 0.9, now),
+		auditMemItem("p1", "beta-key", "beta content about retries here", []string{"beta"}, 0.9, now),
 	} {
 		if err := s.CreateMemoryItem(ctx, m); err != nil {
 			t.Fatal(err)
@@ -42,15 +41,8 @@ func TestAuditSearchMemoryTagFilterRegression(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 2 {
-		t.Fatalf("MemStore ignores tag filter: got %d results, want 2 (both items)", len(res))
-	}
-	keys := map[string]bool{}
-	for _, m := range res {
-		keys[m.Key] = true
-	}
-	if !keys["alpha-key"] || !keys["beta-key"] {
-		t.Errorf("want both alpha-key and beta-key in unfiltered results, got %v", keys)
+	if len(res) != 1 || res[0].Key != "alpha-key" {
+		t.Fatalf("tag filter: got %+v, want only [alpha-key]", res)
 	}
 }
 
@@ -59,8 +51,8 @@ func TestAuditSearchMemoryEmptyTagsMeansAll(t *testing.T) {
 	s := NewMemStore()
 	now := time.Now().UTC()
 	for _, m := range []*MemoryItem{
-		auditMemItem("p1", "k1", "first content here", []string{"a"}, 0.5, now),
-		auditMemItem("p1", "k2", "second content here", nil, 0.5, now),
+		auditMemItem("p1", "k1", "first content here with length", []string{"a"}, 0.5, now),
+		auditMemItem("p1", "k2", "second content here with length", nil, 0.5, now),
 	} {
 		if err := s.CreateMemoryItem(ctx, m); err != nil {
 			t.Fatal(err)
@@ -75,42 +67,34 @@ func TestAuditSearchMemoryEmptyTagsMeansAll(t *testing.T) {
 	}
 }
 
-// BUG(#110): no ORDER BY confidence DESC, created_at DESC — result order is
-// Go map iteration order (nondeterministic). Regression documents the
-// current MemStore property weakly but deterministically: assert result SET
-// membership, not order.
+// FIXED(#110): ORDER BY confidence DESC, created_at DESC like Postgres —
+// result order is deterministic, not Go map iteration order.
 func TestAuditSearchMemoryOrdering(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	base := time.Now().UTC()
-	wantKeys := map[string]bool{"c-high": true, "c-mid2": true, "c-mid1": true, "c-low": true}
+	// Distinct confidences make the expected order unambiguous without
+	// sleeping between writes.
 	confs := map[string]float32{"c-high": 0.9, "c-mid2": 0.7, "c-mid1": 0.5, "c-low": 0.2}
-	keys := []string{"c-high", "c-mid2", "c-mid1", "c-low"}
+	keys := []string{"c-low", "c-mid1", "c-mid2", "c-high"} // insert shuffled
 	for i, key := range keys {
-		m := auditMemItem("p1", key, "ordering content for "+key, nil, confs[key], base.Add(time.Duration(i)*time.Second))
+		m := auditMemItem("p1", key, "ordering content for "+key+" here", nil, confs[key], base.Add(time.Duration(i)*time.Second))
 		if err := s.CreateMemoryItem(ctx, m); err != nil {
 			t.Fatal(err)
 		}
-		// Pin CreatedAt: MemStore stamps now() on write; override the stored
-		// row directly so ties cannot mask an ordering bug.
-		stored, _ := s.GetMemoryItem(ctx, m.ID)
-		stored.CreatedAt = base.Add(time.Duration(i) * time.Second)
 	}
+	want := []string{"c-high", "c-mid2", "c-mid1", "c-low"}
 	for run := 0; run < 10; run++ {
 		res, err := s.SearchMemory(ctx, "p1", "", nil, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(res) != len(wantKeys) {
-			t.Fatalf("got %d results, want %d", len(res), len(wantKeys))
+		if len(res) != len(want) {
+			t.Fatalf("got %d results, want %d", len(res), len(want))
 		}
-		seen := map[string]bool{}
-		for _, m := range res {
-			seen[m.Key] = true
-		}
-		for k := range wantKeys {
-			if !seen[k] {
-				t.Fatalf("run %d: key %q missing from results %+v (want full set; order is nondeterministic map order)", run, k, seen)
+		for i, key := range want {
+			if res[i].Key != key {
+				t.Fatalf("run %d: position %d = %q, want %q (confidence DESC)", run, i, res[i].Key, key)
 			}
 		}
 	}
@@ -122,13 +106,11 @@ func TestAuditSearchMemoryStatusVisibility(t *testing.T) {
 	now := time.Now().UTC()
 	visible := map[string]bool{StatusConfirmed: true, StatusProposed: true}
 	for _, st := range []string{StatusProposed, StatusConfirmed, StatusRejected, StatusSuperseded} {
-		m := auditMemItem("p1", "k-"+st, "visibility content here", nil, 0.5, now)
-		m.Status = ""
+		m := auditMemItem("p1", "k-"+st, "visibility content here ok", nil, 0.5, now)
+		m.Status = st
 		if err := s.CreateMemoryItem(ctx, m); err != nil {
 			t.Fatal(err)
 		}
-		stored, _ := s.GetMemoryItem(ctx, m.ID)
-		stored.Status = st
 	}
 	res, err := s.SearchMemory(ctx, "p1", "", nil, 0)
 	if err != nil {
@@ -147,7 +129,8 @@ func TestAuditSearchMemoryStatusVisibility(t *testing.T) {
 func TestAuditSearchMemoryOrgLevelVisible(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
-	m := auditMemItem("", "org-key", "org level content here", nil, 0.8, time.Now().UTC())
+	m := auditMemItem("", "org-key", "org level content here ok", nil, 0.8, time.Now().UTC())
+	m.Level = LevelOrganization
 	if err := s.CreateMemoryItem(ctx, m); err != nil {
 		t.Fatal(err)
 	}
@@ -160,14 +143,36 @@ func TestAuditSearchMemoryOrgLevelVisible(t *testing.T) {
 	}
 }
 
+// FIXED(#102): a NULL-project row that is NOT organization-level stays
+// invisible — personal/session rows never leak globally.
+func TestAuditSearchMemoryNonOrgNullHidden(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	now := time.Now().UTC()
+	leak := auditMemItem("", "leak-key", "project null content here ok", nil, 0.8, now)
+	leak.Level = LevelProject // NULL project but claims project scope
+	if err := s.CreateMemoryItem(ctx, leak); err != nil {
+		t.Fatal(err)
+	}
+	res, err := s.SearchMemory(ctx, "any-project", "", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range res {
+		if m.Key == "leak-key" {
+			t.Errorf("non-organization NULL-project row leaked globally: %+v", res)
+		}
+	}
+}
+
 func TestAuditSearchMemoryProjectIsolation(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	now := time.Now().UTC()
-	if err := s.CreateMemoryItem(ctx, auditMemItem("pa", "k-a", "project a content", nil, 0.5, now)); err != nil {
+	if err := s.CreateMemoryItem(ctx, auditMemItem("pa", "k-a", "project a content here ok", nil, 0.5, now)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateMemoryItem(ctx, auditMemItem("pb", "k-b", "project b content", nil, 0.5, now)); err != nil {
+	if err := s.CreateMemoryItem(ctx, auditMemItem("pb", "k-b", "project b content here ok", nil, 0.5, now)); err != nil {
 		t.Fatal(err)
 	}
 	res, err := s.SearchMemory(ctx, "pa", "", nil, 0)
@@ -179,14 +184,14 @@ func TestAuditSearchMemoryProjectIsolation(t *testing.T) {
 	}
 }
 
-// BUG(#110): Postgres clamps limit<=0 to 20; MemStore treats 0 as uncapped.
-// Regression documents current MemStore behavior.
+// FIXED(#110): MemStore clamps limit<=0 to the 20-row default like
+// Postgres instead of treating 0 as uncapped.
 func TestAuditSearchMemoryLimitDefault(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	now := time.Now().UTC()
 	for i := 0; i < 25; i++ {
-		m := auditMemItem("p1", "bulk-key", "bulk content number here", nil, 0.5, now)
+		m := auditMemItem("p1", "bulk-key", "bulk content number here ok", nil, 0.5, now)
 		m.Key = "bulk-key-" + string(rune('a'+i/10)) + string(rune('0'+i%10))
 		if err := s.CreateMemoryItem(ctx, m); err != nil {
 			t.Fatal(err)
@@ -196,8 +201,8 @@ func TestAuditSearchMemoryLimitDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 25 {
-		t.Errorf("MemStore treats limit<=0 as uncapped: got %d rows, want 25", len(res))
+	if len(res) != 20 {
+		t.Errorf("limit<=0 must default to 20 rows: got %d", len(res))
 	}
 }
 
@@ -206,7 +211,7 @@ func TestAuditSearchMemoryLimitHonored(t *testing.T) {
 	s := NewMemStore()
 	now := time.Now().UTC()
 	for _, key := range []string{"l1", "l2", "l3"} {
-		if err := s.CreateMemoryItem(ctx, auditMemItem("p1", key, "limit content here", nil, 0.5, now)); err != nil {
+		if err := s.CreateMemoryItem(ctx, auditMemItem("p1", key, "limit content here with length", nil, 0.5, now)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -219,23 +224,19 @@ func TestAuditSearchMemoryLimitHonored(t *testing.T) {
 	}
 }
 
-// BUG(#110): SearchEpisodes has no ORDER BY opened_at DESC (map order).
-// Regression documents the current MemStore property weakly but
-// deterministically: assert result SET membership, not order.
+// FIXED(#110): SearchEpisodes orders by opened_at DESC (id tie-break) like
+// Postgres — newest first, deterministic.
 func TestAuditSearchEpisodesOrdering(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
-	base := time.Now().UTC()
 	titles := []string{"oldest ep", "middle ep", "newest ep"}
-	for i, title := range titles {
+	for _, title := range titles {
 		ep := &Episode{ProjectID: "p1", Title: title, EpisodeType: "bug_fix"}
 		if err := s.CreateEpisode(ctx, ep); err != nil {
 			t.Fatal(err)
 		}
-		stored, _ := s.GetEpisode(ctx, ep.ID)
-		stored.OpenedAt = base.Add(time.Duration(i) * time.Hour)
 	}
-	want := map[string]bool{"newest ep": true, "middle ep": true, "oldest ep": true}
+	want := []string{"newest ep", "middle ep", "oldest ep"}
 	for run := 0; run < 10; run++ {
 		res, err := s.SearchEpisodes(ctx, "p1", "", "", 0)
 		if err != nil {
@@ -244,20 +245,15 @@ func TestAuditSearchEpisodesOrdering(t *testing.T) {
 		if len(res) != 3 {
 			t.Fatalf("got %d episodes, want 3", len(res))
 		}
-		seen := map[string]bool{}
-		for _, ep := range res {
-			seen[ep.Title] = true
-		}
-		for title := range want {
-			if !seen[title] {
-				t.Fatalf("run %d: title %q missing from results %+v (want full set; order is nondeterministic map order)", run, title, seen)
+		for i, title := range want {
+			if res[i].Title != title {
+				t.Fatalf("run %d: position %d = %q, want %q (opened_at DESC)", run, i, res[i].Title, title)
 			}
 		}
 	}
 }
 
-// BUG(#110): same missing default-limit-20 as SearchMemory. Regression
-// documents current MemStore behavior (uncapped).
+// FIXED(#110): same default-limit-20 as SearchMemory.
 func TestAuditSearchEpisodesLimitDefault(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -271,8 +267,8 @@ func TestAuditSearchEpisodesLimitDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res) != 25 {
-		t.Errorf("MemStore treats limit<=0 as uncapped: got %d rows, want 25", len(res))
+	if len(res) != 20 {
+		t.Errorf("limit<=0 must default to 20 rows: got %d", len(res))
 	}
 }
 

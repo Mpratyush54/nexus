@@ -9,6 +9,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -21,44 +22,63 @@ func auditCreateProposed(t *testing.T, ctx context.Context, s *MemStore, key str
 	return item
 }
 
-// BUG(#89): REJECTED is terminal but ConfirmMemory resurrects it to
-// CONFIRMED. Regression documents current MemStore behavior (DAG unenforced,
-// unconditional flip).
+// FIXED(#89): REJECTED is terminal — ConfirmMemory refuses to resurrect it.
+// The row is created terminal directly (no store API models reject-before-
+// RejectMemory except RejectMemory itself, which only leaves PROPOSED).
 func TestAuditMemoryConfirmRejectedResurrect(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
-	item := auditCreateProposed(t, ctx, s, "k-rej")
-	stored, err := s.GetMemoryItem(ctx, item.ID)
-	if err != nil {
+	item := &MemoryItem{ProjectID: "p1", Key: "k-rej", Content: "content with enough length here", Status: StatusRejected}
+	if err := s.CreateMemoryItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	stored.Status = StatusRejected // terminal state; no store API models reject
-	if err := s.ConfirmMemory(ctx, item.ID, "u"); err != nil {
-		t.Fatalf("MemStore ConfirmMemory succeeds unconditionally, got %v", err)
+	if err := s.ConfirmMemory(ctx, item.ID, "u"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("confirming REJECTED must fail with ErrConflict, got %v", err)
 	}
 	got, _ := s.GetMemoryItem(ctx, item.ID)
-	if got.Status != StatusConfirmed {
-		t.Errorf("Status = %q, want CONFIRMED (MemStore resurrects REJECTED)", got.Status)
+	if got.Status != StatusRejected {
+		t.Errorf("Status = %q, want REJECTED (terminal, no resurrection)", got.Status)
 	}
 }
 
-// BUG(#89): SUPERSEDED is terminal but ConfirmMemory resurrects it.
-// Regression documents current MemStore behavior.
+// FIXED(#89): SUPERSEDED is terminal — ConfirmMemory refuses to resurrect it.
 func TestAuditMemoryConfirmSupersededResurrect(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
-	item := auditCreateProposed(t, ctx, s, "k-sup")
-	stored, err := s.GetMemoryItem(ctx, item.ID)
-	if err != nil {
+	item := &MemoryItem{ProjectID: "p1", Key: "k-sup", Content: "content with enough length here", Status: StatusSuperseded}
+	if err := s.CreateMemoryItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	stored.Status = StatusSuperseded
-	if err := s.ConfirmMemory(ctx, item.ID, "u"); err != nil {
-		t.Fatalf("MemStore ConfirmMemory succeeds unconditionally, got %v", err)
+	if err := s.ConfirmMemory(ctx, item.ID, "u"); !errors.Is(err, ErrConflict) {
+		t.Fatalf("confirming SUPERSEDED must fail with ErrConflict, got %v", err)
 	}
 	got, _ := s.GetMemoryItem(ctx, item.ID)
-	if got.Status != StatusConfirmed {
-		t.Errorf("Status = %q, want CONFIRMED (MemStore resurrects SUPERSEDED)", got.Status)
+	if got.Status != StatusSuperseded {
+		t.Errorf("Status = %q, want SUPERSEDED (terminal, no resurrection)", got.Status)
+	}
+}
+
+// FIXED(#98): RejectMemory persists PROPOSED -> REJECTED; second rejects and
+// confirms of terminal rows fail.
+func TestAuditMemoryRejectLifecycle(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	item := auditCreateProposed(t, ctx, s, "k-reject")
+	if err := s.RejectMemory(ctx, item.ID, "u1"); err != nil {
+		t.Fatalf("RejectMemory PROPOSED: %v", err)
+	}
+	got, _ := s.GetMemoryItem(ctx, item.ID)
+	if got.Status != StatusRejected {
+		t.Errorf("Status = %q, want REJECTED persisted", got.Status)
+	}
+	if err := s.RejectMemory(ctx, item.ID, "u1"); !errors.Is(err, ErrConflict) {
+		t.Errorf("double reject must fail with ErrConflict, got %v", err)
+	}
+	if err := s.ConfirmMemory(ctx, item.ID, "u1"); !errors.Is(err, ErrConflict) {
+		t.Errorf("confirm of REJECTED must fail with ErrConflict, got %v", err)
+	}
+	if err := s.RejectMemory(ctx, "mem_missing", "u1"); err != ErrNotFound {
+		t.Errorf("reject of missing id: got %v, want ErrNotFound", err)
 	}
 }
 
@@ -106,9 +126,8 @@ func TestAuditMemoryStatusDAGPureValidator(t *testing.T) {
 	}
 }
 
-// BUG(#110): GetMemoryItem returns the internal pointer — callers can
-// mutate stored rows without any API call (no defensive copy). Regression
-// documents current MemStore behavior.
+// FIXED(#110): GetMemoryItem returns a defensive copy — caller mutations
+// no longer corrupt stored rows.
 func TestAuditMemoryGetAliasing(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -123,16 +142,12 @@ func TestAuditMemoryGetAliasing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.Content != "mutated by caller" {
-		t.Errorf("mutating a Get result should mutate the store (no copy), got %q want %q", again.Content, "mutated by caller")
-	}
-	if orig == again.Content {
-		t.Log("note: orig content no longer observable after aliasing mutation")
+	if again.Content != orig {
+		t.Errorf("store corrupted via Get aliasing: got %q want %q", again.Content, orig)
 	}
 }
 
-// BUG(#110): SearchMemory results alias stored rows too. Regression
-// documents current MemStore behavior.
+// FIXED(#110): SearchMemory results are copies too.
 func TestAuditMemorySearchAliasing(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -146,14 +161,13 @@ func TestAuditMemorySearchAliasing(t *testing.T) {
 	}
 	res[0].Content = "mutated via search result"
 	again, _ := s.GetMemoryItem(ctx, res[0].ID)
-	if again.Content != "mutated via search result" {
-		t.Errorf("mutating a SearchMemory result should mutate the store (no copy), got %q", again.Content)
+	if again.Content == "mutated via search result" {
+		t.Error("store corrupted via SearchMemory aliasing")
 	}
 }
 
-// BUG(#110): CreateMemoryItem stores the caller's pointer — later caller
-// mutations (and the ID/timestamp write-back) leak across the boundary.
-// Regression documents current MemStore behavior.
+// FIXED(#110): CreateMemoryItem copies the caller's struct — later caller
+// mutations no longer leak into the store.
 func TestAuditMemoryCreateInputAliasing(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -166,7 +180,7 @@ func TestAuditMemoryCreateInputAliasing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Content != "caller mutated after create" {
-		t.Errorf("post-Create caller mutation should leak into store (no copy), got %q", got.Content)
+	if got.Content == "caller mutated after create" {
+		t.Error("post-Create caller mutation leaked into store")
 	}
 }

@@ -100,7 +100,9 @@ type Turn struct {
 // Harvester tails agent transcript files for one workspace.
 type Harvester struct {
 	workspace  string // workspace root (absolute)
-	folderName string // base folder name, used for workspace matching
+	folderName string // base folder name, fallback for workspace matching
+	origin     string // git remote origin URL (primary identity, issue #109)
+	rootCommit string // git root commit hash (primary identity, issue #109)
 
 	Sources      []TranscriptSource
 	PollInterval time.Duration
@@ -119,7 +121,7 @@ type Harvester struct {
 	agents     map[string]string    // path -> agent name
 	batch      map[string][]Turn    // path -> turns since session start
 	// extractors holds per-agent SQLite row extractors (nil value or absent
-	// agent = liveness-only default). Issue #33.
+	// agent = built-in fallback, then liveness-only). Issue #33/#77.
 	extractors map[string]SQLiteExtractor
 }
 
@@ -151,7 +153,9 @@ func NewHarvester(workspaceRoot string, emitter EventEmitter) *Harvester {
 }
 
 // NewHarvesterWithPoll is NewHarvester with explicit intervals (tests use a
-// short poll; production uses HarvesterPollInterval).
+// short poll; production uses HarvesterPollInterval). Workspace identity
+// (origin + root commit, issue #109) is resolved best-effort; empty when
+// the workspace is not a git repo.
 func NewHarvesterWithPoll(workspaceRoot string, emitter EventEmitter, poll, idle time.Duration) *Harvester {
 	if poll <= 0 {
 		poll = HarvesterPollInterval
@@ -159,9 +163,15 @@ func NewHarvesterWithPoll(workspaceRoot string, emitter EventEmitter, poll, idle
 	if idle <= 0 {
 		idle = DefaultIdleTimeout
 	}
+	origin, rootCommit := "", ""
+	if strings.TrimSpace(workspaceRoot) != "" {
+		origin, rootCommit = FingerprintOf(workspaceRoot)
+	}
 	return &Harvester{
 		workspace:    workspaceRoot,
 		folderName:   filepath.Base(filepath.Clean(workspaceRoot)),
+		origin:       origin,
+		rootCommit:   rootCommit,
 		Sources:      ResolveSources(),
 		PollInterval: poll,
 		IdleTimeout:  idle,
@@ -177,6 +187,16 @@ func NewHarvesterWithPoll(workspaceRoot string, emitter EventEmitter, poll, idle
 	}
 }
 
+// WorkspaceIdentity returns the harvester's git identity (origin URL and
+// root commit) used to prioritize exact matching over folder-name fallback
+// (issue #109). Empty strings mean "not a git repo / unknown".
+func (h *Harvester) WorkspaceIdentity() (origin, rootCommit string) {
+	if h == nil {
+		return "", ""
+	}
+	return h.origin, h.rootCommit
+}
+
 // SetSQLiteExtractor registers (or with nil, unregisters) a row extractor
 // for one sqlite agent (cursor, copilot, antigravity). Unregistered agents
 // stay liveness-only. Issue #33.
@@ -188,6 +208,17 @@ func (h *Harvester) SetSQLiteExtractor(agent string, ex SQLiteExtractor) {
 		return
 	}
 	h.extractors[agent] = ex
+}
+
+// SetEmitter swaps the event sink (issue #115: runtime wiring). Nil means
+// results are only returned, never forwarded. Safe for concurrent use.
+func (h *Harvester) SetEmitter(emitter EventEmitter) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.emitter = emitter
 }
 
 func (h *Harvester) emit(ev Event) {
@@ -246,13 +277,70 @@ func ResolveSources() []TranscriptSource {
 }
 
 // MatchesWorkspace reports whether a transcript path belongs to this
-// workspace. Only files whose path contains the workspace folder name are
-// harvested, so other projects' sessions never leak into this stream.
+// workspace (issue #109). Matching priority: git origin/root-commit
+// identity first, then exact folder-segment match. The old fuzzy
+// substring fallback ("api" matching any path containing "api") is gone:
+// generic directory names no longer misattribute unrelated repos.
+//
+//   - Empty/degenerate workspace matches all (no filter).
+//   - Otherwise the path matches when any slash-separated segment equals
+//     the workspace folder name (case-insensitive), or when the path
+//     contains the normalized origin fragment or root-commit hash.
 func (h *Harvester) MatchesWorkspace(path string) bool {
 	if h.folderName == "" || h.folderName == "." || h.folderName == string(filepath.Separator) {
 		return true
 	}
-	return strings.Contains(strings.ToLower(path), strings.ToLower(h.folderName))
+	low := strings.ToLower(path)
+	// Primary: git identity fragments (origin URL tail / root commit).
+	if h.origin != "" {
+		frag := strings.ToLower(h.origin)
+		// Match on the repo tail (e.g. "nexus" from github.com/org/nexus)
+		// so encoded transcript dirs still hit without fuzzy collisions.
+		if tail := originTail(frag); tail != "" && strings.Contains(low, tail) {
+			return true
+		}
+	}
+	if h.rootCommit != "" && strings.Contains(low, strings.ToLower(h.rootCommit)) {
+		return true
+	}
+	// Fallback: exact path-segment match on the folder name (not substring).
+	want := strings.ToLower(h.folderName)
+	for _, seg := range strings.FieldsFunc(low, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if seg == want {
+			return true
+		}
+		// Claude-style encoded dirs use "-" for "/" (e.g. "--home--user--proj"):
+		// accept when the segment contains the folder as a dash-delimited token.
+		for _, tok := range strings.Split(seg, "-") {
+			if tok == want {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// originTail extracts the repo tail from a git origin URL for matching
+// (e.g. "git@github.com:org/nexus.git" -> "nexus").
+func originTail(origin string) string {
+	o := strings.ToLower(strings.TrimSpace(origin))
+	o = strings.TrimSuffix(o, ".git")
+	o = strings.TrimSuffix(o, "/")
+	if i := strings.LastIndexAny(o, "/:"); i >= 0 {
+		o = o[i+1:]
+	}
+	// Keep only alphanumerics/dash/underscore to avoid regex noise.
+	var b strings.Builder
+	for _, r := range o {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			b.WriteRune(r)
+		}
+	}
+	s := b.String()
+	if len(s) < 3 {
+		return "" // too generic to match safely (e.g. "api" alone)
+	}
+	return s
 }
 
 // sessionID derives a stable session id from the transcript path.
@@ -277,20 +365,37 @@ var noiseTypes = map[string]bool{
 	"thinking": true, "progress": true,
 }
 
+// maxJSONLLineBytes bounds a single JSONL line (issue #118): a 1MB
+// single-line record must not stall tailing. Overlong lines are skipped
+// (truncated to this bound before parse attempt).
+const maxJSONLLineBytes = 1 << 20
+
 // ParseTurns parses JSONL dialogue turns from r, skipping tool-call noise and
 // blank records. It tolerates per-line schema drift across agents (Claude,
-// Cursor, OpenCode) by probing several field names.
+// Cursor, OpenCode) by probing several field names. Overlong single lines
+// (>1MB) are skipped, never stalling the scan.
 func ParseTurns(r io.Reader) ([]Turn, error) {
 	var turns []Turn
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	sc.Buffer(make([]byte, 64<<10), maxJSONLLineBytes)
 	for sc.Scan() {
-		t, ok := parseTurnLine(sc.Bytes())
+		line := sc.Bytes()
+		if len(line) > maxJSONLLineBytes {
+			continue
+		}
+		t, ok := parseTurnLine(line)
 		if ok {
 			turns = append(turns, t)
 		}
 	}
-	return turns, sc.Err()
+	if err := sc.Err(); err != nil {
+		// A single overlong line (ErrTooLong) skips that line, not the file.
+		if err == bufio.ErrTooLong {
+			return turns, nil
+		}
+		return turns, err
+	}
+	return turns, nil
 }
 
 // parseTurnLine parses one JSONL line. ok=false means "skip, not an error"
@@ -553,14 +658,17 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 
 	var turns []Turn
 	sc := bufio.NewScanner(strings.NewReader(string(consumable)))
-	sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+	sc.Buffer(make([]byte, 64<<10), maxJSONLLineBytes)
 	for sc.Scan() {
 		if t, ok := parseTurnLine(sc.Bytes()); ok {
 			turns = append(turns, t)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, err
+		// Overlong single line: skip it but still advance the offset below.
+		if err != bufio.ErrTooLong {
+			return nil, err
+		}
 	}
 
 	now := h.now().UTC()
@@ -622,8 +730,35 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 	since := h.lastActive[path]
 	h.mu.Unlock()
 
-	// Liveness-only default: no SQL driver dep is approved (see ADR-033).
+	// No registered extractor: try the built-in stdlib fallback first
+	// (issue #77: sqlite3 CLI when present, else raw string-scan for
+	// VSCode/Cursor storage payloads). Opaque test fixtures yield zero
+	// turns and fall through to liveness-only, preserving prior behavior.
 	if ex == nil {
+		if turns := extractSQLiteFallback(path, since); len(turns) > 0 {
+			last := now
+			h.mu.Lock()
+			for i := range turns {
+				if turns[i].Timestamp.IsZero() {
+					turns[i].Timestamp = now
+				}
+				if turns[i].Timestamp.After(last) {
+					last = turns[i].Timestamp
+				}
+			}
+			h.lastActive[path] = last
+			delete(h.completed, path)
+			h.batch[path] = append(h.batch[path], turns...)
+			h.mu.Unlock()
+			for _, t := range turns {
+				h.emit(Event{
+					Type:      EventConversationTurn,
+					Payload:   turnPayload("conversation_turn", agent, path, t),
+					CreatedAt: now,
+				})
+			}
+			return true
+		}
 		log.Printf("harvester: sqlite source %q (%s) has no SQLiteExtractor registered — liveness-only (no SQL driver dep, see ADR-033)", agent, path)
 		h.mu.Lock()
 		h.lastActive[path] = now
@@ -721,9 +856,29 @@ func (h *Harvester) CheckIdle() []Event {
 	return out
 }
 
+// Harvester walk bounds (issue #118): the full-home walk every 30s is
+// capped so a huge home directory cannot stall the daemon.
+const (
+	// maxWalkFiles caps files visited per ScanAndTail pass.
+	maxWalkFiles = 2000
+	// maxWalkDepth caps directory depth below each source dir.
+	maxWalkDepth = 6
+	// maxWalkFileBytes skips sqlite/jsonl files larger than 64MB.
+	maxWalkFileBytes = 64 << 20
+)
+
+// harvesterSkipDirs are never descended into during transcript walks.
+var harvesterSkipDirs = map[string]bool{
+	"node_modules": true, ".git": true, "dist": true, "build": true,
+	"out": true, ".next": true, "__pycache__": true, ".venv": true,
+	"venv": true, "target": true, "bin": true, "obj": true,
+	"coverage": true, ".idea": true, ".vscode": true, "Library": true,
+}
+
 // ScanAndTail walks all sources, tailing jsonl/json transcripts and tracking
 // sqlite/vscdb files, restricted to this workspace. Files classified NEVER by
-// adapters.ClassifyPath (credentials, secrets) are never touched.
+// adapters.ClassifyPath (credentials, secrets) are never touched. Walks are
+// bounded (file count, depth, size, skip dirs) per issue #118.
 func (h *Harvester) ScanAndTail() error {
 	for _, src := range h.Sources {
 		for _, dir := range src.Dirs {
@@ -737,8 +892,30 @@ func (h *Harvester) scanDir(src TranscriptSource, dir string) error {
 	if dir == "" {
 		return nil
 	}
+	visited := 0
 	return filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
+			return nil
+		}
+		if visited > maxWalkFiles {
+			return filepath.SkipDir
+		}
+		if info.IsDir() {
+			// Depth bound + skip rebuildables/tooling dirs.
+			rel, rerr := filepath.Rel(dir, p)
+			if rerr == nil && rel != "." {
+				depth := len(strings.Split(rel, string(filepath.Separator)))
+				if depth > maxWalkDepth {
+					return filepath.SkipDir
+				}
+			}
+			if harvesterSkipDirs[filepath.Base(p)] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		visited++
+		if info.Size() > maxWalkFileBytes {
 			return nil
 		}
 		if adapters.ClassifyPath(p) == adapters.Never {

@@ -273,24 +273,21 @@ func TestAuditResolveCacheStalenessKnownBug(t *testing.T) {
 	}
 }
 
-// REGRESSION (actual behavior): safeName cleans ':' and ' ' and maps "." to
-// "root", but ignores the index parameter, so same-basename roots collide.
-// BUG tracked in #108: index `i` is accepted but never used; the comment
-// promises an index prefix to avoid collisions.
-// This test pins the CURRENT colliding results.
+// FIXED (#108): safeName cleans ':' and ' ' and prefixes the root index so
+// same-basename roots land in different dest dirs.
 func TestAuditSafeNameCleansAndCollidesKnownBug(t *testing.T) {
 	// Cleaning: ':' and ' ' become '_'.
 	if got := safeName(`D:\my proj`, 0); strings.ContainsAny(got, ": ") {
 		t.Errorf("safeName should clean ':' and ' ': %q", got)
 	}
-	if got := safeName(".", 0); got != "root" {
-		t.Errorf("safeName(.) = %q want root", got)
+	if got := safeName(".", 0); got != "00-root" {
+		t.Errorf("safeName(.) = %q want 00-root (index-prefixed)", got)
 	}
-	// Same basename with different indices currently collides.
+	// Same basename with different indices must NOT collide.
 	a := safeName(filepath.Join("D:", "projA", ".claude"), 0)
 	b := safeName(filepath.Join("D:", "projB", ".claude"), 1)
-	if a != b {
-		t.Errorf("expected pinned collision: safeName(projA/.claude,0)=%q != safeName(projB/.claude,1)=%q (BUG #108: index ignored)", a, b)
+	if a == b {
+		t.Errorf("FIXED #108: safeName must use index, got collision %q == %q", a, b)
 	}
 }
 
@@ -330,10 +327,8 @@ func TestAuditCopyFilteredCopiesSkipsResumes(t *testing.T) {
 	}
 }
 
-// REGRESSION (actual behavior): same-basename roots land in the same dest
-// dir because safeName ignores the root index.
-// BUG tracked in #108: safeName must use the index so different roots land
-// in different dest dirs. This test pins the CURRENT collision.
+// FIXED (#108): same-basename roots land in different dest dirs because
+// safeName prefixes the root index.
 func TestAuditCopyFilteredSameBasenameCollisionKnownBug(t *testing.T) {
 	clearAuditResolveCache(t)
 	home := t.TempDir()
@@ -344,13 +339,22 @@ func TestAuditCopyFilteredSameBasenameCollisionKnownBug(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(r1, "f.json"), []byte("from-root-1"), 0o644)
 	_ = os.WriteFile(filepath.Join(r2, "f.json"), []byte("from-root-2-DIFFERENT-CONTENT!!"), 0o644)
 	dest := t.TempDir()
-	copied, _, _ := CopyFiltered([]string{r1, r2}, dest, 1<<20, "", home)
+	copied, _, err := CopyFiltered([]string{r1, r2}, dest, 1<<20, "", home)
+	if err != nil {
+		t.Fatalf("CopyFiltered: %v", err)
+	}
 	if len(copied) != 2 {
 		t.Fatalf("expected 2 copied, got %d", len(copied))
 	}
-	// Pinned: both roots currently collide to the identical RawPath.
-	if copied[0].RawPath != copied[1].RawPath {
-		t.Errorf("expected pinned collision, got distinct RawPaths %q vs %q (BUG #108: safeName must use index)", copied[0].RawPath, copied[1].RawPath)
+	// Fixed: distinct roots must map to distinct RawPaths.
+	if copied[0].RawPath == copied[1].RawPath {
+		t.Errorf("FIXED #108: expected distinct RawPaths, got collision %q", copied[0].RawPath)
+	}
+	// Both payloads must survive (no overwrite).
+	for _, c := range copied {
+		if _, err := os.Stat(c.RawPath); err != nil {
+			t.Errorf("dest copy missing %q: %v", c.RawPath, err)
+		}
 	}
 }
 

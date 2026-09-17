@@ -18,7 +18,7 @@ import (
 func TestAuditMemoryCreateDefaultsConfidenceStatusLevel(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
-	item := &MemoryItem{ProjectID: "p1", Key: "k1", Content: "some content here"}
+	item := &MemoryItem{ProjectID: "p1", Key: "k1", Content: "some content here with enough length"}
 	if err := s.CreateMemoryItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
@@ -42,9 +42,8 @@ func TestAuditMemoryCreateDefaultsConfidenceStatusLevel(t *testing.T) {
 	}
 }
 
-// BUG(#102): Postgres defaults scope to 'fact' (migration DEFAULT +
-// PostgresStore.CreateMemoryItem); MemStore leaves Scope empty. Regression
-// documents current MemStore behavior.
+// FIXED(#102): Postgres defaults scope to 'fact' (migration DEFAULT +
+// PostgresStore.CreateMemoryItem); MemStore now applies the same default.
 func TestAuditMemoryCreateDefaultsScopeFact(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -52,13 +51,13 @@ func TestAuditMemoryCreateDefaultsScopeFact(t *testing.T) {
 	if err := s.CreateMemoryItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if item.Scope != "" {
-		t.Errorf("Scope = %q, want empty (MemStore leaves Scope unset; Postgres parity is fact)", item.Scope)
+	if item.Scope != "fact" {
+		t.Errorf("Scope = %q, want fact default (Postgres parity)", item.Scope)
 	}
 }
 
-// BUG(#102): Postgres normalises empty tags to []; MemStore keeps nil.
-// Regression documents current MemStore behavior.
+// FIXED(#102): Postgres normalises empty tags to []; MemStore now does the
+// same instead of keeping nil.
 func TestAuditMemoryCreateDefaultsTagsNonNil(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -66,85 +65,72 @@ func TestAuditMemoryCreateDefaultsTagsNonNil(t *testing.T) {
 	if err := s.CreateMemoryItem(ctx, item); err != nil {
 		t.Fatal(err)
 	}
-	if item.Tags != nil {
-		t.Errorf("Tags = %v, want nil (MemStore keeps nil; Postgres parity is non-nil [])", item.Tags)
+	if item.Tags == nil {
+		t.Error("Tags = nil, want non-nil [] (Postgres parity)")
 	}
 }
 
-// BUG(#102): content CHECK (20-2000 chars) unenforced — short content
-// accepted. Regression documents current MemStore behavior.
+// FIXED(#102): content CHECK (20-2000 chars) enforced — short content
+// rejected like Postgres.
 func TestAuditMemoryCreateAcceptsShortContent(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	item := &MemoryItem{ProjectID: "p1", Key: "k-short", Content: "hi"}
-	if err := s.CreateMemoryItem(ctx, item); err != nil {
-		t.Fatalf("MemStore accepts short content, got err %v", err)
-	}
-	if item.Content != "hi" {
-		t.Errorf("Content = %q, want preserved short content", item.Content)
+	if err := s.CreateMemoryItem(ctx, item); err == nil {
+		t.Fatal("MemStore must reject short content (CHECK 20-2000)")
 	}
 	if err := ValidateMemoryContent(item.Content); err == nil {
 		t.Error("validator itself missed short content")
 	}
 }
 
-// BUG(#102): content over 2000 chars accepted. Regression documents current
-// MemStore behavior.
+// FIXED(#102): content over 2000 chars rejected like Postgres.
 func TestAuditMemoryCreateAcceptsLongContent(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	item := &MemoryItem{ProjectID: "p1", Key: "k-long", Content: strings.Repeat("x", 2001)}
-	if err := s.CreateMemoryItem(ctx, item); err != nil {
-		t.Fatalf("MemStore accepts 2001-char content, got err %v", err)
-	}
-	if len([]rune(item.Content)) != 2001 {
-		t.Errorf("Content length = %d, want preserved 2001 chars", len([]rune(item.Content)))
+	if err := s.CreateMemoryItem(ctx, item); err == nil {
+		t.Fatal("MemStore must reject 2001-char content (CHECK 20-2000)")
 	}
 }
 
-// BUG(#102): level CHECK unenforced. Regression documents current MemStore
-// behavior.
+// FIXED(#102): level CHECK enforced (now including the ephemeral 5th tier,
+// issue #30).
 func TestAuditMemoryCreateAcceptsBadLevel(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	item := &MemoryItem{ProjectID: "p1", Key: "k-level", Content: "content with enough length here", Level: "galaxy"}
-	if err := s.CreateMemoryItem(ctx, item); err != nil {
-		t.Fatalf("MemStore accepts bad level, got err %v", err)
-	}
-	if item.Level != "galaxy" {
-		t.Errorf("Level = %q, want preserved %q (MemStore does no validation)", item.Level, "galaxy")
+	if err := s.CreateMemoryItem(ctx, item); err == nil {
+		t.Fatal("MemStore must reject bad level (CHECK)")
 	}
 	if err := ValidateMemoryLevel(item.Level); err == nil {
 		t.Error("validator itself missed bad level")
 	}
+	// The ephemeral tier is accepted.
+	ephem := &MemoryItem{ProjectID: "p1", Key: "k-ephem", Content: "content with enough length here", Level: LevelEphemeral}
+	if err := s.CreateMemoryItem(ctx, ephem); err != nil {
+		t.Errorf("ephemeral level must be accepted (5th tier): %v", err)
+	}
 }
 
-// BUG(#102): scope CHECK unenforced. Regression documents current MemStore
-// behavior.
+// FIXED(#102): scope CHECK enforced.
 func TestAuditMemoryCreateAcceptsBadScope(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	item := &MemoryItem{ProjectID: "p1", Key: "k-scope2", Content: "content with enough length here", Scope: "vibe"}
-	if err := s.CreateMemoryItem(ctx, item); err != nil {
-		t.Fatalf("MemStore accepts bad scope, got err %v", err)
-	}
-	if item.Scope != "vibe" {
-		t.Errorf("Scope = %q, want preserved %q (MemStore does no validation)", item.Scope, "vibe")
+	if err := s.CreateMemoryItem(ctx, item); err == nil {
+		t.Fatal("MemStore must reject bad scope (CHECK)")
 	}
 }
 
-// BUG(#102): confidence CHECK (0-1) unenforced. Regression documents current
-// MemStore behavior.
+// FIXED(#102): confidence CHECK (0-1) enforced.
 func TestAuditMemoryCreateAcceptsBadConfidence(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 	for _, c := range []float32{-0.5, 5.0} {
 		item := &MemoryItem{ProjectID: "p1", Key: "k-conf", Content: "content with enough length here", Confidence: c}
-		if err := s.CreateMemoryItem(ctx, item); err != nil {
-			t.Fatalf("MemStore accepts confidence %v, got err %v", c, err)
-		}
-		if item.Confidence != c {
-			t.Fatalf("MemStore rewrote confidence %v -> %v", c, item.Confidence)
+		if err := s.CreateMemoryItem(ctx, item); err == nil {
+			t.Fatalf("MemStore must reject confidence %v (CHECK 0-1)", c)
 		}
 	}
 }

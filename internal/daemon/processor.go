@@ -759,6 +759,23 @@ const (
 	IdleFlushAfter = 5 * time.Minute
 )
 
+// Designation timing (issue #115).
+//
+//   - PresenceThreshold mirrors store.OfflineThreshold (90s): a workspace
+//     silent past 90s reads offline for presence/liveness. Defined here so
+//     the daemon never imports the pgx-backed store.
+//   - DesignatedFailoverAfter is the distinct 1h failover delay (plan §6.3):
+//     the designated-processor role is sticky for 1h past last heartbeat so
+//     laptops flapping on sleep do not churn designation 40x earlier than
+//     spec. Presence may flap at 90s; the role does not.
+const (
+	// PresenceThreshold mirrors store.OfflineThreshold for presence checks.
+	PresenceThreshold = 90 * time.Second
+	// DesignatedFailoverAfter is how long a designated processor may be
+	// silent before another daemon may take over (plan §6.3, 1h).
+	DesignatedFailoverAfter = time.Hour
+)
+
 // Processor consumes event batches on the designated daemon and proposes
 // structured memories. Construct with NewProcessor; run ProcessEvents from a
 // background goroutine fed by the harvester/interceptor channels.
@@ -841,6 +858,55 @@ func (p *Processor) ProcessEvents(ctx context.Context, project string, events []
 		}
 	}
 	return proposals, nil
+}
+
+// ProcessToolEvents runs episode auto-detection (plan §2.3, issue #115) over
+// a Layer-1 ToolEvent window and emits an episode_summary proposal when the
+// fail->read->fix->green-rerun arc completes. Non-designated daemons return
+// nil (fail-closed). It is the ToolEvent counterpart to ProcessEvents:
+// call it from the interceptor event loop; ProcessEvents itself stays
+// conversation-only for backward compatibility.
+func (p *Processor) ProcessToolEvents(ctx context.Context, project string, evs []ToolEvent) ([]Proposal, error) {
+	if !p.ShouldRun() {
+		return nil, nil
+	}
+	if len(evs) == 0 {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ep := DetectEpisodePattern(evs)
+	if ep == nil {
+		return nil, nil
+	}
+	content := strings.TrimSpace(ep.Title + "\nTrigger: " + ep.Trigger + "\n" + ep.Resolution + "\n" + ep.Verification)
+	if len(content) < 20 {
+		return nil, nil
+	}
+	if len(content) > 2000 {
+		content = content[:2000]
+	}
+	pr := Proposal{
+		Key:        KeyFromContent(content),
+		Content:    content,
+		Level:      LevelProject,
+		Scope:      ScopeEpisodeSummary,
+		Confidence: 0.8,
+		Source:     "processor:episode",
+		Explicit:   false,
+	}
+	pr.ConfirmAfter = ConfirmationDelay(pr)
+	pr.ProposedAt = time.Now().UTC()
+	if dup, _ := IsDuplicate(pr.Content, p.Store.Existing()); dup {
+		return nil, nil
+	}
+	if p.Store != nil {
+		if err := p.Store.Save(pr); err != nil {
+			return nil, err
+		}
+	}
+	return []Proposal{pr}, nil
 }
 
 // applyCaps enforces the per-batch proposal count and content-char budget

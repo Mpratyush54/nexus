@@ -158,13 +158,20 @@ func TestAuditSkipDirsAndDriveIgnore(t *testing.T) {
 	}
 }
 
+// FIXED (#117): Cadence no longer describes the removed robocopy/restic
+// backup world; it documents harvester + daemon sync tiers.
 func TestAuditCadenceMentionsTiers(t *testing.T) {
 	if Cadence == "" {
 		t.Fatal("Cadence empty")
 	}
-	for _, want := range []string{"restic", "azure", "15min"} {
+	for _, want := range []string{"harvest", "daemon sync", "15min", "daily"} {
 		if !strings.Contains(strings.ToLower(Cadence), want) {
 			t.Errorf("Cadence should mention %q: %q", want, Cadence)
+		}
+	}
+	for _, banned := range []string{"robocopy", "restic", "azure-blob"} {
+		if strings.Contains(strings.ToLower(Cadence), banned) {
+			t.Errorf("Cadence must not mention removed backup transport %q: %q", banned, Cadence)
 		}
 	}
 }

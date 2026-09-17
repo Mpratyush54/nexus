@@ -39,8 +39,10 @@ func TestAuditSystemdContents(t *testing.T) {
 		"Wants=network-online.target",
 		"Type=simple",
 		"ExecStart=",
-		"Restart=on-failure",
+		"Restart=always",
 		"RestartSec=5s",
+		"StandardOutput=journal",
+		"StandardError=journal",
 		"WantedBy=default.target",
 		exe, "daemon", "--port", "7171",
 	} {

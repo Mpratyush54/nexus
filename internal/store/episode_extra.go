@@ -139,7 +139,7 @@ func (s *MemStore) GetEpisodeTimeline(ctx context.Context, episodeID string) ([]
 	var out []*Event
 	for _, ev := range s.events {
 		if ev.EpisodeID == episodeID {
-			out = append(out, ev)
+			out = append(out, cloneEvent(ev))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -182,7 +182,7 @@ func (s *MemStore) SearchEpisodesByErrorPattern(ctx context.Context, projectID, 
 		}
 		for _, p := range ep.ErrorPatterns {
 			if p == pattern {
-				out = append(out, ep)
+				out = append(out, cloneEpisode(ep))
 				break
 			}
 		}
@@ -217,7 +217,7 @@ func (s *MemStore) SearchEpisodesByFile(ctx context.Context, projectID, file str
 		}
 		for _, f := range ep.FilesInvolved {
 			if f == file {
-				out = append(out, ep)
+				out = append(out, cloneEpisode(ep))
 				break
 			}
 		}
@@ -332,7 +332,7 @@ func (s *MemStore) SearchEpisodesSemantic(ctx context.Context, projectID string,
 	}
 	out := make([]*Episode, 0, len(ranked))
 	for _, r := range ranked {
-		out = append(out, r.ep)
+		out = append(out, cloneEpisode(r.ep))
 	}
 	return out, nil
 }

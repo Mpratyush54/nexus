@@ -10,6 +10,8 @@ package store
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -49,11 +51,9 @@ func TestAuditResolveProjectRootBeatsFolder(t *testing.T) {
 	}
 }
 
-// BUG(#102): two projects share folder "dup"; Postgres returns the
-// first-registered deterministically, MemStore returns whichever the map
-// yields first — nondeterministic across calls. Regression documents the
-// current MemStore property weakly but deterministically: both projects
-// exist and resolution returns one of them.
+// FIXED(#110, was BUG(#102)): ambiguous folders resolve deterministically —
+// first-registered wins (earliest CreatedAt), matching the Postgres
+// ORDER BY created_at ASC LIMIT 1 contract.
 func TestAuditResolveProjectFolderAmbiguity(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -71,27 +71,20 @@ func TestAuditResolveProjectFolderAmbiguity(t *testing.T) {
 	// Build the ambiguous state (two rows, one folder): reachable in
 	// production via legacy rows / direct writes, since ResolveProject
 	// itself folder-matches and would never create the second row.
-	second.FolderName = "dup-folder"
-	seen := map[string]int{}
+	s.mu.Lock()
+	secondRow := s.projects[second.ID]
+	secondRow.FolderName = "dup-folder"
+	// Keep the age order unambiguous: first-registered stays oldest.
+	secondRow.CreatedAt = first.CreatedAt.Add(time.Second)
+	s.mu.Unlock()
 	for i := 0; i < 50; i++ {
 		got, err := s.ResolveProject(ctx, "", "", "dup-folder")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.ID != first.ID && got.ID != second.ID {
-			t.Fatalf("ambiguous folder resolved to unknown project %s", got.ID)
+		if got.ID != first.ID {
+			t.Fatalf("call %d: ambiguous folder resolved to %s, want first-registered %s", i, got.ID, first.ID)
 		}
-		seen[got.ID]++
-	}
-	if len(seen) == 0 {
-		t.Fatal("expected at least one resolution")
-	}
-	// Deterministic weak property: resolution returns one of the two owners.
-	if _, ok := seen[first.ID]; !ok {
-		t.Logf("note: first-registered %s never won over 50 calls (Postgres parity is first-registered-wins)", first.ID)
-	}
-	if _, ok := seen[second.ID]; !ok {
-		t.Logf("note: second project %s never won over 50 calls", second.ID)
 	}
 }
 
@@ -103,8 +96,8 @@ func TestAuditGetProjectNotFound(t *testing.T) {
 	}
 }
 
-// BUG(#110): GetProject/ResolveProject return internal pointers (aliasing).
-// Regression documents current MemStore behavior (no defensive copy).
+// FIXED(#110): GetProject/ResolveProject return defensive copies — caller
+// mutations no longer corrupt the store.
 func TestAuditGetProjectAliasing(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -117,14 +110,14 @@ func TestAuditGetProjectAliasing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if again.FolderName != "mutated" {
-		t.Errorf("mutating a ResolveProject result should mutate the store (no copy), got %q", again.FolderName)
+	if again.FolderName == "mutated" {
+		t.Error("store corrupted via ResolveProject aliasing")
 	}
 }
 
-// BUG(#110): re-registering the same (machine_id, path) must upsert
-// (Postgres ON CONFLICT); MemStore inserts a duplicate row with a new ID.
-// Regression documents current MemStore behavior.
+// FIXED(#110 + #87): re-registering the same (machine_id, path) upserts
+// like Postgres ON CONFLICT — one row, same ID, only liveness/git fields
+// refreshed. Identity (project/user) is preserved, not rebound.
 func TestAuditRegisterWorkspaceUpsertDivergence(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -140,17 +133,86 @@ func TestAuditRegisterWorkspaceUpsertDivergence(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws2 := mk()
+	ws2.Branch = "dev"
 	if err := s.RegisterWorkspace(ctx, ws2); err != nil {
 		t.Fatal(err)
 	}
-	if ws1.ID == ws2.ID {
-		t.Errorf("MemStore mints a new ID per RegisterWorkspace (%s); Postgres upserts one row", ws1.ID)
+	if ws1.ID != ws2.ID {
+		t.Errorf("upsert must reuse the row ID: got %s vs %s", ws1.ID, ws2.ID)
 	}
 	s.mu.RLock()
 	n := len(s.workspaces)
+	stored := s.workspaces[ws1.ID]
 	s.mu.RUnlock()
-	if n != 2 {
-		t.Errorf("MemStore keeps duplicate workspace rows for one (machine_id,path): %d rows, want 2", n)
+	if n != 1 {
+		t.Errorf("upsert must keep one row per (machine_id,path): %d rows", n)
+	}
+	if stored.Branch != "dev" {
+		t.Errorf("upsert must refresh git state, branch = %q", stored.Branch)
+	}
+	// Identity is sticky: a re-registration naming another project does
+	// not rebind the row (issue #87).
+	other, err := s.ResolveProject(ctx, "", "", "ws-proj-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hijack := &Workspace{ProjectID: other.ID, UserID: "u2", MachineID: "m1", Path: "/repo"}
+	if err := s.RegisterWorkspace(ctx, hijack); err != nil {
+		t.Fatal(err)
+	}
+	if hijack.ID != ws1.ID {
+		t.Errorf("same (machine_id,path) must map to the same row, got %s", hijack.ID)
+	}
+	s.mu.RLock()
+	kept := s.workspaces[ws1.ID]
+	s.mu.RUnlock()
+	if kept.ProjectID != proj.ID || kept.UserID != "u1" {
+		t.Errorf("upsert rebound identity to %s/%s", kept.ProjectID, kept.UserID)
+	}
+	// Unknown projects fail instead of creating orphan workspaces.
+	ghost := &Workspace{ProjectID: "proj_missing", UserID: "u1", MachineID: "m9", Path: "/ghost"}
+	if err := s.RegisterWorkspace(ctx, ghost); !errors.Is(err, ErrNotFound) {
+		t.Errorf("orphan workspace: got %v, want ErrNotFound", err)
+	}
+}
+
+// FIXED(#86): concurrent first registration of one identity converges on a
+// single project row — every goroutine gets the same ID.
+func TestAuditResolveProjectConcurrentFirstRegistration(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	const n = 32
+	ids := make([]string, n)
+	errs := make([]error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			p, err := s.ResolveProject(ctx, "git@github.com:org/race.git", "R-RACE", "race-folder")
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			ids[i] = p.ID
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: %v", i, err)
+		}
+	}
+	for i := 1; i < n; i++ {
+		if ids[i] != ids[0] {
+			t.Fatalf("divergent IDs: %s vs %s", ids[0], ids[i])
+		}
+	}
+	s.mu.RLock()
+	nrows := len(s.projects)
+	s.mu.RUnlock()
+	if nrows != 1 {
+		t.Fatalf("concurrent first registration created %d rows, want 1", nrows)
 	}
 }
 

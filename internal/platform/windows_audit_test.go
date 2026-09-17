@@ -19,7 +19,7 @@ func TestAuditSchtasksStructure(t *testing.T) {
 		t.Fatalf("argv must start with /Create: %q", argv)
 	}
 	joined := strings.Join(argv, " ")
-	for _, want := range []string{"/Create", "/TN", SchtasksName, "/TR", "/SC", "ONLOGON", "/RL", "HIGHEST", "/F"} {
+	for _, want := range []string{"/Create", "/TN", SchtasksName, "/TR", "/SC", "ONLOGON", "/DELAY", "/RL", "HIGHEST", "/F"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("schtasks args missing %q: %q", want, joined)
 		}

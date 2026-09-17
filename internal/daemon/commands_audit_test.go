@@ -35,7 +35,6 @@ func TestAuditIsAllowedMatrix(t *testing.T) {
 		{"cargo", "test"},
 		{"cargo", "test", "--all"},
 		// Flag passthrough: only argv[0]/first-arg shape is gated.
-		{"git", "--upload-pack=evil"},
 		{"go", "test", "-run", "TestX"},
 	}
 	for _, a := range allowed {
@@ -78,6 +77,26 @@ func TestAuditIsAllowedMatrix(t *testing.T) {
 		// NUL bytes are always rejected.
 		{"git\x00", "status"},
 		{"go", "test\x00"},
+		// Issue #91: git write/config/remote/hook surface is rejected.
+		{"git", "config", "--global", "user.email", "x@y.z"},
+		{"git", "remote", "add", "origin", "https://example.com/r.git"},
+		{"git", "commit", "-m", "x"},
+		{"git", "add", "."},
+		{"git", "push"},
+		{"git", "pull"},
+		{"git", "fetch"},
+		{"git", "clone", "https://example.com/r.git"},
+		{"git", "init"},
+		{"git", "checkout", "main"},
+		{"git", "reset", "--hard"},
+		{"git", "--upload-pack=evil"},
+		{"git", "log", "--upload-pack=evil"},
+		{"git", "-c", "protocol.ext.allow=always", "fetch", "origin"},
+		{"git", "fetch", "--upload-pack=evil"},
+		{"git", "--exec=evil"},
+		{"git", "diff", "--output=/tmp/x"},
+		{"git", "-c", "credential.helper=evil"},
+		{"git", "log", "--config", "x.y=z"},
 	}
 	for _, a := range denied {
 		if IsAllowed(a) {

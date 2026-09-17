@@ -69,7 +69,7 @@ func TestAuditServerStubStoreFailClosed(t *testing.T) {
 }
 
 func TestAuditServerLogin503(t *testing.T) {
-	h := newHandler("audit-secret-1234567890")
+	h := newHandler("audit-secret-1234567890", testConfig(t))
 	req := httptest.NewRequest(http.MethodPost, "/auth/login", strings.NewReader(`{"username":"a","password":"b"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -87,7 +87,7 @@ func TestAuditServerLogin503(t *testing.T) {
 }
 
 func TestAuditServerHealthzLive(t *testing.T) {
-	h := newHandler("audit-secret-1234567890")
+	h := newHandler("audit-secret-1234567890", testConfig(t))
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -101,7 +101,7 @@ func TestAuditServerHealthzLive(t *testing.T) {
 
 func TestAuditServerDataRouteFailsClosed(t *testing.T) {
 	secret := "audit-secret-1234567890"
-	h := newHandler(secret)
+	h := newHandler(secret, testConfig(t))
 	tok, err := server.NewAuthenticator([]byte(secret)).Generate("alice", time.Hour)
 	if err != nil {
 		t.Fatalf("mint token: %v", err)

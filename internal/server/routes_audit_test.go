@@ -13,7 +13,7 @@ import (
 )
 
 // Audit coverage for internal/server/routes.go + server.go middleware +
-// routes_extra.go reject fallback. Reuses helpers from server_test.go
+// routes_extra.go reject persistence. Reuses helpers from server_test.go
 // (newTestServer, loginAs, doJSON, decodeBody); never edits them.
 
 // /healthz must be exactly {"ok":true} with no auth.
@@ -119,11 +119,10 @@ func TestAuditRoutesSearchLimitValidation(t *testing.T) {
 	}
 }
 
-// Large limits pass straight through to the store: no upper-bound clamp
-// exists on either search route. Documented as a potential DoS vector
-// (a caller can request limit=1000000); the store simply returns what it
-// has. This test locks in current behavior, not desired behavior.
-func TestAuditRoutesLargeLimitPassThrough(t *testing.T) {
+// Large limits clamp to MaxSearchLimit (issue #94: default-20/max-100) on
+// both search routes: limit=1000000 is accepted (200) but the store only
+// ever sees a clamped bound, so count stays within the cap.
+func TestAuditRoutesLargeLimitClamped(t *testing.T) {
 	s := newTestServer()
 	token := loginAs(t, s, "large-limit-audit")
 	rec := doJSON(t, s, http.MethodPost, "/projects/resolve", token, map[string]string{"folder_name": "large-limit-proj"})
@@ -139,24 +138,34 @@ func TestAuditRoutesLargeLimitPassThrough(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	// NOTE(search-limit): no clamp — limit=1000000 is accepted and forwarded.
 	for _, route := range []string{
 		"/memory/search?project_id=" + project.ID + "&q=pytest&limit=1000000",
 		"/episodes/search?project_id=" + project.ID + "&limit=1000000",
 	} {
 		rec := doJSON(t, s, http.MethodGet, route, token, nil)
 		if rec.Code != http.StatusOK {
-			t.Errorf("GET %s: status = %d, want 200 (large limit passes through)", route, rec.Code)
+			t.Errorf("GET %s: status = %d, want 200 (oversize limit clamps, not rejects)", route, rec.Code)
+			continue
 		}
+		var out struct {
+			Count int `json:"count"`
+		}
+		decodeBody(t, rec, &out)
+		if out.Count > MaxSearchLimit {
+			t.Errorf("GET %s: count = %d, want <= MaxSearchLimit (%d)", route, out.Count, MaxSearchLimit)
+		}
+	}
+	// Empty ?limit= selects the default (20): the shape stays {"items","count"}.
+	rec = doJSON(t, s, http.MethodGet, "/memory/search?project_id="+project.ID+"&q=pytest", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("default-limit search status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 
-// Reject fallback mutates the live MemStore pointer: the status flip
-// persists without a dedicated Store.RejectMemory method. Attribution
-// (rejected_by) is silently dropped — MemoryItem has no RejectedBy column.
-// TODO(store): add Store.RejectMemory so PostgresStore (which returns
-// scanned copies, not live pointers) persists rejections too.
-func TestAuditRoutesRejectFallbackPointerMutation(t *testing.T) {
+// Reject persists through the native Store.RejectMemory path (Wave 1 added
+// it to MemStore + PostgresStore): PROPOSED -> REJECTED is durable on every
+// backend, and terminal/confirmed rows fail with 409 instead of resurrecting.
+func TestAuditRoutesRejectNativePersist(t *testing.T) {
 	s := newTestServer()
 	token := loginAs(t, s, "reject-audit")
 	rec := doJSON(t, s, http.MethodPost, "/projects/resolve", token, map[string]string{"folder_name": "reject-audit-proj"})
@@ -172,17 +181,11 @@ func TestAuditRoutesRejectFallbackPointerMutation(t *testing.T) {
 	var created store.MemoryItem
 	decodeBody(t, rec, &created)
 
-	// MemStore must NOT implement the native reject interface (else this
-	// test would exercise the wrong path).
-	if _, ok := s.Store.(rejectMemoryStore); ok {
-		t.Fatal("MemStore must not implement rejectMemoryStore for fallback test")
+	// The store now implements the native reject interface: the handler
+	// must take the persistent path (no pointer-mutation fallback).
+	if _, ok := s.Store.(rejectMemoryStore); !ok {
+		t.Fatal("MemStore must implement rejectMemoryStore (Wave-1 RejectMemory)")
 	}
-
-	before, err := s.Store.GetMemoryItem(t.Context(), created.ID)
-	if err != nil {
-		t.Fatalf("GetMemoryItem: %v", err)
-	}
-	livePtr := before // MemStore returns the live map pointer.
 
 	rec = doJSON(t, s, http.MethodPost, "/memory/"+created.ID+"/reject", token, map[string]any{"rejected_by": "auditor"})
 	if rec.Code != http.StatusOK {
@@ -193,9 +196,6 @@ func TestAuditRoutesRejectFallbackPointerMutation(t *testing.T) {
 	if out.Status != "REJECTED" {
 		t.Fatalf("response status = %q, want REJECTED", out.Status)
 	}
-	if livePtr.Status != "REJECTED" {
-		t.Fatal("fallback must mutate the live MemStore pointer in place")
-	}
 	stored, err := s.Store.GetMemoryItem(t.Context(), created.ID)
 	if err != nil {
 		t.Fatalf("GetMemoryItem: %v", err)
@@ -203,8 +203,11 @@ func TestAuditRoutesRejectFallbackPointerMutation(t *testing.T) {
 	if stored.Status != "REJECTED" {
 		t.Fatalf("stored status = %q, want REJECTED", stored.Status)
 	}
-	// TODO(store): rejected_by attribution is dropped (see routes_extra.go
-	// `_ = rejectedBy`); no field on the response carries it.
+	// Terminal rows cannot be re-rejected: second reject is a conflict.
+	rec = doJSON(t, s, http.MethodPost, "/memory/"+created.ID+"/reject", token, map[string]any{})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("re-reject status = %d, want 409", rec.Code)
+	}
 	if !strings.Contains(rec.Body.String(), "REJECTED") {
 		t.Fatalf("response must carry REJECTED, got %s", rec.Body.String())
 	}

@@ -34,6 +34,7 @@ func TestAuditDarwinPlistContents(t *testing.T) {
 	plist := RenderLaunchdPlist(LaunchdLabel, exe, []string{"daemon", "run", "--port", "7171"})
 	for _, want := range []string{
 		LaunchdLabel, exe, "ProgramArguments", "RunAtLoad", "KeepAlive",
+		"ThrottleInterval", "StandardOutPath", "StandardErrorPath",
 		"daemon", "run", "--port", "7171", "<true/>",
 	} {
 		if !strings.Contains(plist, want) {

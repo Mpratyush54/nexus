@@ -38,22 +38,18 @@ func auditSession(t *testing.T, ctx context.Context, s *MemStore, p *Project) *S
 func auditSessionMem(t *testing.T, ctx context.Context, s *MemStore, p *Project, sessID, key, status string) *MemoryItem {
 	t.Helper()
 	m := &MemoryItem{ProjectID: p.ID, SessionID: sessID, Key: key, Content: "session content with enough length"}
+	if status != "" {
+		m.Status = status
+	}
 	if err := s.CreateSessionMemory(ctx, m); err != nil {
 		t.Fatal(err)
-	}
-	if status != "" {
-		stored, err := s.GetMemoryItem(ctx, m.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		stored.Status = status
 	}
 	return m
 }
 
-// BUG(#110): org-level session memory (ProjectID "") appears in project P's
-// promotion candidates under MemStore; Postgres scoping excludes it.
-// Regression documents current MemStore behavior.
+// FIXED(#110): org-level (NULL-project) session rows are excluded from
+// project promotion candidates, matching the Postgres
+// WHERE project_id = $1 scoping.
 func TestAuditPromotionCandidatesOrgNullDivergence(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -66,14 +62,10 @@ func TestAuditPromotionCandidatesOrgNullDivergence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
 	for _, c := range cands {
 		if c.Key == "orgkey" {
-			found = true
+			t.Errorf("org-level (NULL project) key %q must be excluded from project %s candidates", "orgkey", p.ID)
 		}
-	}
-	if !found {
-		t.Errorf("MemStore includes org-level (NULL project) key %q in project %s candidates (Postgres excludes NULL-project rows)", "orgkey", p.ID)
 	}
 }
 
@@ -312,5 +304,52 @@ func TestAuditSaveProposedSQLGuards(t *testing.T) {
 	}
 	if err := (ProposedInput{}).Validate(); err == nil {
 		t.Error("empty ProposedInput must fail validation")
+	}
+}
+
+// FIXED(#119): session TTL sweeper ends stale active sessions (idempotent),
+// honoring explicit ExpiresAt over the default TTL.
+func TestAuditExpireStaleSessions(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	p := auditProject(t, ctx, s, "expiry-proj")
+	now := time.Now().UTC()
+
+	old := &Session{ProjectID: p.ID, CreatedBy: "u1"}
+	if err := s.CreateSession(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	b := memSessionsOf(s)
+	b.mu.Lock()
+	b.sessions[old.ID].CreatedAt = now.Add(-8 * 24 * time.Hour)
+	b.mu.Unlock()
+
+	pinned := &Session{ProjectID: p.ID, CreatedBy: "u1", ExpiresAt: now.Add(30 * 24 * time.Hour)}
+	if err := s.CreateSession(ctx, pinned); err != nil {
+		t.Fatal(err)
+	}
+	b.mu.Lock()
+	b.sessions[pinned.ID].CreatedAt = now.Add(-8 * 24 * time.Hour)
+	b.mu.Unlock()
+
+	n, err := s.ExpireStaleSessions(ctx, now, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("swept = %d, want 1 (only the TTL-lapsed session)", n)
+	}
+	got, _ := s.GetSession(ctx, old.ID)
+	if got.IsActive || got.EndedAt.IsZero() {
+		t.Errorf("lapsed session not ended: %+v", got)
+	}
+	kept, _ := s.GetSession(ctx, pinned.ID)
+	if !kept.IsActive {
+		t.Error("session with future ExpiresAt must survive the sweep")
+	}
+	// Idempotent rerun sweeps nothing.
+	n, err = s.ExpireStaleSessions(ctx, now, 0)
+	if err != nil || n != 0 {
+		t.Errorf("rerun: swept = %d, err = %v; want 0, nil", n, err)
 	}
 }

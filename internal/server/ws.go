@@ -103,7 +103,35 @@ type Client struct {
 
 	Send chan []byte // outbound frames (JSON-encoded WSMessage)
 
+	// mu guards closed; wmu serializes all socket frame writes
+	// (wsWriteLoop data frames vs wsReadLoop pong/close replies).
+	mu     sync.Mutex
+	closed bool
+	wmu    sync.Mutex
+
 	dropped atomic.Int64
+}
+
+// safeSend queues raw without panicking on closed channels.
+func (c *Client) safeSend(raw []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	select {
+	case c.Send <- raw:
+	default:
+		c.dropped.Add(1)
+	}
+}
+
+// markClosed flags the client closed; caller must hold h.mu.Lock and must
+// close(c.Send) exactly once after marking.
+func (c *Client) markClosed() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closed = true
 }
 
 // Status returns the client's effective presence (expired typing demotes to
@@ -120,16 +148,69 @@ func (c *Client) Status(now time.Time) string {
 type Hub struct {
 	mu      sync.RWMutex
 	clients map[string]*Client
+	authz   WSAuthorizer
+	// throttle gates inbound actions (issue #93). Nil allows all.
+	throttle func(userID, projectID string) bool
+	// steerHook routes steering actions through the steering manager
+	// (issue #42). Nil falls through to broadcast.
+	steerHook SteerHook
 
 	now func() time.Time // overridable in tests
 }
+
+// SteerHook routes one action through an external state machine (steering).
+// Returning handled=true means the hook owned the message (replies/fan-out
+// done by the hook); handled=false falls through to broadcast.
+type SteerHook func(clientID, userID, eventType string, payload map[string]any) (handled bool, err error)
+
+// SetSteerHook sets the steering action hook. Nil restores broadcast-only.
+func (h *Hub) SetSteerHook(fn SteerHook) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.steerHook = fn
+}
+
+func (h *Hub) getSteerHook() SteerHook {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.steerHook
+}
+
+// SetThrottle sets the inbound-action rate gate. Nil restores allow-all.
+func (h *Hub) SetThrottle(fn func(userID, projectID string) bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.throttle = fn
+}
+
+func (h *Hub) throttled(userID, projectID string) bool {
+	h.mu.RLock()
+	fn := h.throttle
+	h.mu.RUnlock()
+	if fn == nil {
+		return false
+	}
+	return !fn(userID, projectID)
+}
+
+var (
+	errWSProjectRequired = errWSError("project_id is required")
+	errWSForbidden       = errWSError("not authorized for project/session scope")
+	errWSRateLimited     = errWSError("rate limit exceeded")
+)
+
+type errWSError string
+
+func (e errWSError) Error() string { return string(e) }
 
 // NewHub returns an empty hub using real time.
 func NewHub() *Hub {
 	return &Hub{clients: make(map[string]*Client), now: time.Now}
 }
 
-// Add registers a client (status → online, lastSeen → now).
+// Add registers a client (status → online, lastSeen → now). A duplicate ID
+// gracefully retires the previous client so its goroutines exit instead of
+// leaking (issue #101).
 func (h *Hub) Add(c *Client) {
 	if c.Send == nil {
 		c.Send = make(chan []byte, SendBufferSize)
@@ -137,18 +218,32 @@ func (h *Hub) Add(c *Client) {
 	now := h.now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if old, ok := h.clients[c.ID]; ok && old != c {
+		old.markClosed()
+		func() {
+			defer func() { _ = recover() }()
+			close(old.Send)
+		}()
+	}
+	c.mu.Lock()
+	c.closed = false
+	c.mu.Unlock()
 	c.status = PresenceOnline
 	c.lastSeen = now
 	h.clients[c.ID] = c
 }
 
-// Remove unregisters a client and closes its Send channel.
+// Remove unregisters a client and closes its Send channel exactly once.
 func (h *Hub) Remove(id string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if c, ok := h.clients[id]; ok {
 		delete(h.clients, id)
-		close(c.Send)
+		c.markClosed()
+		func() {
+			defer func() { _ = recover() }()
+			close(c.Send)
+		}()
 	}
 }
 
@@ -175,13 +270,28 @@ func (h *Hub) Dropped(id string) int64 {
 }
 
 // Subscribe scopes a client to a project and optional session channel.
+// Authorization (issue #90) runs before mutation: the client's UserID is
+// checked against the requested scope via the hub authorizer.
 func (h *Hub) Subscribe(id, projectID, sessionID string) error {
 	if strings.TrimSpace(projectID) == "" {
 		return errors.New("project_id is required")
 	}
+	h.mu.RLock()
+	c, ok := h.clients[id]
+	userID := ""
+	if ok {
+		userID = c.UserID
+	}
+	h.mu.RUnlock()
+	if !ok {
+		return errors.New("client not connected")
+	}
+	if err := h.authorize(userID, projectID, sessionID); err != nil {
+		return err
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	c, ok := h.clients[id]
+	c, ok = h.clients[id]
 	if !ok {
 		return errors.New("client not connected")
 	}
@@ -285,11 +395,9 @@ func (h *Hub) broadcast(msg WSMessage, projectID, sessionID, excludeID string) {
 		if !match {
 			continue
 		}
-		select {
-		case c.Send <- raw:
-		default:
-			c.dropped.Add(1) // backpressure: shed, never stall
-		}
+		// Send while holding RLock so Remove (Lock) cannot close the
+		// channel mid-send; safeSend additionally guards the closed flag.
+		c.safeSend(raw)
 	}
 }
 
@@ -326,6 +434,29 @@ func (h *Hub) HandleClientMessage(id string, raw []byte) error {
 		if c == nil {
 			return errors.New("client not connected")
 		}
+		// Authorize the sender's current scope on every action (issue #90):
+		// a client that never subscribed (or was moved) cannot inject.
+		if err := h.authorize(c.UserID, c.ProjectID, c.SessionID); err != nil {
+			h.reply(id, WSMessage{Type: WSMsgError, Message: err.Error()})
+			return err
+		}
+		if h.throttled(c.UserID, c.ProjectID) {
+			h.reply(id, WSMessage{Type: WSMsgError, Message: "rate limit exceeded"})
+			return errWSRateLimited
+		}
+		// Steering actions ride the same envelope (issue #42): the hook
+		// drives the manager + emitter and owns replies/fan-out.
+		if hook := h.getSteerHook(); hook != nil {
+			handled, herr := hook(c.ID, c.UserID, msg.EventType, msg.Payload)
+			if herr != nil {
+				h.reply(id, WSMessage{Type: WSMsgError, Message: herr.Error()})
+				return herr
+			}
+			if handled {
+				h.Heartbeat(id)
+				return nil
+			}
+		}
 		h.broadcast(WSMessage{Type: WSMsgEvent, ProjectID: c.ProjectID, SessionID: c.SessionID,
 			EventType: msg.EventType, Payload: msg.Payload, UserID: c.UserID},
 			c.ProjectID, c.SessionID, id)
@@ -343,16 +474,11 @@ func (h *Hub) reply(id string, msg WSMessage) {
 	if err != nil {
 		return
 	}
+	// Hold RLock across the send so Remove cannot close mid-send.
 	h.mu.RLock()
-	c, ok := h.clients[id]
-	h.mu.RUnlock()
-	if !ok {
-		return
-	}
-	select {
-	case c.Send <- raw:
-	default:
-		c.dropped.Add(1)
+	defer h.mu.RUnlock()
+	if c, ok := h.clients[id]; ok {
+		c.safeSend(raw)
 	}
 }
 
@@ -397,8 +523,19 @@ func (h *Hub) SweepOffline(timeout time.Duration) []string {
 
 // AttachHub registers the WebSocket endpoint on the server mux. It is
 // separate from registerRoutes so tests can opt in without changing the
-// Phase 1 route table in routes.go.
+// Phase 1 route table in routes.go. It also wires the hub's authz (issue
+// #90) and rate-limit throttle (issue #93) to this server's store/gates.
 func (s *Server) AttachHub(h *Hub) {
+	h.AuthorizeHub(NewStoreAuthorizer(s.Store))
+	s.steerMu.Lock()
+	s.hub = h
+	s.steerMu.Unlock()
+	h.SetThrottle(func(_, projectID string) bool {
+		if projectID == "" {
+			projectID = "global"
+		}
+		return s.eventAllowed(projectID)
+	})
 	s.Mux.HandleFunc("GET /ws", s.serveWS(h))
 }
 
@@ -436,7 +573,7 @@ func (s *Server) serveWS(h *Hub) http.HandlerFunc {
 				c.ProjectID, c.SessionID, "")
 		}()
 		// Online announcement happens on subscribe (scope is known then).
-		go wsWriteLoop(conn, rw, c.Send)
+		go wsWriteLoop(conn, rw, c)
 		wsReadLoop(conn, rw, h, c)
 	}
 }
@@ -588,35 +725,46 @@ func wsReadLoop(conn net.Conn, rw *bufio.ReadWriter, h *Hub, c *Client) {
 				_ = h.HandleClientMessage(c.ID, msg)
 			}
 		case wsOpPing:
+			c.wmu.Lock()
 			_ = wsWriteFrame(rw, wsOpPong, payload)
+			c.wmu.Unlock()
 		case wsOpPong:
 			// Heartbeat already refreshed above.
 		case wsOpClose:
+			c.wmu.Lock()
 			_ = wsWriteFrame(rw, wsOpClose, payload)
+			c.wmu.Unlock()
 			return
 		}
 	}
 }
 
 // wsWriteLoop pumps hub → client, plus periodic pings. It exits when Send is
-// closed (hub Remove) or the socket fails.
-func wsWriteLoop(conn net.Conn, rw *bufio.ReadWriter, send <-chan []byte) {
+// closed (hub Remove) or the socket fails. All frame writes serialize on
+// c.wmu with wsReadLoop control replies (issue #101).
+func wsWriteLoop(conn net.Conn, rw *bufio.ReadWriter, c *Client) {
 	ticker := time.NewTicker(wsPingPeriod)
 	defer ticker.Stop()
 	defer conn.Close()
 	for {
 		select {
-		case msg, ok := <-send:
+		case msg, ok := <-c.Send:
 			if !ok {
 				return
 			}
 			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := wsWriteFrame(rw, wsOpText, msg); err != nil {
+			c.wmu.Lock()
+			err := wsWriteFrame(rw, wsOpText, msg)
+			c.wmu.Unlock()
+			if err != nil {
 				return
 			}
 		case <-ticker.C:
 			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := wsWriteFrame(rw, wsOpPing, nil); err != nil {
+			c.wmu.Lock()
+			err := wsWriteFrame(rw, wsOpPing, nil)
+			c.wmu.Unlock()
+			if err != nil {
 				return
 			}
 		}
@@ -630,6 +778,9 @@ func wsReadFrame(rw *bufio.ReadWriter) (op byte, fin bool, payload []byte, err e
 	hdr, err := readExact(rw, 2)
 	if err != nil {
 		return 0, false, nil, err
+	}
+	if hdr[0]&0x70 != 0 {
+		return 0, false, nil, errors.New("unsupported websocket RSV bits")
 	}
 	fin = hdr[0]&0x80 != 0
 	op = hdr[0] & 0x0F

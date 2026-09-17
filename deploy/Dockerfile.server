@@ -1,23 +1,39 @@
-# central-server — production image (template)
-# Build context: repo root. Target entrypoint: ./cmd/server (per
-# implementation-plan.md target structure; lands with Phase 1.8+).
-# No terraform apply — image build only.
+# central-server — production image (issue #20; hardened per #45/#112/#128).
+# Build context: repo root.
+#
+# Runtime is a shell-capable minimal base (alpine), NOT distroless: the
+# ENTRYPOINT (migrate.sh) needs /bin/sh and the ECS/compose healthchecks
+# need wget. Only migrations/*.up.sql are baked in — *.down.sql are NEVER
+# copied (destructive; see #128). Env contract (single source of truth:
+# deploy/secrets-notes.md): DATABASE_URL primary, discrete DB_* + DB_SSLMODE
+# fallback assembled by migrate.sh and cmd/server identically.
 
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-# Builds once cmd/server/main.go lands; fails fast until then (intentional).
 RUN CGO_ENABLED=0 go build -trimpath -o /out/central-server ./cmd/server
 
-FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/central-server /central-server
-COPY --from=build /src/migrations /migrations
-COPY deploy/migrate.sh /migrate.sh
-USER nonroot:nonroot
+FROM alpine:3.21
+RUN apk add --no-cache postgresql16-client wget \
+  && adduser -D -u 10001 appuser
+COPY --from=build /out/central-server /usr/local/bin/central-server
+# Forward-only migrations only. Down-migrations are destructive and must
+# never ship in the prod image (issue #128).
+COPY --from=build /src/migrations/*.up.sql /migrations/
+COPY deploy/migrate.sh /usr/local/bin/migrate.sh
+RUN chown -R 10001:10001 /migrations \
+  && chmod +x /usr/local/bin/migrate.sh \
+  && chmod 444 /migrations/*.up.sql
+USER 10001
 EXPOSE 8080
-ENV PORT=8080
-# migrate.sh runs first (runs migrations on boot), then execs the server.
-ENTRYPOINT ["/migrate.sh"]
-CMD ["/central-server"]
+ENV PORT=8080 \
+    MIGRATIONS_DIR=/migrations
+# Liveness only; readiness (/readyz, DB+sslmode gate) is the ECS check.
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=60s \
+  CMD wget -qO- http://localhost:8080/healthz | grep -q '"ok":true'
+# migrate.sh applies migrations/*.up.sql on boot (refuses to boot without a
+# DSN), then execs the server.
+ENTRYPOINT ["/usr/local/bin/migrate.sh"]
+CMD ["/usr/local/bin/central-server"]

@@ -35,10 +35,36 @@ func auditCaptureStdout(t *testing.T, fn func()) string {
 
 func TestAuditMemUsageOutput(t *testing.T) {
 	out := auditCaptureStdout(t, usage)
-	for _, want := range []string{"mem status", "mem projects", "mem mcp"} {
+	for _, want := range []string{"mem status", "mem projects", "mem mcp", "nexus"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("usage() missing %q:\n%s", want, out)
 		}
+	}
+}
+
+// FIXED (#116 struct-clobber): Create must copy back only store-minted
+// fields (ID/status/defaults), preserving caller-supplied content verbatim.
+func TestAuditMemCreatePreservesCallerFields(t *testing.T) {
+	ctx := context.Background()
+	mem := store.NewMemStore()
+	p, err := mem.ResolveProject(ctx, "", "", "clobber-proj")
+	if err != nil {
+		t.Fatalf("ResolveProject: %v", err)
+	}
+	s := mcpStore{mem: mem}
+	item := &mcp.MemoryItem{
+		Key: "testing/framework", Content: "The team uses pytest with fixtures for all integration tests here.",
+		Level: "project", ProjectID: p.ID, Tags: []string{"testing"}, Source: "cli",
+	}
+	origKey, origContent := item.Key, item.Content
+	if err := s.CreateMemoryItem(ctx, item); err != nil {
+		t.Fatalf("CreateMemoryItem: %v", err)
+	}
+	if item.Key != origKey || item.Content != origContent {
+		t.Fatalf("clobber: caller fields overwritten: %+v", item)
+	}
+	if item.ID == "" || item.Status != "PROPOSED" {
+		t.Fatalf("minted fields not echoed: %+v", item)
 	}
 }
 
