@@ -45,8 +45,17 @@ func (r branchFakeRow) Scan(dest ...any) error {
 			*ptr = r.values[i].(string)
 		case *int64:
 			*ptr = r.values[i].(int64)
+		case *bool:
+			*ptr = r.values[i].(bool)
 		case *time.Time:
 			*ptr = r.values[i].(time.Time)
+		case **time.Time:
+			if r.values[i] == nil {
+				*ptr = nil
+			} else {
+				t := r.values[i].(time.Time)
+				*ptr = &t
+			}
 		default:
 			return errors.New("branchFakeRow: unsupported dest")
 		}
@@ -107,11 +116,20 @@ func (f *branchFakeDB) QueryRow(_ context.Context, sql string, args ...any) pgx.
 }
 
 // branchRow builds a full branchColumns row: id, project, name, owner,
-// parent, fork-event, visibility, created_at.
+// parent, fork-event, visibility, created_at, potentially_stale,
+// archived_at (active head: stale false, archived nil).
 func branchRow(id, project, name, owner, parent string, forkEvent int64, visibility string) branchFakeRow {
+	return branchRowUpkeep(id, project, name, owner, parent, forkEvent, visibility,
+		time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC), false, nil)
+}
+
+// branchRowUpkeep builds a full branchColumns row with explicit upkeep
+// fields: created is created_at, stale is potentially_stale, archived is
+// archived_at (nil = active).
+func branchRowUpkeep(id, project, name, owner, parent string, forkEvent int64, visibility string, created time.Time, stale bool, archived any) branchFakeRow {
 	return branchFakeRow{values: []any{
 		id, project, name, owner, parent, forkEvent, visibility,
-		time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC),
+		created, stale, archived,
 	}}
 }
 
@@ -528,5 +546,145 @@ func TestBranchEnsureMain(t *testing.T) {
 	}
 	if _, err := s.EnsureMainBranch(context.Background(), "  ", ""); err == nil {
 		t.Error("empty project id should be rejected")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Upkeep (issue #44, plan §5.4): 30-day auto-archive + persisted staleness
+// ---------------------------------------------------------------------------
+
+func TestBranchIsArchivable(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-31 * 24 * time.Hour)
+	archivedAt := now.Add(-time.Hour)
+	oldBranch := func() store.Branch {
+		return store.Branch{ID: "b", Name: "bob-exp", ParentBranchID: "main-id", CreatedAt: old}
+	}
+	if !store.IsArchivable(oldBranch(), now) {
+		t.Error("31-day-old child branch should be archivable")
+	}
+	// Boundary inclusive: exactly 30 days counts.
+	exact := store.Branch{ID: "b", Name: "x", ParentBranchID: "p", CreatedAt: now.Add(-store.BranchArchiveTTL)}
+	if !store.IsArchivable(exact, now) {
+		t.Error("branch exactly at the 30-day TTL should be archivable")
+	}
+	young := oldBranch()
+	young.CreatedAt = now.Add(-29 * 24 * time.Hour)
+	if store.IsArchivable(young, now) {
+		t.Error("29-day-old branch should not be archivable")
+	}
+	main := store.Branch{ID: "m", Name: "main", CreatedAt: old}
+	if store.IsArchivable(main, now) {
+		t.Error("main should never auto-archive (every chain resolves against it)")
+	}
+	done := oldBranch()
+	done.ArchivedAt = &archivedAt
+	if store.IsArchivable(done, now) {
+		t.Error("already-archived branch should not be archivable again")
+	}
+	nocreated := oldBranch()
+	nocreated.CreatedAt = time.Time{}
+	if store.IsArchivable(nocreated, now) {
+		t.Error("branch with unknown creation time should fail closed")
+	}
+	if store.IsArchivable(oldBranch(), time.Time{}) {
+		t.Error("zero now should never archive (fail closed)")
+	}
+}
+
+func TestBranchMarkStale(t *testing.T) {
+	fake := &branchFakeDB{rowQueue: []branchFakeRow{
+		branchRowUpkeep("child-id", "proj", "bob-exp", "bob", "main-id", 0,
+			store.VisibilityPrivate, time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC), true, nil),
+	}}
+	s := store.NewBranchStore(fake)
+	got, err := s.MarkStale(context.Background(), "child-id")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.PotentiallyStale {
+		t.Errorf("marked branch = %+v, want potentially_stale true", got)
+	}
+	if n := stmtsMention(fake.stmts, "potentially_stale = true"); n != 1 {
+		t.Errorf("want exactly 1 staleness UPDATE, got %d: %v", n, fake.stmts)
+	}
+	if _, err := s.MarkStale(context.Background(), "  "); err == nil {
+		t.Error("empty branch id should be rejected")
+	}
+}
+
+func TestBranchArchiveBranchEligible(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	created := now.Add(-31 * 24 * time.Hour)
+	fake := &branchFakeDB{rowQueue: []branchFakeRow{
+		// GetBranchByID(head): old, active child.
+		branchRowUpkeep("child-id", "proj", "bob-exp", "bob", "main-id", 0,
+			store.VisibilityPrivate, created, false, nil),
+		// UPDATE ... RETURNING (archived head).
+		branchRowUpkeep("child-id", "proj", "bob-exp", "bob", "main-id", 0,
+			store.VisibilityPrivate, created, false, now),
+	}}
+	s := store.NewBranchStore(fake)
+	got, err := s.ArchiveBranch(context.Background(), "child-id", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsArchived() {
+		t.Errorf("archived branch = %+v, want archived_at set", got)
+	}
+	if n := stmtsMention(fake.stmts, "SET archived_at"); n != 1 {
+		t.Errorf("want exactly 1 archive UPDATE, got %d: %v", n, fake.stmts)
+	}
+}
+
+func TestBranchArchiveBranchRefusesYoung(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	fake := &branchFakeDB{rowQueue: []branchFakeRow{
+		branchRowUpkeep("child-id", "proj", "bob-exp", "bob", "main-id", 0,
+			store.VisibilityPrivate, now.Add(-time.Hour), false, nil),
+	}}
+	s := store.NewBranchStore(fake)
+	if _, err := s.ArchiveBranch(context.Background(), "child-id", now); err == nil {
+		t.Error("1-hour-old branch should be refused (30-day rule)")
+	}
+	if n := stmtsMention(fake.stmts, "UPDATE"); n != 0 {
+		t.Errorf("refused archive must not UPDATE, got: %v", fake.stmts)
+	}
+}
+
+func TestBranchSurfaceStalenessFlagsAndClears(t *testing.T) {
+	view := func(key, content string) store.MemoryView {
+		return store.MemoryView{Key: key, Content: content}
+	}
+	fork := []store.MemoryView{view("k", "v0")}
+	parentMoved := []store.MemoryView{view("k", "v1")}
+	child := []store.MemoryView{view("k", "v0")}
+
+	// Stale: parent moved a forked key the child carries → flag persists.
+	flagged := &branchFakeDB{}
+	s := store.NewBranchStore(flagged)
+	stale, err := s.SurfaceStaleness(context.Background(), "child-id", fork, parentMoved, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 1 || !stale[0].IsStale() {
+		t.Fatalf("stale = %+v, want 1 flagged item", stale)
+	}
+	if len(flagged.args) != 1 || len(flagged.args[0]) != 2 || flagged.args[0][1] != true {
+		t.Errorf("stale UPDATE args = %v, want [child-id true]", flagged.args)
+	}
+
+	// Clean: parent untouched since fork → flag cleared, no items returned.
+	clean := &branchFakeDB{}
+	s = store.NewBranchStore(clean)
+	stale, err = s.SurfaceStaleness(context.Background(), "child-id", fork, fork, child)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("stale = %+v, want empty", stale)
+	}
+	if len(clean.args) != 1 || len(clean.args[0]) != 2 || clean.args[0][1] != false {
+		t.Errorf("clean UPDATE args = %v, want [child-id false]", clean.args)
 	}
 }

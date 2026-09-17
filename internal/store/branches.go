@@ -49,18 +49,29 @@ const MainBranchName = "main"
 // backstop as well).
 const MaxBranchDepth = 5
 
-// Branch mirrors a memory_branches row (plan §5.1). Empty OwnerID /
-// ParentBranchID mean SQL NULL (root branch has no parent). ForkedAtEventID
-// 0 means NULL — safe because events(id) is BIGSERIAL, never 0.
+// BranchArchiveTTL is the plan §5.4 auto-archive age: a non-main branch with
+// no archive timestamp becomes eligible once now - created_at >= 30 days.
+// Main never auto-archives (it is the project root every chain resolves
+// against); see IsArchivable.
+const BranchArchiveTTL = 30 * 24 * time.Hour
+
+// Branch mirrors a memory_branches row (plan §5.1, plus 007 upkeep columns).
+// Empty OwnerID / ParentBranchID mean SQL NULL (root branch has no parent).
+// ForkedAtEventID 0 means NULL — safe because events(id) is BIGSERIAL, never
+// 0. ArchivedAt nil means NULL (branch active); PotentiallyStale persists
+// the DetectStale signal (branch_diff.go, issue #18) via MarkStale /
+// SurfaceStaleness.
 type Branch struct {
-	ID              string
-	ProjectID       string
-	Name            string
-	OwnerID         string
-	ParentBranchID  string
-	ForkedAtEventID int64
-	Visibility      string
-	CreatedAt       time.Time
+	ID               string
+	ProjectID        string
+	Name             string
+	OwnerID          string
+	ParentBranchID   string
+	ForkedAtEventID  int64
+	Visibility       string
+	CreatedAt        time.Time
+	PotentiallyStale bool
+	ArchivedAt       *time.Time
 }
 
 // IsMain reports whether this is the project root branch.
@@ -71,6 +82,26 @@ func (b Branch) IsMain() bool {
 // IsRoot reports whether this branch has no parent.
 func (b Branch) IsRoot() bool {
 	return strings.TrimSpace(b.ParentBranchID) == ""
+}
+
+// IsArchived reports whether the 30-day auto-archive has fired (archived_at
+// IS NOT NULL, migration 007).
+func (b Branch) IsArchived() bool {
+	return b.ArchivedAt != nil
+}
+
+// IsArchivable encodes the plan §5.4 30-day rule as a pure predicate: a
+// branch is eligible when it is not main, not already archived, has a known
+// creation time, and now-created_at >= BranchArchiveTTL (boundary inclusive).
+// Zero now never archives (fail closed — callers pass time.Now().UTC()).
+func IsArchivable(b Branch, now time.Time) bool {
+	if b.IsMain() || b.IsArchived() {
+		return false
+	}
+	if b.CreatedAt.IsZero() || now.IsZero() {
+		return false
+	}
+	return !now.Before(b.CreatedAt.Add(BranchArchiveTTL))
 }
 
 // HasForkPoint reports whether the branch records the event it forked at.
@@ -182,8 +213,10 @@ func (p BranchWriteParams) Validate() error {
 	return nil
 }
 
-// branchColumns selects branches with NULLs coalesced (except created_at).
-// forked_at_event_id COALESCEs to 0 ("no fork point"); callers read 0 as NULL.
+// branchColumns selects branches with NULLs coalesced (except created_at
+// and archived_at, which stay nullable). forked_at_event_id COALESCEs to 0
+// ("no fork point"); callers read 0 as NULL. potentially_stale COALESCEs to
+// false so pre-007 rows scan cleanly.
 const branchColumns = `id::TEXT AS id, ` +
 	`project_id::TEXT AS project_id, ` +
 	`COALESCE(name, '') AS name, ` +
@@ -191,7 +224,9 @@ const branchColumns = `id::TEXT AS id, ` +
 	`COALESCE(parent_branch_id::TEXT, '') AS parent_branch_id, ` +
 	`COALESCE(forked_at_event_id, 0) AS forked_at_event_id, ` +
 	`COALESCE(visibility, 'private') AS visibility, ` +
-	`created_at`
+	`created_at, ` +
+	`COALESCE(potentially_stale, false) AS potentially_stale, ` +
+	`archived_at`
 
 // branchMemoryColumns selects one memory_items row plus its branch head.
 // branch_id COALESCEs to ” so legacy pre-005 rows scan cleanly.
@@ -210,7 +245,7 @@ func scanBranch(row pgx.Row) (*Branch, error) {
 	if err := row.Scan(
 		&b.ID, &b.ProjectID, &b.Name, &b.OwnerID,
 		&b.ParentBranchID, &b.ForkedAtEventID, &b.Visibility,
-		&b.CreatedAt,
+		&b.CreatedAt, &b.PotentiallyStale, &b.ArchivedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -539,6 +574,90 @@ func (s *BranchStore) WriteToBranch(ctx context.Context, params BranchWriteParam
 		return nil, fmt.Errorf("store: write to branch: %w", err)
 	}
 	return m, nil
+}
+
+// ---------------------------------------------------------------------------
+// Branch upkeep (issue #44, plan §5.4): persisted staleness + 30-day
+// auto-archive (migration 007). DetectStale itself stays pure in
+// branch_diff.go (issue #18) — the methods below only persist its signal.
+// ---------------------------------------------------------------------------
+
+// MarkStale flags one branch as potentially stale (SET potentially_stale =
+// true) and returns the updated head. It is the explicit, single-branch
+// counterpart to SurfaceStaleness: callers that already ran DetectStale
+// off-band persist the outcome without re-running it.
+func (s *BranchStore) MarkStale(ctx context.Context, branchID string) (*Branch, error) {
+	branchID = strings.TrimSpace(branchID)
+	if branchID == "" {
+		return nil, errors.New("store: mark stale requires a branch id")
+	}
+	b, err := scanBranch(s.db.QueryRow(ctx,
+		`UPDATE memory_branches SET potentially_stale = true WHERE id = $1
+		 RETURNING `+branchColumns, branchID))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: branch %s: %w", branchID, ErrNotFound)
+		}
+		return nil, fmt.Errorf("store: mark branch stale: %w", err)
+	}
+	return b, nil
+}
+
+// ArchiveBranch fires the 30-day auto-archive for one branch: it loads the
+// head, enforces the IsArchivable rule against now, then stamps archived_at.
+// Main branches, already-archived branches, and branches younger than
+// BranchArchiveTTL are refused with an error (never silently skipped), so a
+// sweeper loop can distinguish "not yet eligible" from a failed write. A
+// zero now is replaced with time.Now().UTC().
+func (s *BranchStore) ArchiveBranch(ctx context.Context, branchID string, now time.Time) (*Branch, error) {
+	branchID = strings.TrimSpace(branchID)
+	if branchID == "" {
+		return nil, errors.New("store: archive branch requires a branch id")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	head, err := s.GetBranchByID(ctx, branchID)
+	if err != nil {
+		return nil, err
+	}
+	if !IsArchivable(*head, now) {
+		return nil, fmt.Errorf("store: branch %s is not archivable (main, already archived, or younger than %s)",
+			branchID, BranchArchiveTTL)
+	}
+	b, err := scanBranch(s.db.QueryRow(ctx,
+		`UPDATE memory_branches SET archived_at = $2 WHERE id = $1
+		 RETURNING `+branchColumns, branchID, now))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: branch %s: %w", branchID, ErrNotFound)
+		}
+		return nil, fmt.Errorf("store: archive branch: %w", err)
+	}
+	return b, nil
+}
+
+// SurfaceStaleness persists the DetectStale signal for one child branch
+// (plan §5.4: "Parent update on a key that exists on child → flag child's
+// item as potentially_stale"). It runs the pure DetectStale over the given
+// resolved states, then writes the outcome back: stale found →
+// potentially_stale = true; clean → potentially_stale = false (clearing a
+// previously surfaced flag). The detected items are returned for review UIs
+// whether or not any were found.
+func (s *BranchStore) SurfaceStaleness(ctx context.Context, branchID string, fork, parentNow, childNow []MemoryView) ([]StaleItem, error) {
+	branchID = strings.TrimSpace(branchID)
+	if branchID == "" {
+		return nil, errors.New("store: surface staleness requires a branch id")
+	}
+	stale := DetectStale(fork, parentNow, childNow)
+	flag := len(stale) > 0
+	_, err := s.db.Exec(ctx,
+		`UPDATE memory_branches SET potentially_stale = $2 WHERE id = $1`,
+		branchID, flag)
+	if err != nil {
+		return nil, fmt.Errorf("store: surface branch staleness: %w", err)
+	}
+	return stale, nil
 }
 
 // ---------------------------------------------------------------------------
