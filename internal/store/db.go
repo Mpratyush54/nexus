@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
 )
@@ -174,9 +176,40 @@ func (s *PostgresStore) RunMigrations(ctx context.Context, migrationsDir string)
 
 // ---- small conversion helpers (shared by all PostgresStore methods) ----
 
+// Rows is the minimal result-set surface stores need (pgx.Rows satisfies
+// it; tests substitute scripted fakes). Issue #34.
+type Rows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Err() error
+	Close()
+}
+
+// DBTX is the query surface required by the users/tasks/watched_files
+// stores (issue #34). *pgxpool.Pool satisfies it, so production code passes
+// the pool (or a transaction) while unit tests substitute fakes.
+type DBTX interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
+// Compile-time proof that transactions also satisfy the store seam is left
+// to call sites: *pgxpool.Pool's Query returns pgx.Rows (a struct value),
+// which cannot satisfy the Rows interface, so pool wiring goes through a
+// thin adapter or *pgx.Tx where needed.
+
 // nullText maps "" to NULL so UNIQUE(canonical_url)/UNIQUE(root_commit)
 // never collide on empty strings (Postgres treats NULLs as distinct).
 func nullText(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// nullUUID maps "" to NULL for nullable UUID columns (issue #34).
+func nullUUID(s string) any {
 	if s == "" {
 		return nil
 	}
