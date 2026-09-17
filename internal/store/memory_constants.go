@@ -6,7 +6,7 @@ package store
 // Master (db.go/models.go/memory.go) uses raw strings ("PROPOSED",
 // "project", ...) with no exported constants. Defining them here is purely
 // additive: no master file is touched, values transcribe the
-// migrations/001 CHECK constraints exactly.
+// migrations/001 CHECK constraints exactly (plus 'ephemeral' from 009).
 const (
 	StatusProposed   = "PROPOSED"
 	StatusConfirmed  = "CONFIRMED"
@@ -19,6 +19,11 @@ const (
 	LevelProject      = "project"
 	LevelPersonal     = "personal"
 	LevelSession      = "session"
+	// LevelEphemeral is the shortest lifetime tier (issue #30, migration
+	// 009): working memory that must never outlive its session. It wins
+	// every override contest (see context.LevelRank) and is never emitted
+	// by heuristic classification — producers assign it explicitly.
+	LevelEphemeral = "ephemeral"
 )
 
 // FormatEmbedding renders a vector for an embedding parameter. It wraps

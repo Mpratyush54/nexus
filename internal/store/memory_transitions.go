@@ -64,13 +64,13 @@ func ValidateMemoryContent(content string) error {
 	return nil
 }
 
-// ValidateMemoryLevel mirrors the level CHECK.
+// ValidateMemoryLevel mirrors the level CHECK (001, widened by 009).
 func ValidateMemoryLevel(level string) error {
 	switch level {
-	case LevelOrganization, LevelProject, LevelPersonal, LevelSession:
+	case LevelOrganization, LevelProject, LevelPersonal, LevelSession, LevelEphemeral:
 		return nil
 	default:
-		return fmt.Errorf("store: invalid level %q (want organization|project|personal|session)", level)
+		return fmt.Errorf("store: invalid level %q (want organization|project|personal|session|ephemeral)", level)
 	}
 }
 

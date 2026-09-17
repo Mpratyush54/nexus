@@ -51,7 +51,7 @@ type MemoryItem struct {
 	Key            string    `json:"key"`
 	Content        string    `json:"content"`
 	ContextSnippet string    `json:"context_snippet,omitempty"`
-	Level          string    `json:"level"` // organization | project | personal | session
+	Level          string    `json:"level"` // organization | project | personal | session | ephemeral
 	Scope          string    `json:"scope"` // fact | preference | decision | constraint | pattern | episode_summary
 	Embedding      []float32 `json:"embedding,omitempty"`
 	Tags           []string  `json:"tags,omitempty"`
