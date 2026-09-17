@@ -96,6 +96,14 @@ type Config struct {
 	Dirty         bool
 	// TokenBudget caps memory_search context output in chars. <=0 means default.
 	TokenBudget int
+	// AgentName selects the per-agent context budget (issue #41): when set
+	// with Budgets, tokenBudget consults the agent registry seed budget
+	// (claude/opencode 10k, copilot 8k, cursor/windsurf 6k) instead of the
+	// static TokenBudget. Empty preserves pre-#41 behaviour.
+	AgentName string
+	// Budgets resolves the seed budget for AgentName
+	// (*store.AgentRegistry in production). Nil skips registry lookup.
+	Budgets BudgetResolver
 }
 
 // Server is a JSON-RPC 2.0 MCP server. It is safe for concurrent use;
@@ -115,12 +123,11 @@ func NewServer(st Store, cfg Config) *Server {
 	return &Server{store: st, cfg: cfg}
 }
 
-// tokenBudget reports the effective context budget in chars.
+// tokenBudget reports the effective context budget in chars: per-agent
+// registry budget when AgentName + Budgets select one, else the static
+// TokenBudget (or DefaultTokenBudget).
 func (s *Server) tokenBudget() int {
-	if s.cfg.TokenBudget <= 0 {
-		return DefaultTokenBudget
-	}
-	return s.cfg.TokenBudget
+	return resolveBudget(s.cfg.AgentName, s.cfg.Budgets, s.cfg.TokenBudget)
 }
 
 func okResult(id *json.RawMessage, result any) *Response {
