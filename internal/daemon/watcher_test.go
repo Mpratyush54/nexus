@@ -9,188 +9,305 @@ import (
 	"time"
 )
 
-func TestWatchFileTypeMapping(t *testing.T) {
-	for _, spec := range InstructionFiles {
-		got, ok := FileTypeForPath(spec.RelPath)
-		if !ok || got != spec.FileType {
-			t.Errorf("FileTypeForPath(%q) = %q,%v; want %q,true", spec.RelPath, got, ok, spec.FileType)
-		}
+func TestHashBytesStableAndSensitive(t *testing.T) {
+	a := HashString("hello")
+	b := HashString("hello")
+	c := HashString("hello!")
+	if a != b {
+		t.Fatal("same input hashed differently")
 	}
-	// Windows separators and case resolve identically.
-	if ft, ok := FileTypeForPath(`.github\copilot-instructions.md`); !ok || ft != "copilot_instructions" {
-		t.Errorf("backslash variant = %q,%v", ft, ok)
+	if a == c {
+		t.Fatal("different inputs hashed equally")
 	}
-	if ft, ok := FileTypeForPath("claude.md"); !ok || ft != "claude_md" {
-		t.Errorf("lowercase variant = %q,%v", ft, ok)
-	}
-	// Non-instruction paths never match — including nested lookalikes.
-	for _, p := range []string{"main.go", "sub/CLAUDE.md", "docs/CLAUDE.md", "", ".", "CLAUDE.md.bak"} {
-		if _, ok := FileTypeForPath(p); ok {
-			t.Errorf("FileTypeForPath(%q) matched, want no match", p)
-		}
+	if len(a) != 64 {
+		t.Fatalf("expected 64-char hex sha256, got %q", a)
 	}
 }
 
-func TestWatchDetectChange(t *testing.T) {
-	// Unchanged content: same hash, no diff.
-	h := HashString("rules v1")
-	newHash, changed, diff := DetectInstructionChange(h, []byte("rules v1"), []byte("rules v1"))
-	if changed || diff != "" || newHash != h {
-		t.Errorf("unchanged = %v,%q,%v", changed, diff, newHash != h)
+func TestHashFileMatchesBytes(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	content := "instruction content\nline2\n"
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	// Edited: changed with a line diff.
-	_, changed, diff = DetectInstructionChange(h, []byte("rules v1\n"), []byte("rules v1\nrules v2\n"))
-	if !changed || !strings.Contains(diff, "+ rules v2\n") {
-		t.Errorf("edited diff = %v,%q", changed, diff)
-	}
-	// New file (no old hash): full-addition diff.
-	_, changed, diff = DetectInstructionChange("", nil, []byte("hello\n"))
-	if !changed || !strings.Contains(diff, "+ hello\n") {
-		t.Errorf("creation diff = %v,%q", changed, diff)
-	}
-	// Unknown "before" text still reports the change, without a line diff.
-	_, changed, diff = DetectInstructionChange(h, nil, []byte("other"))
-	if !changed || strings.Contains(diff, "+") || !strings.Contains(diff, "hash changed") {
-		t.Errorf("retention-gap diff = %v,%q", changed, diff)
-	}
-}
-
-func TestWatchPayloadKeys(t *testing.T) {
-	p := InstructionChangedPayload("CLAUDE.md", "claude_md", "old", "new", "diff", 42, false)
-	for _, k := range []string{"path", "file_type", "old_hash", "new_hash", "diff", "size", "deleted"} {
-		if _, ok := p[k]; !ok {
-			t.Errorf("payload missing key %q", k)
-		}
-	}
-	if p["file_type"] != "claude_md" || p["deleted"] != false {
-		t.Errorf("payload = %v", p)
-	}
-}
-
-func TestWatchPollOnceEndToEnd(t *testing.T) {
-	root := t.TempDir()
-	write := func(rel, content string) {
-		t.Helper()
-		abs := filepath.Join(root, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("CLAUDE.md", "rule one\n")
-	write("main.go", "package main\n")
-
-	rec := &eventRecorder{}
-	w, err := NewWatcher(root, rec.sink())
+	h1, err := HashFile(p)
 	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
+		t.Fatal(err)
 	}
-	defer w.Close()
+	if h1 != HashBytes([]byte(content)) {
+		t.Fatal("file hash differs from bytes hash")
+	}
+	if _, err := HashFile(filepath.Join(dir, "missing.txt")); err == nil {
+		t.Fatal("expected error for missing file")
+	}
+}
 
-	// Steady state: no events.
-	w.PollOnce()
-	if n := rec.count(EventInstructionFileChanged); n != 0 {
-		t.Fatalf("steady state emitted %d events", n)
+func TestDefaultTargets(t *testing.T) {
+	targets := DefaultWatchedTargets()
+	if len(targets) != 4 {
+		t.Fatalf("expected 4 targets, got %d", len(targets))
+	}
+	want := map[string]string{
+		"CLAUDE.md":                       "claude_md",
+		".cursorrules":                    "cursorrules",
+		".github/copilot-instructions.md": "copilot_instructions",
+		".windsurfrules":                  "windsurfrules",
+	}
+	for _, tg := range targets {
+		if want[tg.RelPath] != tg.FileType {
+			t.Errorf("target %s: got type %s", tg.RelPath, tg.FileType)
+		}
+	}
+}
+
+func writeWSFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	abs := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWatcherBaselineSilentThenDetectsChange(t *testing.T) {
+	root := t.TempDir()
+	writeWSFile(t, root, "CLAUDE.md", "rule one\n")
+
+	w := NewWatcher(root, nil, time.Second, nil)
+	if evs := w.CheckOnce(); len(evs) != 0 {
+		t.Fatalf("first sight must baseline silently, got %d events", len(evs))
 	}
 
-	// Edit an instruction file: exactly one hash-diff event.
-	write("CLAUDE.md", "rule one\nrule two\n")
-	w.PollOnce()
-	if n := rec.count(EventInstructionFileChanged); n != 1 {
-		t.Fatalf("edit emitted %d events, want 1", n)
-	}
-	p := rec.last(EventInstructionFileChanged)
-	if p["path"] != "CLAUDE.md" || p["file_type"] != "claude_md" {
-		t.Errorf("payload identity = %v", p)
-	}
-	if d, _ := p["diff"].(string); !strings.Contains(d, "+ rule two\n") {
-		t.Errorf("payload diff:\n%v", d)
-	}
-	if p["old_hash"] == p["new_hash"] {
-		t.Error("hashes did not rotate")
+	// No change -> no event.
+	if evs := w.CheckOnce(); len(evs) != 0 {
+		t.Fatalf("unchanged poll emitted %d events", len(evs))
 	}
 
-	// Unrelated file edits are invisible to the watcher.
-	write("main.go", "package main\n// changed\n")
-	w.PollOnce()
-	if n := rec.count(EventInstructionFileChanged); n != 1 {
-		t.Fatalf("unrelated edit emitted, total %d", n)
+	// Modify -> exactly one INSTRUCTION_FILE_CHANGED with diff.
+	writeWSFile(t, root, "CLAUDE.md", "rule one\nrule two\n")
+	evs := w.CheckOnce()
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 change event, got %d", len(evs))
+	}
+	ev := evs[0]
+	if ev.Type != ToolEventInstructionFileChanged {
+		t.Fatalf("wrong type: %s", ev.Type)
+	}
+	if ev.Payload["path"] != "CLAUDE.md" || ev.Payload["file_type"] != "claude_md" {
+		t.Fatalf("bad payload identity: %v", ev.Payload)
+	}
+	diff, _ := ev.Payload["diff"].(string)
+	if !strings.Contains(diff, "+ rule two") {
+		t.Fatalf("diff missing added line: %q", diff)
+	}
+	if ev.Payload["old_hash"] == ev.Payload["new_hash"] {
+		t.Fatal("hashes must differ after change")
 	}
 
-	// New instruction file appears: creation event with full-add diff.
-	write(".cursorrules", "prefer tabs\n")
-	w.PollOnce()
-	if n := rec.count(EventInstructionFileChanged); n != 2 {
-		t.Fatalf("creation emitted total %d, want 2", n)
+	// Steady state again -> silent.
+	if evs := w.CheckOnce(); len(evs) != 0 {
+		t.Fatalf("post-change poll should be silent, got %d", len(evs))
 	}
-	if p := rec.last(EventInstructionFileChanged); p["path"] != ".cursorrules" || p["old_hash"] != "" {
-		t.Errorf("creation payload = %v", p)
+}
+
+func TestWatcherMissingFilesSkipped(t *testing.T) {
+	root := t.TempDir() // no instruction files at all
+	w := NewWatcher(root, nil, time.Second, nil)
+	if evs := w.CheckOnce(); len(evs) != 0 {
+		t.Fatalf("empty workspace must emit nothing, got %d", len(evs))
+	}
+	// Deleted file is forgotten, not an event.
+	writeWSFile(t, root, ".cursorrules", "x\n")
+	w.SeedBaseline()
+	if err := os.Remove(filepath.Join(root, ".cursorrules")); err != nil {
+		t.Fatal(err)
+	}
+	if evs := w.CheckOnce(); len(evs) != 0 {
+		t.Fatalf("deletion must not emit, got %d", len(evs))
+	}
+}
+
+func TestWatcherEmitsToEmitter(t *testing.T) {
+	root := t.TempDir()
+	writeWSFile(t, root, ".windsurfrules", "v1\n")
+	ch := NewChanEmitter(16)
+	w := NewWatcher(root, nil, time.Second, ch)
+	w.SeedBaseline()
+	writeWSFile(t, root, ".windsurfrules", "v2\n")
+	if evs := w.CheckOnce(); len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	select {
+	case ev := <-ch.Ch:
+		if ev.Type != ToolEventInstructionFileChanged {
+			t.Fatalf("wrong type: %s", ev.Type)
+		}
+	default:
+		t.Fatal("expected event forwarded to emitter")
+	}
+}
+
+func TestWatcherDiffCapped(t *testing.T) {
+	root := t.TempDir()
+	writeWSFile(t, root, "CLAUDE.md", "seed\n")
+	w := NewWatcher(root, nil, time.Second, nil)
+	w.SeedBaseline()
+	writeWSFile(t, root, "CLAUDE.md", "seed\n"+strings.Repeat("new rule line that is fairly long\n", 2000))
+	evs := w.CheckOnce()
+	if len(evs) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(evs))
+	}
+	diff, _ := evs[0].Payload["diff"].(string)
+	if len(diff) > MaxDiffBytes+len("\n[truncated]")+1 {
+		t.Fatalf("watcher diff over cap: %d", len(diff))
+	}
+}
+
+func TestWatcherNestedCopilotPath(t *testing.T) {
+	root := t.TempDir()
+	writeWSFile(t, root, ".github/copilot-instructions.md", "a\n")
+	w := NewWatcher(root, nil, time.Second, nil)
+	w.SeedBaseline()
+	writeWSFile(t, root, ".github/copilot-instructions.md", "a\nb\n")
+	evs := w.CheckOnce()
+	if len(evs) != 1 {
+		t.Fatalf("nested path change missed: %d events", len(evs))
+	}
+	if evs[0].Payload["file_type"] != "copilot_instructions" {
+		t.Fatalf("wrong file_type: %v", evs[0].Payload)
+	}
+}
+
+func TestWatcherStartStopsOnCancel(t *testing.T) {
+	root := t.TempDir()
+	w := NewWatcher(root, nil, 10*time.Millisecond, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); w.Start(ctx) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start did not return after ctx cancel")
+	}
+}
+
+func TestToStoreWatchedFile(t *testing.T) {
+	wf := ToStoreWatchedFile("ws_1", WatchedTarget{RelPath: "CLAUDE.md", FileType: "claude_md"}, "abc")
+	if wf.WorkspaceID != "ws_1" || wf.Path != "CLAUDE.md" || wf.LastHash != "abc" || wf.FileType != "claude_md" {
+		t.Fatalf("bad mapping: %+v", wf)
+	}
+}
+
+func TestWatchHashStorePersistsAcrossRestarts(t *testing.T) {
+	root := t.TempDir()
+	writeWSFile(t, root, "CLAUDE.md", "v1\n")
+	hashes := NewMemoryHashStore()
+
+	w := NewWatcherWithStore(root, nil, time.Second, nil, "ws-1", hashes)
+	w.SeedBaseline()
+
+	// Edit: CheckOnce emits and persists the new hash.
+	writeWSFile(t, root, "CLAUDE.md", "v1\nv2\n")
+	if evs := w.CheckOnce(); len(evs) != 1 {
+		t.Fatalf("edit emitted %d events, want 1", len(evs))
+	}
+	persisted, ok := hashes.GetHash("ws-1", "CLAUDE.md")
+	if !ok || persisted != HashString("v1\nv2\n") {
+		t.Fatalf("persisted hash = %q,%v; want current content hash", persisted, ok)
 	}
 
-	// Deletion emits with deleted=true.
+	// Restart with the same store and unchanged disk: the persisted hash
+	// seeds the baseline, so CheckOnce stays silent.
+	w2 := NewWatcherWithStore(root, nil, time.Second, nil, "ws-1", hashes)
+	w2.SeedBaseline()
+	if evs := w2.CheckOnce(); len(evs) != 0 {
+		t.Fatalf("restart with unchanged content emitted %d events", len(evs))
+	}
+}
+
+func TestWatchHashStoreSurfacesEditWhileDown(t *testing.T) {
+	root := t.TempDir()
+	writeWSFile(t, root, "CLAUDE.md", "v1\n")
+	hashes := NewMemoryHashStore()
+	if err := hashes.SetHash("ws-1", "CLAUDE.md", HashString("v1\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Edit while the daemon is down, then boot with persistence: the
+	// persisted (stale) hash seeds the baseline so CheckOnce emits.
+	writeWSFile(t, root, "CLAUDE.md", "v1\nv2\n")
+	w := NewWatcherWithStore(root, nil, time.Second, nil, "ws-1", hashes)
+	w.SeedBaseline()
+	evs := w.CheckOnce()
+	if len(evs) != 1 {
+		t.Fatalf("edit-while-down emitted %d events, want 1", len(evs))
+	}
+	if evs[0].Payload["old_hash"] != HashString("v1\n") {
+		t.Errorf("old_hash = %v, want pre-restart hash", evs[0].Payload["old_hash"])
+	}
+}
+
+func TestWatchHashStoreDeletionClearsPersistedHash(t *testing.T) {
+	root := t.TempDir()
+	writeWSFile(t, root, "CLAUDE.md", "v1\n")
+	hashes := NewMemoryHashStore()
+	w := NewWatcherWithStore(root, nil, time.Second, nil, "ws-1", hashes)
+	w.SeedBaseline()
+
+	writeWSFile(t, root, "CLAUDE.md", "v1\nv2\n")
+	if evs := w.CheckOnce(); len(evs) != 1 {
+		t.Fatalf("edit emitted %d events, want 1", len(evs))
+	}
+	if _, ok := hashes.GetHash("ws-1", "CLAUDE.md"); !ok {
+		t.Fatal("edit must persist a hash")
+	}
 	if err := os.Remove(filepath.Join(root, "CLAUDE.md")); err != nil {
 		t.Fatal(err)
 	}
-	w.PollOnce()
-	if n := rec.count(EventInstructionFileChanged); n != 3 {
-		t.Fatalf("deletion emitted total %d, want 3", n)
+	// Deletion is forgotten silently (no event) and drops the persisted hash.
+	if evs := w.CheckOnce(); len(evs) != 0 {
+		t.Fatalf("deletion must not emit, got %d events", len(evs))
 	}
-	if p := rec.last(EventInstructionFileChanged); p["deleted"] != true {
-		t.Errorf("deletion payload = %v", p)
-	}
-}
-
-func TestWatchCheckPathIdempotent(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rec := &eventRecorder{}
-	w, err := NewWatcher(root, rec.sink())
-	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
-	}
-	defer w.Close()
-
-	// Re-checking unchanged content emits nothing, however often called.
-	w.checkPath("CLAUDE.md")
-	w.checkPath("CLAUDE.md")
-	if n := rec.count(EventInstructionFileChanged); n != 0 {
-		t.Fatalf("idempotent check emitted %d events", n)
+	if _, ok := hashes.GetHash("ws-1", "CLAUDE.md"); ok {
+		t.Error("deletion must drop the persisted hash")
 	}
 }
 
-func TestWatchRunEmitsOnWrite(t *testing.T) {
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rec := &eventRecorder{}
-	w, err := NewWatcher(root, rec.sink())
+func TestFileHashStoreRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "hashes.json")
+	s, err := NewFileHashStore(path)
 	if err != nil {
-		t.Fatalf("NewWatcher: %v", err)
+		t.Fatalf("NewFileHashStore: %v", err)
 	}
-	defer w.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go w.Run(ctx)
-
-	// Live fsnotify path: modify the file, expect one debounced event.
-	time.Sleep(200 * time.Millisecond) // let Run start watching
-	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\nv2\n"), 0o644); err != nil {
+	if s.Path() != path {
+		t.Errorf("Path() = %q, want %q", s.Path(), path)
+	}
+	if err := s.SetHash("ws-1", "CLAUDE.md", "abc"); err != nil {
+		t.Fatalf("SetHash: %v", err)
+	}
+	// Reload from disk: the hash survives the process boundary.
+	reloaded, err := NewFileHashStore(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if h, ok := reloaded.GetHash("ws-1", "CLAUDE.md"); !ok || h != "abc" {
+		t.Errorf("reloaded hash = %q,%v; want abc,true", h, ok)
+	}
+	if err := reloaded.DeleteHash("ws-1", "CLAUDE.md"); err != nil {
+		t.Fatalf("DeleteHash: %v", err)
+	}
+	if _, ok := reloaded.GetHash("ws-1", "CLAUDE.md"); ok {
+		t.Error("deleted hash must be gone")
+	}
+	// Corrupt state is an error, never silent amnesia.
+	if err := os.WriteFile(path, []byte("{nope"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for rec.count(EventInstructionFileChanged) == 0 && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-	}
-	if n := rec.count(EventInstructionFileChanged); n == 0 {
-		t.Fatal("Run emitted no event within 10s of write")
-	}
-	if p := rec.last(EventInstructionFileChanged); !strings.Contains(p["diff"].(string), "+ v2\n") {
-		t.Errorf("live diff:\n%v", p["diff"])
+	if _, err := NewFileHashStore(path); err == nil {
+		t.Error("corrupt state file must fail to load")
 	}
 }

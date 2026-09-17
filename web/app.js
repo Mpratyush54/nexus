@@ -1,484 +1,479 @@
-"use strict";
-/* Central Memory dashboard (issue #14) — static SPA, no build step.
+/* Central Memory — Multiplayer Live Feed dashboard (Phase 3, nexus issue #14).
  *
- * Server contracts (must match; see docs/issues/ISSUE-14.md checklist):
+ * Static SPA, vanilla JS, zero dependencies. Speaks:
+ *   REST: existing internal/server/routes.go
+ *     POST /auth/login
+ *     POST /projects/resolve
+ *     GET  /workspaces/{projectId}/active
+ *     GET  /memory/search?project_id&q&tags&limit      -> {items,count}
+ *     GET  /episodes/search?project_id&q&error_pattern&limit -> {items,count}
+ *     POST /memory/{id}/confirm | POST /memory/{id}/reject | POST /memory/{id}/promote
+ *        (confirmation-flow endpoints from plan §2.8 — NOT yet on the server;
+ *         calls are best-effort and fall back to optimistic local state.)
+ *   WS: implementation-plan.md §3.2 (internal/server/ws.go does not exist yet —
+ *       this client implements the planned shape so the future hub just works):
+ *     C->S: {"type":"subscribe","project_id":"...","session_id":"..."}
+ *           {"type":"action","event_type":"MESSAGE_SENT","payload":{...}}
+ *           {"type":"presence","status":"typing"}
+ *     S->C: {"type":"event","event":{...}}
+ *           {"type":"presence","user_id":"...","status":"online|typing|idle|offline"}
+ *           {"type":"memory_update","item":{...},"action":"proposed|confirmed|rejected"}
+ *           {"type":"episode_update","episode":{...},"action":"opened|updated|resolved"}
  *
- * REST (implemented, internal/server/routes.go):
- *   POST /auth/login  {username,password} -> {token,expires_at,user_id}
- *   GET  /memory/search?project_id=&q=&tags=&key=&level=&limit= -> {items,count}
- *     item: {id,project_id,key,content,context_snippet,level,scope,tags,
- *            confidence,status,source,created_at}
- *     NOTE: no `status` query param — status filters client-side.
- *   POST /memory {project_id,key,content,...} -> 201 item
- *   GET  /episodes/search?project_id=&q=&error_pattern=&file=&status=
- *        &episode_type=&limit= -> {episodes,count}
- *     episode: {id,project_id,title,episode_type,trigger,investigation,
- *       root_cause,resolution,verification,tags,files_involved,
- *       error_patterns,status,opened_at}
- *   GET  /workspaces/{projectID}/active -> {workspaces,count}
- *   GET  /healthz -> {status:"ok"}
- *   Errors: {"error":"..."} envelope.
- *
- * Lifecycle (NOT yet implemented server-side — follow-up, see ADR-014):
- *   POST /memory/{id}/confirm | POST /memory/{id}/reject
- *   POST /memory/{id}/promote {level}
- *   Buttons call these; a 404 surfaces the pending-endpoint notice.
- *
- * WebSocket (plan §3.2 shapes; endpoint path is a PROPOSAL for issue #13,
- * which owns internal/server/ws.go — no ws.go exists yet):
- *   WS_PATH = "/ws"
- *   Client -> Server:
- *     {"type":"subscribe","project_id":"...","session_id":"..."}
- *     {"type":"action","event_type":"MESSAGE_SENT","payload":{...}}
- *     {"type":"presence","status":"typing"}
- *   Server -> Client:
- *     {"type":"event","event":{...full event row...}}
- *     {"type":"presence","user_id":"...","status":"online|typing|idle|offline"}
- *     {"type":"memory_update","item":{...},"action":"proposed|confirmed|rejected"}
- *     {"type":"episode_update","episode":{...},"action":"opened|updated|resolved"}
+ * If the WS endpoint is absent (404 / refused), the dashboard stays usable over
+ * REST and retries the socket with backoff.
  */
+'use strict';
 
-const WS_PATH = "/ws"; // proposed path for #13's hub; see note above
-const FEED_CAP = 200;
+const $ = (id) => document.getElementById(id);
+const els = {};
+['apiBase','wsUrl','username','password','authState','wsDot','wsLabel','latency',
+ 'canonicalUrl','rootCommit','folderName','projectId','sessionId','agentName',
+ 'projectState','presenceList','presenceCount','feed','feedCount','feedFilter',
+ 'memoryList','memLevel','memStatus','episodeList','searchBox',
+ 'memSearchResults','memSearchCount','epSearchResults','epSearchCount'
+].forEach((id) => { els[id] = $(id); });
+
+const store = {
+  load(k, d) { try { const v = localStorage.getItem('cm.' + k); return v == null ? d : v; } catch { return d; } },
+  save(k, v) { try { localStorage.setItem('cm.' + k, v); } catch {} },
+};
 
 const state = {
-  token: sessionStorage.getItem("cm.token") || "",
-  userID: sessionStorage.getItem("cm.user_id") || "",
+  token: store.load('token', ''),
+  projectId: store.load('projectId', ''),
+  sessionId: store.load('sessionId', ''),
   ws: null,
   wsWanted: false,
   retryMs: 1000,
-  presence: new Map(), // user_id -> status
-  episodes: [], // last search result, for the detail pane
+  presence: new Map(), // user_id -> {status, at}
+  feedTotal: 0,
+  pollTimer: null,
 };
 
-const $ = (id) => document.getElementById(id);
-
+// ---------- small utils ----------
 function esc(s) {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-  }[c]));
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
-
-function now() {
-  return new Date().toISOString().slice(11, 19);
+function apiBase() { return els.apiBase.value.trim().replace(/\/+$/, ''); }
+function authHeaders() {
+  const h = { 'Content-Type': 'application/json' };
+  if (state.token) h.Authorization = 'Bearer ' + state.token;
+  return h;
 }
-
-/* ---------------- REST ---------------- */
-
-async function api(path, { method = "GET", body } = {}) {
-  const headers = {};
-  if (state.token) headers.Authorization = "Bearer " + state.token;
-  let payload;
-  if (body !== undefined) {
-    headers["Content-Type"] = "application/json";
-    payload = JSON.stringify(body);
-  }
-  const res = await fetch(path, { method, headers, body: payload });
+function fmtTime(iso) {
+  try { return new Date(iso).toLocaleTimeString(); } catch { return ''; }
+}
+async function rest(path, opts) {
+  const res = await fetch(apiBase() + path, opts);
   const text = await res.text();
-  let data = null;
-  try {
-    data = text ? JSON.parse(text) : null;
-  } catch {
-    throw new Error(`HTTP ${res.status}: non-JSON response`);
-  }
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = { _raw: text }; }
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status}: ${(data && data.error) || text || "request failed"}`);
+    const msg = (body && body.error && body.error.message) || ('HTTP ' + res.status);
+    throw new Error(msg);
   }
-  return data;
+  return body;
 }
 
-function requireProject() {
-  const id = $("project-id").value.trim();
-  if (!id) throw new Error("Enter a Project ID first.");
-  return id;
-}
-
-function note(msg, isErr) {
-  const el = $("toolbar-msg");
-  el.textContent = msg;
-  el.style.color = isErr ? "var(--bad)" : "";
-}
-
-/* ---------------- auth ---------------- */
-
-async function login(ev) {
-  ev.preventDefault();
-  const username = $("login-user").value.trim();
-  const password = $("login-pass").value;
-  if (!username || !password) {
-    $("login-state").textContent = "username + password required";
-    return;
-  }
+// ---------- connection / auth ----------
+async function login() {
+  const username = els.username.value.trim();
+  const password = els.password.value;
+  if (!username || !password) { els.authState.textContent = 'username + password required'; return; }
   try {
-    // POST /auth/login {username,password} -> {token,expires_at,user_id}
-    const data = await api("/auth/login", { method: "POST", body: { username, password } });
-    state.token = data.token;
-    state.userID = data.user_id;
-    sessionStorage.setItem("cm.token", state.token);
-    sessionStorage.setItem("cm.user_id", state.userID);
-    $("login-state").textContent = `ok (${data.user_id})`;
-  } catch (err) {
-    $("login-state").textContent = String(err.message || err);
-  }
+    const body = await rest('/auth/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    state.token = body.token || '';
+    store.save('token', state.token);
+    els.authState.textContent = 'token for ' + (body.username || username) + ' ✓';
+  } catch (e) { els.authState.textContent = 'login failed: ' + e.message; }
 }
 
-function refreshLoginState() {
-  if (state.token) $("login-state").textContent = `token set (${state.userID || "?"})`;
+// ---------- project / session picker ----------
+async function resolveProject() {
+  try {
+    const body = await rest('/projects/resolve', {
+      method: 'POST', headers: authHeaders(),
+      body: JSON.stringify({
+        canonical_url: els.canonicalUrl.value.trim(),
+        root_commit: els.rootCommit.value.trim(),
+        folder_name: els.folderName.value.trim(),
+      }),
+    });
+    state.projectId = body.id || '';
+    els.projectId.value = state.projectId;
+    store.save('projectId', state.projectId);
+    els.projectState.textContent = 'resolved: ' + (body.display_name || body.folder_name || state.projectId);
+    refreshMemory();
+    refreshEpisodes();
+  } catch (e) { els.projectState.textContent = 'resolve failed: ' + e.message; }
 }
 
-/* ---------------- WebSocket live feed ---------------- */
-
-function wsURL() {
-  const scheme = location.protocol === "https:" ? "wss://" : "ws://";
-  // Token via query: browsers cannot set Authorization headers on upgrade.
-  // #13 decides the auth scheme; the hub should also accept header-based
-  // auth from non-browser clients. Works without a token too (server 401s).
-  const q = state.token ? `?token=${encodeURIComponent(state.token)}` : "";
-  return scheme + location.host + WS_PATH + q;
+async function checkActiveWorkspace() {
+  const pid = els.projectId.value.trim();
+  if (!pid) { els.projectState.textContent = 'set a project ID first'; return; }
+  try {
+    const ws = await rest('/workspaces/' + encodeURIComponent(pid) + '/active', { headers: authHeaders() });
+    els.projectState.textContent = 'active: ' + (ws.machine_id || ws.id) + ' @ ' + (ws.branch || '?') + (ws.is_dirty ? ' (dirty)' : '');
+    upsertPresence(ws.user_id || ws.machine_id || ws.id, 'online');
+  } catch (e) { els.projectState.textContent = 'no active workspace: ' + e.message; }
 }
 
-function setConn(which, label) {
-  const dot = $("conn-dot");
-  dot.className = `dot ${which}`;
-  $("conn-label").textContent = label;
+// ---------- WebSocket ----------
+function setWsState(label, cls) {
+  els.wsLabel.textContent = label;
+  els.wsDot.className = 'dot ' + cls;
 }
 
-function connectLive() {
+function connectWs() {
   state.wsWanted = true;
   state.retryMs = 1000;
-  openWS();
+  openWs();
 }
 
-function openWS() {
-  if (state.ws) state.ws.close();
-  setConn("connecting", "connecting…");
+function openWs() {
+  if (!state.wsWanted) return;
+  const url = els.wsUrl.value.trim();
+  if (!url) return;
+  try { if (state.ws) state.ws.close(); } catch {}
+  setWsState('connecting…', 'dot-idle');
   let ws;
-  try {
-    ws = new WebSocket(wsURL());
-  } catch (err) {
-    setConn("offline", "bad WS URL");
-    scheduleRetry();
-    return;
-  }
+  try { ws = new WebSocket(url); } catch (e) { scheduleRetry(); return; }
   state.ws = ws;
+  const t0 = performance.now();
 
-  ws.onopen = () => {
-    setConn("online", "live");
+  ws.addEventListener('open', () => {
+    setWsState('connected', 'dot-on');
+    els.latency.textContent = Math.round(performance.now() - t0) + 'ms to open';
     state.retryMs = 1000;
-    // Client -> Server subscribe (plan §3.2 verbatim shape).
-    const msg = { type: "subscribe" };
-    try {
-      msg.project_id = requireProject();
-    } catch {
-      msg.project_id = $("project-id").value.trim(); // may be empty; hub validates
-    }
-    const sess = $("session-id").value.trim();
-    if (sess) msg.session_id = sess;
-    ws.send(JSON.stringify(msg));
-    note("subscribed: " + JSON.stringify(msg));
-  };
-
-  ws.onmessage = (ev) => {
+    sendSubscribe();
+    stopPollFallback();
+  });
+  ws.addEventListener('message', (ev) => {
+    // Sub-second render: parse + prepend a node, never a full refresh.
     let msg;
-    try {
-      msg = JSON.parse(ev.data);
-    } catch {
-      return; // ignore non-JSON frames
-    }
-    handleWSMessage(msg);
-  };
-
-  ws.onclose = () => {
-    if (state.ws === ws) state.ws = null;
-    setConn("offline", "disconnected");
-    if (state.wsWanted) scheduleRetry();
-  };
-
-  ws.onerror = () => {
-    // onclose follows; keep handling there.
-  };
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    routeWs(msg);
+  });
+  ws.addEventListener('close', () => {
+    setWsState('disconnected', 'dot-off');
+    startPollFallback();
+    scheduleRetry();
+  });
+  ws.addEventListener('error', () => { try { ws.close(); } catch {} });
 }
 
 function scheduleRetry() {
-  const ms = Math.min(state.retryMs, 15000);
-  setConn("offline", `retrying in ${Math.round(ms / 1000)}s…`);
-  setTimeout(() => {
-    if (state.wsWanted && !state.ws) {
-      state.retryMs *= 2;
-      openWS();
-    }
-  }, ms);
+  if (!state.wsWanted) return;
+  setWsState('retry in ' + Math.round(state.retryMs / 1000) + 's (REST still works)', 'dot-idle');
+  setTimeout(() => { if (state.wsWanted && (!state.ws || state.ws.readyState > 1)) openWs(); },
+    state.retryMs);
+  state.retryMs = Math.min(state.retryMs * 2, 30000);
+}
+
+function disconnectWs() {
+  state.wsWanted = false;
+  try { if (state.ws) state.ws.close(); } catch {}
+  setWsState('disconnected', 'dot-off');
+  stopPollFallback();
+}
+
+function sendSubscribe() {
+  const pid = els.projectId.value.trim();
+  if (!pid || !state.ws || state.ws.readyState !== 1) return;
+  state.projectId = pid;
+  state.sessionId = els.sessionId.value.trim();
+  store.save('projectId', pid);
+  store.save('sessionId', state.sessionId);
+  state.ws.send(JSON.stringify({
+    type: 'subscribe', project_id: pid, session_id: state.sessionId || undefined,
+  }));
+  els.projectState.textContent = 'subscribed to ' + pid + (state.sessionId ? ' / ' + state.sessionId : '');
 }
 
 function sendPresence(status) {
-  // Client -> Server presence (plan §3.2): {"type":"presence","status":"typing"}
-  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-    state.ws.send(JSON.stringify({ type: "presence", status }));
-  }
+  if (!state.ws || state.ws.readyState !== 1) return;
+  state.ws.send(JSON.stringify({ type: 'presence', status }));
 }
 
-function handleWSMessage(msg) {
-  // Server -> Client shapes (plan §3.2): event | presence |
-  // memory_update | episode_update. Unknown types render generically.
+function routeWs(msg) {
   switch (msg.type) {
-    case "event":
-      pushFeed("ev-event", describeEvent(msg.event));
-      break;
-    case "presence":
-      if (msg.user_id) {
-        state.presence.set(msg.user_id, msg.status || "?");
-        renderPresence();
-      }
-      pushFeed("ev-presence", `<b>${esc(msg.user_id)}</b> is ${esc(msg.status)}`);
-      break;
-    case "memory_update":
-      pushFeed("ev-memory_update",
-        `memory <b>${esc(msg.action)}</b>: ${esc(msg.item && msg.item.key)}`);
-      refreshMemoriesSilent(); // targeted re-fetch, no full refresh
-      break;
-    case "episode_update":
-      pushFeed("ev-episode_update",
-        `episode <b>${esc(msg.action)}</b>: ${esc(msg.episode && msg.episode.title)}`);
-      break;
-    default:
-      pushFeed("", esc(JSON.stringify(msg)));
+    case 'event': onEvent(msg.event); break;
+    case 'presence': onPresenceMsg(msg); break;
+    case 'memory_update': onMemoryUpdate(msg); break;
+    case 'episode_update': onEpisodeUpdate(msg); break;
+    default: onEvent({ event_type: 'UNKNOWN_FRAME', payload: msg, created_at: new Date().toISOString() });
   }
 }
 
-function describeEvent(ev) {
-  if (!ev || typeof ev !== "object") return esc(JSON.stringify(ev));
-  const kind = ev.event_type || "event";
-  const who = ev.user_id || ev.agent_id || "system";
-  return `<b>${esc(kind)}</b> <span class="meta">${esc(who)}${ev.project_id ? " · " + esc(ev.project_id) : ""}</span>`;
+// ---------- presence ----------
+function upsertPresence(userId, status) {
+  if (!userId) return;
+  state.presence.set(String(userId), { status, at: Date.now() });
+  renderPresence();
 }
-
-function pushFeed(cls, html) {
-  const ul = $("feed");
-  const li = document.createElement("li");
-  if (cls) li.className = cls;
-  li.innerHTML = `<time>${esc(now())}</time><span>${html}</span>`;
-  ul.prepend(li);
-  while (ul.children.length > FEED_CAP) ul.lastChild.remove();
-  $("feed-count").textContent = String(ul.children.length);
+function onPresenceMsg(msg) {
+  upsertPresence(msg.user_id || msg.user || msg.agent_id, msg.status || 'online');
 }
-
-/* ---------------- sessions & participants ---------------- */
-
 function renderPresence() {
-  const ul = $("presence");
-  ul.innerHTML = "";
-  if (state.presence.size === 0) {
-    ul.innerHTML = `<li class="muted">No presence seen yet — connect live first.</li>`;
-    return;
-  }
-  for (const [user, status] of state.presence) {
-    const li = document.createElement("li");
-    li.innerHTML = `<b>${esc(user)}</b> <span class="meta">${esc(status)}</span>`;
-    ul.appendChild(li);
+  const now = Date.now();
+  const items = [...state.presence.entries()].map(([user, p]) => {
+    // 90s OfflineThreshold mirrors server.go + §3.4 heartbeat presence.
+    const stale = now - p.at > 90000;
+    const status = stale ? 'offline' : p.status;
+    return { user, status };
+  });
+  items.sort((a, b) => (a.user < b.user ? -1 : 1));
+  els.presenceCount.textContent = '(' + items.length + ')';
+  els.presenceList.innerHTML = items.length ? items.map((p) =>
+    '<li><span class="dot ' + (p.status === 'online' ? 'dot-on' : p.status === 'typing' ? 'dot-typing' : p.status === 'idle' ? 'dot-idle' : 'dot-off') +
+    '"></span><code>' + esc(p.user) + '</code><span class="muted">' + esc(p.status) + '</span></li>'
+  ).join('') : '<li class="muted">no presence yet — connect WS and subscribe</li>';
+}
+setInterval(renderPresence, 15000);
+
+// ---------- live event feed ----------
+const HUMAN = ['FILE_MODIFIED', 'COMMAND_EXECUTED', 'GIT_COMMITTED', 'MEMORY_PROPOSED',
+  'MEMORY_CONFIRMED', 'EPISODE_OPENED', 'EPISODE_RESOLVED', 'MESSAGE_SENT',
+  'SESSION_STARTED', 'CONVERSATION_TURN'];
+
+function eventSummary(ev) {
+  const p = (ev && ev.payload) || {};
+  switch (ev.event_type) {
+    case 'FILE_MODIFIED': return 'modified ' + (p.path || '?');
+    case 'FILE_READ': return 'read ' + (p.path || '?');
+    case 'COMMAND_EXECUTED': return (p.cmd || p.command || 'cmd') + ' → exit ' + (p.exit_code != null ? p.exit_code : '?');
+    case 'GIT_COMMITTED': return (p.message || p.sha || 'commit');
+    case 'CONVERSATION_TURN': return (p.speaker || 'agent') + ': ' + String(p.content || '').slice(0, 140);
+    case 'MEMORY_PROPOSED': case 'MEMORY_CONFIRMED': case 'MEMORY_REJECTED':
+      return (p.key || p.id || 'memory');
+    case 'EPISODE_OPENED': case 'EPISODE_RESOLVED': case 'EPISODE_UPDATED':
+      return (p.title || p.id || 'episode');
+    case 'MESSAGE_SENT': return String(p.text || p.content || '').slice(0, 140);
+    default: return Object.keys(p).slice(0, 3).map((k) => k + '=' + JSON.stringify(p[k])).join(' ').slice(0, 140);
   }
 }
 
-async function refreshWorkspaces() {
-  // GET /workspaces/{projectID}/active -> {workspaces,count}
-  const ul = $("workspaces");
-  let projectID;
-  try {
-    projectID = requireProject();
-  } catch (err) {
-    ul.innerHTML = `<li class="muted">${esc(err.message)}</li>`;
-    return;
-  }
-  try {
-    const data = await api(`/workspaces/${encodeURIComponent(projectID)}/active`);
-    ul.innerHTML = "";
-    if (!data.workspaces || data.workspaces.length === 0) {
-      ul.innerHTML = `<li class="muted">No active workspaces.</li>`;
-      return;
-    }
-    for (const w of data.workspaces) {
-      const li = document.createElement("li");
-      li.innerHTML =
-        `<b>${esc(w.machine_id || w.id)}</b> ` +
-        `<span class="meta">${esc(w.user_id || "")} · ${esc(w.branch || "")}@${esc((w.commit_sha || "").slice(0, 8))}${w.is_dirty ? " · dirty" : ""}</span><br />` +
-        `<span class="meta">${esc(w.path || "")}</span>`;
-      ul.appendChild(li);
-    }
-  } catch (err) {
-    ul.innerHTML = `<li class="muted">${esc(err.message || err)}</li>`;
-  }
+function onEvent(ev) {
+  if (!ev) return;
+  const filter = ($('feedFilter').value || '').trim().toLowerCase();
+  if (filter && !(String(ev.event_type || '').toLowerCase().includes(filter))) return;
+  state.feedTotal += 1;
+  els.feedCount.textContent = '(' + state.feedTotal + ')';
+  const li = document.createElement('li');
+  const interesting = HUMAN.includes(ev.event_type) ? ' hi' : '';
+  li.className = 'feed-item' + interesting;
+  li.innerHTML = '<span class="badge">' + esc(ev.event_type || '?') + '</span> ' +
+    '<span>' + esc(eventSummary(ev)) + '</span> ' +
+    '<span class="muted">' + esc(fmtTime(ev.created_at)) +
+    (ev.session_id ? ' · ' + esc(ev.session_id.slice(0, 8)) : '') + '</span>';
+  els.feed.prepend(li);
+  while (els.feed.children.length > 200) els.feed.lastChild.remove();
+  // Feed doubles as a presence hint: anyone emitting events is online.
+  if (ev.user_id || ev.agent_id) upsertPresence(ev.user_id || ev.agent_id, 'online');
 }
 
-/* ---------------- Memory Explorer ---------------- */
-
-async function searchMemories(silent) {
-  // GET /memory/search?project_id=&q=&tags=&key=&level=&limit=
-  const ul = $("memories");
-  let projectID;
-  try {
-    projectID = requireProject();
-  } catch (err) {
-    if (!silent) ul.innerHTML = `<li class="muted">${esc(err.message)}</li>`;
-    return;
-  }
-  const params = new URLSearchParams({ project_id: projectID });
-  const q = $("mem-q").value.trim();
-  const level = $("mem-level").value; // wire values are lowercase already
-  const status = $("mem-status").value; // NO server param — filter client-side
-  if (q) params.set("q", q);
-  if (level) params.set("level", level);
-  params.set("limit", "50");
-  try {
-    const data = await api(`/memory/search?${params.toString()}`);
-    let items = data.items || [];
-    if (status) items = items.filter((m) => m.status === status);
-    ul.innerHTML = "";
-    if (items.length === 0) {
-      ul.innerHTML = `<li class="muted">No memories match.</li>`;
-      return;
-    }
-    for (const m of items) ul.appendChild(memoryRow(m));
-  } catch (err) {
-    if (!silent) ul.innerHTML = `<li class="muted">${esc(err.message || err)}</li>`;
-  }
+// REST fallback while WS is down: re-poll the searchable collections.
+// (No GET /events REST route exists yet, so memory/episode search is the pollable surface.)
+function startPollFallback() {
+  if (state.pollTimer) return;
+  state.pollTimer = setInterval(() => {
+    if (state.ws && state.ws.readyState === 1) return;
+    if (els.projectId.value.trim() && state.token) { refreshMemory(true); refreshEpisodes(true); }
+  }, 5000);
+}
+function stopPollFallback() {
+  clearInterval(state.pollTimer);
+  state.pollTimer = null;
 }
 
-function refreshMemoriesSilent() {
-  // Live WS update path: re-run the current filter, never location.reload().
-  if ($("project-id").value.trim()) searchMemories(true).catch(() => {});
-}
-
-function memoryRow(m) {
-  const li = document.createElement("li");
-  li.dataset.id = m.id;
-  const tags = (m.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("");
+// ---------- memory explorer ----------
+function memoryCard(item) {
+  const li = document.createElement('li');
+  li.className = 'mini-card';
+  li.dataset.id = item.id || '';
   li.innerHTML =
-    `<b>${esc(m.key)}</b> ` +
-    `<span class="tag">${esc(m.level)}</span><span class="tag">${esc(m.status)}</span>` +
-    `<span class="meta">conf ${esc(m.confidence)} · ${esc(m.scope || "")}</span>` +
-    `<p>${esc(m.content)}</p>` +
-    (m.context_snippet ? `<p class="meta">${esc(m.context_snippet)}</p>` : "") +
-    (tags ? `<p>${tags}</p>` : "") +
-    `<div class="btn-row">
-       <button type="button" data-act="confirm">Confirm</button>
-       <button type="button" data-act="reject">Reject</button>
-       <button type="button" data-act="promote">Promote</button>
-     </div>`;
-  li.querySelectorAll("button").forEach((b) =>
-    b.addEventListener("click", () => memoryAction(m.id, b.dataset.act, b)));
+    '<div class="mini-head"><code>' + esc(item.key || item.id) + '</code>' +
+    '<span class="badge">' + esc(item.status || '') + '</span>' +
+    '<span class="badge dim">' + esc(item.level || '') + '</span></div>' +
+    '<p>' + esc(item.content || '') + '</p>' +
+    (item.context_snippet ? '<p class="muted">◷ ' + esc(item.context_snippet) + '</p>' : '') +
+    '<div class="row">' +
+    '<button data-act="confirm" type="button">Confirm</button>' +
+    '<button data-act="reject" type="button" class="ghost">Reject</button>' +
+    '<button data-act="promote" type="button" class="ghost">Promote → project</button>' +
+    '<span class="muted">conf ' + esc(item.confidence != null ? item.confidence : '?') + '</span></div>';
+  li.querySelectorAll('button').forEach((b) =>
+    b.addEventListener('click', () => memoryAction(item, b.dataset.act, li)));
   return li;
 }
 
-function nextLevel(level) {
-  // session -> personal -> project -> organization
-  const order = ["session", "personal", "project", "organization"];
-  const i = order.indexOf(level);
-  return i < 0 || i === order.length - 1 ? "project" : order[i + 1];
+// Best-effort confirmation flow (plan §2.8). The server has no
+// PATCH /memory/:id route yet, so 404/405 falls back to optimistic UI
+// and a WS "action" hint for the future hub.
+async function memoryAction(item, act, node) {
+  const map = { confirm: 'confirm', reject: 'reject', promote: 'promote' };
+  const endpoint = '/memory/' + encodeURIComponent(item.id) + '/' + map[act];
+  try {
+    await rest(endpoint, { method: 'POST', headers: authHeaders(), body: JSON.stringify({}) });
+  } catch (e) {
+    const hint = node.querySelector('.muted');
+    if (hint) hint.textContent = 'server has no ' + endpoint + ' yet (' + e.message + ') — optimistic only';
+  }
+  if (act === 'confirm') item.status = 'CONFIRMED';
+  if (act === 'reject') item.status = 'REJECTED';
+  if (act === 'promote') { item.level = 'project'; item.session_id = ''; }
+  if (state.ws && state.ws.readyState === 1) {
+    try {
+      state.ws.send(JSON.stringify({
+        type: 'action',
+        event_type: act === 'reject' ? 'MEMORY_REJECTED' : 'MEMORY_CONFIRMED',
+        payload: { id: item.id, key: item.key },
+      }));
+    } catch {}
+  }
+  const fresh = memoryCard(item);
+  node.replaceWith(fresh);
 }
 
-async function memoryAction(id, act, btn) {
-  // Lifecycle endpoints are PROPOSED (server follow-up, see ADR-014):
-  //   POST /memory/{id}/confirm | /reject | /promote {level}
-  btn.disabled = true;
+function clientFilterMemories(items) {
+  const lvl = els.memLevel.value, st = els.memStatus.value;
+  return items.filter((m) =>
+    (!lvl || (m.level || '') === lvl) && (!st || (m.status || '') === st));
+}
+
+async function refreshMemory(quiet) {
+  const pid = els.projectId.value.trim();
+  if (!pid) return;
   try {
-    const body = act === "promote"
-      ? { level: nextLevel(document.querySelector(`li[data-id="${CSS.escape(id)}"] .tag`)?.textContent || "session") }
-      : {};
-    await api(`/memory/${encodeURIComponent(id)}/${act}`, { method: "POST", body });
-    note(`memory ${act} ok (${id})`);
-    searchMemories(true).catch(() => {});
-  } catch (err) {
-    note(`memory ${act} failed: ${err.message} — lifecycle endpoints are a server follow-up (see footer).`, true);
-  } finally {
-    btn.disabled = false;
+    const body = await rest('/memory/search?project_id=' + encodeURIComponent(pid) + '&limit=50',
+      { headers: authHeaders() });
+    const items = clientFilterMemories(body.items || []);
+    els.memoryList.innerHTML = '';
+    items.forEach((m) => els.memoryList.appendChild(memoryCard(m)));
+    if (!items.length && !quiet) els.memoryList.innerHTML = '<li class="muted">no memories match</li>';
+  } catch (e) { if (!quiet) els.memoryList.innerHTML = '<li class="muted">search failed: ' + esc(e.message) + '</li>'; }
+}
+
+function onMemoryUpdate(msg) {
+  // Live apply without refresh: prepend/update the card in place.
+  if (!msg.item) return;
+  const list = els.memoryList;
+  const existing = msg.item.id ? list.querySelector('[data-id="' + CSS.escape(msg.item.id) + '"]') : null;
+  const card = memoryCard(msg.item);
+  if (existing) existing.replaceWith(card);
+  else list.prepend(card);
+  onEvent({ event_type: msg.action === 'rejected' ? 'MEMORY_REJECTED' : 'MEMORY_CONFIRMED', payload: { key: msg.item.key }, created_at: new Date().toISOString() });
+}
+
+// ---------- episode inspector ----------
+function episodeCard(ep) {
+  const div = document.createElement('div');
+  div.className = 'mini-card';
+  if (ep.id) div.dataset.id = ep.id;
+  const arc = [['Trigger', ep.trigger], ['Investigation', ep.investigation],
+    ['Root cause', ep.root_cause], ['Fix', ep.resolution], ['Verification', ep.verification]]
+    .filter(([, v]) => v).map(([k, v]) =>
+      '<details><summary>' + esc(k) + '</summary><p>' + esc(v) + '</p></details>').join('');
+  div.innerHTML =
+    '<div class="mini-head"><strong>' + esc(ep.title || ep.id) + '</strong>' +
+    '<span class="badge">' + esc(ep.status || '') + '</span>' +
+    '<span class="badge dim">' + esc(ep.episode_type || '') + '</span></div>' +
+    (ep.error_patterns && ep.error_patterns.length ? '<p><code>' + esc(ep.error_patterns.join(', ')) + '</code></p>' : '') +
+    (ep.files_involved && ep.files_involved.length ? '<p class="muted">files: ' + esc(ep.files_involved.join(', ')) + '</p>' : '') +
+    arc;
+  return div;
+}
+
+async function refreshEpisodes(quiet) {
+  const pid = els.projectId.value.trim();
+  if (!pid) return;
+  try {
+    const body = await rest('/episodes/search?project_id=' + encodeURIComponent(pid) + '&limit=50',
+      { headers: authHeaders() });
+    const eps = body.items || [];
+    els.episodeList.innerHTML = '';
+    eps.forEach((e) => els.episodeList.appendChild(episodeCard(e)));
+    if (!eps.length && !quiet) els.episodeList.innerHTML = '<p class="muted">no episodes yet</p>';
+  } catch (e) { if (!quiet) els.episodeList.innerHTML = '<p class="muted">search failed: ' + esc(e.message) + '</p>'; }
+}
+
+function onEpisodeUpdate(msg) {
+  if (!msg.episode) return;
+  const existing = msg.episode.id ? els.episodeList.querySelector('[data-id="' + CSS.escape(msg.episode.id) + '"]') : null;
+  const card = episodeCard(msg.episode);
+  if (existing) existing.replaceWith(card);
+  else els.episodeList.prepend(card);
+  onEvent({ event_type: msg.action === 'resolved' ? 'EPISODE_RESOLVED' : 'EPISODE_OPENED', payload: { title: msg.episode.title }, created_at: new Date().toISOString() });
+}
+
+// ---------- search ----------
+async function runSearch() {
+  const pid = els.projectId.value.trim();
+  const q = els.searchBox.value.trim();
+  if (!pid) { els.memSearchCount.textContent = '(set a project ID first)'; return; }
+  const [mem, eps] = await Promise.all([
+    rest('/memory/search?project_id=' + encodeURIComponent(pid) + '&q=' + encodeURIComponent(q) + '&limit=20', { headers: authHeaders() }).catch((e) => ({ error: e.message })),
+    rest('/episodes/search?project_id=' + encodeURIComponent(pid) + '&q=' + encodeURIComponent(q) + '&limit=20', { headers: authHeaders() }).catch((e) => ({ error: e.message })),
+  ]);
+  els.memSearchResults.innerHTML = '';
+  els.epSearchResults.innerHTML = '';
+  if (mem.error) els.memSearchCount.textContent = '(' + mem.error + ')';
+  else {
+    els.memSearchCount.textContent = '(' + (mem.count != null ? mem.count : (mem.items || []).length) + ')';
+    (mem.items || []).forEach((m) => els.memSearchResults.appendChild(memoryCard(m)));
+  }
+  if (eps.error) els.epSearchCount.textContent = '(' + eps.error + ')';
+  else {
+    els.epSearchCount.textContent = '(' + (eps.count != null ? eps.count : (eps.items || []).length) + ')';
+    (eps.items || []).forEach((e) => els.epSearchResults.appendChild(episodeCard(e)));
   }
 }
 
-/* ---------------- Episode Inspector ---------------- */
+// ---------- wiring ----------
+function init() {
+  els.apiBase.value = store.load('apiBase', els.apiBase.value);
+  els.wsUrl.value = store.load('wsUrl', els.wsUrl.value);
+  els.projectId.value = state.projectId;
+  els.sessionId.value = state.sessionId;
+  els.agentName.value = store.load('agentName', '');
+  if (state.token) els.authState.textContent = 'restored token ✓';
+  renderPresence();
 
-async function searchEpisodes() {
-  // GET /episodes/search?project_id=&q=&error_pattern=&file=&status=&episode_type=&limit=
-  const ul = $("episodes");
-  let projectID;
-  try {
-    projectID = requireProject();
-  } catch (err) {
-    ul.innerHTML = `<li class="muted">${esc(err.message)}</li>`;
-    return;
-  }
-  const params = new URLSearchParams({ project_id: projectID });
-  const q = $("ep-q").value.trim();
-  const errPat = $("ep-error").value.trim();
-  const file = $("ep-file").value.trim();
-  const status = $("ep-status").value;
-  if (q) params.set("q", q);
-  if (errPat) params.set("error_pattern", errPat);
-  if (file) params.set("file", file);
-  if (status) params.set("status", status);
-  params.set("limit", "50");
-  try {
-    const data = await api(`/episodes/search?${params.toString()}`);
-    state.episodes = data.episodes || [];
-    ul.innerHTML = "";
-    if (state.episodes.length === 0) {
-      ul.innerHTML = `<li class="muted">No episodes match.</li>`;
-      return;
-    }
-    state.episodes.forEach((ep, i) => {
-      const li = document.createElement("li");
-      li.innerHTML =
-        `<b>${esc(ep.title)}</b><br />` +
-        `<span class="tag">${esc(ep.episode_type)}</span>` +
-        `<span class="tag">${esc(ep.status)}</span>` +
-        `<div class="btn-row"><button type="button">Inspect</button></div>`;
-      li.querySelector("button").addEventListener("click", () => showEpisode(i));
-      ul.appendChild(li);
-    });
-  } catch (err) {
-    ul.innerHTML = `<li class="muted">${esc(err.message || err)}</li>`;
-  }
+  $('loginBtn').addEventListener('click', login);
+  $('wsBtn').addEventListener('click', () => {
+    store.save('apiBase', apiBase());
+    store.save('wsUrl', els.wsUrl.value.trim());
+    store.save('agentName', els.agentName.value.trim());
+    connectWs();
+  });
+  $('wsDisconnectBtn').addEventListener('click', disconnectWs);
+  $('resolveBtn').addEventListener('click', resolveProject);
+  $('subscribeBtn').addEventListener('click', sendSubscribe);
+  $('activeWsBtn').addEventListener('click', checkActiveWorkspace);
+  $('typingBtn').addEventListener('click', () => sendPresence('typing'));
+  $('idleBtn').addEventListener('click', () => sendPresence('idle'));
+  $('clearFeedBtn').addEventListener('click', () => {
+    els.feed.innerHTML = ''; state.feedTotal = 0; els.feedCount.textContent = '';
+  });
+  $('memRefreshBtn').addEventListener('click', () => refreshMemory());
+  $('epRefreshBtn').addEventListener('click', () => refreshEpisodes());
+  $('searchBtn').addEventListener('click', runSearch);
+  els.searchBox.addEventListener('keydown', (e) => { if (e.key === 'Enter') runSearch(); });
+  els.memLevel.addEventListener('change', () => refreshMemory(true));
+  els.memStatus.addEventListener('change', () => refreshMemory(true));
+  els.projectId.addEventListener('change', () => {
+    state.projectId = els.projectId.value.trim();
+    store.save('projectId', state.projectId);
+  });
+  els.sessionId.addEventListener('change', () => {
+    state.sessionId = els.sessionId.value.trim();
+    store.save('sessionId', state.sessionId);
+  });
 }
 
-function showEpisode(i) {
-  // trigger → root-cause → fix view from the episode arc fields.
-  const ep = state.episodes[i];
-  const detail = $("episode-detail");
-  if (!ep) return;
-  const section = (h, v) => (v ? `<h3>${h}</h3><p>${esc(v)}</p>` : "");
-  detail.innerHTML =
-    `<h2>${esc(ep.title)}</h2>` +
-    `<p class="meta">${esc(ep.episode_type)} · ${esc(ep.status)} · opened ${esc(ep.opened_at || "")}</p>` +
-    ((ep.error_patterns || []).map((t) => `<span class="tag">err: ${esc(t)}</span>`).join("") +
-      (ep.files_involved || []).map((t) => `<span class="tag">file: ${esc(t)}</span>`).join("") +
-      (ep.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join("")) +
-    section("Trigger", ep.trigger) +
-    section("Investigation", ep.investigation) +
-    section("Root cause", ep.root_cause || ep.rootCause) +
-    section("Fix", ep.resolution) +
-    section("Verification", ep.verification);
-}
-
-/* ---------------- misc ---------------- */
-
-async function checkHealth() {
-  try {
-    const data = await api("/healthz");
-    note(`health: ${JSON.stringify(data)}`);
-  } catch (err) {
-    note(`health failed: ${err.message}`, true);
-  }
-}
-
-/* ---------------- wiring ---------------- */
-
-$("login-form").addEventListener("submit", login);
-$("connect-btn").addEventListener("click", connectLive);
-$("health-btn").addEventListener("click", checkHealth);
-$("refresh-workspaces").addEventListener("click", refreshWorkspaces);
-$("memory-filter").addEventListener("submit", (e) => { e.preventDefault(); searchMemories(false); });
-$("episode-filter").addEventListener("submit", (e) => { e.preventDefault(); searchEpisodes(); });
-// Typing presence: light touch — signal on search typing (plan §3.2 presence).
-$("mem-q").addEventListener("input", () => sendPresence("typing"));
-window.addEventListener("beforeunload", () => { state.wsWanted = false; });
-
-refreshLoginState();
-renderPresence();
+document.addEventListener('DOMContentLoaded', init);

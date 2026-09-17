@@ -1,0 +1,96 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  # Job 1: fast static gate on both OSes. Windows gets mingw-w64 so the
+  # cgo-based -race builds used in later jobs are proven available there too.
+  build:
+    name: build+vet+gofmt (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mingw-w64 (Windows, provides 64-bit gcc for -race)
+        if: runner.os == 'Windows'
+        run: choco install mingw -y
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: gofmt check (fail on any unformatted file)
+        shell: bash
+        run: |
+          files="$(gofmt -l .)"
+          if [ -n "$files" ]; then
+            echo "gofmt found unformatted files:"
+            echo "$files"
+            exit 1
+          fi
+
+  # Job 2: race detector over the whole suite (DB-free unit tests; live-DB
+  # tests SKIP without TEST_POSTGRES_DSN — see postgres job below).
+  test-race:
+    name: go test -race ./...
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Test with race detector
+        run: go test -race -count=1 ./...
+
+  # Job 3: full suite against a real Postgres 16 + pgvector service. The
+  # TEST_POSTGRES_DSN-gated tests in internal/store apply migrations/
+  # via RunMigrations and exercise the live schema, so this job covers
+  # "migrations apply" end-to-end with no extra harness.
+  postgres:
+    name: full suite vs Postgres (pgvector:pg16)
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nexus_test
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/nexus_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Migrations present
+        shell: bash
+        run: ls migrations/*.up.sql
+
+      - name: Full suite with live DB (applies migrations via RunMigrations)
+        run: go test -count=1 ./...
