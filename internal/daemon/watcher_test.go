@@ -194,3 +194,146 @@ func TestWatchRunEmitsOnWrite(t *testing.T) {
 		t.Errorf("live diff:\n%v", p["diff"])
 	}
 }
+
+func TestWatchHashStorePersistsAcrossRestarts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hashes := NewMemoryHashStore()
+
+	rec := &eventRecorder{}
+	w, err := NewWatcher(root, rec.sink())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	w.SetWorkspaceID("ws-1")
+	w.SetHashStore(hashes)
+
+	// Edit: PollOnce emits and persists the new hash.
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\nv2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.PollOnce()
+	if n := rec.count(EventInstructionFileChanged); n != 1 {
+		t.Fatalf("edit emitted %d events, want 1", n)
+	}
+	persisted, ok := hashes.GetHash("ws-1", "CLAUDE.md")
+	if !ok || persisted != HashString("v1\nv2\n") {
+		t.Fatalf("persisted hash = %q,%v; want current content hash", persisted, ok)
+	}
+	w.Close()
+
+	// Restart with the same store and unchanged disk: the persisted hash
+	// seeds the baseline, so PollOnce stays silent.
+	rec2 := &eventRecorder{}
+	w2, err := NewWatcherWithStore(root, rec2.sink(), "ws-1", hashes)
+	if err != nil {
+		t.Fatalf("NewWatcherWithStore: %v", err)
+	}
+	defer w2.Close()
+	w2.PollOnce()
+	if n := rec2.count(EventInstructionFileChanged); n != 0 {
+		t.Fatalf("restart with unchanged content emitted %d events", n)
+	}
+}
+
+func TestWatchHashStoreSurfacesEditWhileDown(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hashes := NewMemoryHashStore()
+	if err := hashes.SetHash("ws-1", "CLAUDE.md", HashString("v1\n")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Edit while the daemon is down, then boot with persistence: the
+	// persisted (stale) hash seeds the baseline so PollOnce emits.
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\nv2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := &eventRecorder{}
+	w, err := NewWatcherWithStore(root, rec.sink(), "ws-1", hashes)
+	if err != nil {
+		t.Fatalf("NewWatcherWithStore: %v", err)
+	}
+	defer w.Close()
+	w.PollOnce()
+	if n := rec.count(EventInstructionFileChanged); n != 1 {
+		t.Fatalf("edit-while-down emitted %d events, want 1", n)
+	}
+	if p := rec.last(EventInstructionFileChanged); p["old_hash"] != HashString("v1\n") {
+		t.Errorf("old_hash = %v, want pre-restart hash", p["old_hash"])
+	}
+}
+
+func TestWatchHashStoreDeletionClearsPersistedHash(t *testing.T) {
+	root := t.TempDir()
+	abs := filepath.Join(root, "CLAUDE.md")
+	if err := os.WriteFile(abs, []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hashes := NewMemoryHashStore()
+	rec := &eventRecorder{}
+	w, err := NewWatcher(root, rec.sink())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer w.Close()
+	w.SetWorkspaceID("ws-1")
+	w.SetHashStore(hashes)
+
+	if err := os.WriteFile(abs, []byte("v1\nv2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.PollOnce()
+	if _, ok := hashes.GetHash("ws-1", "CLAUDE.md"); !ok {
+		t.Fatal("edit must persist a hash")
+	}
+	if err := os.Remove(abs); err != nil {
+		t.Fatal(err)
+	}
+	w.PollOnce()
+	if n := rec.count(EventInstructionFileChanged); n != 2 {
+		t.Fatalf("deletion emitted total %d, want 2", n)
+	}
+	if _, ok := hashes.GetHash("ws-1", "CLAUDE.md"); ok {
+		t.Error("deletion must drop the persisted hash")
+	}
+}
+
+func TestFileHashStoreRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sub", "hashes.json")
+	s, err := NewFileHashStore(path)
+	if err != nil {
+		t.Fatalf("NewFileHashStore: %v", err)
+	}
+	if s.Path() != path {
+		t.Errorf("Path() = %q, want %q", s.Path(), path)
+	}
+	if err := s.SetHash("ws-1", "CLAUDE.md", "abc"); err != nil {
+		t.Fatalf("SetHash: %v", err)
+	}
+	// Reload from disk: the hash survives the process boundary.
+	reloaded, err := NewFileHashStore(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if h, ok := reloaded.GetHash("ws-1", "CLAUDE.md"); !ok || h != "abc" {
+		t.Errorf("reloaded hash = %q,%v; want abc,true", h, ok)
+	}
+	if err := reloaded.DeleteHash("ws-1", "CLAUDE.md"); err != nil {
+		t.Fatalf("DeleteHash: %v", err)
+	}
+	if _, ok := reloaded.GetHash("ws-1", "CLAUDE.md"); ok {
+		t.Error("deleted hash must be gone")
+	}
+	// Corrupt state is an error, never silent amnesia.
+	if err := os.WriteFile(path, []byte("{nope"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewFileHashStore(path); err == nil {
+		t.Error("corrupt state file must fail to load")
+	}
+}

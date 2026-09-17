@@ -1,0 +1,192 @@
+// User identity and preferences (issue #34, plan §1.1).
+//
+// The users table shipped in migration 001 but had zero store coverage:
+// every other store (projects, workspaces, sessions) references user IDs,
+// yet no code path could create or read a user. This file closes that gap
+// with a thin CRUD store over the DBTX seam (db.go), following the
+// projects.go/workspaces.go conventions: NULL-coalescing column lists,
+// pgx.ErrNoRows mapped to wrapped ErrNotFound, and validation before any
+// statement so invalid input issues no queries.
+//
+// Testability: UserStore depends only on DBTX, so unit tests run against a
+// scripted fake (users_test.go). Settings is selected as settings::TEXT so
+// the JSONB column scans into a plain string, mirroring the events.go
+// payload::TEXT convention.
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+// User mirrors a users row (migration 001). Empty Email means SQL NULL;
+// Settings is the raw JSON document ('{}' when never set).
+type User struct {
+	ID        string
+	Username  string
+	Email     string
+	Settings  string
+	CreatedAt time.Time
+}
+
+// UserParams carries user identity for Create.
+type UserParams struct {
+	Username string
+	Email    string // optional; "" = NULL
+	Settings string // optional raw JSON; "" = '{}'
+}
+
+// userColumns selects users with NULLs coalesced (settings falls back to
+// '{}' so scans never see NULL) and the UUID formatted as text.
+const userColumns = `id::TEXT AS id, ` +
+	`username, ` +
+	`COALESCE(email, '') AS email, ` +
+	`COALESCE(settings::TEXT, '{}') AS settings, ` +
+	`created_at`
+
+// scanUser scans a full userColumns row.
+func scanUser(row pgx.Row) (*User, error) {
+	var u User
+	if err := row.Scan(&u.ID, &u.Username, &u.Email, &u.Settings, &u.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+// normalizeSettings trims the settings document, defaulting "" to '{}'.
+// Validity beyond "non-empty" is the database's job (JSONB cast rejects
+// malformed documents at insert/update time).
+func normalizeSettings(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "{}"
+	}
+	return strings.TrimSpace(s)
+}
+
+// UserStore is user CRUD plus settings management over any DBTX.
+type UserStore struct {
+	db DBTX
+}
+
+// NewUserStore wires a UserStore to any DBTX (pool, transaction, fake).
+func NewUserStore(db DBTX) *UserStore {
+	return &UserStore{db: db}
+}
+
+// Create inserts a user. Username is required (the table enforces UNIQUE);
+// email and settings are optional.
+func (s *UserStore) Create(ctx context.Context, params UserParams) (*User, error) {
+	username := strings.TrimSpace(params.Username)
+	if username == "" {
+		return nil, errors.New("store: username is required")
+	}
+	u, err := scanUser(s.db.QueryRow(ctx,
+		`INSERT INTO users (username, email, settings)
+		 VALUES ($1, $2, $3::JSONB)
+		 RETURNING `+userColumns,
+		username,
+		nullText(strings.TrimSpace(params.Email)),
+		normalizeSettings(params.Settings)))
+	if err != nil {
+		return nil, fmt.Errorf("store: create user: %w", err)
+	}
+	return u, nil
+}
+
+// GetByID fetches one user or a wrapped ErrNotFound.
+func (s *UserStore) GetByID(ctx context.Context, id string) (*User, error) {
+	u, err := scanUser(s.db.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE id = $1`, id))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: user %s: %w", id, ErrNotFound)
+		}
+		return nil, fmt.Errorf("store: get user: %w", err)
+	}
+	return u, nil
+}
+
+// GetByUsername fetches one user by its unique username or a wrapped
+// ErrNotFound. This is the daemon/server login path: workspace registration
+// carries a username, not a UUID.
+func (s *UserStore) GetByUsername(ctx context.Context, username string) (*User, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return nil, errors.New("store: username is required")
+	}
+	u, err := scanUser(s.db.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE username = $1`, username))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: user %q: %w", username, ErrNotFound)
+		}
+		return nil, fmt.Errorf("store: get user by username: %w", err)
+	}
+	return u, nil
+}
+
+// UpdateSettings replaces the whole settings document (LLM provider, API
+// key ref, preferences) and returns the updated row.
+func (s *UserStore) UpdateSettings(ctx context.Context, id, settings string) (*User, error) {
+	u, err := scanUser(s.db.QueryRow(ctx,
+		`UPDATE users SET settings = $2::JSONB WHERE id = $1 RETURNING `+userColumns,
+		id, normalizeSettings(settings)))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: user %s: %w", id, ErrNotFound)
+		}
+		return nil, fmt.Errorf("store: update user settings: %w", err)
+	}
+	return u, nil
+}
+
+// Delete removes a user. Rows referencing the user (projects.created_by,
+// workspaces.user_id) block deletion with a foreign-key error —
+// reassignment is a follow-up.
+func (s *UserStore) Delete(ctx context.Context, id string) error {
+	tag, err := s.db.Exec(ctx, `DELETE FROM users WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("store: delete user: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("store: user %s: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// List returns users newest-first with a clamped limit.
+func (s *UserStore) List(ctx context.Context, limit, offset int) ([]User, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT `+userColumns+` FROM users ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`,
+		limit, offset)
+	if err != nil {
+		return nil, fmt.Errorf("store: list users: %w", err)
+	}
+	defer rows.Close()
+	var out []User
+	for rows.Next() {
+		var u User
+		if err := rows.Scan(&u.ID, &u.Username, &u.Email, &u.Settings, &u.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store: list users scan: %w", err)
+		}
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: list users rows: %w", err)
+	}
+	return out, nil
+}

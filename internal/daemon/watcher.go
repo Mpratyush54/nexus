@@ -27,6 +27,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -131,16 +132,160 @@ func InstructionChangedPayload(relPath, fileType, oldHash, newHash, diff string,
 	}
 }
 
+// WatchedFileStore persists last-known instruction-file hashes across
+// daemon restarts (issue #34). Without it the watcher keeps last_hash in
+// memory only: a restart forgets every hash, so edits made while down are
+// silently adopted as the new baseline instead of surfacing as changes.
+//
+// The interface is defined here (not imported from internal/store) so the
+// daemon never depends on the Postgres layer: the server persists hashes
+// in watched_files, while the daemon carries this local seam. Keys are
+// (workspaceID, workspace-relative slash path).
+type WatchedFileStore interface {
+	// GetHash returns the persisted hash for a watched file.
+	GetHash(workspaceID, path string) (hash string, ok bool)
+	// SetHash records the latest hash for a watched file.
+	SetHash(workspaceID, path, hash string) error
+	// DeleteHash drops a watched file (e.g. it was deleted on disk).
+	DeleteHash(workspaceID, path string) error
+}
+
+// MemoryHashStore is a mutex-guarded in-memory WatchedFileStore for tests
+// and for daemons that opt out of persistence (nil store behaves the same).
+type MemoryHashStore struct {
+	mu     sync.Mutex
+	hashes map[string]map[string]string // workspaceID -> path -> hash
+}
+
+// NewMemoryHashStore returns an empty in-memory hash store.
+func NewMemoryHashStore() *MemoryHashStore {
+	return &MemoryHashStore{hashes: map[string]map[string]string{}}
+}
+
+// GetHash returns the stored hash, if any.
+func (s *MemoryHashStore) GetHash(workspaceID, path string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h, ok := s.hashes[workspaceID][path]
+	return h, ok
+}
+
+// SetHash records the hash.
+func (s *MemoryHashStore) SetHash(workspaceID, path, hash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hashes[workspaceID] == nil {
+		s.hashes[workspaceID] = map[string]string{}
+	}
+	s.hashes[workspaceID][path] = hash
+	return nil
+}
+
+// DeleteHash drops the stored hash.
+func (s *MemoryHashStore) DeleteHash(workspaceID, path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.hashes[workspaceID], path)
+	if len(s.hashes[workspaceID]) == 0 {
+		delete(s.hashes, workspaceID)
+	}
+	return nil
+}
+
+// FileHashStore is a JSON file-backed WatchedFileStore: the daemon's
+// restart-durable default. The file holds {workspaceID: {path: hash}} and
+// is rewritten on every mutation (best-effort — the watcher ignores
+// persistence errors and PollOnce remains the correctness fallback).
+type FileHashStore struct {
+	path   string
+	mu     sync.Mutex
+	hashes map[string]map[string]string
+}
+
+// NewFileHashStore loads hashes from path (missing file = empty store;
+// malformed JSON is an error so a corrupt state file is never silently
+// treated as "nothing changed").
+func NewFileHashStore(path string) (*FileHashStore, error) {
+	s := &FileHashStore{path: path, hashes: map[string]map[string]string{}}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return s, nil
+		}
+		return nil, err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return s, nil
+	}
+	if err := json.Unmarshal(data, &s.hashes); err != nil {
+		return nil, err
+	}
+	if s.hashes == nil {
+		s.hashes = map[string]map[string]string{}
+	}
+	return s, nil
+}
+
+// Path returns the backing file path.
+func (s *FileHashStore) Path() string { return s.path }
+
+// GetHash returns the stored hash, if any.
+func (s *FileHashStore) GetHash(workspaceID, path string) (string, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	h, ok := s.hashes[workspaceID][path]
+	return h, ok
+}
+
+// SetHash records the hash and rewrites the file.
+func (s *FileHashStore) SetHash(workspaceID, path, hash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hashes[workspaceID] == nil {
+		s.hashes[workspaceID] = map[string]string{}
+	}
+	s.hashes[workspaceID][path] = hash
+	return s.saveLocked()
+}
+
+// DeleteHash drops the stored hash and rewrites the file.
+func (s *FileHashStore) DeleteHash(workspaceID, path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.hashes[workspaceID], path)
+	if len(s.hashes[workspaceID]) == 0 {
+		delete(s.hashes, workspaceID)
+	}
+	return s.saveLocked()
+}
+
+// saveLocked rewrites the JSON file (caller holds mu). Parent dirs are
+// created so a fresh state path works on first boot.
+func (s *FileHashStore) saveLocked() error {
+	data, err := json.MarshalIndent(s.hashes, "", "  ")
+	if err != nil {
+		return err
+	}
+	if dir := filepath.Dir(s.path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
+	return os.WriteFile(s.path, append(data, '\n'), 0o600)
+}
+
 // Watcher tracks instruction-file hashes under a workspace root and emits
 // INSTRUCTION_FILE_CHANGED through the interceptor on every verified
 // change. Use NewWatcher + Run + Close; PollOnce is the deterministic
 // single-pass check.
 type Watcher struct {
-	root       string
-	sink       EventSink
-	watcher    *fsnotify.Watcher
-	debounce   time.Duration
-	maxContent int64
+	root        string
+	sink        EventSink
+	watcher     *fsnotify.Watcher
+	debounce    time.Duration
+	maxContent  int64
+	workspaceID string
+	hashStore   WatchedFileStore
 
 	mu          sync.Mutex
 	lastHash    map[string]string // rel path -> SHA256 hex ("" = never seen)
@@ -189,6 +334,32 @@ func NewWatcher(root string, sink EventSink) (*Watcher, error) {
 	return w, nil
 }
 
+// NewWatcherWithStore is NewWatcher with hash persistence installed before
+// the baseline snapshot is taken, so persisted hashes seed the baseline:
+// content edited while the daemon was down surfaces as a change on the
+// first PollOnce instead of being silently adopted. A nil store means
+// memory-only (identical to NewWatcher).
+func NewWatcherWithStore(root string, sink EventSink, workspaceID string, hashStore WatchedFileStore) (*Watcher, error) {
+	w, err := NewWatcher(root, sink)
+	if err != nil {
+		return nil, err
+	}
+	if workspaceID != "" {
+		w.workspaceID = workspaceID
+	}
+	if hashStore != nil {
+		w.hashStore = hashStore
+	}
+	// Re-baseline with persistence active: snapshot prefers persisted
+	// hashes over fresh disk hashes (see snapshot).
+	w.mu.Lock()
+	w.lastHash = map[string]string{}
+	w.lastContent = map[string][]byte{}
+	w.mu.Unlock()
+	w.snapshot()
+	return w, nil
+}
+
 // watchParentDirs returns the distinct existing-or-future parent dirs of
 // nested watch specs (e.g. <root>/.github), excluding the root itself.
 func watchParentDirs(root string) []string {
@@ -206,6 +377,56 @@ func watchParentDirs(root string) []string {
 	return out
 }
 
+// SetWorkspaceID binds the watcher to a workspace identity for hash
+// persistence. Until set, hashes stay memory-only (the pre-#34 behavior).
+func (w *Watcher) SetWorkspaceID(id string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.workspaceID = id
+}
+
+// SetHashStore installs the hash persistence backend (nil = memory-only).
+// Pair with SetWorkspaceID; without a workspace ID the store is unused.
+func (w *Watcher) SetHashStore(s WatchedFileStore) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.hashStore = s
+}
+
+// storedHash returns the persisted hash for rel, if persistence is
+// configured (workspace ID + store both set).
+func (w *Watcher) storedHash(rel string) (string, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.workspaceID == "" || w.hashStore == nil {
+		return "", false
+	}
+	return w.hashStore.GetHash(w.workspaceID, rel)
+}
+
+// persistHash records the latest hash best-effort (a persistence failure
+// must never block or corrupt change detection).
+func (w *Watcher) persistHash(rel, hash string) {
+	w.mu.Lock()
+	ws, hs := w.workspaceID, w.hashStore
+	w.mu.Unlock()
+	if ws == "" || hs == nil {
+		return
+	}
+	_ = hs.SetHash(ws, rel, hash)
+}
+
+// dropPersistedHash removes the persisted hash best-effort.
+func (w *Watcher) dropPersistedHash(rel string) {
+	w.mu.Lock()
+	ws, hs := w.workspaceID, w.hashStore
+	w.mu.Unlock()
+	if ws == "" || hs == nil {
+		return
+	}
+	_ = hs.DeleteHash(ws, rel)
+}
+
 // snapshot records current hashes/content without emitting.
 func (w *Watcher) snapshot() {
 	for _, spec := range InstructionFiles {
@@ -215,6 +436,13 @@ func (w *Watcher) snapshot() {
 		}
 		w.lastHash[spec.RelPath] = HashBytes(data)
 		w.lastContent[spec.RelPath] = retainContent(data, w.maxContent)
+		if h, ok := w.storedHash(spec.RelPath); ok {
+			// Persisted hash wins over the fresh disk hash: content
+			// edited while the daemon was down must surface as a
+			// change on the next PollOnce, not be silently adopted as
+			// the new baseline.
+			w.lastHash[spec.RelPath] = h
+		}
 	}
 }
 
@@ -349,6 +577,7 @@ func (w *Watcher) checkPath(rel string) {
 	}
 	w.mu.Unlock()
 	if payload != nil {
+		w.persistHash(rel, newHash)
 		NewInterceptor(w.sink).Emit(EventInstructionFileChanged, payload)
 	}
 }
@@ -373,5 +602,6 @@ func (w *Watcher) emitRemoval(rel, fileType string) {
 	delete(w.lastContent, rel)
 	payload := InstructionChangedPayload(rel, fileType, oldHash, "", diff, 0, true)
 	w.mu.Unlock()
+	w.dropPersistedHash(rel)
 	NewInterceptor(w.sink).Emit(EventInstructionFileChanged, payload)
 }
