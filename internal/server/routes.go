@@ -4,6 +4,8 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -384,7 +386,63 @@ func (s *Server) handleCreateMemory(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------------------
 // GET /memory/search?project_id=&q=&tags=a,b&key=&level=&limit=
+//   [&embedding=[0.1,0.2,...]]
+//
+// Text path (default): substring ?q= over key/content/context_snippet plus
+// tag/key/level filters. Vector path (issue #37): when ?embedding= carries
+// a caller-supplied vector (pgvector literal "[0.1,0.2]" or bare
+// "0.1,0.2"), the request routes through store.Search (plan §1.5 cosine +
+// rerank) via the optional VectorMemorySearcher extension; a store that
+// predates the extension answers 400, never silent text results. ?q= is
+// NEVER stub-embedded server-side (see ADR-037): fake deterministic vectors
+// would corrupt cosine ranking while looking authoritative. When both are
+// present, embedding wins and ?q= is ignored.
 // ---------------------------------------------------------------------------
+
+// parseEmbeddingParam parses the optional ?embedding= query parameter: a
+// pgvector literal ("[0.1,0.2]") or bare comma/space-separated floats
+// ("0.1,0.2"). "" (absent) returns nil, nil — the text path. Anything
+// unparseable (including NaN/Inf, which ParseFloat accepts but pgvector
+// rejects) is an error the handler maps to 400.
+func parseEmbeddingParam(raw string) ([]float32, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, nil
+	}
+	s = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(s, "["), "]"))
+	s = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(s, "("), ")"))
+	if s == "" {
+		return nil, errors.New("empty embedding vector")
+	}
+	var parts []string
+	if strings.Contains(s, ",") {
+		parts = strings.Split(s, ",")
+	} else {
+		parts = strings.Fields(s)
+	}
+	vec := make([]float32, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, errors.New("empty embedding component")
+		}
+		f, err := strconv.ParseFloat(part, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid embedding component %q", part)
+		}
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, fmt.Errorf("non-finite embedding component %q", part)
+		}
+		if len(vec) >= 4096 {
+			return nil, errors.New("embedding exceeds 4096 dimensions")
+		}
+		vec = append(vec, float32(f))
+	}
+	if len(vec) == 0 {
+		return nil, errors.New("empty embedding vector")
+	}
+	return vec, nil
+}
 
 func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
@@ -406,14 +464,37 @@ func (s *Server) handleSearchMemory(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid level")
 		return
 	}
-	items, err := s.store.SearchMemory(r.Context(), MemoryFilter{
+	filter := MemoryFilter{
 		ProjectID: projectID,
 		Query:     strings.TrimSpace(q.Get("q")),
 		Tags:      tags,
 		Key:       strings.TrimSpace(q.Get("key")),
 		Level:     level,
 		Limit:     queryLimit(r),
-	})
+	}
+	if rawEmb := strings.TrimSpace(q.Get("embedding")); rawEmb != "" {
+		emb, err := parseEmbeddingParam(rawEmb)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid embedding: "+err.Error())
+			return
+		}
+		vs, ok := s.store.(VectorMemorySearcher)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "vector search not supported by configured store")
+			return
+		}
+		items, err := vs.SearchMemoryVector(r.Context(), filter, emb)
+		if err != nil {
+			storeError(w, err)
+			return
+		}
+		if items == nil {
+			items = []Memory{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+		return
+	}
+	items, err := s.store.SearchMemory(r.Context(), filter)
 	if err != nil {
 		storeError(w, err)
 		return
