@@ -1,6 +1,9 @@
 package daemon
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -284,4 +287,251 @@ func TestHashSHA256KnownVector(t *testing.T) {
 	if HashString("abc") == HashString("abd") {
 		t.Error("hash collision on distinct inputs")
 	}
+}
+
+func TestInterceptRedactSecrets(t *testing.T) {
+	secrets := []string{
+		"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234 here",
+		"key AKIAIOSFODNN7EXAMPLE leaked",
+		"glpat-abc123XYZ_-def in text",
+		"sk-ant-abc123XYZ-456 exposed",
+		`api_key = "supersecretvalue1234567890"`,
+	}
+	for _, s := range secrets {
+		out, hit := RedactSecrets(s)
+		if !hit {
+			t.Errorf("RedactSecrets(%q): hit=false", s)
+			continue
+		}
+		if strings.Contains(out, s) {
+			t.Errorf("RedactSecrets(%q): raw secret survives: %q", s, out)
+		}
+		if !strings.Contains(out, RedactedPlaceholder) {
+			t.Errorf("RedactSecrets(%q): missing placeholder: %q", s, out)
+		}
+	}
+	clean := "just a normal log line with no credentials"
+	if out, hit := RedactSecrets(clean); hit || out != clean {
+		t.Errorf("clean string mangled: %q hit=%v", out, hit)
+	}
+}
+
+func TestInterceptPayloadsRedactDontDrop(t *testing.T) {
+	const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
+	rec := &eventRecorder{}
+	in := NewInterceptor(rec.sink())
+
+	in.OnFileRead("notes.txt", 100, "prefix "+secret+" suffix")
+	p := rec.last(EventFileRead)
+	if p == nil {
+		t.Fatal("FILE_READ with secret dropped, want redacted event")
+	} else {
+		head, _ := p["head"].(string)
+		if strings.Contains(head, secret) {
+			t.Errorf("FILE_READ head leaks secret: %q", head)
+		}
+		if !strings.Contains(head, RedactedPlaceholder) {
+			t.Errorf("FILE_READ head missing placeholder: %q", head)
+		}
+	}
+
+	in.OnFileWrite("notes.txt", []byte("line1\n"), []byte("line1\nkey="+secret+"\n"))
+	p = rec.last(EventFileModified)
+	if p == nil {
+		t.Fatal("FILE_MODIFIED with secret dropped, want redacted event")
+	} else {
+		diff, _ := p["diff"].(string)
+		if strings.Contains(diff, secret) {
+			t.Errorf("FILE_MODIFIED diff leaks secret:\n%s", diff)
+		}
+		if !strings.Contains(diff, RedactedPlaceholder) {
+			t.Errorf("FILE_MODIFIED diff missing placeholder:\n%s", diff)
+		}
+	}
+
+	in.OnCommand("deploy", 0, []byte("ok "+secret), nil)
+	p = rec.last(EventCommandExecuted)
+	if p == nil {
+		t.Fatal("COMMAND_EXECUTED with secret dropped, want redacted event")
+	} else {
+		out, _ := p["stdout"].(string)
+		if strings.Contains(out, secret) {
+			t.Errorf("COMMAND_EXECUTED stdout leaks secret: %q", out)
+		}
+		if !strings.Contains(out, RedactedPlaceholder) {
+			t.Errorf("COMMAND_EXECUTED stdout missing placeholder: %q", out)
+		}
+	}
+
+	in.OnGitCommit("abc123", "rotate "+secret, "1 file changed")
+	p = rec.last(EventGitCommitted)
+	if p == nil {
+		t.Fatal("GIT_COMMITTED with secret dropped, want redacted event")
+	} else {
+		msg, _ := p["message"].(string)
+		if strings.Contains(msg, secret) {
+			t.Errorf("GIT_COMMITTED message leaks secret: %q", msg)
+		}
+		if p["hash"] != "abc123" {
+			t.Errorf("hash mangled by redaction: %v", p["hash"])
+		}
+	}
+
+	in.OnGitDiff("", "@@ line with "+secret)
+	p = rec.last(EventGitDiffViewed)
+	if p == nil {
+		t.Fatal("GIT_DIFF_VIEWED with secret dropped, want redacted event")
+	} else {
+		stat, _ := p["stat"].(string)
+		if strings.Contains(stat, secret) {
+			t.Errorf("GIT_DIFF_VIEWED stat leaks secret: %q", stat)
+		}
+	}
+}
+
+func TestInterceptDiffStat(t *testing.T) {
+	if got := DiffStat(""); got != "(empty diff)" {
+		t.Errorf("DiffStat(empty) = %q", got)
+	}
+	diff := "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n+three\n"
+	stat := DiffStat(diff)
+	if !strings.Contains(stat, "2 added") || !strings.Contains(stat, "1 removed") {
+		t.Errorf("DiffStat = %q, want 2 added / 1 removed", stat)
+	}
+}
+
+func TestHandlerEmitsFileReadAndWrite(t *testing.T) {
+	d := newTestDaemon(t)
+	rec := &eventRecorder{}
+	d.SetEventSink(rec.sink())
+
+	req := authReq(t, d, http.MethodPost, "/file/write", `{"path":"notes.txt","content":"hello interceptor\n"}`)
+	recW := httptest.NewRecorder()
+	d.Handler().ServeHTTP(recW, req)
+	if recW.Code != http.StatusOK {
+		t.Fatalf("write: got %d", recW.Code)
+	}
+	if p := rec.last(EventFileModified); p == nil {
+		t.Fatal("no FILE_MODIFIED emitted by /file/write")
+	} else if p["path"] != "notes.txt" {
+		t.Errorf("path = %v", p["path"])
+	}
+
+	req2 := authReq(t, d, http.MethodPost, "/file/read", `{"path":"notes.txt"}`)
+	recR := httptest.NewRecorder()
+	d.Handler().ServeHTTP(recR, req2)
+	if recR.Code != http.StatusOK {
+		t.Fatalf("read: got %d", recR.Code)
+	}
+	if p := rec.last(EventFileRead); p == nil {
+		t.Fatal("no FILE_READ emitted by /file/read")
+	} else {
+		if p["path"] != "notes.txt" {
+			t.Errorf("path = %v", p["path"])
+		}
+		head, _ := p["head"].(string)
+		if !strings.Contains(head, "hello interceptor") {
+			t.Errorf("head = %q", head)
+		}
+	}
+}
+
+func TestHandlerEmitsCommandAndGitDiff(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not on PATH")
+	}
+	dir := initGitRepo(t)
+	if err := os.WriteFile(dir+"/a.txt", []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(dir, "", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := &eventRecorder{}
+	d.SetEventSink(rec.sink())
+
+	req := authReq(t, d, http.MethodGet, "/git/diff", "")
+	rd := httptest.NewRecorder()
+	d.Handler().ServeHTTP(rd, req)
+	if rd.Code != http.StatusOK {
+		t.Fatalf("diff: got %d", rd.Code)
+	}
+	if p := rec.last(EventGitDiffViewed); p == nil {
+		t.Fatal("no GIT_DIFF_VIEWED emitted by /git/diff")
+	} else if p["ref"] != "" {
+		t.Errorf("ref = %v", p["ref"])
+	}
+
+	creq := authReq(t, d, http.MethodPost, "/command/run", `{"cmd":"git","args":["version"]}`)
+	rc := httptest.NewRecorder()
+	d.Handler().ServeHTTP(rc, creq)
+	if rc.Code != http.StatusOK {
+		t.Fatalf("command: got %d", rc.Code)
+	}
+	if p := rec.last(EventCommandExecuted); p == nil {
+		t.Fatal("no COMMAND_EXECUTED emitted by /command/run")
+	} else if p["cmdline"] != "git version" {
+		t.Errorf("cmdline = %v", p["cmdline"])
+	}
+}
+
+func TestCheckGitCommitEmitsOnHeadChange(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not on PATH")
+	}
+	dir := initGitRepo(t)
+	d, err := New(dir, "", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	rec := &eventRecorder{}
+	d.SetEventSink(rec.sink())
+
+	d.checkGitCommit() // HEAD seeded in New: no change → no event
+	if n := rec.count(EventGitCommitted); n != 0 {
+		t.Fatalf("seeded HEAD emitted %d events, want 0", n)
+	}
+
+	if err := os.WriteFile(dir+"/b.txt", []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := RunCommand(t.Context(), dir, "git", []string{"add", "."}); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if _, _, err := RunCommand(t.Context(), dir, "git", []string{"commit", "-m", "second"}); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	d.checkGitCommit()
+	p := rec.last(EventGitCommitted)
+	if p == nil {
+		t.Fatal("no GIT_COMMITTED after HEAD change")
+	}
+	if want, _ := GitCommit(dir); p["hash"] != strings.TrimSpace(want) {
+		t.Errorf("hash = %v, want %v", p["hash"], want)
+	}
+
+	d.checkGitCommit() // idempotent: no second event
+	if n := rec.count(EventGitCommitted); n != 1 {
+		t.Errorf("GIT_COMMITTED count = %d, want 1", n)
+	}
+}
+
+func TestSetEventSinkWiresEmission(t *testing.T) {
+	d := newTestDaemon(t) // nil sink: silent no-op
+	d.Interceptor.OnFileRead("x", 1, "y")
+	rec := &eventRecorder{}
+	d.SetEventSink(rec.sink())
+	d.Interceptor.OnFileRead("x", 1, "y")
+	if rec.count(EventFileRead) != 1 {
+		t.Fatal("SetEventSink did not wire emission")
+	}
+	d.SetEventSink(nil) // back to no-op, must not panic
+	d.Interceptor.OnFileRead("x", 1, "y")
+	if rec.count(EventFileRead) != 1 {
+		t.Fatal("nil sink emitted")
+	}
+	var nilD *Daemon
+	nilD.SetEventSink(rec.sink()) // nil-receiver safe
+	nilD.checkGitCommit()
 }

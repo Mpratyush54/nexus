@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"central-memory/internal/scan"
 )
 
 // Event type constants (plan §2.1). Kept as plain strings so the sink
@@ -123,22 +125,51 @@ func (i *Interceptor) OnGitCommit(hash, message, stat string) {
 	i.Emit(EventGitCommitted, GitCommitPayload(hash, message, stat))
 }
 
-// FileReadPayload builds the FILE_READ payload (pure).
+// RedactedPlaceholder replaces secret matches in event payloads (issue #32).
+// Payloads are redacted, never dropped: the event is still emitted so the
+// Layer-1 stream stays complete, but the secret bytes never reach the store.
+const RedactedPlaceholder = "[REDACTED]"
+
+// RedactSecrets replaces every internal/scan NeverPattern match in s with
+// RedactedPlaceholder (pure). It reports whether anything was redacted.
+// A no-match input is returned unchanged.
+func RedactSecrets(s string) (string, bool) {
+	redacted := false
+	out := s
+	for _, re := range scan.NeverPatterns {
+		if re.MatchString(out) {
+			out = re.ReplaceAllString(out, RedactedPlaceholder)
+			redacted = true
+		}
+	}
+	return out, redacted
+}
+
+// redact always returns the redacted string, discarding the hit flag.
+func redact(s string) string {
+	out, _ := RedactSecrets(s)
+	return out
+}
+
+// FileReadPayload builds the FILE_READ payload (pure). The head preview is
+// secret-screened via RedactSecrets before the 200-rune cap so a secret
+// straddling the cap boundary cannot leak a partial match; redaction never
+// drops the event.
 func FileReadPayload(path string, size int64, head string) map[string]any {
 	return map[string]any{
-		"path": path,
+		"path": redact(path),
 		"size": size,
-		"head": HeadChars(head, MaxReadHeadChars),
+		"head": HeadChars(redact(head), MaxReadHeadChars),
 	}
 }
 
 // FileModifiedPayload builds the FILE_MODIFIED payload (pure). The diff is
-// capped at MaxEventDiffBytes; identical content yields an empty diff but
-// the write itself is still recorded.
+// secret-screened via RedactSecrets and capped at MaxEventDiffBytes;
+// identical content yields an empty diff but the write is still recorded.
 func FileModifiedPayload(path string, oldContent, newContent []byte) map[string]any {
-	diff, truncated := CapString(DiffLines(string(oldContent), string(newContent)), MaxEventDiffBytes)
+	diff, truncated := CapString(redact(DiffLines(string(oldContent), string(newContent))), MaxEventDiffBytes)
 	return map[string]any{
-		"path":      path,
+		"path":      redact(path),
 		"size":      int64(len(newContent)),
 		"old_size":  int64(len(oldContent)),
 		"diff":      diff,
@@ -147,12 +178,13 @@ func FileModifiedPayload(path string, oldContent, newContent []byte) map[string]
 }
 
 // CommandPayload builds the COMMAND_EXECUTED payload (pure). stdout and
-// stderr are each capped at MaxEventOutputBytes with explicit flags.
+// stderr are secret-screened via RedactSecrets before the 4KB caps (a secret
+// split by the cap would otherwise leak a partial match) with explicit flags.
 func CommandPayload(cmdline string, exitCode int, stdout, stderr []byte) map[string]any {
-	out, outTrunc := CapBytes(stdout, MaxEventOutputBytes)
-	errBytes, errTrunc := CapBytes(stderr, MaxEventOutputBytes)
+	out, outTrunc := CapBytes([]byte(redact(string(stdout))), MaxEventOutputBytes)
+	errBytes, errTrunc := CapBytes([]byte(redact(string(stderr))), MaxEventOutputBytes)
 	return map[string]any{
-		"cmdline":          cmdline,
+		"cmdline":          redact(cmdline),
 		"exit_code":        exitCode,
 		"stdout":           string(out),
 		"stderr":           string(errBytes),
@@ -161,21 +193,45 @@ func CommandPayload(cmdline string, exitCode int, stdout, stderr []byte) map[str
 	}
 }
 
-// GitCommitPayload builds the GIT_COMMITTED payload (pure).
+// GitCommitPayload builds the GIT_COMMITTED payload (pure). Message and stat
+// are secret-screened; the hash is a hex SHA and passes through untouched.
 func GitCommitPayload(hash, message, stat string) map[string]any {
 	return map[string]any{
 		"hash":    hash,
-		"message": message,
-		"stat":    stat,
+		"message": redact(message),
+		"stat":    redact(stat),
 	}
 }
 
-// GitDiffPayload builds the GIT_DIFF_VIEWED payload (pure).
+// GitDiffPayload builds the GIT_DIFF_VIEWED payload (pure). The stat is
+// secret-screened; the ref is a validated revision string and passes through.
 func GitDiffPayload(ref, stat string) map[string]any {
 	return map[string]any{
 		"ref":  ref,
-		"stat": stat,
+		"stat": redact(stat),
 	}
+}
+
+// DiffStat summarizes a git diff for the GIT_DIFF_VIEWED stat field (pure):
+// "<added> added / <removed> removed / <n> lines, <m> bytes". Counts ignore
+// the "+++"/"---" file-header lines. Empty diffs report "(empty diff)".
+func DiffStat(diff string) string {
+	if diff == "" {
+		return "(empty diff)"
+	}
+	var added, removed int
+	lines := splitDiffLines(diff)
+	for _, ln := range lines {
+		switch {
+		case strings.HasPrefix(ln, "+++"), strings.HasPrefix(ln, "---"):
+			// File headers, not content lines.
+		case strings.HasPrefix(ln, "+"):
+			added++
+		case strings.HasPrefix(ln, "-"):
+			removed++
+		}
+	}
+	return fmt.Sprintf("%d added / %d removed / %d lines, %d bytes", added, removed, len(lines), len(diff))
 }
 
 // JoinCmdline renders cmd + args as a single shell-readable command line,

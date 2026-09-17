@@ -125,6 +125,14 @@ func (d *Daemon) handleCommandRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	code, out, err := RunCommand(r.Context(), d.Root, req.Cmd, req.Args)
+	exitForEvent := code
+	if err != nil {
+		exitForEvent = -1
+	}
+	d.Interceptor.OnCommand(JoinCmdline(req.Cmd, req.Args), exitForEvent, []byte(out), nil)
+	if req.Cmd == "git" {
+		d.checkGitCommit()
+	}
 	if err != nil {
 		if r.Context().Err() == context.DeadlineExceeded || err == context.DeadlineExceeded {
 			writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "command timed out"})

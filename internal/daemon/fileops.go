@@ -192,6 +192,7 @@ func (d *Daemon) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, fileReadResponse{Path: req.Path, Content: string(data), Size: len(data)})
+	d.Interceptor.OnFileRead(req.Path, int64(len(data)), string(data))
 }
 
 func (d *Daemon) handleFileWrite(w http.ResponseWriter, r *http.Request) {
@@ -208,6 +209,10 @@ func (d *Daemon) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "path is required")
 		return
 	}
+	var oldContent []byte
+	if abs, rerr := ResolveInSandbox(d.Root, req.Path); rerr == nil {
+		oldContent, _ = os.ReadFile(abs)
+	}
 	err := WriteFileSandboxed(d.Root, req.Path, []byte(req.Content))
 	switch {
 	case errors.Is(err, ErrTraversal):
@@ -221,4 +226,5 @@ func (d *Daemon) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "path": req.Path})
+	d.Interceptor.OnFileWrite(req.Path, oldContent, []byte(req.Content))
 }

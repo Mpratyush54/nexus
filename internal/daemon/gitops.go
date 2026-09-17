@@ -92,6 +92,7 @@ func (d *Daemon) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git status failed: "+firstLine(out))
 		return
 	}
+	d.checkGitCommit()
 	writeJSON(w, http.StatusOK, map[string]string{"status": out})
 }
 
@@ -110,6 +111,8 @@ func (d *Daemon) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "git diff failed: "+firstLine(out))
 		return
 	}
+	d.Interceptor.OnGitDiff(ref, DiffStat(out))
+	d.checkGitCommit()
 	writeJSON(w, http.StatusOK, map[string]string{"diff": out, "ref": ref})
 }
 

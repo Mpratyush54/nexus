@@ -60,6 +60,15 @@ type Daemon struct {
 	// Token is the bearer token required on all API routes.
 	Token string
 
+	// Interceptor is the Layer-1 passive event emitter (issue #32). It is
+	// nil-sink safe: New builds it with a nil sink (no-op) until the core
+	// injects the real server client via SetEventSink.
+	Interceptor *Interceptor
+
+	// lastHEAD is the last observed HEAD SHA for the GIT_COMMITTED
+	// HEAD-change detector (see checkGitCommit). Guarded by mu.
+	lastHEAD string
+
 	mux    *http.ServeMux
 	srv    *http.Server
 	client *http.Client
@@ -148,13 +157,17 @@ func New(root, serverURL, addr string) (*Daemon, error) {
 		host = "unknown"
 	}
 	d := &Daemon{
-		Root:      canon,
-		ServerURL: strings.TrimRight(strings.TrimSpace(serverURL), "/"),
-		Addr:      addr,
-		MachineID: host,
-		Token:     tok,
-		client:    &http.Client{Timeout: 15 * time.Second},
-		stopCh:    make(chan struct{}),
+		Root:        canon,
+		ServerURL:   strings.TrimRight(strings.TrimSpace(serverURL), "/"),
+		Addr:        addr,
+		MachineID:   host,
+		Token:       tok,
+		Interceptor: NewInterceptor(nil),
+		client:      &http.Client{Timeout: 15 * time.Second},
+		stopCh:      make(chan struct{}),
+	}
+	if head, err := GitCommit(canon); err == nil {
+		d.lastHEAD = strings.TrimSpace(head)
 	}
 	d.mux = http.NewServeMux()
 	d.mount()
@@ -170,6 +183,9 @@ func New(root, serverURL, addr string) (*Daemon, error) {
 // process managers and liveness probes work without the secret; every other
 // route requires Authorization: Bearer <token> and returns 401 otherwise.
 func (d *Daemon) mount() {
+	if d.Interceptor == nil {
+		d.Interceptor = NewInterceptor(nil)
+	}
 	d.mux.HandleFunc("/healthz", d.handleHealth)
 	d.mux.Handle("/file/read", d.requireAuth(http.HandlerFunc(d.handleFileRead)))
 	d.mux.Handle("/file/write", d.requireAuth(http.HandlerFunc(d.handleFileWrite)))
@@ -180,6 +196,51 @@ func (d *Daemon) mount() {
 
 // Handler exposes the daemon mux (useful for httptest in unit tests).
 func (d *Daemon) Handler() http.Handler { return d.mux }
+
+// SetEventSink injects (or replaces) the Layer-1 event sink (issue #32).
+// A nil sink means no-op emission (local-only mode, tests). It never fails.
+func (d *Daemon) SetEventSink(sink EventSink) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.Interceptor == nil {
+		d.Interceptor = NewInterceptor(sink)
+		return
+	}
+	d.Interceptor.Sink = sink
+}
+
+// checkGitCommit is the HEAD-change detector feeding GIT_COMMITTED
+// (issue #32). It compares the current HEAD SHA against the last observed
+// one and emits OnGitCommit on change (message/stat best-effort, capped).
+// It never fails the caller: git errors and empty repos are silent no-ops,
+// and emission itself is nil-sink/panic safe via Interceptor.Emit.
+func (d *Daemon) checkGitCommit() {
+	if d == nil {
+		return
+	}
+	head, err := GitCommit(d.Root)
+	head = strings.TrimSpace(head)
+	if err != nil || head == "" {
+		return
+	}
+	d.mu.Lock()
+	last := d.lastHEAD
+	if head == last {
+		d.mu.Unlock()
+		return
+	}
+	d.lastHEAD = head
+	d.mu.Unlock()
+	ctx := context.Background()
+	msg, _ := runGit(ctx, d.Root, "log", "-1", "--format=%B", head)
+	stat, _ := runGit(ctx, d.Root, "show", "--stat", "--oneline", head)
+	msg, _ = CapString(strings.TrimSpace(msg), MaxEventDiffBytes)
+	stat, _ = CapString(strings.TrimSpace(stat), MaxEventDiffBytes)
+	d.Interceptor.OnGitCommit(head, msg, stat)
+}
 
 // CheckAuth reports whether r carries the daemon bearer token.
 func (d *Daemon) CheckAuth(r *http.Request) bool {
