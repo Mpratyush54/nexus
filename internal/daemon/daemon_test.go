@@ -66,11 +66,11 @@ func TestAuthUnauthorized(t *testing.T) {
 
 func TestFileReadTraversalReturns403(t *testing.T) {
 	d := testDaemon(t)
-	paths := []string{"../../etc/passwd", `..\..\Windows\System32\drivers\etc\hosts`, "a.txt:stream"}
-	if runtime.GOOS != "windows" {
-		paths = append(paths, "/etc/passwd")
+	paths := []string{"../../etc/passwd", "a.txt:stream"}
+	if runtime.GOOS == "windows" {
+		paths = append(paths, `..\..\Windows\System32\drivers\etc\hosts`, `C:\Windows\System32\drivers\etc\hosts`)
 	} else {
-		paths = append(paths, `C:\Windows\System32\drivers\etc\hosts`)
+		paths = append(paths, "/etc/passwd")
 	}
 	for _, p := range paths {
 		w := doReq(d, "POST", "/file/read", `{"path":`+jsonStr(p)+`}`, "test-token-123")
