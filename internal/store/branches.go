@@ -1,668 +1,636 @@
-// Memory branching, copy-on-write (issue #17, plan §§5.1–5.2).
-//
-// A branch is a lightweight head row: Fork inserts one memory_branches row
-// pointing at its parent and copies ZERO memory_items rows. Reads resolve a
-// key by walking child → parent → … → main and returning the first match;
-// writes always INSERT into the current branch and never touch parents.
-//
-// Ownership: this file owns ONLY branch heads and branch-scoped reads/writes.
-// MemoryItem (memory.go, issue #6) has no BranchID field, so this file
-// defines its own BranchMemory view struct rather than editing another
-// owner's type; a follow-up may unify them. Diff/merge (plan §5.2) are owned
-// by issue #18 — this file exposes the seam #18 builds on (AncestorIDs,
-// AncestorChain, FirstMatch) and nothing more.
-//
-// Testability: BranchStore depends on the DBTX interface (db.go), and chain
-// walking plus first-match resolution are pure, so fork-zero-copy, read
-// precedence, and write isolation are all covered DB-free; live-DB behaviour
-// is covered by TEST_POSTGRES_DSN-gated tests (follow-up).
 package store
+
+// branches.go — Copy-on-Write memory branching (Phase 5, nexus issue #17).
+//
+// This is the ONLY file that implements branching. It was added without
+// touching any existing store file (models.go, store.go, memory.go, …) so
+// parallel Phase 5 work (diff/merge, security) cannot clash:
+//
+//   - Branch rows for the Postgres backend live in the `memory_branches`
+//     table from migrations/005_branches.up.sql; all SQL here is local to
+//     this file (column lists, scanners, INSERT/SELECT).
+//   - Branch rows + overlays for the MemStore backend (tests/local dev)
+//     live in a package-level registry keyed by *MemStore
+//     (branchBucket), because MemStore's struct cannot gain a field without
+//     editing store.go. Main-line memories stay in MemStore.memories —
+//     branch writes go to the bucket overlay and never touch them.
+//
+// CoW contract (plan §5.2), enforced identically on both backends:
+//
+//   - Fork: inserts ONE branch row pointing at its parent. Zero memory rows
+//     are copied.
+//   - Read (ResolveRead): walks branch -> parent -> … -> main and returns
+//     the first key match. A key written on a child shadows the same key on
+//     every ancestor; keys never written on the branch resolve to the parent
+//     value.
+//   - Write (WriteToBranch): always inserts into the current branch. Parent
+//     branches are never updated, so isolation holds by construction.
+//   - Visibility (CheckBranchAccess): `shared` branches are readable by
+//     anyone; `private` branches only by their owner. The empty requester id
+//     means internal/system access and bypasses the check.
+//   - Depth: chains longer than MaxBranchDepth levels are rejected at fork.
+//   - Episodes are NOT branched (plan §5.3) — no episode code lives here.
+//
+// Note on MemoryItem: the struct (models.go) has no BranchID field, so the
+// Postgres path tags rows via the branch_id column using the branch id
+// passed to WriteToBranch, and ResolveRead returns the winning item fetched
+// by id. The MemStore path keeps branch overlays physically separate from
+// main-line memories. Both honor the contract above.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// Branch visibility values (CHECK constraint in migrations/005, plan §5.1).
+// ErrForbidden is returned when a requester may not read a private branch.
+var ErrForbidden = errors.New("forbidden: private branch")
+
+// Branch naming, visibility, and depth limits.
 const (
-	VisibilityPrivate = "private"
-	VisibilityShared  = "shared"
+	// MainBranchName is auto-created per project (shared, no parent).
+	MainBranchName = "main"
+	// BranchVisibilityPrivate restricts reads to the branch owner.
+	BranchVisibilityPrivate = "private"
+	// BranchVisibilityShared allows reads by any project member.
+	BranchVisibilityShared = "shared"
+	// MaxBranchDepth caps the parent chain length (plan §5.4: 5 levels).
+	MaxBranchDepth = 5
 )
 
-// DefaultBranchVisibility applies when ForkParams leaves Visibility empty:
-// branches start private; sharing is an explicit act.
-const DefaultBranchVisibility = VisibilityPrivate
-
-// MainBranchName is the auto-created root branch of every project (plan §5.1:
-// "Every project gets a \"main\" branch automatically"). Creation is
-// application-layer via EnsureMainBranch, stored 'shared' so every project
-// member resolves it.
-const MainBranchName = "main"
-
-// MaxBranchDepth caps the parent chain (plan §5.4: 5 levels). Fork refuses a
-// child that would exceed it; AncestorIDs refuses to walk past it (cycle
-// backstop as well).
-const MaxBranchDepth = 5
-
-// BranchArchiveTTL is the plan §5.4 auto-archive age: a non-main branch with
-// no archive timestamp becomes eligible once now - created_at >= 30 days.
-// Main never auto-archives (it is the project root every chain resolves
-// against); see IsArchivable.
-const BranchArchiveTTL = 30 * 24 * time.Hour
-
-// Branch mirrors a memory_branches row (plan §5.1, plus 007 upkeep columns).
-// Empty OwnerID / ParentBranchID mean SQL NULL (root branch has no parent).
-// ForkedAtEventID 0 means NULL — safe because events(id) is BIGSERIAL, never
-// 0. ArchivedAt nil means NULL (branch active); PotentiallyStale persists
-// the DetectStale signal (branch_diff.go, issue #18) via MarkStale /
-// SurfaceStaleness.
-type Branch struct {
-	ID               string
-	ProjectID        string
-	Name             string
-	OwnerID          string
-	ParentBranchID   string
-	ForkedAtEventID  int64
-	Visibility       string
-	CreatedAt        time.Time
-	PotentiallyStale bool
-	ArchivedAt       *time.Time
+// MemoryBranch is one copy-on-write branch pointer. It carries no memory
+// content — content stays in memory_items tagged with branch_id (Postgres)
+// or in the MemStore overlay bucket (in-memory).
+type MemoryBranch struct {
+	ID              string     `json:"id"`
+	ProjectID       string     `json:"project_id"`
+	Name            string     `json:"name"`
+	OwnerID         string     `json:"owner_id,omitempty"`
+	ParentBranchID  string     `json:"parent_branch_id,omitempty"`
+	ForkedAtEventID int64      `json:"forked_at_event_id,omitempty"`
+	Visibility      string     `json:"visibility"` // private | shared
+	CreatedAt       time.Time  `json:"created_at"`
+	ArchivedAt      *time.Time `json:"archived_at,omitempty"`      // nil = active (migration 007)
+	PotentiallyStale bool      `json:"potentially_stale,omitempty"` // persisted DetectStale signal (migration 007)
 }
 
-// IsMain reports whether this is the project root branch.
-func (b Branch) IsMain() bool {
-	return strings.TrimSpace(b.Name) == MainBranchName && strings.TrimSpace(b.ParentBranchID) == ""
+// BranchStore is the branching surface. Both MemStore (tests/local dev) and
+// PostgresStore (production) implement it.
+type BranchStore interface {
+	// EnsureMainBranch returns the project's shared "main" branch,
+	// creating it when missing (migration seeds pre-existing projects;
+	// this covers projects created afterwards).
+	EnsureMainBranch(ctx context.Context, projectID string) (*MemoryBranch, error)
+	// CreateBranch creates a top-level branch forked from main.
+	CreateBranch(ctx context.Context, projectID, name, ownerID, visibility string) (*MemoryBranch, error)
+	// ForkBranch creates child branch `name` pointing at parentID.
+	// forkEventID records the source event at fork time (0 = unknown).
+	// Zero memory rows are copied.
+	ForkBranch(ctx context.Context, parentID, name, ownerID, visibility string, forkEventID int64) (*MemoryBranch, error)
+	// GetBranch fetches one branch by id.
+	GetBranch(ctx context.Context, id string) (*MemoryBranch, error)
+	// ListBranches lists all branches of a project, oldest first.
+	ListBranches(ctx context.Context, projectID string) ([]*MemoryBranch, error)
+	// WriteToBranch inserts item into the current branch only. The item's
+	// project is forced to the branch's project; parents are never touched.
+	WriteToBranch(ctx context.Context, branchID string, item *MemoryItem) error
+	// ResolveRead walks branch -> parent -> main and returns the first
+	// match for key (CONFIRMED/PROPOSED only, latest write wins per level).
+	ResolveRead(ctx context.Context, branchID, key string) (*MemoryItem, error)
 }
 
-// IsRoot reports whether this branch has no parent.
-func (b Branch) IsRoot() bool {
-	return strings.TrimSpace(b.ParentBranchID) == ""
-}
+// Compile-time guarantees.
+var _ BranchStore = (*MemStore)(nil)
+var _ BranchStore = (*PostgresStore)(nil)
 
-// IsArchived reports whether the 30-day auto-archive has fired (archived_at
-// IS NOT NULL, migration 007).
-func (b Branch) IsArchived() bool {
-	return b.ArchivedAt != nil
-}
-
-// IsArchivable encodes the plan §5.4 30-day rule as a pure predicate: a
-// branch is eligible when it is not main, not already archived, has a known
-// creation time, and now-created_at >= BranchArchiveTTL (boundary inclusive).
-// Zero now never archives (fail closed — callers pass time.Now().UTC()).
-func IsArchivable(b Branch, now time.Time) bool {
-	if b.IsMain() || b.IsArchived() {
-		return false
+// CheckBranchAccess enforces branch visibility: shared branches are open,
+// private branches require requesterID == owner. Empty requesterID means
+// internal/system access and always passes.
+func CheckBranchAccess(branch *MemoryBranch, requesterID string) error {
+	if branch == nil {
+		return ErrNotFound
 	}
-	if b.CreatedAt.IsZero() || now.IsZero() {
-		return false
-	}
-	return !now.Before(b.CreatedAt.Add(BranchArchiveTTL))
-}
-
-// HasForkPoint reports whether the branch records the event it forked at.
-func (b Branch) HasForkPoint() bool {
-	return b.ForkedAtEventID > 0
-}
-
-// NormalizeVisibility lower-cases and trims v, defaulting "" to private. The
-// second return is false for values outside the plan §5.1 CHECK set.
-func NormalizeVisibility(v string) (string, bool) {
-	n := strings.ToLower(strings.TrimSpace(v))
-	if n == "" {
-		return DefaultBranchVisibility, true
-	}
-	switch n {
-	case VisibilityPrivate, VisibilityShared:
-		return n, true
-	default:
-		return n, false
-	}
-}
-
-// ValidateBranchName rejects empty names (UNIQUE(project_id, name) would
-// otherwise collide every unnamed branch on ("<project>", "")).
-func ValidateBranchName(name string) error {
-	if strings.TrimSpace(name) == "" {
-		return errors.New("store: branch name is required")
-	}
-	return nil
-}
-
-// IsVisibleToUser encodes branch visibility: shared branches resolve for any
-// project member; private branches resolve only for their owner. A private
-// branch with no recorded owner resolves for nobody (fail closed).
-func IsVisibleToUser(branch Branch, userID string) bool {
-	if branch.Visibility == VisibilityShared {
-		return true
-	}
-	return strings.TrimSpace(branch.OwnerID) != "" &&
-		strings.TrimSpace(branch.OwnerID) == strings.TrimSpace(userID)
-}
-
-// BranchMemory is the branch-scoped view of one memory_items row. It embeds
-// the issue-#6 MemoryItem untouched and adds the 005 branch_id: empty
-// BranchID means a legacy pre-005 row (NULL branch_id), which resolution
-// treats as main-level — visible at the end of every chain.
-type BranchMemory struct {
-	MemoryItem
-	BranchID string
-}
-
-// IsLegacy reports whether this row predates branching (NULL branch_id).
-func (m BranchMemory) IsLegacy() bool {
-	return strings.TrimSpace(m.BranchID) == ""
-}
-
-// ForkParams carries one fork request. Visibility "" defaults to private;
-// ForkedAtEventID 0 stores NULL.
-type ForkParams struct {
-	ProjectID       string
-	ParentBranchID  string
-	Name            string
-	OwnerID         string // "" = NULL (e.g. system-created main)
-	Visibility      string // "" = private
-	ForkedAtEventID int64  // 0 = NULL
-}
-
-// BranchWriteParams carries one branch-scoped write. Level/Scope/Status
-// default to 'project'/'fact'/'PROPOSED' when empty; anything else passes
-// through to the DB CHECK constraints in migrations/001.
-type BranchWriteParams struct {
-	ProjectID string
-	BranchID  string
-	Key       string
-	Content   string
-	Level     string
-	Scope     string
-	Status    string
-}
-
-// normalizeWriteDefaults fills Level/Scope/Status blanks.
-func (p *BranchWriteParams) normalizeWriteDefaults() {
-	if strings.TrimSpace(p.Level) == "" {
-		p.Level = LevelProject
-	}
-	if strings.TrimSpace(p.Scope) == "" {
-		p.Scope = "fact"
-	}
-	if strings.TrimSpace(p.Status) == "" {
-		p.Status = StatusProposed
-	}
-}
-
-// Validate rejects writes missing an address (project/branch/key/content).
-// It does not touch the database.
-func (p BranchWriteParams) Validate() error {
-	if strings.TrimSpace(p.ProjectID) == "" {
-		return errors.New("store: branch write requires a project id")
-	}
-	if strings.TrimSpace(p.BranchID) == "" {
-		return errors.New("store: branch write requires a branch id")
-	}
-	if strings.TrimSpace(p.Key) == "" {
-		return errors.New("store: branch write requires a key")
-	}
-	if strings.TrimSpace(p.Content) == "" {
-		return errors.New("store: branch write requires content")
-	}
-	return nil
-}
-
-// branchColumns selects branches with NULLs coalesced (except created_at
-// and archived_at, which stay nullable). forked_at_event_id COALESCEs to 0
-// ("no fork point"); callers read 0 as NULL. potentially_stale COALESCEs to
-// false so pre-007 rows scan cleanly.
-const branchColumns = `id::TEXT AS id, ` +
-	`project_id::TEXT AS project_id, ` +
-	`COALESCE(name, '') AS name, ` +
-	`COALESCE(owner_id::TEXT, '') AS owner_id, ` +
-	`COALESCE(parent_branch_id::TEXT, '') AS parent_branch_id, ` +
-	`COALESCE(forked_at_event_id, 0) AS forked_at_event_id, ` +
-	`COALESCE(visibility, 'private') AS visibility, ` +
-	`created_at, ` +
-	`COALESCE(potentially_stale, false) AS potentially_stale, ` +
-	`archived_at`
-
-// branchMemoryColumns selects one memory_items row plus its branch head.
-// branch_id COALESCEs to ” so legacy pre-005 rows scan cleanly.
-const branchMemoryColumns = `id::TEXT AS id, ` +
-	`COALESCE(project_id::TEXT, '') AS project_id, ` +
-	`key, ` +
-	`content, ` +
-	`COALESCE(level, 'project') AS level, ` +
-	`COALESCE(scope, 'fact') AS scope, ` +
-	`COALESCE(status, 'PROPOSED') AS status, ` +
-	`COALESCE(branch_id::TEXT, '') AS branch_id`
-
-// scanBranch scans a full branchColumns row.
-func scanBranch(row pgx.Row) (*Branch, error) {
-	var b Branch
-	if err := row.Scan(
-		&b.ID, &b.ProjectID, &b.Name, &b.OwnerID,
-		&b.ParentBranchID, &b.ForkedAtEventID, &b.Visibility,
-		&b.CreatedAt, &b.PotentiallyStale, &b.ArchivedAt,
-	); err != nil {
-		return nil, err
-	}
-	return &b, nil
-}
-
-// scanBranchMemory scans a full branchMemoryColumns row.
-func scanBranchMemory(row pgx.Row) (*BranchMemory, error) {
-	var m BranchMemory
-	if err := row.Scan(
-		&m.ID, &m.ProjectID, &m.Key, &m.Content,
-		&m.Level, &m.Scope, &m.Status, &m.BranchID,
-	); err != nil {
-		return nil, err
-	}
-	return &m, nil
-}
-
-// nullEventID maps <= 0 to SQL NULL for the nullable forked_at_event_id.
-func nullEventID(id int64) any {
-	if id <= 0 {
+	if requesterID == "" {
 		return nil
 	}
-	return id
+	if branch.Visibility == BranchVisibilityShared {
+		return nil
+	}
+	if branch.OwnerID != "" && branch.OwnerID == requesterID {
+		return nil
+	}
+	return ErrForbidden
 }
 
-// BranchStore is branch heads plus copy-on-write resolution.
-type BranchStore struct {
-	db DBTX
+// normalizeVisibility defaults blank to private and rejects unknown values.
+func normalizeVisibility(v string) (string, error) {
+	v = strings.ToLower(strings.TrimSpace(v))
+	if v == "" {
+		return BranchVisibilityPrivate, nil
+	}
+	switch v {
+	case BranchVisibilityPrivate, BranchVisibilityShared:
+		return v, nil
+	default:
+		return "", fmt.Errorf("invalid branch visibility %q: must be private or shared", v)
+	}
 }
 
-// NewBranchStore wires a BranchStore to any DBTX (pool, transaction, fake).
-func NewBranchStore(db DBTX) *BranchStore {
-	return &BranchStore{db: db}
+// ---------------------------------------------------------------------------
+// MemStore backend — branch rows + overlays in a sidecar bucket.
+// ---------------------------------------------------------------------------
+
+// memBranchBucket is the sidecar state for one *MemStore: branch rows by id
+// plus per-branch overlays (key -> latest item). Main-line memories stay in
+// MemStore.memories; overlays shadow them on ResolveRead.
+type memBranchBucket struct {
+	mu       sync.RWMutex
+	branches map[string]*MemoryBranch
+	overlays map[string]map[string]*MemoryItem
 }
 
-// EnsureMainBranch returns the project's "main" branch, creating it (shared,
-// owned by ownerID, no parent) when absent. The INSERT is ON CONFLICT
-// DO NOTHING on UNIQUE(project_id, name), so concurrent first-writes race
-// safely and the following SELECT always finds the row.
-func (s *BranchStore) EnsureMainBranch(ctx context.Context, projectID, ownerID string) (*Branch, error) {
-	if strings.TrimSpace(projectID) == "" {
-		return nil, errors.New("store: main branch requires a project id")
-	}
-	if _, err := s.db.Exec(ctx,
-		`INSERT INTO memory_branches (project_id, name, owner_id, visibility)
-		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (project_id, name) DO NOTHING`,
-		strings.TrimSpace(projectID), MainBranchName,
-		nullUUID(strings.TrimSpace(ownerID)), VisibilityShared); err != nil {
-		return nil, fmt.Errorf("store: ensure main branch: %w", err)
-	}
-	return s.GetBranchByName(ctx, strings.TrimSpace(projectID), MainBranchName)
+// memBranchBuckets keys sidecar state by store instance so tests using
+// separate NewMemStore() values never see each other's branches.
+var memBranchBuckets sync.Map // map[*MemStore]*memBranchBucket
+
+func branchBucket(s *MemStore) *memBranchBucket {
+	b, _ := memBranchBuckets.LoadOrStore(s, &memBranchBucket{
+		branches: make(map[string]*MemoryBranch),
+		overlays: make(map[string]map[string]*MemoryItem),
+	})
+	return b.(*memBranchBucket)
 }
 
-// GetBranchByID fetches one branch or a wrapped ErrNotFound.
-func (s *BranchStore) GetBranchByID(ctx context.Context, id string) (*Branch, error) {
-	b, err := scanBranch(s.db.QueryRow(ctx,
-		`SELECT `+branchColumns+` FROM memory_branches WHERE id = $1`, id))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: branch %s: %w", id, ErrNotFound)
-		}
-		return nil, fmt.Errorf("store: get branch: %w", err)
-	}
-	return b, nil
-}
-
-// GetBranchByName fetches one project branch by name or a wrapped ErrNotFound.
-func (s *BranchStore) GetBranchByName(ctx context.Context, projectID, name string) (*Branch, error) {
-	b, err := scanBranch(s.db.QueryRow(ctx,
-		`SELECT `+branchColumns+` FROM memory_branches WHERE project_id = $1 AND name = $2`,
-		projectID, name))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: branch %q: %w", name, ErrNotFound)
-		}
-		return nil, fmt.Errorf("store: get branch by name: %w", err)
-	}
-	return b, nil
-}
-
-// Fork creates a child branch head pointing at parentBranchID. It copies ZERO
-// memory_items rows — the child resolves parent content through the chain
-// until it writes its own shadowing copies. Cross-project forks and chains
-// that would exceed MaxBranchDepth are rejected.
-func (s *BranchStore) Fork(ctx context.Context, params ForkParams) (*Branch, error) {
-	projectID := strings.TrimSpace(params.ProjectID)
-	parentID := strings.TrimSpace(params.ParentBranchID)
-	name := strings.TrimSpace(params.Name)
-	if projectID == "" {
-		return nil, errors.New("store: fork requires a project id")
-	}
-	if parentID == "" {
-		return nil, errors.New("store: fork requires a parent branch id")
-	}
-	if err := ValidateBranchName(name); err != nil {
-		return nil, err
-	}
-	visibility, ok := NormalizeVisibility(params.Visibility)
-	if !ok {
-		return nil, fmt.Errorf("store: unknown branch visibility %q", params.Visibility)
-	}
-	parent, err := s.GetBranchByID(ctx, parentID)
-	if err != nil {
-		return nil, err
-	}
-	if strings.TrimSpace(parent.ProjectID) != projectID {
-		return nil, fmt.Errorf("store: fork parent belongs to project %q, not %q",
-			parent.ProjectID, projectID)
-	}
-	chain, err := s.AncestorIDs(ctx, parent.ID)
-	if err != nil {
-		return nil, err
-	}
-	if len(chain) >= MaxBranchDepth {
-		return nil, fmt.Errorf("store: fork would exceed max branch depth %d", MaxBranchDepth)
-	}
-	b, err := scanBranch(s.db.QueryRow(ctx,
-		`INSERT INTO memory_branches
-		     (project_id, name, owner_id, parent_branch_id, forked_at_event_id, visibility)
-		 VALUES ($1, $2, $3, $4, $5, $6)
-		 RETURNING `+branchColumns,
-		projectID, name,
-		nullUUID(strings.TrimSpace(params.OwnerID)),
-		parent.ID, nullEventID(params.ForkedAtEventID), visibility))
-	if err != nil {
-		return nil, fmt.Errorf("store: fork branch: %w", err)
-	}
-	return b, nil
-}
-
-// AncestorIDs walks branchID → parent → … → root in the database and returns
-// the chain child-first (chain[0] is the branch itself). The walk is capped
-// at MaxBranchDepth and cycle-guarded, so a corrupted parent loop surfaces as
-// an error instead of an unbounded query sequence.
-func (s *BranchStore) AncestorIDs(ctx context.Context, branchID string) ([]string, error) {
-	cur := strings.TrimSpace(branchID)
-	if cur == "" {
-		return nil, errors.New("store: branch id is required")
-	}
-	var chain []string
-	seen := make(map[string]struct{})
+// memBranchChain returns the parent chain starting at id, child first.
+// Caller must hold (at least) b.mu.RLock.
+func memBranchChain(b *memBranchBucket, id string) ([]*MemoryBranch, error) {
+	var chain []*MemoryBranch
+	seen := make(map[string]bool)
+	cur := id
 	for cur != "" {
-		if _, dup := seen[cur]; dup {
-			return nil, fmt.Errorf("store: branch parent cycle at %s", cur)
+		if seen[cur] {
+			return nil, fmt.Errorf("branch chain cycle at %q", cur)
 		}
-		seen[cur] = struct{}{}
-		chain = append(chain, cur)
-		if len(chain) > MaxBranchDepth {
-			return nil, fmt.Errorf("store: branch chain exceeds max depth %d", MaxBranchDepth)
+		seen[cur] = true
+		br, ok := b.branches[cur]
+		if !ok {
+			return nil, ErrNotFound
 		}
-		var parent string
-		if err := s.db.QueryRow(ctx,
-			`SELECT COALESCE(parent_branch_id::TEXT, '') FROM memory_branches WHERE id = $1`,
-			cur).Scan(&parent); err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return nil, fmt.Errorf("store: branch %s: %w", cur, ErrNotFound)
-			}
-			return nil, fmt.Errorf("store: walk branch chain: %w", err)
+		chain = append(chain, br)
+		cur = br.ParentBranchID
+		if len(chain) > MaxBranchDepth+1 {
+			return nil, fmt.Errorf("branch chain exceeds max depth %d", MaxBranchDepth)
 		}
-		cur = strings.TrimSpace(parent)
 	}
 	return chain, nil
 }
 
-// AncestorChain is the pure, DB-free chain walk over an in-memory head map
-// (id → branch): child-first, cycle-guarded, capped at MaxBranchDepth. IDs
-// missing from heads still appear in the chain (their parent is unknown, so
-// the walk stops there) — callers resolving against partial maps keep the
-// known prefix instead of failing outright.
-func AncestorChain(heads map[string]Branch, startID string) []string {
-	var chain []string
-	seen := make(map[string]struct{})
-	cur := strings.TrimSpace(startID)
-	for cur != "" {
-		if _, dup := seen[cur]; dup {
-			return chain
-		}
-		seen[cur] = struct{}{}
-		chain = append(chain, cur)
-		if len(chain) >= MaxBranchDepth {
-			return chain
-		}
-		next, ok := heads[cur]
-		if !ok {
-			return chain
-		}
-		cur = strings.TrimSpace(next.ParentBranchID)
-	}
-	return chain
+// visibleStatus reports whether a memory row participates in branch reads,
+// mirroring SearchMemory's CONFIRMED/PROPOSED visibility.
+func visibleStatus(status string) bool {
+	return status == "CONFIRMED" || status == "PROPOSED"
 }
 
-// FirstMatch resolves one key along a child-first chain: the nearest branch
-// holding the key wins; legacy (NULL-branch) rows count as main-level and
-// lose to every real branch row. Second return is false when no row matches.
-func FirstMatch(items []BranchMemory, chain []string) (*BranchMemory, bool) {
-	if len(items) == 0 || len(chain) == 0 {
-		return nil, false
+// EnsureMainBranch returns the project's shared "main", creating it lazily.
+func (s *MemStore) EnsureMainBranch(_ context.Context, projectID string) (*MemoryBranch, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project id is required")
 	}
-	byBranch := make(map[string]*BranchMemory, len(items))
-	var legacy *BranchMemory
-	for i := range items {
-		if items[i].IsLegacy() {
-			if legacy == nil {
-				legacy = &items[i]
-			}
+	b := branchBucket(s)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, br := range b.branches {
+		if br.ProjectID == projectID && br.Name == MainBranchName {
+			return br, nil
+		}
+	}
+	main := &MemoryBranch{
+		ID:         newID("br"),
+		ProjectID:  projectID,
+		Name:       MainBranchName,
+		Visibility: BranchVisibilityShared,
+		CreatedAt:  time.Now().UTC(),
+	}
+	b.branches[main.ID] = main
+	return main, nil
+}
+
+// CreateBranch creates a top-level branch forked from main.
+func (s *MemStore) CreateBranch(ctx context.Context, projectID, name, ownerID, visibility string) (*MemoryBranch, error) {
+	main, err := s.EnsureMainBranch(ctx, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return s.ForkBranch(ctx, main.ID, name, ownerID, visibility, 0)
+}
+
+// ForkBranch inserts one child row pointing at its parent. Zero data copied.
+func (s *MemStore) ForkBranch(_ context.Context, parentID, name, ownerID, visibility string, forkEventID int64) (*MemoryBranch, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("branch name is required")
+	}
+	vis, err := normalizeVisibility(visibility)
+	if err != nil {
+		return nil, err
+	}
+	b := branchBucket(s)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	parent, ok := b.branches[parentID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	for _, br := range b.branches {
+		if br.ProjectID == parent.ProjectID && br.Name == name {
+			return nil, ErrConflict
+		}
+	}
+	chain, err := memBranchChain(b, parentID)
+	if err != nil {
+		return nil, err
+	}
+	if len(chain) >= MaxBranchDepth {
+		return nil, fmt.Errorf("max branch depth %d exceeded", MaxBranchDepth)
+	}
+	child := &MemoryBranch{
+		ID:              newID("br"),
+		ProjectID:       parent.ProjectID,
+		Name:            name,
+		OwnerID:         ownerID,
+		ParentBranchID:  parentID,
+		ForkedAtEventID: forkEventID,
+		Visibility:      vis,
+		CreatedAt:       time.Now().UTC(),
+	}
+	b.branches[child.ID] = child
+	return child, nil
+}
+
+// GetBranch fetches one branch by id.
+func (s *MemStore) GetBranch(_ context.Context, id string) (*MemoryBranch, error) {
+	b := branchBucket(s)
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	br, ok := b.branches[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return br, nil
+}
+
+// ListBranches lists a project's branches, oldest first.
+func (s *MemStore) ListBranches(_ context.Context, projectID string) ([]*MemoryBranch, error) {
+	b := branchBucket(s)
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	var out []*MemoryBranch
+	for _, br := range b.branches {
+		if br.ProjectID == projectID {
+			out = append(out, br)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+// WriteToBranch inserts item into the branch overlay only. Main-line
+// memories (s.memories) and parent overlays are never touched, so write
+// isolation holds by construction.
+func (s *MemStore) WriteToBranch(_ context.Context, branchID string, item *MemoryItem) error {
+	if item == nil {
+		return fmt.Errorf("memory item is required")
+	}
+	if strings.TrimSpace(item.Key) == "" {
+		return fmt.Errorf("memory key is required")
+	}
+	b := branchBucket(s)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	br, ok := b.branches[branchID]
+	if !ok {
+		return ErrNotFound
+	}
+	if item.ID == "" {
+		item.ID = newID("mem")
+	}
+	if item.Confidence == 0 {
+		item.Confidence = 1.0
+	}
+	if item.Status == "" {
+		item.Status = "PROPOSED"
+	}
+	if item.Level == "" {
+		item.Level = "project"
+	}
+	item.ProjectID = br.ProjectID // a branch write always belongs to its project
+	item.CreatedAt = time.Now().UTC()
+	item.UpdatedAt = item.CreatedAt
+	ov, ok := b.overlays[branchID]
+	if !ok {
+		ov = make(map[string]*MemoryItem)
+		b.overlays[branchID] = ov
+	}
+	ov[item.Key] = item
+	return nil
+}
+
+// ResolveRead walks branch -> parent -> main, first key match wins. The
+// latest write on each branch level shadows ancestors; when no level has
+// the key, main-line MemStore memories (project-scoped + org-level,
+// CONFIRMED/PROPOSED, latest first) are the final fallback.
+func (s *MemStore) ResolveRead(_ context.Context, branchID, key string) (*MemoryItem, error) {
+	b := branchBucket(s)
+	b.mu.RLock()
+	chain, err := memBranchChain(b, branchID)
+	if err != nil {
+		b.mu.RUnlock()
+		return nil, err
+	}
+	for _, br := range chain {
+		if m, ok := b.overlays[br.ID][key]; ok {
+			b.mu.RUnlock()
+			return m, nil
+		}
+	}
+	var projectID string
+	if len(chain) > 0 {
+		projectID = chain[0].ProjectID
+	}
+	b.mu.RUnlock()
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var best *MemoryItem
+	for _, m := range s.memories {
+		if m.Key != key || !visibleStatus(m.Status) {
 			continue
 		}
-		if _, taken := byBranch[items[i].BranchID]; !taken {
-			byBranch[items[i].BranchID] = &items[i]
+		if m.ProjectID != "" && m.ProjectID != projectID {
+			continue
+		}
+		if best == nil || m.UpdatedAt.After(best.UpdatedAt) {
+			best = m
 		}
 	}
-	for _, id := range chain {
-		if m, ok := byBranch[id]; ok {
-			return m, true
-		}
+	if best == nil {
+		return nil, ErrNotFound
 	}
-	if legacy != nil {
-		return legacy, true
-	}
-	return nil, false
+	return best, nil
 }
 
-// BuildBranchReadSQL renders the branch-scoped item lookup: one row set per
-// key across the whole chain (`IN` over child-first IDs) plus legacy
-// NULL-branch rows, with first-match precedence applied in Go by FirstMatch.
-// Comparing branch_id::TEXT keeps the driver surface to plain strings (same
-// convention as the session store's UUID-carrying predicates).
-func BuildBranchReadSQL(chainLen int) string {
-	base := `SELECT ` + branchMemoryColumns + ` FROM memory_items ` +
-		`WHERE project_id = $1 AND key = $2 AND (branch_id IS NULL`
-	if chainLen > 0 {
-		base += ` OR branch_id::TEXT IN (`
-		for i := range chainLen {
-			if i > 0 {
-				base += `, `
-			}
-			base += fmt.Sprintf(`$%d`, 3+i)
-		}
-		base += `)`
+// ---------------------------------------------------------------------------
+// PostgresStore backend — memory_branches table + branch_id column.
+// ---------------------------------------------------------------------------
+
+const branchColumns = `id, project_id, name, owner_id, parent_branch_id,
+	forked_at_event_id, visibility, created_at, archived_at,
+	COALESCE(potentially_stale, false) AS potentially_stale`
+
+func scanBranch(row pgx.Row) (*MemoryBranch, error) {
+	var b MemoryBranch
+	var projectID string
+	var ownerID, parentID *string
+	var forkEventID *int64
+	if err := row.Scan(&b.ID, &projectID, &b.Name, &ownerID, &parentID,
+		&forkEventID, &b.Visibility, &b.CreatedAt, &b.ArchivedAt,
+		&b.PotentiallyStale); err != nil {
+		return nil, err
 	}
-	return base + `)`
+	b.ProjectID = projectID
+	if ownerID != nil {
+		b.OwnerID = *ownerID
+	}
+	if parentID != nil {
+		b.ParentBranchID = *parentID
+	}
+	if forkEventID != nil {
+		b.ForkedAtEventID = *forkEventID
+	}
+	return &b, nil
 }
 
-// Read resolves one key from branchID with copy-on-write precedence (plan
-// §5.2: walk branch → parent → … → main, first match wins). A wrapped
-// ErrNotFound means no row on the whole chain — not just the current branch.
-func (s *BranchStore) Read(ctx context.Context, projectID, branchID, key string) (*BranchMemory, error) {
-	projectID = strings.TrimSpace(projectID)
-	branchID = strings.TrimSpace(branchID)
-	key = strings.TrimSpace(key)
-	if projectID == "" {
-		return nil, errors.New("store: branch read requires a project id")
+// pgBranchChain walks the parent chain in Go (chains are <= MaxBranchDepth,
+// so one row fetch per level is cheap and keeps the SQL simple).
+func (s *PostgresStore) pgBranchChain(ctx context.Context, id string) ([]*MemoryBranch, error) {
+	var chain []*MemoryBranch
+	seen := make(map[string]bool)
+	cur := id
+	for cur != "" {
+		if seen[cur] {
+			return nil, fmt.Errorf("branch chain cycle at %q", cur)
+		}
+		seen[cur] = true
+		br, err := scanBranch(s.pool.QueryRow(ctx,
+			`SELECT `+branchColumns+` FROM memory_branches WHERE id = $1::uuid`, cur))
+		if err == pgx.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		if err != nil {
+			return nil, err
+		}
+		chain = append(chain, br)
+		cur = br.ParentBranchID
+		if len(chain) > MaxBranchDepth+1 {
+			return nil, fmt.Errorf("branch chain exceeds max depth %d", MaxBranchDepth)
+		}
 	}
-	if branchID == "" {
-		return nil, errors.New("store: branch read requires a branch id")
+	if len(chain) == 0 {
+		return nil, ErrNotFound
 	}
-	if key == "" {
-		return nil, errors.New("store: branch read requires a key")
+	return chain, nil
+}
+
+// EnsureMainBranch get-or-creates the project's shared "main" branch.
+func (s *PostgresStore) EnsureMainBranch(ctx context.Context, projectID string) (*MemoryBranch, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, fmt.Errorf("project id is required")
 	}
-	head, err := s.GetBranchByID(ctx, branchID)
+	if _, err := s.pool.Exec(ctx,
+		`INSERT INTO memory_branches (project_id, name, visibility)
+		 VALUES ($1::uuid, 'main', 'shared')
+		 ON CONFLICT (project_id, name) DO NOTHING`, projectID); err != nil {
+		return nil, err
+	}
+	br, err := scanBranch(s.pool.QueryRow(ctx,
+		`SELECT `+branchColumns+` FROM memory_branches
+		  WHERE project_id = $1::uuid AND name = 'main'`, projectID))
+	if err == pgx.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	return br, err
+}
+
+// CreateBranch creates a top-level branch forked from main.
+func (s *PostgresStore) CreateBranch(ctx context.Context, projectID, name, ownerID, visibility string) (*MemoryBranch, error) {
+	main, err := s.EnsureMainBranch(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
-	if strings.TrimSpace(head.ProjectID) != projectID {
-		return nil, fmt.Errorf("store: branch %s belongs to project %q, not %q",
-			branchID, head.ProjectID, projectID)
+	return s.ForkBranch(ctx, main.ID, name, ownerID, visibility, 0)
+}
+
+// ForkBranch inserts one child row pointing at its parent. Zero data copied.
+func (s *PostgresStore) ForkBranch(ctx context.Context, parentID, name, ownerID, visibility string, forkEventID int64) (*MemoryBranch, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, fmt.Errorf("branch name is required")
 	}
-	chain, err := s.AncestorIDs(ctx, head.ID)
+	vis, err := normalizeVisibility(visibility)
 	if err != nil {
 		return nil, err
 	}
-	args := make([]any, 0, 2+len(chain))
-	args = append(args, projectID, key)
-	for _, id := range chain {
-		args = append(args, id)
-	}
-	rows, err := s.db.Query(ctx, BuildBranchReadSQL(len(chain)), args...)
+	parentChain, err := s.pgBranchChain(ctx, parentID)
 	if err != nil {
-		return nil, fmt.Errorf("store: branch read query: %w", err)
+		return nil, err
+	}
+	parent := parentChain[0]
+	if len(parentChain) >= MaxBranchDepth {
+		return nil, fmt.Errorf("max branch depth %d exceeded", MaxBranchDepth)
+	}
+	var exists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM memory_branches
+		  WHERE project_id = $1::uuid AND name = $2)`,
+		parent.ProjectID, name).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, ErrConflict
+	}
+	br, err := scanBranch(s.pool.QueryRow(ctx,
+		`INSERT INTO memory_branches
+			(project_id, name, owner_id, parent_branch_id, forked_at_event_id, visibility)
+		 VALUES ($1::uuid, $2, $3::uuid, $4::uuid, $5, $6)
+		 RETURNING `+branchColumns,
+		parent.ProjectID, name, nullText(ownerID), parent.ID,
+		nullEventID(forkEventID), vis))
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return nil, ErrConflict
+		}
+		return nil, err
+	}
+	return br, nil
+}
+
+// GetBranch fetches one branch by id.
+func (s *PostgresStore) GetBranch(ctx context.Context, id string) (*MemoryBranch, error) {
+	br, err := scanBranch(s.pool.QueryRow(ctx,
+		`SELECT `+branchColumns+` FROM memory_branches WHERE id = $1::uuid`, id))
+	if err == pgx.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	return br, err
+}
+
+// ListBranches lists a project's branches, oldest first.
+func (s *PostgresStore) ListBranches(ctx context.Context, projectID string) ([]*MemoryBranch, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+branchColumns+` FROM memory_branches
+		  WHERE project_id = $1::uuid ORDER BY created_at`, projectID)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
-	var items []BranchMemory
+	var out []*MemoryBranch
 	for rows.Next() {
-		var m BranchMemory
-		if err := rows.Scan(
-			&m.ID, &m.ProjectID, &m.Key, &m.Content,
-			&m.Level, &m.Scope, &m.Status, &m.BranchID,
-		); err != nil {
-			return nil, fmt.Errorf("store: branch read scan: %w", err)
+		br, err := scanBranch(rows)
+		if err != nil {
+			return nil, err
 		}
-		m.ProjectID = projectID
-		items = append(items, m)
+		out = append(out, br)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: branch read rows: %w", err)
-	}
-	if m, ok := FirstMatch(items, chain); ok {
-		return m, nil
-	}
-	return nil, fmt.Errorf("store: key %q on branch %s: %w", key, branchID, ErrNotFound)
+	return out, rows.Err()
 }
 
-// WriteToBranch inserts a new item scoped to params.BranchID (plan §5.2:
-// "Always insert into current branch. Never modify parents"). Shadowing a
-// parent key writes a sibling row — the parent row is untouched, so the
-// parent chain still resolves its own value. Each call inserts exactly one
-// row; updates/supersedes are out of scope here.
-func (s *BranchStore) WriteToBranch(ctx context.Context, params BranchWriteParams) (*BranchMemory, error) {
-	if err := params.Validate(); err != nil {
-		return nil, err
+// WriteToBranch inserts into the current branch only — a bare INSERT with
+// branch_id set. No UPDATE exists on this path, so parents cannot change.
+func (s *PostgresStore) WriteToBranch(ctx context.Context, branchID string, item *MemoryItem) error {
+	if item == nil {
+		return fmt.Errorf("memory item is required")
 	}
-	params.normalizeWriteDefaults()
-	m, err := scanBranchMemory(s.db.QueryRow(ctx,
+	if strings.TrimSpace(item.Key) == "" {
+		return fmt.Errorf("memory key is required")
+	}
+	chain, err := s.pgBranchChain(ctx, branchID)
+	if err != nil {
+		return err
+	}
+	if item.Confidence == 0 {
+		item.Confidence = 1.0
+	}
+	if item.Status == "" {
+		item.Status = "PROPOSED"
+	}
+	if item.Level == "" {
+		item.Level = "project"
+	}
+	if item.Scope == "" {
+		item.Scope = "fact"
+	}
+	if len(item.Tags) == 0 {
+		item.Tags = []string{}
+	}
+	row := s.pool.QueryRow(ctx,
 		`INSERT INTO memory_items
-		     (project_id, branch_id, key, content, level, scope, status)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
-		 RETURNING `+branchMemoryColumns,
-		strings.TrimSpace(params.ProjectID),
-		strings.TrimSpace(params.BranchID),
-		strings.TrimSpace(params.Key),
-		params.Content,
-		params.Level, params.Scope, params.Status))
-	if err != nil {
-		return nil, fmt.Errorf("store: write to branch: %w", err)
-	}
-	return m, nil
+			(project_id, user_id, session_id, org_id, "key", content,
+			 context_snippet, level, scope, embedding, tags, confidence,
+			 status, source, source_event_id, proposed_by, branch_id)
+		 VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6,
+		         NULLIF($7,''), $8, $9, $10::vector, $11, $12,
+		         $13, NULLIF($14,''), $15, $16::uuid, $17::uuid)
+		 RETURNING id, created_at, updated_at`,
+		chain[0].ProjectID, nullText(item.UserID),
+		nullText(item.SessionID), nullText(item.OrgID),
+		item.Key, item.Content, item.ContextSnippet,
+		item.Level, item.Scope, encodeEmbedding(item.Embedding),
+		item.Tags, item.Confidence, item.Status, item.Source,
+		nullEventID(item.SourceEventID), nullText(item.ProposedBy), branchID)
+	return row.Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
 }
 
-// ---------------------------------------------------------------------------
-// Branch upkeep (issue #44, plan §5.4): persisted staleness + 30-day
-// auto-archive (migration 007). DetectStale itself stays pure in
-// branch_diff.go (issue #18) — the methods below only persist its signal.
-// ---------------------------------------------------------------------------
-
-// MarkStale flags one branch as potentially stale (SET potentially_stale =
-// true) and returns the updated head. It is the explicit, single-branch
-// counterpart to SurfaceStaleness: callers that already ran DetectStale
-// off-band persist the outcome without re-running it.
-func (s *BranchStore) MarkStale(ctx context.Context, branchID string) (*Branch, error) {
-	branchID = strings.TrimSpace(branchID)
-	if branchID == "" {
-		return nil, errors.New("store: mark stale requires a branch id")
-	}
-	b, err := scanBranch(s.db.QueryRow(ctx,
-		`UPDATE memory_branches SET potentially_stale = true WHERE id = $1
-		 RETURNING `+branchColumns, branchID))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: branch %s: %w", branchID, ErrNotFound)
-		}
-		return nil, fmt.Errorf("store: mark branch stale: %w", err)
-	}
-	return b, nil
-}
-
-// ArchiveBranch fires the 30-day auto-archive for one branch: it loads the
-// head, enforces the IsArchivable rule against now, then stamps archived_at.
-// Main branches, already-archived branches, and branches younger than
-// BranchArchiveTTL are refused with an error (never silently skipped), so a
-// sweeper loop can distinguish "not yet eligible" from a failed write. A
-// zero now is replaced with time.Now().UTC().
-func (s *BranchStore) ArchiveBranch(ctx context.Context, branchID string, now time.Time) (*Branch, error) {
-	branchID = strings.TrimSpace(branchID)
-	if branchID == "" {
-		return nil, errors.New("store: archive branch requires a branch id")
-	}
-	if now.IsZero() {
-		now = time.Now().UTC()
-	}
-	head, err := s.GetBranchByID(ctx, branchID)
+// ResolveRead walks branch -> parent -> main, first key match wins, then
+// falls back to untagged main-line rows (project-scoped + org-level).
+func (s *PostgresStore) ResolveRead(ctx context.Context, branchID, key string) (*MemoryItem, error) {
+	chain, err := s.pgBranchChain(ctx, branchID)
 	if err != nil {
 		return nil, err
 	}
-	if !IsArchivable(*head, now) {
-		return nil, fmt.Errorf("store: branch %s is not archivable (main, already archived, or younger than %s)",
-			branchID, BranchArchiveTTL)
-	}
-	b, err := scanBranch(s.db.QueryRow(ctx,
-		`UPDATE memory_branches SET archived_at = $2 WHERE id = $1
-		 RETURNING `+branchColumns, branchID, now))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: branch %s: %w", branchID, ErrNotFound)
+	for _, br := range chain {
+		var itemID string
+		err := s.pool.QueryRow(ctx,
+			`SELECT id FROM memory_items
+			  WHERE branch_id = $1::uuid AND "key" = $2
+			    AND status IN ('CONFIRMED','PROPOSED')
+			  ORDER BY updated_at DESC LIMIT 1`, br.ID, key).Scan(&itemID)
+		if err == nil {
+			return s.GetMemoryItem(ctx, itemID)
 		}
-		return nil, fmt.Errorf("store: archive branch: %w", err)
+		if err != pgx.ErrNoRows {
+			return nil, err
+		}
 	}
-	return b, nil
-}
-
-// SurfaceStaleness persists the DetectStale signal for one child branch
-// (plan §5.4: "Parent update on a key that exists on child → flag child's
-// item as potentially_stale"). It runs the pure DetectStale over the given
-// resolved states, then writes the outcome back: stale found →
-// potentially_stale = true; clean → potentially_stale = false (clearing a
-// previously surfaced flag). The detected items are returned for review UIs
-// whether or not any were found.
-func (s *BranchStore) SurfaceStaleness(ctx context.Context, branchID string, fork, parentNow, childNow []MemoryView) ([]StaleItem, error) {
-	branchID = strings.TrimSpace(branchID)
-	if branchID == "" {
-		return nil, errors.New("store: surface staleness requires a branch id")
+	var itemID string
+	err = s.pool.QueryRow(ctx,
+		`SELECT id FROM memory_items
+		  WHERE branch_id IS NULL AND "key" = $1
+		    AND (project_id = $2::uuid OR project_id IS NULL)
+		    AND status IN ('CONFIRMED','PROPOSED')
+		  ORDER BY updated_at DESC LIMIT 1`, key, chain[0].ProjectID).Scan(&itemID)
+	if err == pgx.ErrNoRows {
+		return nil, ErrNotFound
 	}
-	stale := DetectStale(fork, parentNow, childNow)
-	flag := len(stale) > 0
-	_, err := s.db.Exec(ctx,
-		`UPDATE memory_branches SET potentially_stale = $2 WHERE id = $1`,
-		branchID, flag)
 	if err != nil {
-		return nil, fmt.Errorf("store: surface branch staleness: %w", err)
+		return nil, err
 	}
-	return stale, nil
+	return s.GetMemoryItem(ctx, itemID)
 }
-
-// ---------------------------------------------------------------------------
-// Extension points for issue #18 (diff/merge) — intentionally NOT implemented
-// here. Diff collects the per-branch items (BuildBranchReadSQL over each
-// head) and compares FirstMatch resolutions for shared keys; Merge inserts
-// the source branch items as PROPOSED rows on the target via WriteToBranch.
-// ---------------------------------------------------------------------------

@@ -15,5 +15,5 @@
 --    DetectStale itself stays pure in branch_diff.go, issue #18).
 
 ALTER TABLE memory_branches
-    ADD COLUMN archived_at TIMESTAMPTZ,
-    ADD COLUMN potentially_stale BOOLEAN DEFAULT false;
+    ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS potentially_stale BOOLEAN DEFAULT false;

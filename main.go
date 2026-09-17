@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 
+	"central-memory/internal/platform"
 	"central-memory/internal/project"
 )
 
@@ -22,6 +23,8 @@ func main() {
 		err = cmdProjects(os.Args[2:])
 	case "status":
 		err = cmdStatus()
+	case "daemon":
+		err = cmdDaemon(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", os.Args[1])
 		usage()
@@ -38,9 +41,11 @@ func usage() {
 
   mem projects                     list detected projects
   mem status                       show system status
+  mem daemon install               register auto-start-on-login service
+  mem daemon uninstall             remove auto-start-on-login service
+  mem daemon status                report daemon service state
 
 Planned:
-  mem daemon [--port PORT]         start workspace daemon
   mem memory search|write          query/write project memory
   mem sessions                     list active sessions`)
 }
@@ -70,4 +75,39 @@ func cmdStatus() error {
 	fmt.Println("daemon: not yet implemented")
 	fmt.Println("server: not yet implemented")
 	return nil
+}
+
+// cmdDaemon — dispatches `daemon install|uninstall|status` to the
+// internal/platform hooks (Issue #43). Follows the cmdProjects/cmdStatus
+// style: thin CLI wrapper, real work lives in internal/platform/.
+func cmdDaemon(args []string) error {
+	if len(args) < 1 {
+		cmdDaemonUsage()
+		return fmt.Errorf("daemon requires one of install|uninstall|status")
+	}
+	switch args[0] {
+	case "install":
+		return platform.Install("", platform.DefaultDaemonArgs())
+	case "uninstall":
+		return platform.Uninstall()
+	case "status":
+		st, err := platform.ServiceStatus()
+		if err != nil {
+			return err
+		}
+		fmt.Println("daemon service:", st)
+		return nil
+	default:
+		cmdDaemonUsage()
+		return fmt.Errorf("unknown daemon subcommand %q", args[0])
+	}
+}
+
+// cmdDaemonUsage — prints daemon subcommand help.
+func cmdDaemonUsage() {
+	fmt.Println(`mem daemon — manage the workspace daemon service
+
+  mem daemon install               register auto-start-on-login service
+  mem daemon uninstall             remove auto-start-on-login service
+  mem daemon status                report daemon service state`)
 }

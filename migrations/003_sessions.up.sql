@@ -1,76 +1,95 @@
--- Migration 003_sessions — Phase 3 session schema.
--- Source of truth: implementation-plan.md §3.1 (transcribed with two
--- documented validity fixes, see below) plus the session-isolation rule
--- of §3.3 (memories default to session-scoped; promotion clears session_id).
--- Cross-platform: pure DDL, no filesystem paths, no OS-specific constructs.
--- Target: AWS RDS Aurora Serverless v2 (PostgreSQL + pgvector).
--- Applies cleanly on top of 001 alone: sessions references only projects
--- and users (both in 001). The events table (002) is not referenced here.
--- Forward-only step 3 of N; rollback in 003_sessions.down.sql.
+-- 003_sessions.up.sql: Session layer + scoping (Phase 3, nexus issues #12/#13).
+--
+-- Depends on: 001_initial (projects, users, memory_items, episodes, tasks),
+--             002_events (events).
+-- Sessions scope multiplayer collaboration: participants join one active
+-- session per project; memories created inside a session start
+-- session-scoped (level='session', session_id set) and are promoted to
+-- project scope only via the promotion flow (see internal/store/sessions.go).
+-- New sessions inherit project + org CONFIRMED memories, never sibling
+-- session memories (enforced in Go, not SQL — no cross-row visibility rule
+-- can be expressed as a CHECK constraint).
 
 -- ============================================================
--- SESSIONS — a live multiplayer working session within a project
+-- SESSIONS
 -- ============================================================
-CREATE TABLE sessions (
+CREATE TABLE IF NOT EXISTS sessions (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id  UUID NOT NULL REFERENCES projects(id),
+    project_id  UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     title       TEXT,
-    created_by  UUID NOT NULL REFERENCES users(id),
-    is_active   BOOLEAN DEFAULT true,
-    created_at  TIMESTAMPTZ DEFAULT now(),
+    created_by  UUID NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+    is_active   BOOLEAN NOT NULL DEFAULT true,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     ended_at    TIMESTAMPTZ
 );
 
+CREATE INDEX IF NOT EXISTS idx_sessions_project ON sessions(project_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_active ON sessions(project_id, is_active)
+    WHERE is_active;
+
 -- ============================================================
--- SESSION PARTICIPANTS — users and agents currently/formerly in a session
+-- SESSION PARTICIPANTS
 -- ============================================================
--- DEVIATION from plan §3.1 (validity fix, see ADR-012): the plan's
--- PRIMARY KEY (session_id, COALESCE(user_id, gen_random_uuid())) is not
--- valid Postgres — a volatile function cannot appear in a primary key,
--- and a PK row cannot represent re-join history. Surrogate id preserves
--- join/leave history (one row per join; Leave stamps left_at), while two
--- partial unique indexes enforce single ACTIVE membership per user/agent
--- per session.
-CREATE TABLE session_participants (
+-- One row per (session, user-or-agent) membership. user_id and agent_id are
+-- both nullable because agents join before they have a users row (agents
+-- table lands in migration 004); at least one must be set (enforced below).
+-- A surrogate PK is used instead of PRIMARY KEY(session_id, user_id):
+-- Postgres treats NULLs as distinct in UNIQUE/PK, so a natural key cannot
+-- prevent duplicate agent-only rows; the partial unique indexes below give
+-- the real protection.
+CREATE TABLE IF NOT EXISTS session_participants (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     session_id  UUID NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    user_id     UUID REFERENCES users(id),
-    agent_id    UUID,                                    -- FK to agents(id) deferred to migration 004,
-                                                        -- same deferred-FK pattern as 001 episode_events.event_id
-    role        TEXT DEFAULT 'MEMBER'
+    user_id     UUID REFERENCES users(id) ON DELETE SET NULL,
+    agent_id    UUID,
+    role        TEXT NOT NULL DEFAULT 'MEMBER'
         CHECK (role IN ('OWNER', 'MEMBER', 'OBSERVER')),
-    joined_at   TIMESTAMPTZ DEFAULT now(),
+    joined_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     left_at     TIMESTAMPTZ,
     CHECK (user_id IS NOT NULL OR agent_id IS NOT NULL)
 );
 
--- One active seat per user per session; left (historical) rows are exempt
--- so re-join after Leave inserts a fresh row.
-CREATE UNIQUE INDEX uq_session_participants_active_user
+CREATE INDEX IF NOT EXISTS idx_participants_session
+    ON session_participants(session_id);
+CREATE INDEX IF NOT EXISTS idx_participants_active
+    ON session_participants(session_id, left_at)
+    WHERE left_at IS NULL;
+-- A user can hold only one membership row per session (re-join reuses the
+-- row by clearing left_at; see JoinSession in internal/store/sessions.go).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_participants_session_user
     ON session_participants(session_id, user_id)
-    WHERE user_id IS NOT NULL AND left_at IS NULL;
-
--- Same for agent seats (agent-only participants carry NULL user_id).
-CREATE UNIQUE INDEX uq_session_participants_active_agent
-    ON session_participants(session_id, agent_id)
-    WHERE agent_id IS NOT NULL AND left_at IS NULL;
-
-CREATE INDEX idx_sessions_project ON sessions(project_id);
-CREATE INDEX idx_sessions_active ON sessions(project_id) WHERE is_active;
-CREATE INDEX idx_session_participants_session ON session_participants(session_id);
+    WHERE user_id IS NOT NULL;
 
 -- ============================================================
--- SESSION-SCOPED MEMORIES — plan §3.1: link session memories to sessions
+-- SCOPING FKs — wire the bare UUID columns from 001/002 to sessions
 -- ============================================================
--- memory_items.session_id exists since 001 as a bare UUID. Plan §3.3:
--- memories default to session-scoped; promotion to project scope clears
--- session_id (sets NULL) and flips level to 'project' — new sessions then
--- inherit project/org CONFIRMED memories but never sibling-session rows
--- (enforced in internal/store/sessions.go IsVisibleToSession).
--- No ON DELETE action: memories outlive their session so the promotion
--- counter (same key in 3+ sessions, §2.7) can still observe them.
-ALTER TABLE memory_items
-    ADD CONSTRAINT fk_memory_session
-    FOREIGN KEY (session_id) REFERENCES sessions(id);
+-- memory_items.session_id: session-scoped memories (level='session').
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_memory_session'
+    ) THEN
+        ALTER TABLE memory_items
+            ADD CONSTRAINT fk_memory_session
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL;
+    END IF;
+END
+$$;
 
-CREATE INDEX idx_memory_session ON memory_items(session_id);
+-- tasks.session_id: tasks opened inside a session.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_task_session'
+    ) THEN
+        ALTER TABLE tasks
+            ADD CONSTRAINT fk_task_session
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE SET NULL;
+    END IF;
+END
+$$;
+
+CREATE INDEX IF NOT EXISTS idx_memory_session ON memory_items(session_id)
+    WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_tasks_session ON tasks(session_id)
+    WHERE session_id IS NOT NULL;

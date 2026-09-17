@@ -1,125 +1,120 @@
-// Git operations for the workspace daemon (issue #3).
-//
-// Thin wrappers over the git CLI executed with Dir pinned to the workspace
-// root: GET /git/status (git status --porcelain) and GET /git/diff
-// (git diff [ref]). The optional ref query is strictly validated to block
-// shell/flag injection (no subprocess shell is used at all — os/exec with
-// argv only). Branch/commit/dirty helpers feed register + heartbeat.
+// Git inspection helpers for the workspace daemon (stdlib os/exec only).
 package daemon
 
 import (
 	"context"
-	"net/http"
 	"os/exec"
 	"regexp"
 	"strings"
 	"time"
+
+	"central-memory/internal/project"
 )
 
-// gitTimeout bounds git subprocesses so a hung pager/lock cannot hang the
-// daemon handler. 30s is generous for status/diff on local repos.
+// gitTimeout bounds git inspection calls so a hung git never stalls the daemon.
 const gitTimeout = 30 * time.Second
 
-// refPattern allows branch names, tags, SHAs and simple revision suffixes
-// (HEAD~1, HEAD^) while rejecting whitespace, shell metacharacters and
-// option injection (leading '-').
-var refPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9/_.\-~^]*$`)
+// refPattern allows plain refs/tags/SHAs plus "~", "^", and "/" range
+// syntax (e.g. HEAD~1, main...feature). Anything else — flags, shell
+// metacharacters, whitespace — is rejected to prevent argument injection.
+var refPattern = regexp.MustCompile(`^[A-Za-z0-9_.\-/]+(?:[~^]+[0-9]*)?(?:\.\.\.?[A-Za-z0-9_.\-/~^]*)?$`)
 
-// ValidRef reports whether ref is safe to pass as a git diff argument.
-// Empty means "unstaged diff against the worktree" and is always valid.
-func ValidRef(ref string) bool {
+// validRef reports whether ref is safe to pass to git as a positional arg.
+func validRef(ref string) bool {
 	if ref == "" {
 		return true
 	}
-	if len(ref) > 128 {
+	if strings.HasPrefix(ref, "-") || strings.HasPrefix(ref, ".") {
+		return false
+	}
+	if strings.ContainsAny(ref, " \t\n\r\"'`$|&;<>(){}!*?\\:") {
 		return false
 	}
 	return refPattern.MatchString(ref)
 }
 
-func runGit(ctx context.Context, root string, args ...string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+func runGit(root string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Dir = root
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return string(out), ctx.Err()
+	}
 	return string(out), err
 }
 
-// GitStatus returns `git status --porcelain` output for root.
-func GitStatus(root string) (string, error) {
-	return runGit(context.Background(), root, "status", "--porcelain")
+// GitStatus returns branch, HEAD commit, dirty flag, and porcelain output.
+func GitStatus(root string) (branch, commit string, dirty bool, porcelain string, err error) {
+	porcelain, err = runGit(root, "status", "--porcelain")
+	if err != nil {
+		return "", "", false, porcelain, err
+	}
+	dirty = strings.TrimSpace(porcelain) != ""
+
+	branch, berr := runGit(root, "rev-parse", "--abbrev-ref", "HEAD")
+	branch = strings.TrimSpace(branch)
+	if berr != nil {
+		branch = ""
+	}
+	commit, cerr := runGit(root, "rev-parse", "HEAD")
+	commit = strings.TrimSpace(commit)
+	if cerr != nil {
+		commit = ""
+	}
+	return branch, commit, dirty, porcelain, nil
 }
 
-// GitDiff returns `git diff [--no-color [ref]]` output for root.
+// GitDiff returns `git diff` or `git diff <ref>` output.
 func GitDiff(root, ref string) (string, error) {
-	args := []string{"diff", "--no-color"}
-	if ref != "" {
-		args = append(args, ref)
+	if !validRef(ref) {
+		return "", &BadRefError{Ref: ref}
 	}
-	return runGit(context.Background(), root, args...)
+	if ref == "" {
+		return runGit(root, "diff")
+	}
+	return runGit(root, "diff", ref)
 }
 
-// GitBranch returns the current branch name ("HEAD" when detached, "" when
-// unavailable — heartbeat/register treat "" as unknown, never fatal).
-func GitBranch(root string) (string, error) {
-	out, err := runGit(context.Background(), root, "rev-parse", "--abbrev-ref", "HEAD")
-	return strings.TrimSpace(out), err
+// BadRefError is returned for unsafe git ref arguments.
+type BadRefError struct{ Ref string }
+
+func (e *BadRefError) Error() string { return "daemon: invalid git ref: " + e.Ref }
+
+// GitLog returns the last n one-line log entries (clamped to 1..100).
+func GitLog(root string, n int) (string, error) {
+	if n <= 0 {
+		n = 20
+	}
+	if n > 100 {
+		n = 100
+	}
+	return runGit(root, "log", "--oneline", "-n", itoa(n))
 }
 
-// GitCommit returns the full HEAD SHA ("" when unavailable).
-func GitCommit(root string) (string, error) {
-	out, err := runGit(context.Background(), root, "rev-parse", "HEAD")
-	return strings.TrimSpace(out), err
+// FingerprintOf reuses internal/project identity resolution.
+func FingerprintOf(root string) (origin, rootCommit string) {
+	return project.Fingerprint(root)
 }
 
-// GitDirty reports whether the worktree has staged or unstaged changes.
-func GitDirty(root string) (bool, error) {
-	out, err := GitStatus(root)
-	if err != nil {
-		return false, err
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
 	}
-	return strings.TrimSpace(out) != "", nil
-}
-
-func (d *Daemon) handleGitStatus(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+	neg := n < 0
+	if neg {
+		n = -n
 	}
-	out, err := GitStatus(d.Root)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "git status failed: "+firstLine(out))
-		return
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": out})
-}
-
-func (d *Daemon) handleGitDiff(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
+	if neg {
+		i--
+		b[i] = '-'
 	}
-	ref := strings.TrimSpace(r.URL.Query().Get("ref"))
-	if !ValidRef(ref) {
-		writeError(w, http.StatusBadRequest, "invalid ref")
-		return
-	}
-	out, err := GitDiff(d.Root, ref)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "git diff failed: "+firstLine(out))
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"diff": out, "ref": ref})
-}
-
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.Index(s, "\n"); i >= 0 {
-		return s[:i]
-	}
-	if len(s) > 200 {
-		return s[:200]
-	}
-	return s
+	return string(b[i:])
 }

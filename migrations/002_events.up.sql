@@ -1,37 +1,58 @@
--- Migration 002_events — Phase 2 event store (append-only log + fan-out).
--- Source of truth: implementation-plan.md §2.1 (transcribed exactly).
--- Cross-platform: pure DDL, no filesystem paths, no OS-specific constructs.
--- Target: AWS RDS Aurora Serverless v2 (PostgreSQL + pgvector).
--- Applies on top of 001_initial: events references projects/users/workspaces/
--- episodes from 001, and completes the deferred FK on episode_events.event_id
--- (001 left it as BIGINT with the comment "REFERENCES events(id), added in
--- migration 002"). session_id/agent_id stay plain UUID here: their parent
--- tables (sessions, agents) land in migrations 003/004.
--- Forward-only step 2 of N; rollback in 002_events.down.sql.
+-- 002_events.up.sql: Append-only event store + real-time bus (Phase 2.1).
+--
+-- Depends on: 001_initial (projects, workspaces, episodes, episode_events).
+-- Every message, tool call, git action, and decision produces one immutable row.
+-- Real-time fan-out uses Postgres LISTEN/NOTIFY on channel 'events'.
 
-CREATE TABLE events (
+-- ============================================================
+-- EVENTS — immutable append-only log
+-- ============================================================
+CREATE TABLE IF NOT EXISTS events (
     id              BIGSERIAL PRIMARY KEY,
-    project_id      UUID NOT NULL REFERENCES projects(id),
+    project_id      UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     session_id      UUID,
-    user_id         UUID REFERENCES users(id),
+    user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
     agent_id        UUID,
-    workspace_id    UUID REFERENCES workspaces(id),
-    episode_id      UUID REFERENCES episodes(id),
+    workspace_id    UUID REFERENCES workspaces(id) ON DELETE SET NULL,
+    episode_id      UUID REFERENCES episodes(id) ON DELETE SET NULL,
     event_type      TEXT NOT NULL,
-    payload         JSONB NOT NULL,
-    created_at      TIMESTAMPTZ DEFAULT now()
+    payload         JSONB NOT NULL DEFAULT '{}',
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_events_project_time ON events(project_id, created_at);
-CREATE INDEX idx_events_project_type ON events(project_id, event_type);
-CREATE INDEX idx_events_episode ON events(episode_id);
+CREATE INDEX IF NOT EXISTS idx_events_project_time ON events(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_events_project_type ON events(project_id, event_type);
+CREATE INDEX IF NOT EXISTS idx_events_episode ON events(episode_id) WHERE episode_id IS NOT NULL;
 
--- Add FK to episode_events now that events table exists
-ALTER TABLE episode_events
-    ADD CONSTRAINT fk_episode_events_event
-    FOREIGN KEY (event_id) REFERENCES events(id);
+-- Now that events exists, wire the FK that 001 deliberately left deferred.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_episode_events_event'
+    ) THEN
+        ALTER TABLE episode_events
+            ADD CONSTRAINT fk_episode_events_event
+            FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE CASCADE;
+    END IF;
+END
+$$;
 
--- Real-time notification
+-- Link memory_items back to their originating event (001 left this as a bare BIGINT).
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_memory_source_event'
+    ) THEN
+        ALTER TABLE memory_items
+            ADD CONSTRAINT fk_memory_source_event
+            FOREIGN KEY (source_event_id) REFERENCES events(id) ON DELETE SET NULL;
+    END IF;
+END
+$$;
+
+-- ============================================================
+-- REAL-TIME BUS — LISTEN/NOTIFY trigger
+-- ============================================================
 CREATE OR REPLACE FUNCTION notify_event() RETURNS trigger AS $$
 BEGIN
     PERFORM pg_notify('events', json_build_object(
@@ -43,5 +64,6 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS events_notify ON events;
 CREATE TRIGGER events_notify AFTER INSERT ON events
     FOR EACH ROW EXECUTE FUNCTION notify_event();
