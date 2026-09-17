@@ -1,537 +1,399 @@
-// Package materializer regenerates push-model agent instruction files from
-// confirmed project memories (issue #16, plan §4.2).
+// Package materializer regenerates static instruction files for push-model
+// agents (copilot, cursor, windsurf) from confirmed project memories.
 //
-// Push vs pull: live MCP agents (Claude, OpenCode) pull memory on demand via
-// memory_search. File-based agents (Copilot, Cursor, Windsurf) cannot call
-// MCP — they read static instruction files (e.g.
-// .github/copilot-instructions.md, .cursorrules). The materializer bridges
-// the gap: it subscribes to MEMORY_CONFIRMED / MEMORY_SUPERSEDED, waits for
-// a 5-second quiet period (debounce), re-renders the project's confirmed
-// memories within each target's context budget, and writes the result into
-// a managed section of each target file, preserving user content outside
-// the delimiters.
+// Phase 4.2 (Mpratyush54/nexus#16):
+//   - Trigger: MEMORY_CONFIRMED / MEMORY_SUPERSEDED events via Store.Subscribe.
+//   - Debounce: 5s quiet period after the last trigger before regenerating,
+//     so batch confirmations produce one write, not N.
+//   - Render: memories formatted to markdown/text within the agent's budget.
+//   - Managed section: generated content lives between BEGIN/END delimiters;
+//     user content outside is preserved byte-for-byte.
+//   - Watcher hook: edits outside the managed section are reported as a
+//     PROPOSED memory candidate (passive extraction input).
 //
-// DECOUPLING NOTE: this package does NOT import internal/store (no event
-// bus, no memory rows). It imports internal/daemon ONLY for
-// daemon.ResolveInSandbox, used as a fail-fast config check in AddTarget
-// when a sandbox root is set (issue #41) — no sandbox writes happen here;
-// all file I/O still goes through the injected FileStore, which remains
-// the enforcement point (the daemon injects its sandboxed fileops behind
-// FileWriter at the boundary). Safe from cycles: internal/daemon imports
-// only internal/scan (+ internal/project in harvester.go), never this
-// package. See ADR-016, ADR-041.
-//
-// Data flow:
-//
-//	store event bus → (adapter) → HandleEvent → pending[project] = now
-//	                                                  │ 5s quiet
-//	                                                  ▼
-//	MemorySource.ListMemories → RenderMemories (budget) → MergeManaged
-//	                                                     (delimiters)
-//	                                                  → FileWriter.WriteFile
-//
-// Concurrency: Materializer holds only interfaces plus a mutex-guarded
-// pending/target map, so one shared instance is safe for concurrent
-// HandleEvent callers. Regeneration itself is synchronous (Flush /
-// Regenerate); Run adds a background ticker loop for production.
+// Stdlib only. File I/O is injected (ReadFunc/WriteFunc) so the workspace
+// daemon sandbox owns the real writes and unit tests use maps.
 package materializer
 
 import (
 	"context"
-	"errors"
-	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
-	"central-memory/internal/daemon"
+	"central-memory/internal/store"
 )
 
-// Event types this package subscribes to (plan §4.2). Declared locally —
-// NOT imported from internal/store — so the materializer never depends on
-// the store event bus (see package doc). Values match the store registry
-// (events.go) exactly.
+// Managed-section delimiters. The em dash matches the plan §4.2 verbatim;
+// ParseManaged also accepts the ASCII "--" variant for robustness.
 const (
-	EventMemoryConfirmed  = "MEMORY_CONFIRMED"
-	EventMemorySuperseded = "MEMORY_SUPERSEDED"
+	BeginMarker    = "<!-- BEGIN CENTRAL MEMORY — DO NOT EDIT -->"
+	EndMarker      = "<!-- END CENTRAL MEMORY -->"
+	BeginMarkerAlt = "<!-- BEGIN CENTRAL MEMORY -- DO NOT EDIT -->"
+	EndMarkerAlt   = "<!-- END CENTRAL MEMORY -->"
 )
 
-// DefaultDebounce is the plan §4.2 quiet period: regeneration fires only
-// after 5 seconds with no new MEMORY_CONFIRMED / MEMORY_SUPERSEDED for
-// that project. Rapid confirmation bursts coalesce into one write.
-const DefaultDebounce = 5 * time.Second
+// Debounce is the quiet period after the last trigger event before the
+// materializer regenerates files (issue #16: 5 seconds).
+const Debounce = 5 * time.Second
 
-// DefaultBudgetChars caps a rendered managed block when a target carries
-// no explicit budget (~1000 tokens, same scale as context.DefaultBudgetChars).
-const DefaultBudgetChars = 4000
-
-// Managed-section delimiters (plan §4.2). The begin marker carries the
-// DO NOT EDIT warning; the file watcher treats edits OUTSIDE the managed
-// section as new memory input (passive extraction), while edits inside
-// are overwritten on the next regeneration.
+// Trigger events that schedule a regeneration.
 const (
-	BeginMarker = "<!-- BEGIN CENTRAL MEMORY — DO NOT EDIT -->"
-	EndMarker   = "<!-- END CENTRAL MEMORY -->"
+	EventConfirmed  = "MEMORY_CONFIRMED"
+	EventSuperseded = "MEMORY_SUPERSEDED"
 )
 
-// Event is the minimal memory-lifecycle signal the materializer consumes.
-// The daemon/server adapter maps store.Event onto this struct at the
-// boundary; MemoryID is informational only (regeneration re-lists the
-// whole project, so superseded items vanish without targeted deletes).
-type Event struct {
-	Type      string
-	ProjectID string
-	MemoryID  string
+// ShouldTrigger reports whether an event type schedules regeneration.
+func ShouldTrigger(eventType string) bool {
+	return eventType == EventConfirmed || eventType == EventSuperseded
 }
 
-// EventHandler is the subscription seam: any event bus (store Subscribe,
-// tests, fakes) delivers memory events through it. Materializer implements
-// it via HandleEvent.
-type EventHandler interface {
-	HandleEvent(ev Event)
-}
-
-// Memory is one confirmed project memory as rendered into instruction
-// files. It mirrors the fields the renderer needs — NOT store.MemoryItem
-// (no store import; the caller maps at the boundary).
-type Memory struct {
-	Key        string
-	Content    string
-	Scope      string
-	Level      string
-	Confidence float64
-}
-
-// Target is one push-model agent file for a project — the Go form of one
-// agents-table row (plan §4.1: output_file, output_format, context_budget)
-// without importing the store agents package.
-type Target struct {
-	// ProjectID scopes the memories rendered into this file.
-	ProjectID string
-	// OutputPath is the workspace-relative instruction file
-	// (e.g. ".github/copilot-instructions.md", ".cursorrules").
-	OutputPath string
-	// ContextBudget caps the managed block in chars (<=0 → DefaultBudgetChars).
-	ContextBudget int
-	// Format selects the line template: "markdown" (default) or "text".
-	Format string
-}
-
-// BudgetOrDefault clamps the target budget into a positive char cap.
-func (t Target) BudgetOrDefault() int {
-	if t.ContextBudget <= 0 {
-		return DefaultBudgetChars
-	}
-	return t.ContextBudget
-}
-
-// MemorySource lists the current confirmed memories for a project. The
-// production implementation queries the store; tests use a fake. Returning
-// only confirmed items is the source's contract — the materializer renders
-// whatever it returns, so MEMORY_SUPERSEDED removal falls out naturally:
-// the superseded item is simply absent on the next list.
+// MemorySource abstracts confirmed-memory retrieval. *store.MemStore and
+// *store.PostgresStore both satisfy it via SearchMemory; tests use a stub.
 type MemorySource interface {
-	ListMemories(ctx context.Context, projectID string) ([]Memory, error)
+	SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*store.MemoryItem, error)
 }
 
-// FileReader reads a target file so MergeManaged can preserve user content
-// outside the delimiters. Missing files report an error (the materializer
-// then writes a managed-only file).
-type FileReader interface {
-	ReadFile(path string) ([]byte, error)
+// EventBus abstracts the real-time fan-out (store.Store already has it).
+type EventBus interface {
+	Subscribe(ctx context.Context, projectID string) (<-chan *store.Event, func(), error)
 }
 
-// FileWriter writes a regenerated target file. The daemon injects its
-// sandboxed writer (ResolveInSandbox + secret checks, fileops.go) here;
-// tests inject a map-backed fake.
-type FileWriter interface {
-	WriteFile(path string, content []byte) error
-}
-
-// FileStore is the combined read/write seam a Materializer holds.
-type FileStore interface {
-	FileReader
-	FileWriter
-}
-
-// Clock abstracts time so debounce is unit-testable without sleeping:
-// production injects SystemClock, tests inject a fake with a mutable now
-// (and optionally a controllable After channel). After exists so Run can
-// sleep via the same seam — Flush(now) tests only need Now.
-type Clock interface {
-	Now() time.Time
-	After(d time.Duration) <-chan time.Time
-}
-
-// systemClock is the production Clock.
-type systemClock struct{}
-
-func (systemClock) Now() time.Time                         { return time.Now() }
-func (systemClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
-
-// SystemClock is the production Clock value to pass to New.
-var SystemClock Clock = systemClock{}
-
-// compile-time conformance: *Materializer satisfies EventHandler.
-var _ EventHandler = (*Materializer)(nil)
-
-// Materializer debounces memory events per project and regenerates push-model
-// agent files. Build with New, register files with AddTarget, feed events
-// via HandleEvent, and drive regeneration with Flush (deterministic,
-// test hook) or Run (background ticker, production).
-type Materializer struct {
-	mu       sync.Mutex
-	source   MemorySource
-	files    FileStore
-	clock    Clock
-	debounce time.Duration
-	targets  map[string][]Target  // projectID → targets
-	pending  map[string]time.Time // projectID → last dirty time
-	// sandboxRoot, when non-empty, confines AddTarget OutputPaths via
-	// daemon.ResolveInSandbox (issue #41). Set with SetSandboxRoot
-	// (production passes the daemon workspace root); empty keeps the
-	// legacy behaviour (trim + blank check only, enforcement left to the
-	// injected FileStore). Guarded by mu.
-	sandboxRoot string
-}
-
-// New wires a Materializer. A nil clock selects SystemClock; a non-positive
-// debounce selects DefaultDebounce. source and files must be non-nil.
-func New(source MemorySource, files FileStore, clock Clock, debounce time.Duration) (*Materializer, error) {
-	if source == nil {
-		return nil, errors.New("materializer: nil MemorySource")
+// RenderMarkdown formats confirmed memories as Markdown within budget
+// chars. Items are ordered project → personal → session? No: caller order
+// is preserved except CONFIRMED-first; over-budget trailing items are
+// dropped so output never exceeds budget.
+func RenderMarkdown(items []*store.MemoryItem, budget int) string {
+	if budget <= 0 {
+		return ""
 	}
-	if files == nil {
-		return nil, errors.New("materializer: nil FileStore")
-	}
-	if clock == nil {
-		clock = SystemClock
-	}
-	if debounce <= 0 {
-		debounce = DefaultDebounce
-	}
-	return &Materializer{
-		source:   source,
-		files:    files,
-		clock:    clock,
-		debounce: debounce,
-		targets:  map[string][]Target{},
-		pending:  map[string]time.Time{},
-	}, nil
-}
-
-// SetSandboxRoot sets the workspace root AddTarget validates OutputPaths
-// against (daemon.ResolveInSandbox: traversal escapes and absolute paths
-// outside the root are rejected). Empty clears it (legacy behaviour).
-// The value is cleaned lexically; it need not exist — validation is the
-// same Clean + HasPrefix confinement the daemon serves.
-func (m *Materializer) SetSandboxRoot(root string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if strings.TrimSpace(root) == "" {
-		m.sandboxRoot = ""
-		return
-	}
-	m.sandboxRoot = filepath.Clean(root)
-}
-
-// AddTarget registers one push-model output file. Multiple targets per
-// project are allowed (e.g. copilot + cursor files for one repo). Adding a
-// target does not mark the project dirty — only memory events do.
-//
-// It returns false (and registers nothing) when the target is blank, a
-// duplicate output path for the project, or escapes the sandbox root set
-// with SetSandboxRoot (traversal/absolute escapes fail fast here instead
-// of surfacing as write errors at Regenerate). Existing callers ignore
-// the result — registration of valid targets is unchanged.
-func (m *Materializer) AddTarget(t Target) bool {
-	t.ProjectID = strings.TrimSpace(t.ProjectID)
-	t.OutputPath = strings.TrimSpace(t.OutputPath)
-	if t.ProjectID == "" || t.OutputPath == "" {
-		return false
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.sandboxRoot != "" {
-		if _, err := daemon.ResolveInSandbox(m.sandboxRoot, t.OutputPath); err != nil {
-			return false
+	confirmed := confirmedFirst(items)
+	var b strings.Builder
+	b.WriteString("# Project Memory (generated by Central Memory)\n\n")
+	for _, m := range confirmed {
+		line := "- **" + m.Key + "** (" + m.Scope + "): " + strings.TrimSpace(m.Content) + "\n"
+		if b.Len()+len(line) > budget {
+			break
 		}
+		b.WriteString(line)
 	}
-	for _, cur := range m.targets[t.ProjectID] {
-		if cur.OutputPath == t.OutputPath {
-			return false // idempotent: one entry per output path
-		}
+	out := b.String()
+	if len(out) > budget {
+		out = out[:budget]
 	}
-	m.targets[t.ProjectID] = append(m.targets[t.ProjectID], t)
-	return true
-}
-
-// RemoveTarget unregisters one output file. Pending state is kept: if the
-// project still has targets, the next Flush regenerates them.
-func (m *Materializer) RemoveTarget(projectID, outputPath string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	kept := m.targets[projectID][:0:0]
-	for _, cur := range m.targets[projectID] {
-		if cur.OutputPath != outputPath {
-			kept = append(kept, cur)
-		}
-	}
-	if len(kept) == 0 {
-		delete(m.targets, projectID)
-	} else {
-		m.targets[projectID] = kept
-	}
-}
-
-// TargetsFor returns the registered targets for a project (copy).
-func (m *Materializer) TargetsFor(projectID string) []Target {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]Target(nil), m.targets[projectID]...)
-}
-
-// HandleEvent implements EventHandler: MEMORY_CONFIRMED and
-// MEMORY_SUPERSEDED mark the event's project dirty at clock.Now(); every
-// other type (and events with a blank project) is ignored so unrelated
-// bus traffic never triggers a write. Repeated calls reset the quiet
-// timer — that reset IS the 5s debounce.
-func (m *Materializer) HandleEvent(ev Event) {
-	if ev.Type != EventMemoryConfirmed && ev.Type != EventMemorySuperseded {
-		return
-	}
-	if strings.TrimSpace(ev.ProjectID) == "" {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.pending[strings.TrimSpace(ev.ProjectID)] = m.clock.Now()
-}
-
-// PendingCount reports how many projects are dirty (test seam).
-func (m *Materializer) PendingCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.pending)
-}
-
-// DueProjects returns dirty projects quiet for at least the debounce as of
-// now (pure selection; does not regenerate or clear state).
-func (m *Materializer) DueProjects(now time.Time) []string {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	var out []string
-	for projectID, dirty := range m.pending {
-		if now.Sub(dirty) >= m.debounce {
-			out = append(out, projectID)
-		}
-	}
-	sort.Strings(out)
 	return out
 }
 
-// Flush regenerates every project quiet for at least the debounce as of
-// now, clearing each from pending whether regeneration succeeds or fails
-// (a failing source must not wedge later events — the next event re-marks
-// the project dirty). It returns one error per failed project, joined with
-// errors.Join (nil when all succeed).
-func (m *Materializer) Flush(now time.Time) error {
-	due := m.DueProjects(now)
-	var errs []error
-	for _, projectID := range due {
-		if err := m.Regenerate(projectID); err != nil {
-			errs = append(errs, err)
-		}
-		m.mu.Lock()
-		delete(m.pending, projectID)
-		m.mu.Unlock()
+// RenderText formats confirmed memories as plain text (for .cursorrules /
+// .windsurfrules) within budget chars.
+func RenderText(items []*store.MemoryItem, budget int) string {
+	if budget <= 0 {
+		return ""
 	}
-	return errors.Join(errs...)
+	confirmed := confirmedFirst(items)
+	var b strings.Builder
+	for _, m := range confirmed {
+		line := m.Key + ": " + strings.TrimSpace(m.Content) + "\n"
+		if b.Len()+len(line) > budget {
+			break
+		}
+		b.WriteString(line)
+	}
+	out := b.String()
+	if len(out) > budget {
+		out = out[:budget]
+	}
+	return out
 }
 
-// FlushDue is the clock-driven shorthand: Flush(m.clock.Now()).
-func (m *Materializer) FlushDue() error {
-	return m.Flush(m.clock.Now())
+func confirmedFirst(items []*store.MemoryItem) []*store.MemoryItem {
+	out := make([]*store.MemoryItem, 0, len(items))
+	for _, m := range items {
+		if m != nil && m.Status == "CONFIRMED" {
+			out = append(out, m)
+		}
+	}
+	rest := make([]*store.MemoryItem, 0, len(items))
+	for _, m := range items {
+		if m != nil && m.Status != "CONFIRMED" {
+			rest = append(rest, m)
+		}
+	}
+	// Stable: keep caller order within each group.
+	return append(out, rest...)
 }
 
-// Regenerate re-renders every target of one project from the source's
-// current confirmed memories. Superseded items need no special casing:
-// the source no longer lists them, so they drop out of the managed block.
-// Projects with no targets are a no-op (nil). A read error on an existing
-// file is treated as "no user content" only when the file is missing; other
-// read/write errors abort that target with an error.
-func (m *Materializer) Regenerate(projectID string) error {
-	targets := m.TargetsFor(projectID)
-	if len(targets) == 0 {
+// ParseManaged splits file content into (pre, managed, post, found).
+// found is false when no managed section exists.
+func ParseManaged(content string) (pre, managed, post string, found bool) {
+	begin, end := locateManaged(content)
+	if begin < 0 {
+		return content, "", "", false
+	}
+	pre = content[:begin]
+	afterBegin := begin + len(matchedBegin(content[begin:]))
+	closeIdx := strings.Index(content[afterBegin:], end)
+	if closeIdx < 0 {
+		return pre, content[afterBegin:], "", true
+	}
+	managed = content[afterBegin : afterBegin+closeIdx]
+	post = content[afterBegin+closeIdx+len(end):]
+	return pre, managed, post, true
+}
+
+func matchedBegin(s string) string {
+	if strings.HasPrefix(s, BeginMarker) {
+		return BeginMarker
+	}
+	return BeginMarkerAlt
+}
+
+func locateManaged(content string) (begin int, end string) {
+	ib, ia := strings.Index(content, BeginMarker), strings.Index(content, BeginMarkerAlt)
+	switch {
+	case ib < 0 && ia < 0:
+		return -1, EndMarker
+	case ib >= 0 && (ia < 0 || ib < ia):
+		return ib, EndMarker
+	default:
+		return ia, EndMarkerAlt
+	}
+}
+
+// MergeManaged returns file content with generated placed inside the
+// managed section. User content outside is preserved byte-for-byte. If no
+// managed section exists, one is appended (separated by a blank line).
+func MergeManaged(existing, generated string) string {
+	pre, _, post, found := ParseManaged(existing)
+	gen := strings.TrimRight(generated, "\n") + "\n"
+	if !found {
+		if strings.TrimSpace(existing) == "" {
+			return BeginMarker + "\n" + gen + EndMarker + "\n"
+		}
+		trimmed := strings.TrimRight(existing, "\n")
+		return trimmed + "\n\n" + BeginMarker + "\n" + gen + EndMarker + "\n"
+	}
+	// Normalize: exactly one trailing newline on pre when non-empty.
+	if pre != "" && !strings.HasSuffix(pre, "\n") {
+		pre += "\n"
+	}
+	out := pre + matchedBeginFor(existing) + "\n" + gen + matchedEndFor(existing)
+	if post != "" && !strings.HasPrefix(post, "\n") {
+		out += "\n"
+	}
+	return out + post
+}
+
+func matchedBeginFor(content string) string {
+	ib, ia := strings.Index(content, BeginMarker), strings.Index(content, BeginMarkerAlt)
+	if ib >= 0 && (ia < 0 || ib < ia) {
+		return BeginMarker
+	}
+	if ia >= 0 {
+		return BeginMarkerAlt
+	}
+	return BeginMarker
+}
+
+func matchedEndFor(content string) string {
+	_, end := locateManaged(content)
+	return end
+}
+
+// OutsideEditChanged reports whether content outside the managed section
+// changed between two file states. The materializer ignores managed-section
+// churn (its own writes); outside edits are user input.
+func OutsideEditChanged(oldContent, newContent string) bool {
+	oPre, _, oPost, _ := ParseManaged(oldContent)
+	nPre, _, nPost, _ := ParseManaged(newContent)
+	return oPre != nPre || oPost != nPost
+}
+
+// OutsideEditProposal extracts the user-written text outside the managed
+// section of newContent when it differs from oldContent. Returns ("", false)
+// when there is no outside change. The caller turns the text into a
+// PROPOSED memory (watcher → INSTRUCTION_FILE_CHANGED → processor).
+func OutsideEditProposal(oldContent, newContent string) (string, bool) {
+	if !OutsideEditChanged(oldContent, newContent) {
+		return "", false
+	}
+	nPre, _, nPost, _ := ParseManaged(newContent)
+	oPre, _, oPost, _ := ParseManaged(oldContent)
+	var parts []string
+	if d := diffAddition(oPre, nPre); strings.TrimSpace(d) != "" {
+		parts = append(parts, strings.TrimSpace(d))
+	}
+	if d := diffAddition(oPost, nPost); strings.TrimSpace(d) != "" {
+		parts = append(parts, strings.TrimSpace(d))
+	}
+	proposal := strings.TrimSpace(strings.Join(parts, "\n"))
+	if proposal == "" {
+		// Content was deleted or only whitespace moved: still signal the
+		// change with the full outside text so nothing is silently lost.
+		proposal = strings.TrimSpace(nPre + "\n" + nPost)
+	}
+	if proposal == "" {
+		return "", false
+	}
+	return proposal, true
+}
+
+// diffAddition returns lines present in next but not in prev (line-set
+// diff; order of next preserved).
+func diffAddition(prev, next string) string {
+	have := make(map[string]bool)
+	for _, l := range strings.Split(prev, "\n") {
+		have[strings.TrimSpace(l)] = true
+	}
+	var added []string
+	for _, l := range strings.Split(next, "\n") {
+		if t := strings.TrimSpace(l); t != "" && !have[t] {
+			added = append(added, l)
+		}
+	}
+	return strings.Join(added, "\n")
+}
+
+// Target describes one push-model agent file to maintain.
+type Target struct {
+	AgentName string // copilot | cursor | windsurf
+	FilePath  string // workspace-relative output file
+	Format    string // markdown | text
+	Budget    int    // chars
+}
+
+// DefaultTargets mirrors the push rows of 004_agents.up.sql.
+func DefaultTargets() []Target {
+	return []Target{
+		{AgentName: "copilot", FilePath: ".github/copilot-instructions.md", Format: "markdown", Budget: 8000},
+		{AgentName: "cursor", FilePath: ".cursorrules", Format: "text", Budget: 6000},
+		{AgentName: "windsurf", FilePath: ".windsurfrules", Format: "text", Budget: 6000},
+	}
+}
+
+// Materializer subscribes to memory events and regenerates push files.
+type Materializer struct {
+	ProjectID string
+	Targets   []Target
+	Debounce  time.Duration
+
+	// Injected collaborators (daemon sandbox owns real I/O).
+	Source MemorySource
+	Bus    EventBus
+	Read   func(path string) (string, error)
+	Write  func(path, content string) error
+	// OnOutsideProposal, when set, receives (filePath, proposalText) for
+	// outside-section edits detected by CheckFile.
+	OnOutsideProposal func(filePath, proposal string)
+}
+
+// CheckFile reads one target file, detects outside-section user edits, and
+// fires OnOutsideProposal. Used by the instruction-file watcher integration.
+func (m *Materializer) CheckFile(ctx context.Context, t Target, oldContent string) error {
+	if m.Read == nil {
 		return nil
 	}
-	memories, err := m.source.ListMemories(context.Background(), projectID)
+	cur, err := m.Read(t.FilePath)
 	if err != nil {
 		return err
 	}
-	var errs []error
-	for _, t := range targets {
-		body, _, _ := RenderMemories(memories, t.Format, t.BudgetOrDefault())
-		existing, readErr := m.files.ReadFile(t.OutputPath)
-		var merged string
-		if readErr != nil {
-			// Missing file (or unreadable): start from managed-only content.
-			// A genuinely corrupt read surfaces on WriteFile instead, so
-			// regeneration degrades to overwrite rather than abort.
-			merged = WrapManaged(body)
-		} else {
-			merged = MergeManaged(string(existing), body)
-		}
-		if err := m.files.WriteFile(t.OutputPath, []byte(merged)); err != nil {
-			errs = append(errs, err)
-		}
+	if proposal, ok := OutsideEditProposal(oldContent, cur); ok && m.OnOutsideProposal != nil {
+		m.OnOutsideProposal(t.FilePath, proposal)
 	}
-	return errors.Join(errs...)
+	return nil
 }
 
-// Run ticks until ctx is done, flushing due projects on each tick. The
-// tick interval defaults to a third of the debounce (≥100ms) so a project
-// regenerates within ~debounce+interval of quiet — well inside the "regen
-// within 5s of quiet" acceptance (worst case ≈ debounce + tick).
-// Production entrypoint; tests drive Flush directly.
-func (m *Materializer) Run(ctx context.Context) {
-	interval := m.debounce / 3
-	if interval < 100*time.Millisecond {
-		interval = 100 * time.Millisecond
+// Render selects the agent-specific formatter and caps to target budget.
+func (m *Materializer) Render(t Target, items []*store.MemoryItem) string {
+	// Highest-confidence first so truncation keeps the best signal.
+	sorted := make([]*store.MemoryItem, 0, len(items))
+	sorted = append(sorted, items...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i] == nil || sorted[j] == nil {
+			return sorted[j] == nil
+		}
+		return sorted[i].Confidence > sorted[j].Confidence
+	})
+	if strings.ToLower(t.Format) == "text" {
+		return RenderText(sorted, t.Budget)
 	}
+	return RenderMarkdown(sorted, t.Budget)
+}
+
+// Regenerate fetches confirmed memories once and rewrites every target.
+func (m *Materializer) Regenerate(ctx context.Context) error {
+	if m.Source == nil {
+		return nil
+	}
+	items, err := m.Source.SearchMemory(ctx, m.ProjectID, "", nil, 200)
+	if err != nil {
+		return err
+	}
+	for _, t := range m.Targets {
+		generated := m.Render(t, items)
+		var existing string
+		if m.Read != nil {
+			existing, _ = m.Read(t.FilePath) // missing file -> create fresh
+		}
+		merged := MergeManaged(existing, generated)
+		if m.Write != nil {
+			if err := m.Write(t.FilePath, merged); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// Run subscribes to MEMORY_CONFIRMED/MEMORY_SUPERSEDED and regenerates
+// after a Debounce quiet period. It returns when ctx is done.
+func (m *Materializer) Run(ctx context.Context) error {
+	if m.Bus == nil {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ch, cancel, err := m.Bus.Subscribe(ctx, m.ProjectID)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	wait := m.Debounce
+	if wait <= 0 {
+		wait = Debounce
+	}
+	var timer *time.Timer
+	var timerCh <-chan time.Time
+	disarm := func() {
+		if timer != nil {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer = nil
+			timerCh = nil
+		}
+	}
+	defer disarm()
 	for {
 		select {
 		case <-ctx.Done():
-			return
-		case <-m.clock.After(interval):
-			_ = m.FlushDue()
+			return ctx.Err()
+		case ev, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			if ev == nil || !ShouldTrigger(ev.EventType) {
+				continue
+			}
+			disarm()
+			timer = time.NewTimer(wait)
+			timerCh = timer.C
+		case <-timerCh:
+			timerCh = nil
+			timer = nil
+			_ = m.Regenerate(ctx) // best-effort: next trigger retries
 		}
 	}
-}
-
-// RenderMemories renders memories into one agent-format body capped at
-// budget chars (<=0 → DefaultBudgetChars). Items keep source order under
-// whole-item granularity: an item that does not fit is skipped (counted
-// dropped) and smaller later items may still fit, so output is always a
-// prefix-complete list, never mid-line truncation. It returns the body
-// plus included/dropped counts for stats and tests.
-func RenderMemories(memories []Memory, format string, budget int) (body string, included, dropped int) {
-	if budget <= 0 {
-		budget = DefaultBudgetChars
-	}
-	var b strings.Builder
-	for _, mem := range memories {
-		line := renderLine(mem, format)
-		if b.Len()+len(line) > budget {
-			dropped++
-			continue
-		}
-		b.WriteString(line)
-		included++
-	}
-	return b.String(), included, dropped
-}
-
-func renderLine(mem Memory, format string) string {
-	content := strings.TrimSpace(mem.Content)
-	if content == "" {
-		content = "(empty memory)"
-	}
-	key := strings.TrimSpace(mem.Key)
-	if key == "" {
-		key = "unnamed"
-	}
-	switch strings.ToLower(strings.TrimSpace(format)) {
-	case "", "markdown":
-		var b strings.Builder
-		b.WriteString("- **")
-		b.WriteString(key)
-		b.WriteString("**")
-		if strings.TrimSpace(mem.Scope) != "" {
-			b.WriteString(" (" + strings.TrimSpace(mem.Scope) + ")")
-		}
-		b.WriteString(": ")
-		b.WriteString(content)
-		b.WriteString("\n")
-		return b.String()
-	default: // "text" and any other push format: plain lines
-		var b strings.Builder
-		b.WriteString("- ")
-		b.WriteString(key)
-		b.WriteString(": ")
-		b.WriteString(content)
-		b.WriteString("\n")
-		return b.String()
-	}
-}
-
-// WrapManaged wraps a rendered body in the managed delimiters.
-func WrapManaged(body string) string {
-	var b strings.Builder
-	b.WriteString(BeginMarker)
-	b.WriteString("\n")
-	b.WriteString(body)
-	if body != "" && !strings.HasSuffix(body, "\n") {
-		b.WriteString("\n")
-	}
-	b.WriteString(EndMarker)
-	b.WriteString("\n")
-	return b.String()
-}
-
-// SplitManaged splits existing file content around the managed section.
-// It returns (before, managedBody, after, found): found is true only when
-// BOTH delimiters are present in order; before/after are the user content
-// outside them (preserved verbatim, byte-for-byte).
-func SplitManaged(existing string) (before, managed, after string, found bool) {
-	start := strings.Index(existing, BeginMarker)
-	if start < 0 {
-		return existing, "", "", false
-	}
-	rest := existing[start+len(BeginMarker):]
-	end := strings.Index(rest, EndMarker)
-	if end < 0 {
-		return existing, "", "", false
-	}
-	before = existing[:start]
-	managed = rest[:end]
-	after = rest[end+len(EndMarker):]
-	return before, managed, after, true
-}
-
-// MergeManaged splices a freshly rendered body into existing file content:
-//   - both delimiters present → the block between them is replaced,
-//     user content before/after is preserved byte-for-byte;
-//   - no (or half — BEGIN without END or vice versa) managed section →
-//     the wrapped block is appended (separated by one blank line when the
-//     file already holds content), never deleting user notes.
-//
-// Malformed half-sections are deliberately left in place and treated as
-// user content: deleting text the user may have written by hand would
-// violate the "user notes preserved" acceptance.
-func MergeManaged(existing, body string) string {
-	before, _, after, found := SplitManaged(existing)
-	if !found {
-		wrapped := WrapManaged(body)
-		if strings.TrimSpace(existing) == "" {
-			return wrapped
-		}
-		var b strings.Builder
-		b.WriteString(strings.TrimRight(existing, "\n"))
-		b.WriteString("\n\n")
-		b.WriteString(wrapped)
-		return b.String()
-	}
-	var b strings.Builder
-	b.WriteString(before)
-	b.WriteString(BeginMarker)
-	b.WriteString("\n")
-	b.WriteString(body)
-	if body != "" && !strings.HasSuffix(body, "\n") {
-		b.WriteString("\n")
-	}
-	b.WriteString(EndMarker)
-	b.WriteString(after)
-	return b.String()
 }
