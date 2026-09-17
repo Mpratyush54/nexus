@@ -85,6 +85,13 @@ const (
 	EventSessionEnded        = "SESSION_ENDED"
 	EventWorkspaceRegistered = "WORKSPACE_REGISTERED"
 	EventWorkspaceOffline    = "WORKSPACE_OFFLINE"
+
+	// Steering (live agent steering — issue #42, Phase 3 WS protocol §3.2
+	// extension; canonical strings proposed by internal/steer).
+	EventAgentInterruptRequested = "AGENT_INTERRUPT_REQUESTED"
+	EventAgentSteerPrompt        = "AGENT_STEER_PROMPT"
+	EventAgentPaused             = "AGENT_PAUSED"
+	EventAgentResumed            = "AGENT_RESUMED"
 )
 
 // ValidEventTypes is the §2.1 registry backing IsValidEventType.
@@ -99,6 +106,8 @@ var ValidEventTypes = map[string]struct{}{
 	EventEpisodeOpened: {}, EventEpisodeUpdated: {}, EventEpisodeResolved: {},
 	EventMessageSent: {}, EventSessionStarted: {}, EventSessionEnded: {},
 	EventWorkspaceRegistered: {}, EventWorkspaceOffline: {},
+	EventAgentInterruptRequested: {}, EventAgentSteerPrompt: {},
+	EventAgentPaused: {}, EventAgentResumed: {},
 }
 
 // IsValidEventType reports whether t is a known §2.1 event type. Matching is

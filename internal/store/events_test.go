@@ -147,9 +147,12 @@ func TestEventTypeConstantsComplete(t *testing.T) {
 		// Lifecycle (5).
 		EventMessageSent, EventSessionStarted, EventSessionEnded,
 		EventWorkspaceRegistered, EventWorkspaceOffline,
+		// Steering — live agent control, issue #42 (4).
+		EventAgentInterruptRequested, EventAgentSteerPrompt,
+		EventAgentPaused, EventAgentResumed,
 	}
-	if len(want) != 23 {
-		t.Fatalf("expected 23 §2.1 event types, listed %d", len(want))
+	if len(want) != 27 {
+		t.Fatalf("expected 27 §2.1 event types, listed %d", len(want))
 	}
 	seen := map[string]struct{}{}
 	for _, typ := range want {
