@@ -1,11 +1,10 @@
 // Tests for the WS event bridge (issue #40). All DB-free, no sockets:
-// mapping is driven through a recording fake publisher, hydration through a
-// map-backed fake fetcher, and Subscribe through stubbed channels.
+// mapping is driven through a recording fake publisher, Subscribe through
+// stubbed *store.Event channels.
 package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -33,25 +32,22 @@ type fakePublisher struct {
 	calls []publishCall
 }
 
-func (f *fakePublisher) PublishEvent(projectID, sessionID string, event any) (int, error) {
+func (f *fakePublisher) PublishEvent(projectID, sessionID, eventType string, payload map[string]any, userID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.calls = append(f.calls, publishCall{method: "event", projectID: projectID, sessionID: sessionID, payload: event})
-	return 1, nil
+	f.calls = append(f.calls, publishCall{method: "event", projectID: projectID, sessionID: sessionID, payload: payload})
 }
 
-func (f *fakePublisher) PublishMemoryUpdate(projectID, sessionID string, item any, action string) (int, error) {
+func (f *fakePublisher) PublishMemoryUpdate(projectID, sessionID string, item any, action string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, publishCall{method: "memory", projectID: projectID, sessionID: sessionID, action: action, payload: item})
-	return 1, nil
 }
 
-func (f *fakePublisher) PublishEpisodeUpdate(projectID, sessionID string, episode any, action string) (int, error) {
+func (f *fakePublisher) PublishEpisodeUpdate(projectID, sessionID string, episode any, action string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, publishCall{method: "episode", projectID: projectID, sessionID: sessionID, action: action, payload: episode})
-	return 1, nil
 }
 
 func (f *fakePublisher) last() publishCall {
@@ -66,29 +62,13 @@ func (f *fakePublisher) count() int {
 	return len(f.calls)
 }
 
-// fakeFetcher serves canned rows (or errors) by id.
-type fakeFetcher struct {
-	rows map[int64]*store.Event
-	err  map[int64]error
-}
-
-func (f *fakeFetcher) GetEventByID(_ context.Context, id int64) (*store.Event, error) {
-	if err, ok := f.err[id]; ok {
-		return nil, err
-	}
-	if e, ok := f.rows[id]; ok {
-		return e, nil
-	}
-	return nil, errors.New("store: event: not found")
-}
-
 func memEvent(t, project, session string) *store.Event {
 	return &store.Event{
 		ID:        7,
 		ProjectID: project,
 		SessionID: session,
 		EventType: t,
-		Payload:   json.RawMessage(`{"key":"k"}`),
+		Payload:   map[string]any{"key": "k"},
 		CreatedAt: time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC),
 	}
 }
@@ -99,9 +79,9 @@ func memEvent(t, project, session string) *store.Event {
 
 func TestBridgeMemoryMapping(t *testing.T) {
 	cases := map[string]string{
-		store.EventMemoryProposed:  "proposed",
-		store.EventMemoryConfirmed: "confirmed",
-		store.EventMemoryRejected:  "rejected",
+		bridgeMemoryProposed:  "proposed",
+		bridgeMemoryConfirmed: "confirmed",
+		bridgeMemoryRejected:  "rejected",
 	}
 	for eventType, want := range cases {
 		fp := &fakePublisher{}
@@ -120,9 +100,9 @@ func TestBridgeMemoryMapping(t *testing.T) {
 
 func TestBridgeEpisodeMapping(t *testing.T) {
 	cases := map[string]string{
-		store.EventEpisodeOpened:   "opened",
-		store.EventEpisodeUpdated:   "updated",
-		store.EventEpisodeResolved:  "resolved",
+		bridgeEpisodeOpened:   "opened",
+		bridgeEpisodeUpdated:  "updated",
+		bridgeEpisodeResolved: "resolved",
 	}
 	for eventType, want := range cases {
 		fp := &fakePublisher{}
@@ -138,7 +118,7 @@ func TestBridgeEpisodeMapping(t *testing.T) {
 
 func TestBridgeGenericEventEnvelope(t *testing.T) {
 	fp := &fakePublisher{}
-	ev := memEvent(store.EventMessageSent, "p1", "s1")
+	ev := memEvent("MESSAGE_SENT", "p1", "s1")
 	ev.UserID = "u9"
 	if err := publishBridgedEvent(fp, ev); err != nil {
 		t.Fatal(err)
@@ -151,16 +131,15 @@ func TestBridgeGenericEventEnvelope(t *testing.T) {
 	if !ok {
 		t.Fatalf("envelope type %T, want map[string]any", got.payload)
 	}
-	if env["event_type"] != store.EventMessageSent || env["user_id"] != "u9" || env["project_id"] != "p1" {
+	if env["event_type"] != "MESSAGE_SENT" || env["user_id"] != "u9" || env["project_id"] != "p1" {
 		t.Fatalf("envelope fields wrong: %v", env)
 	}
 }
 
-func TestBridgeSupersededFallsBackToGeneric(t *testing.T) {
-	// MEMORY_SUPERSEDED has no §3.2 memory_update action — it must ride a
-	// generic event frame, never an invented action string.
+func TestBridgeUnknownTypeFallsBackToGeneric(t *testing.T) {
+	// Unmapped types ride a generic event frame, never an invented action.
 	fp := &fakePublisher{}
-	if err := publishBridgedEvent(fp, memEvent(store.EventMemorySuperseded, "p1", "")); err != nil {
+	if err := publishBridgedEvent(fp, memEvent("MEMORY_SUPERSEDED", "p1", "")); err != nil {
 		t.Fatal(err)
 	}
 	if got := fp.last(); got.method != "event" {
@@ -170,13 +149,13 @@ func TestBridgeSupersededFallsBackToGeneric(t *testing.T) {
 
 func TestBridgePublishValidation(t *testing.T) {
 	fp := &fakePublisher{}
-	if err := publishBridgedEvent(nil, memEvent(store.EventMessageSent, "p", "")); err == nil {
+	if err := publishBridgedEvent(nil, memEvent("MESSAGE_SENT", "p", "")); err == nil {
 		t.Fatal("nil hub: want error")
 	}
 	if err := publishBridgedEvent(fp, nil); err == nil {
 		t.Fatal("nil event: want error")
 	}
-	if err := publishBridgedEvent(fp, memEvent(store.EventMessageSent, "", "")); err == nil {
+	if err := publishBridgedEvent(fp, memEvent("MESSAGE_SENT", "", "")); err == nil {
 		t.Fatal("empty project: want error")
 	}
 	if fp.count() != 0 {
@@ -188,24 +167,35 @@ func TestBridgePublishValidation(t *testing.T) {
 // Subscription drain
 // ---------------------------------------------------------------------------
 
-func TestBridgeSubscriptionDrainsAndSkipsBadRows(t *testing.T) {
+func TestBridgeSubscriptionDrains(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	sub := make(chan store.EventNotification, 4)
-	sub <- store.EventNotification{ID: 1, ProjectID: "p1", EventType: store.EventMessageSent}
-	sub <- store.EventNotification{ID: 2, ProjectID: "p1", EventType: store.EventMessageSent} // missing row
-	sub <- store.EventNotification{ID: 3, ProjectID: "p1", EventType: store.EventMemoryProposed}
+	sub := make(chan *store.Event, 3)
+	sub <- memEvent("MESSAGE_SENT", "p1", "s1")
+	sub <- memEvent(bridgeMemoryProposed, "p1", "s1")
+	sub <- memEvent(bridgeEpisodeResolved, "p1", "")
 	close(sub)
 
-	fetch := &fakeFetcher{
-		rows: map[int64]*store.Event{
-			1: memEvent(store.EventMessageSent, "p1", "s1"),
-			3: memEvent(store.EventMemoryProposed, "p1", "s1"),
-		},
-		err: map[int64]error{2: store.ErrNotFound},
-	}
 	fp := &fakePublisher{}
-	if n := bridgeSubscription(ctx, sub, fetch, fp); n != 2 {
+	if n := bridgeSubscription(ctx, sub, fp); n != 3 {
+		t.Fatalf("delivered=%d, want 3", n)
+	}
+	if fp.count() != 3 {
+		t.Fatalf("publish calls=%d, want 3", fp.count())
+	}
+}
+
+func TestBridgeSubscriptionSkipsBadRows(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sub := make(chan *store.Event, 3)
+	sub <- memEvent("MESSAGE_SENT", "p1", "s1")
+	sub <- nil // bad row: logged and skipped, never kills the stream
+	sub <- memEvent(bridgeMemoryProposed, "p1", "s1")
+	close(sub)
+
+	fp := &fakePublisher{}
+	if n := bridgeSubscription(ctx, sub, fp); n != 2 {
 		t.Fatalf("delivered=%d, want 2 (bad row skipped)", n)
 	}
 	if fp.count() != 2 {
@@ -215,9 +205,9 @@ func TestBridgeSubscriptionDrainsAndSkipsBadRows(t *testing.T) {
 
 func TestBridgeSubscriptionEndsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	sub := make(chan store.EventNotification) // never delivers, never closes
+	sub := make(chan *store.Event) // never delivers, never closes
 	done := make(chan int, 1)
-	go func() { done <- bridgeSubscription(ctx, sub, &fakeFetcher{}, &fakePublisher{}) }()
+	go func() { done <- bridgeSubscription(ctx, sub, &fakePublisher{}) }()
 	cancel()
 	select {
 	case n := <-done:
@@ -236,14 +226,14 @@ func TestBridgeSubscriptionEndsOnCancel(t *testing.T) {
 func TestBridgeLoopResubscribesAfterDrop(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	first := make(chan store.EventNotification, 1)
-	first <- store.EventNotification{ID: 1, ProjectID: "p1", EventType: store.EventMessageSent}
+	first := make(chan *store.Event, 1)
+	first <- memEvent("MESSAGE_SENT", "p1", "")
 	close(first) // broken connection right after one delivery
-	second := make(chan store.EventNotification, 1)
-	second <- store.EventNotification{ID: 2, ProjectID: "p1", EventType: store.EventMessageSent}
+	second := make(chan *store.Event, 1)
+	second <- memEvent("MESSAGE_SENT", "p1", "")
 
 	calls := 0
-	subscribe := func(context.Context) (<-chan store.EventNotification, error) {
+	subscribe := func(context.Context) (<-chan *store.Event, error) {
 		calls++
 		if calls == 1 {
 			return first, nil
@@ -251,17 +241,11 @@ func TestBridgeLoopResubscribesAfterDrop(t *testing.T) {
 		cancel() // end the test once the second subscription is handed out
 		return second, nil
 	}
-	fetch := &fakeFetcher{
-		rows: map[int64]*store.Event{
-			1: memEvent(store.EventMessageSent, "p1", ""),
-			2: memEvent(store.EventMessageSent, "p1", ""),
-		},
-	}
 	go func() {
 		time.Sleep(5 * time.Second)
 		cancel() // backstop: never hang the suite
 	}()
-	if err := bridgeLoop(ctx, subscribe, fetch, &fakePublisher{}); err != nil {
+	if err := bridgeLoop(ctx, subscribe, &fakePublisher{}); err != nil {
 		t.Fatalf("bridgeLoop: %v", err)
 	}
 	if calls < 2 {
@@ -271,15 +255,15 @@ func TestBridgeLoopResubscribesAfterDrop(t *testing.T) {
 
 func TestBridgeLoopSubscribeErrorThenRecover(t *testing.T) {
 	// A failing Subscribe must back off and retry, not return: fail once,
-	// then hand over a channel that delivers one notification and closes
+	// then hand over a channel that delivers one event and closes
 	// (broken connection), then cancel on the third subscribe.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	good := make(chan store.EventNotification, 1)
-	good <- store.EventNotification{ID: 1, ProjectID: "p1", EventType: store.EventMessageSent}
+	good := make(chan *store.Event, 1)
+	good <- memEvent("MESSAGE_SENT", "p1", "")
 	close(good)
 	attempts := 0
-	subscribe := func(context.Context) (<-chan store.EventNotification, error) {
+	subscribe := func(context.Context) (<-chan *store.Event, error) {
 		attempts++
 		switch attempts {
 		case 1:
@@ -288,14 +272,11 @@ func TestBridgeLoopSubscribeErrorThenRecover(t *testing.T) {
 			return good, nil
 		default:
 			cancel()
-			empty := make(chan store.EventNotification)
+			empty := make(chan *store.Event)
 			return empty, nil
 		}
 	}
-	fetch := &fakeFetcher{rows: map[int64]*store.Event{
-		1: memEvent(store.EventMessageSent, "p1", ""),
-	}}
-	if err := bridgeLoop(ctx, subscribe, fetch, &fakePublisher{}); err != nil {
+	if err := bridgeLoop(ctx, subscribe, &fakePublisher{}); err != nil {
 		t.Fatalf("bridgeLoop: %v", err)
 	}
 	if attempts < 3 {
@@ -303,14 +284,22 @@ func TestBridgeLoopSubscribeErrorThenRecover(t *testing.T) {
 	}
 }
 
-func TestBridgeEventsNilPool(t *testing.T) {
+func TestBridgeEventsNilWiring(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := BridgeEvents(ctx, nil, NewHub(HubOptions{})); err == nil {
-		t.Fatal("nil pool: want error")
+	if err := BridgeEvents(ctx, nil, NewHub()); err == nil {
+		t.Fatal("nil subscribe: want error")
 	}
 	if err := BridgeEvents(ctx, nil, nil); err == nil {
-		t.Fatal("nil pool+hub: want error")
+		t.Fatal("nil subscribe+hub: want error")
+	}
+	okSub := func(context.Context) (<-chan *store.Event, error) {
+		cancel()
+		empty := make(chan *store.Event)
+		return empty, nil
+	}
+	if err := BridgeEvents(ctx, okSub, nil); err == nil {
+		t.Fatal("nil hub: want error")
 	}
 }
 
