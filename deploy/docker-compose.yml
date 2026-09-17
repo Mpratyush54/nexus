@@ -59,6 +59,12 @@ services:
     environment:
       CENTRAL_SERVER_URL: http://server:8080
       DAEMON_ADDR: :7687
+      # Token file lives OUTSIDE the read-only workspace mount (issue #45):
+      # the daemon mints/loads .central-memory/daemon.token under the
+      # workspace root, which :ro below cannot write. /tmp is writable and
+      # ephemeral per container boot (fresh token each `up`; acceptable for
+      # the demo shape — production mounts a persistent state volume here).
+      DAEMON_TOKEN_FILE: /tmp/daemon.token
     ports:
       - "7687:7687"
     volumes:

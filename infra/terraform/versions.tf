@@ -11,8 +11,9 @@ terraform {
       version = "~> 3.0"
     }
   }
-  # Remote state is intentionally NOT configured here: the team picks the
-  # backend (S3 + DynamoDB lock) at apply time via -backend-config.
+  # Remote state: partial S3 backend in backend.tf (issue #45) — supply
+  # bucket/key/region/lock table at init time via -backend-config (see the
+  # example there). Plain `terraform init` keeps local state for dev.
 }
 
 provider "aws" {

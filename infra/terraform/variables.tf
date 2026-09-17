@@ -25,6 +25,12 @@ variable "subnet_ids" {
   default     = []
 }
 
+variable "public_subnet_ids" {
+  description = "Public subnets for the internet-facing ALB (issue #45: an ALB on private subnets cannot receive traffic). Empty means 'same as subnet_ids' — correct for the default VPC (whose subnets are public) but MUST be set explicitly for custom VPCs with private app subnets."
+  type        = list(string)
+  default     = []
+}
+
 variable "aurora_min_acu" {
   description = "Aurora Serverless v2 minimum capacity. 0.5 is the engine minimum — early-stage scale-to-near-zero per Locked Decisions."
   type        = number

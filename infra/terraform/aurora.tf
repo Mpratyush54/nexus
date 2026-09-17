@@ -25,6 +25,10 @@ data "aws_subnets" "target" {
 locals {
   effective_vpc_id  = var.vpc_id != "" ? var.vpc_id : data.aws_vpc.target[0].id
   effective_subnets = length(var.subnet_ids) > 0 ? var.subnet_ids : data.aws_subnets.target[0].ids
+  # ALB placement (issue #45): the internet-facing load balancer must sit on
+  # PUBLIC subnets. Explicit public_subnet_ids win; otherwise the app subnets
+  # are reused (correct for the default VPC, whose subnets are public).
+  effective_public_subnets = length(var.public_subnet_ids) > 0 ? var.public_subnet_ids : local.effective_subnets
 }
 
 # Custom parameter group: required so the cluster runs the PG16 family where

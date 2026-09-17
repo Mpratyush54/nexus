@@ -45,7 +45,7 @@ func run(args []string) error {
 	}
 	addr := fmt.Sprintf("127.0.0.1:%d", *port)
 
-	token, err := daemon.EnsureToken(*root)
+	token, err := daemon.EnsureTokenAt(daemon.ResolveTokenFile(*root))
 	if err != nil {
 		return err
 	}

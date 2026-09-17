@@ -20,6 +20,13 @@ resource "aws_security_group" "alb" {
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
+  ingress {
+    description = "HTTP for the :80 -> :443 redirect listener only (issue #45); nothing is served on port 80."
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
   egress {
     from_port   = 0
     to_port     = 0
@@ -50,7 +57,11 @@ resource "aws_security_group" "server" {
 resource "aws_lb" "server" {
   name               = "${var.project}-alb"
   load_balancer_type = "application"
-  subnets            = local.effective_subnets
+  # Internet-facing: must sit on PUBLIC subnets (issue #45 — private
+  # subnets here would blackhole all traffic). Tasks stay on the private
+  # effective_subnets via the service network_configuration below.
+  internal           = false
+  subnets            = local.effective_public_subnets
   security_groups    = [aws_security_group.alb.id]
 }
 
@@ -80,6 +91,22 @@ resource "aws_lb_listener" "https" {
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.server.arn
+  }
+}
+
+# HTTP :80 exists ONLY to redirect to HTTPS (issue #45): plain-HTTP API
+# traffic must never be served, and HSTS-less clients get bounced, not 404s.
+resource "aws_lb_listener" "http_redirect" {
+  load_balancer_arn = aws_lb.server.arn
+  port              = 80
+  protocol          = "HTTP"
+  default_action {
+    type = "redirect"
+    redirect {
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_301"
+    }
   }
 }
 

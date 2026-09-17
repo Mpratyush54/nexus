@@ -12,11 +12,17 @@
 ## One-time setup checklist
 
 1. Create the cluster in a private VPC (2+ AZs), Postgres 16 or later.
-2. Enable the `vector` extension for the cluster:
-   - Aurora Postgres 16 ships `pgvector` — no custom parameter group needed,
-     but the DB user that runs migrations must have `rds_superuser` (or
-     `GRANT CREATE ON DATABASE ...` + extension privilege) for
-     `CREATE EXTENSION "vector"`.
+2. Pre-provision extensions as the RDS **master user** (issue #45): on
+   Aurora, `CREATE EXTENSION` requires rds_superuser, which the app user
+   must NOT have. Connect once as master and run:
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS "pgcrypto";
+   CREATE EXTENSION IF NOT EXISTS "vector";
+   ```
+   `migrations/001_initial.up.sql` repeats the same statements with
+   `IF NOT EXISTS`, so first boot is a safe no-op after this step — the
+   app user only needs CONNECT + DML/DDL on its own schema, never
+   superuser.
 3. First boot runs `migrations/001_initial.up.sql`, which executes:
    ```sql
    CREATE EXTENSION IF NOT EXISTS "pgcrypto";
