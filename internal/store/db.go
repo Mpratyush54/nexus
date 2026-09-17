@@ -69,9 +69,49 @@ func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)
 }
 
-// RunMigrations executes migrations/*.up.sql in lexical order (001, 002, …).
-// Files must be idempotent (CREATE IF NOT EXISTS / guarded ALTERs) so a
-// half-applied run can simply be retried.
+// schemaMigrationsDDL tracks which migration versions have been applied.
+// version is the migration filename without the ".up.sql" suffix
+// (e.g. "001_initial" for "001_initial.up.sql").
+const schemaMigrationsDDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
+    version TEXT PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+)`
+
+// migrationVersion maps a migration filename to its tracking version.
+// "001_initial.up.sql" -> "001_initial". Non-.up.sql names are returned
+// unchanged so callers can spot misuse in tests.
+func migrationVersion(filename string) string {
+	return strings.TrimSuffix(filename, ".up.sql")
+}
+
+// filterPendingMigrations returns the subset of sorted *.up.sql filenames
+// whose version is not in applied. Pure (no I/O) so unit tests cover the
+// skip/record logic without a live Postgres.
+func filterPendingMigrations(sortedUps []string, applied map[string]bool) []string {
+	var pending []string
+	for _, name := range sortedUps {
+		if !applied[migrationVersion(name)] {
+			pending = append(pending, name)
+		}
+	}
+	return pending
+}
+
+// RunMigrations executes pending migrations/*.up.sql in lexical order,
+// skipping versions already recorded in schema_migrations.
+//
+// Backward compatibility: databases created before version tracking have
+// 001-005 applied but no schema_migrations rows. On first run with this
+// code the table is created empty, every file looks pending, and each file
+// is re-executed — safe because all current migrations are idempotent
+// (CREATE TABLE/INDEX IF NOT EXISTS, guarded DO-block ALTERs,
+// INSERT ... ON CONFLICT DO NOTHING), then recorded. Subsequent launches
+// skip them via the version check and only execute the file once.
+//
+// Each migration runs in its own transaction (body + version INSERT commit
+// atomically), so a half-applied file is retried cleanly on next launch.
+// Files must stay transaction-safe: no CREATE INDEX CONCURRENTLY or other
+// non-transactional DDL (split such migrations out if ever needed).
 func (s *PostgresStore) RunMigrations(ctx context.Context, migrationsDir string) error {
 	entries, err := os.ReadDir(migrationsDir)
 	if err != nil {
@@ -84,14 +124,50 @@ func (s *PostgresStore) RunMigrations(ctx context.Context, migrationsDir string)
 		}
 	}
 	sort.Strings(ups)
-	for _, name := range ups {
+
+	if _, err := s.pool.Exec(ctx, schemaMigrationsDDL); err != nil {
+		return fmt.Errorf("ensure schema_migrations: %w", err)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT version FROM schema_migrations`)
+	if err != nil {
+		return fmt.Errorf("read schema_migrations: %w", err)
+	}
+	applied := make(map[string]bool, len(ups))
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan schema_migrations: %w", err)
+		}
+		applied[v] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read schema_migrations: %w", err)
+	}
+
+	for _, name := range filterPendingMigrations(ups, applied) {
+		version := migrationVersion(name)
 		sqlBytes, err := os.ReadFile(filepath.Join(migrationsDir, name))
 		if err != nil {
 			return fmt.Errorf("read %s: %w", name, err)
 		}
-		if _, err := s.pool.Exec(ctx, string(sqlBytes)); err != nil {
+		tx, err := s.pool.Begin(ctx)
+		if err != nil {
+			return fmt.Errorf("begin %s: %w", name, err)
+		}
+		if _, err := tx.Exec(ctx, string(sqlBytes)); err != nil {
+			_ = tx.Rollback(ctx)
 			return fmt.Errorf("apply %s: %w", name, err)
 		}
+		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (version) VALUES ($1) ON CONFLICT DO NOTHING`, version); err != nil {
+			_ = tx.Rollback(ctx)
+			return fmt.Errorf("record %s: %w", name, err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return fmt.Errorf("commit %s: %w", name, err)
+		}
+		applied[version] = true
 	}
 	return nil
 }

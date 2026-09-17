@@ -5,7 +5,12 @@ package server
 // in-memory (no sockets); only the upgrade-gate tests touch HTTP.
 
 import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
+	"io"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -232,3 +237,256 @@ func (w *captureWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 func (w *captureWriter) WriteHeader(code int) { w.code = code }
+
+// --- RFC 6455 fragmentation tests (nexus issue #13 follow-up) ---------------
+
+var wsTestMask = [4]byte{0x01, 0x02, 0x03, 0x04}
+
+// encodeMaskedFrame builds one raw client→server frame (always masked).
+func encodeMaskedFrame(fin bool, op byte, payload []byte) []byte {
+	var out bytes.Buffer
+	b0 := op & 0x0F
+	if fin {
+		b0 |= 0x80
+	}
+	out.WriteByte(b0)
+	switch {
+	case len(payload) <= 125:
+		out.WriteByte(0x80 | byte(len(payload)))
+	case len(payload) <= 65535:
+		out.WriteByte(0x80 | 126)
+		_ = binary.Write(&out, binary.BigEndian, uint16(len(payload)))
+	default:
+		out.WriteByte(0x80 | 127)
+		_ = binary.Write(&out, binary.BigEndian, uint64(len(payload)))
+	}
+	out.Write(wsTestMask[:])
+	masked := make([]byte, len(payload))
+	for i := range payload {
+		masked[i] = payload[i] ^ wsTestMask[i%4]
+	}
+	out.Write(masked)
+	return out.Bytes()
+}
+
+// writeClientFrame writes one masked client frame onto w.
+func writeClientFrame(t *testing.T, w io.Writer, fin bool, op byte, payload []byte) {
+	t.Helper()
+	if _, err := w.Write(encodeMaskedFrame(fin, op, payload)); err != nil {
+		t.Fatalf("write client frame: %v", err)
+	}
+}
+
+// readServerFrame reads one unmasked server→client frame.
+func readServerFrame(t *testing.T, r io.Reader) (fin bool, op byte, payload []byte) {
+	t.Helper()
+	hdr := make([]byte, 2)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		t.Fatalf("read server frame header: %v", err)
+	}
+	fin = hdr[0]&0x80 != 0
+	op = hdr[0] & 0x0F
+	length := int64(hdr[1] & 0x7F)
+	switch length {
+	case 126:
+		var ext [2]byte
+		if _, err := io.ReadFull(r, ext[:]); err != nil {
+			t.Fatalf("read server frame ext16: %v", err)
+		}
+		length = int64(binary.BigEndian.Uint16(ext[:]))
+	case 127:
+		var ext [8]byte
+		if _, err := io.ReadFull(r, ext[:]); err != nil {
+			t.Fatalf("read server frame ext64: %v", err)
+		}
+		length = int64(binary.BigEndian.Uint64(ext[:]))
+	}
+	if hdr[1]&0x80 != 0 {
+		t.Fatal("server frames must not be masked")
+	}
+	payload = make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read server frame payload: %v", err)
+	}
+	return fin, op, payload
+}
+
+// startWSReadLoop runs wsReadLoop over a net.Pipe; returns the test-side
+// conn (test writes client frames here) and a done channel closed when the
+// loop exits. Caller must close testConn at the end to stop the loop.
+func startWSReadLoop(h *Hub, c *Client) (testConn net.Conn, done chan struct{}) {
+	serverConn, clientConn := net.Pipe()
+	rw := bufio.NewReadWriter(bufio.NewReader(serverConn), bufio.NewWriter(serverConn))
+	done = make(chan struct{})
+	go func() {
+		defer close(done)
+		wsReadLoop(serverConn, rw, h, c)
+	}()
+	return clientConn, done
+}
+
+func drainSend(c *Client) []byte {
+	select {
+	case raw := <-c.Send:
+		return raw
+	default:
+		return nil
+	}
+}
+
+// wsReadFrame must surface the FIN bit (hdr[0] & 0x80), not just the opcode.
+func TestWSReadFrameFINBit(t *testing.T) {
+	raw := encodeMaskedFrame(false, wsOpText, []byte("hi"))
+	rw := bufio.NewReadWriter(bufio.NewReader(bytes.NewReader(raw)), bufio.NewWriter(io.Discard))
+	op, fin, payload, err := wsReadFrame(rw)
+	if err != nil {
+		t.Fatalf("wsReadFrame FIN=0: %v", err)
+	}
+	if op != wsOpText || fin {
+		t.Fatalf("FIN=0 frame: op=%#x fin=%v, want op=text fin=false", op, fin)
+	}
+	if string(payload) != "hi" {
+		t.Fatalf("payload = %q, want %q", payload, "hi")
+	}
+
+	raw = encodeMaskedFrame(true, wsOpContinuation, []byte("yo"))
+	rw = bufio.NewReadWriter(bufio.NewReader(bytes.NewReader(raw)), bufio.NewWriter(io.Discard))
+	op, fin, payload, err = wsReadFrame(rw)
+	if err != nil {
+		t.Fatalf("wsReadFrame FIN=1: %v", err)
+	}
+	if op != wsOpContinuation || !fin {
+		t.Fatalf("FIN=1 frame: op=%#x fin=%v, want op=continuation fin=true", op, fin)
+	}
+	if string(payload) != "yo" {
+		t.Fatalf("payload = %q, want %q", payload, "yo")
+	}
+}
+
+// A JSON message split into text(FIN=0) + continuation(FIN=1) must dispatch
+// exactly once, with the complete payload — no premature dispatch of the
+// first fragment (which alone is invalid JSON).
+func TestWSFragmentedMessageSingleDispatch(t *testing.T) {
+	h := NewHub()
+	c := newHubClient(h, "frag-user", "", "")
+	testConn, done := startWSReadLoop(h, c)
+	defer func() { _ = testConn.Close(); <-done }()
+
+	full, _ := json.Marshal(WSMessage{Type: WSMsgSubscribe, ProjectID: "proj1", SessionID: "sess1"})
+	split := len(full) / 2
+	writeClientFrame(t, testConn, false, wsOpText, full[:split])
+
+	// First fragment alone must NOT dispatch (no error reply for bad JSON).
+	select {
+	case extra := <-c.Send:
+		t.Fatalf("premature dispatch after first fragment: %s", extra)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	writeClientFrame(t, testConn, true, wsOpContinuation, full[split:])
+
+	select {
+	case raw := <-c.Send:
+		var ack WSMessage
+		if err := json.Unmarshal(raw, &ack); err != nil {
+			t.Fatalf("decode ack: %v", err)
+		}
+		if ack.Type != WSMsgSubscribed || ack.ProjectID != "proj1" || ack.SessionID != "sess1" {
+			t.Fatalf("ack = %+v; want subscribed proj1/sess1", ack)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reassembled dispatch")
+	}
+	// Exactly one dispatch: nothing else pending.
+	select {
+	case extra := <-c.Send:
+		t.Fatalf("extra dispatch after reassembly: %s", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if c.ProjectID != "proj1" || c.SessionID != "sess1" {
+		t.Fatalf("client scope = %q/%q; want proj1/sess1", c.ProjectID, c.SessionID)
+	}
+}
+
+// Unfragmented single-frame messages (text FIN=1) must keep working.
+func TestWSUnfragmentedStillWorks(t *testing.T) {
+	h := NewHub()
+	c := newHubClient(h, "u", "", "")
+	testConn, done := startWSReadLoop(h, c)
+	defer func() { _ = testConn.Close(); <-done }()
+
+	raw, _ := json.Marshal(WSMessage{Type: WSMsgSubscribe, ProjectID: "p", SessionID: "s"})
+	writeClientFrame(t, testConn, true, wsOpText, raw)
+
+	select {
+	case got := <-c.Send:
+		var ack WSMessage
+		if err := json.Unmarshal(got, &ack); err != nil {
+			t.Fatalf("decode ack: %v", err)
+		}
+		if ack.Type != WSMsgSubscribed {
+			t.Fatalf("want subscribed ack, got %+v", ack)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for unfragmented dispatch")
+	}
+}
+
+// An interleaved ping between fragments must be answered with pong and must
+// not corrupt the reassembly buffer.
+func TestWSInterleavedPingPreservesFrag(t *testing.T) {
+	h := NewHub()
+	c := newHubClient(h, "ping-user", "", "")
+	testConn, done := startWSReadLoop(h, c)
+	defer func() { _ = testConn.Close(); <-done }()
+
+	full, _ := json.Marshal(WSMessage{Type: WSMsgSubscribe, ProjectID: "proj1", SessionID: "sess1"})
+	split := len(full) / 2
+	writeClientFrame(t, testConn, false, wsOpText, full[:split])
+	writeClientFrame(t, testConn, true, wsOpPing, []byte("ping1"))
+
+	_ = testConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	fin, op, payload := readServerFrame(t, testConn)
+	_ = testConn.SetReadDeadline(time.Time{})
+	if op != wsOpPong || !fin || string(payload) != "ping1" {
+		t.Fatalf("pong = op=%#x fin=%v payload=%q; want pong fin=true %q", op, fin, payload, "ping1")
+	}
+
+	writeClientFrame(t, testConn, true, wsOpContinuation, full[split:])
+
+	select {
+	case raw := <-c.Send:
+		var ack WSMessage
+		if err := json.Unmarshal(raw, &ack); err != nil {
+			t.Fatalf("decode ack: %v", err)
+		}
+		if ack.Type != WSMsgSubscribed || ack.ProjectID != "proj1" {
+			t.Fatalf("ack = %+v; want subscribed proj1", ack)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch after interleaved ping")
+	}
+	select {
+	case extra := <-c.Send:
+		t.Fatalf("extra dispatch after ping test: %s", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A continuation with no open fragment must be ignored, not dispatched.
+func TestWSStrayContinuationIgnored(t *testing.T) {
+	h := NewHub()
+	c := newHubClient(h, "stray", "", "")
+	testConn, done := startWSReadLoop(h, c)
+	defer func() { _ = testConn.Close(); <-done }()
+
+	writeClientFrame(t, testConn, true, wsOpContinuation, []byte(`{"type":"subscribe"}`))
+	select {
+	case extra := <-c.Send:
+		t.Fatalf("stray continuation dispatched: %s", extra)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if got := drainSend(c); got != nil {
+		t.Fatalf("unexpected message after stray continuation: %s", got)
+	}
+}

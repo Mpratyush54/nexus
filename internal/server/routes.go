@@ -26,6 +26,10 @@ func (s *Server) registerRoutes() {
 
 	s.Mux.HandleFunc("POST /episodes", s.requireAuth(s.handleEpisodeCreate))
 	s.Mux.HandleFunc("GET /episodes/search", s.requireAuth(s.handleEpisodeSearch))
+
+	// Issue #8: sessions, branches, confirmation flow, episode resolve.
+	// Handlers live in routes_extra.go to avoid clashing with Phase 1.8 work.
+	s.registerExtraRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

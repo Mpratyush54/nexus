@@ -524,26 +524,63 @@ func headerHasToken(header, token string) bool {
 
 // wsReadLoop pumps client → hub until error/close. Every frame refreshes the
 // client's heartbeat; ping is answered with pong; close is echoed.
+// Fragmented text messages (RFC 6455 §5.4) are reassembled in frag and only
+// dispatched to HandleClientMessage once the final (FIN=1) frame arrives.
+// Control frames (ping/pong/close) are handled inline and never buffered
+// into frag, so they may appear interleaved between fragments.
 func wsReadLoop(conn net.Conn, rw *bufio.ReadWriter, h *Hub, c *Client) {
 	defer conn.Close()
 	var frag []byte // reassembly buffer for fragmented text messages
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
-		op, payload, err := wsReadFrame(rw)
+		op, fin, payload, err := wsReadFrame(rw)
 		if err != nil {
 			return
 		}
 		h.Heartbeat(c.ID)
+		if op >= wsOpClose && !fin {
+			// Control frames MUST NOT be fragmented (RFC 6455 §5.5).
+			return
+		}
 		switch op {
-		case wsOpText, wsOpContinuation:
-			frag = append(frag, payload...)
-			if op == wsOpText || len(frag) > 0 {
-				// FIN is always set by our reader contract (see wsReadFrame:
-				// fragmented frames are reassembled here by concatenation
-				// until a text frame boundary — simplified: each frame is
-				// treated as complete unless opcode is continuation).
-				if op == wsOpContinuation {
+		case wsOpText, wsOpContinuation:			if op == wsOpText {
+				if frag != nil {
+					// New data frame while reassembly is in progress:
+					// protocol error per RFC 6455 §5.4 (a new message
+					// must not start before the previous one finishes).
+					// Drop the incomplete buffer and start over with
+					// this frame so one bad peer cannot wedge the loop.
+					frag = nil
+				}
+				if !fin {
+					// First fragment: buffer and wait for continuations.
+					// Ensure frag is non-nil even for empty payloads so
+					// a later continuation can tell "started" from "idle".
+					if frag == nil {
+						frag = make([]byte, 0, len(payload))
+					}
+					frag = append(frag, payload...)
+					if len(frag) > MaxWSMessageBytes {
+						frag = nil // shed oversize reassembly, keep loop alive
+					}
 					continue
+				}
+				// Unfragmented text message (no reassembly in progress).
+				_ = h.HandleClientMessage(c.ID, payload)
+			} else {
+				// Continuation frame.
+				if frag == nil {
+					// Continuation with nothing to continue:
+					// protocol error per RFC 6455 §5.4 — ignore the frame.
+					continue
+				}
+				frag = append(frag, payload...)
+				if len(frag) > MaxWSMessageBytes {
+					frag = nil // shed oversize reassembly, keep loop alive
+					continue
+				}
+				if !fin {
+					continue // more fragments to come
 				}
 				msg := frag
 				frag = nil
@@ -586,57 +623,59 @@ func wsWriteLoop(conn net.Conn, rw *bufio.ReadWriter, send <-chan []byte) {
 }
 
 // wsReadFrame reads one client→server frame (which must be masked per
-// RFC 6455 §5.3). Control frames are limited to 125 bytes by the protocol.
-func wsReadFrame(rw *bufio.ReadWriter) (byte, []byte, error) {
+// RFC 6455 §5.3) and returns its opcode, FIN bit, and unmasked payload.
+// Control frames are limited to 125 bytes by the protocol.
+func wsReadFrame(rw *bufio.ReadWriter) (op byte, fin bool, payload []byte, err error) {
 	hdr, err := readExact(rw, 2)
 	if err != nil {
-		return 0, nil, err
+		return 0, false, nil, err
 	}
-	op := hdr[0] & 0x0F
+	fin = hdr[0]&0x80 != 0
+	op = hdr[0] & 0x0F
 	masked := hdr[1]&0x80 != 0
 	length := int64(hdr[1] & 0x7F)
 	switch length {
 	case 126:
 		ext, err := readExact(rw, 2)
 		if err != nil {
-			return 0, nil, err
+			return 0, false, nil, err
 		}
 		length = int64(binary.BigEndian.Uint16(ext))
 	case 127:
 		ext, err := readExact(rw, 8)
 		if err != nil {
-			return 0, nil, err
+			return 0, false, nil, err
 		}
 		length = int64(binary.BigEndian.Uint64(ext))
 		if length < 0 {
-			return 0, nil, errors.New("oversize websocket frame")
+			return 0, false, nil, errors.New("oversize websocket frame")
 		}
 	}
 	if op >= wsOpClose && length > 125 {
-		return 0, nil, errors.New("oversize websocket control frame")
+		return 0, false, nil, errors.New("oversize websocket control frame")
 	}
 	if length > MaxWSMessageBytes {
-		return 0, nil, errors.New("websocket message too large")
+		return 0, false, nil, errors.New("websocket message too large")
 	}
 	if !masked {
-		return 0, nil, errors.New("client frames must be masked")
+		return 0, false, nil, errors.New("client frames must be masked")
 	}
 	mask, err := readExact(rw, 4)
 	if err != nil {
-		return 0, nil, err
+		return 0, false, nil, err
 	}
-	payload := make([]byte, length)
+	payload = make([]byte, length)
 	if _, err := io.ReadFull(rw, payload); err != nil {
-		return 0, nil, errWSClosed
+		return 0, false, nil, errWSClosed
 	}
 	for i := range payload {
 		payload[i] ^= mask[i%4]
 	}
 	switch op {
 	case wsOpText, wsOpContinuation, wsOpPing, wsOpPong, wsOpClose:
-		return op, payload, nil
+		return op, fin, payload, nil
 	default:
-		return 0, nil, fmt.Errorf("unsupported websocket opcode %d", op)
+		return 0, false, nil, fmt.Errorf("unsupported websocket opcode %d", op)
 	}
 }
 
