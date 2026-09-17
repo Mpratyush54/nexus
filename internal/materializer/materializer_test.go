@@ -4,29 +4,42 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
 // fakeClock is the injectable clock/timer: tests pin Now and advance it
 // manually, so debounce tests never sleep. After returns a channel fed by
-// advance (only Run uses it; Flush tests ignore it).
+// advance (only Run uses it; Flush tests ignore it). now is mutex-guarded:
+// After polls it from a background goroutine while the test goroutine
+// advances it, which races without the lock (issue #47).
 type fakeClock struct {
+	mu  sync.Mutex
 	now time.Time
 }
 
 func newFakeClock() *fakeClock { return &fakeClock{now: time.Now()} }
 
-func (c *fakeClock) Now() time.Time { return c.now }
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
 
 func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	ch := make(chan time.Time, 1)
+	c.mu.Lock()
 	deadline := c.now.Add(d)
+	c.mu.Unlock()
 	go func() {
 		for {
 			time.Sleep(time.Millisecond)
-			if !c.now.Before(deadline) {
-				ch <- c.now
+			c.mu.Lock()
+			now, due := c.now, !c.now.Before(deadline)
+			c.mu.Unlock()
+			if due {
+				ch <- now
 				return
 			}
 		}
@@ -34,7 +47,11 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 	return ch
 }
 
-func (c *fakeClock) advance(d time.Duration) { c.now = c.now.Add(d) }
+func (c *fakeClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
 
 // fakeSource serves scripted confirmed memories per project.
 type fakeSource struct {

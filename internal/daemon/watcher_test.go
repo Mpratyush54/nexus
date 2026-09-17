@@ -162,6 +162,101 @@ func TestWatchCheckPathIdempotent(t *testing.T) {
 	}
 }
 
+// waitForWatchEvent polls rec until an event of typ arrives or timeout
+// elapses. It is the single retry point for the ONE live-fsnotify smoke
+// test below — everything else asserts deterministically via PollOnce, so
+// no other test may sleep on wall-clock watcher behavior.
+func waitForWatchEvent(t *testing.T, rec *eventRecorder, typ string, timeout time.Duration) map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for rec.count(typ) == 0 && time.Now().Before(deadline) {
+		time.Sleep(50 * time.Millisecond)
+	}
+	p := rec.last(typ)
+	if p == nil {
+		t.Fatalf("no %s event within %v", typ, timeout)
+	}
+	return p
+}
+
+func TestWatchPollOnceNestedCreation(t *testing.T) {
+	// fsnotify-gap fallback: a nested instruction file whose parent dir did
+	// not exist at watcher construction is still picked up by PollOnce.
+	root := t.TempDir()
+	rec := &eventRecorder{}
+	w, err := NewWatcher(root, rec.sink())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer w.Close()
+
+	if err := os.MkdirAll(filepath.Join(root, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".github", "copilot-instructions.md"), []byte("rule\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.PollOnce()
+	if n := rec.count(EventInstructionFileChanged); n != 1 {
+		t.Fatalf("nested creation emitted %d events, want 1", n)
+	}
+	p := rec.last(EventInstructionFileChanged)
+	if p["path"] != ".github/copilot-instructions.md" || p["file_type"] != "copilot_instructions" {
+		t.Errorf("payload identity = %v", p)
+	}
+	if p["old_hash"] != "" {
+		t.Errorf("creation old_hash = %v, want empty", p["old_hash"])
+	}
+}
+
+func TestWatchPollOnceOversizedDegradesToHashNotice(t *testing.T) {
+	// Over-cap "before" content is dropped (nil): the change still emits,
+	// but the diff degrades to a hash-change notice instead of a line diff.
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec := &eventRecorder{}
+	w, err := NewWatcher(root, rec.sink())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer w.Close()
+
+	w.mu.Lock()
+	w.lastContent["CLAUDE.md"] = nil // simulate over-cap retention drop
+	w.mu.Unlock()
+	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\nv2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	w.PollOnce()
+	if n := rec.count(EventInstructionFileChanged); n != 1 {
+		t.Fatalf("oversized edit emitted %d events, want 1", n)
+	}
+	d, _ := rec.last(EventInstructionFileChanged)["diff"].(string)
+	if !strings.Contains(d, "hash changed") || strings.Contains(d, "+ v2\n") {
+		t.Errorf("oversized diff should be a hash notice, got %q", d)
+	}
+}
+
+func TestWatchPollOnceEmptyRootSilent(t *testing.T) {
+	// No instruction files, never seen: PollOnce emits nothing (removals
+	// for never-seen paths are not changes).
+	root := t.TempDir()
+	rec := &eventRecorder{}
+	w, err := NewWatcher(root, rec.sink())
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	defer w.Close()
+
+	w.PollOnce()
+	w.PollOnce()
+	if n := rec.count(EventInstructionFileChanged); n != 0 {
+		t.Fatalf("empty root emitted %d events, want 0", n)
+	}
+}
+
 func TestWatchRunEmitsOnWrite(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\n"), 0o644); err != nil {
@@ -183,14 +278,8 @@ func TestWatchRunEmitsOnWrite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "CLAUDE.md"), []byte("v1\nv2\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(10 * time.Second)
-	for rec.count(EventInstructionFileChanged) == 0 && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-	}
-	if n := rec.count(EventInstructionFileChanged); n == 0 {
-		t.Fatal("Run emitted no event within 10s of write")
-	}
-	if p := rec.last(EventInstructionFileChanged); !strings.Contains(p["diff"].(string), "+ v2\n") {
+	p := waitForWatchEvent(t, rec, EventInstructionFileChanged, 10*time.Second)
+	if !strings.Contains(p["diff"].(string), "+ v2\n") {
 		t.Errorf("live diff:\n%v", p["diff"])
 	}
 }
