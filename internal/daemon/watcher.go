@@ -192,19 +192,59 @@ func (s *FileHashStore) DeleteHash(workspaceID, path string) error {
 	return s.saveLocked()
 }
 
-// saveLocked rewrites the JSON file (caller holds mu). Parent dirs are
-// created so a fresh state path works on first boot.
+// saveLocked rewrites the JSON file atomically (caller holds mu): write to
+// a temp file in the same directory, fsync it, then os.Rename over the
+// target. Same-dir placement makes the rename atomic, so a crash mid-write
+// can never leave a truncated state file behind (issue #109). Parent dirs
+// are created so a fresh state path works on first boot. Temp files are
+// removed best-effort on any error before the rename succeeds.
 func (s *FileHashStore) saveLocked() error {
 	data, err := json.MarshalIndent(s.hashes, "", "  ")
 	if err != nil {
 		return err
 	}
-	if dir := filepath.Dir(s.path); dir != "" {
+	data = append(data, '\n')
+	dir := filepath.Dir(s.path)
+	if dir != "" {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
 	}
-	return os.WriteFile(s.path, append(data, '\n'), 0o600)
+	tmp, err := os.CreateTemp(dir, ".hashes-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	// 0600 preserved (CreateTemp already uses 0600; explicit chmod keeps
+	// it exact under unusual umasks).
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	// fsync before rename: the new content is durable before it becomes
+	// visible at the target path.
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		return err
+	}
+	renamed = true
+	return nil
 }
 
 // Watcher polls instruction files under root and emits change events.

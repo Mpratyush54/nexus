@@ -101,6 +101,13 @@ type Turn struct {
 type Harvester struct {
 	workspace  string // workspace root (absolute)
 	folderName string // base folder name, used for workspace matching
+	// origin and rootCommit are the move-proof repo identity for the
+	// workspace (git remote origin URL + root-commit hash, best-effort via
+	// FingerprintOf — "" when not a git repo). They outrank folderName in
+	// MatchesCandidate, mirroring MemStore.ResolveProject priority
+	// (canonical URL > root commit > folder name). Issue #109.
+	origin     string
+	rootCommit string
 
 	Sources      []TranscriptSource
 	PollInterval time.Duration
@@ -159,9 +166,17 @@ func NewHarvesterWithPoll(workspaceRoot string, emitter EventEmitter, poll, idle
 	if idle <= 0 {
 		idle = DefaultIdleTimeout
 	}
+	// Best-effort repo identity: "" when not a git repo (or no git
+	// binary), in which case matching degrades to folder-name fallback.
+	var origin, rootCommit string
+	if strings.TrimSpace(workspaceRoot) != "" {
+		origin, rootCommit = FingerprintOf(workspaceRoot)
+	}
 	return &Harvester{
 		workspace:    workspaceRoot,
 		folderName:   filepath.Base(filepath.Clean(workspaceRoot)),
+		origin:       origin,
+		rootCommit:   rootCommit,
 		Sources:      ResolveSources(),
 		PollInterval: poll,
 		IdleTimeout:  idle,
@@ -245,14 +260,110 @@ func ResolveSources() []TranscriptSource {
 	return out
 }
 
+// Origin returns the workspace's git remote origin URL ("" when unknown).
+// Together with RootCommit it is the canonical identity to pass to the
+// server's ResolveProject (canonical_url, root_commit, folder_name).
+// Issue #109.
+func (h *Harvester) Origin() string { return h.origin }
+
+// RootCommit returns the workspace's git root-commit hash ("" when unknown).
+// Issue #109.
+func (h *Harvester) RootCommit() string { return h.rootCommit }
+
+// normalizeGitURL strips scheme/user/suffix noise so equivalent remotes
+// compare equal. It mirrors store.NormalizeGitURL and is kept local (not
+// imported) so the daemon stays stdlib-only — same precedent as
+// internal/migrate's local copy. The two must stay in sync.
+// Issue #109.
+func normalizeGitURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	for _, scheme := range []string{"https://", "http://", "ssh://", "git+ssh://", "git://"} {
+		s = strings.TrimPrefix(s, scheme)
+	}
+	// Strip any "user@" (covers "git@host" both bare and post-scheme).
+	if i := strings.Index(s, "@"); i >= 0 && (strings.Index(s, "/") == -1 || i < strings.Index(s, "/")) {
+		s = s[i+1:]
+	}
+	// scp-like "host:path" -> "host/path".
+	s = strings.Replace(s, ":", "/", 1)
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimSuffix(s, "/")
+	return strings.ToLower(s)
+}
+
+// MatchLevel ranks workspace-identity evidence, strongest first. It mirrors
+// MemStore.ResolveProject priority: canonical URL > root commit >
+// folder name. Issue #109.
+type MatchLevel int
+
+const (
+	// MatchNone means the candidate is not attributable to the workspace.
+	MatchNone MatchLevel = iota
+	// MatchFolderName is the weakest signal: the transcript path merely
+	// contains the workspace folder base name. Generic dir names
+	// ("api", "server", "frontend") collide here — it is a fallback only.
+	MatchFolderName
+	// MatchRootCommit is a strong signal: equal git root-commit hashes.
+	MatchRootCommit
+	// MatchRemoteURL is the strongest signal: equal normalized git remotes.
+	MatchRemoteURL
+)
+
+// ClassifyWorkspaceMatch ranks a candidate transcript attribution against a
+// workspace identity triple (origin, rootCommit, folderName). The candidate
+// carries its own origin/root ("" when the transcript format records none)
+// plus its path on disk. Pure function — no git binary — so the priority
+// ordering is unit-testable. Issue #109.
+func ClassifyWorkspaceMatch(origin, rootCommit, folderName, candOrigin, candRoot, candPath string) MatchLevel {
+	n, c := normalizeGitURL(origin), normalizeGitURL(candOrigin)
+	urlsKnown := n != "" && c != ""
+	if urlsKnown && n == c {
+		return MatchRemoteURL
+	}
+	r, cr := strings.TrimSpace(rootCommit), strings.TrimSpace(candRoot)
+	rootsKnown := r != "" && cr != ""
+	if rootsKnown && r == cr {
+		// Equal roots rescue disagreeing URLs (forks, renamed remotes).
+		return MatchRootCommit
+	}
+	if urlsKnown || rootsKnown {
+		// Both sides carry identity and none of it agrees: these are
+		// different repos, so the folder-name fallback must NOT rescue
+		// the match — that fallback is the misattribution vector
+		// (generic dir names like "api" / "server") this ordering
+		// exists to close. Single-sided identity stays inconclusive
+		// and falls through to the path check below.
+		return MatchNone
+	}
+	if folderName != "" && folderName != "." && folderName != string(filepath.Separator) {
+		if strings.Contains(strings.ToLower(candPath), strings.ToLower(folderName)) {
+			return MatchFolderName
+		}
+	} else {
+		// No folder filter configured: match-all, as MatchesWorkspace does.
+		return MatchFolderName
+	}
+	return MatchNone
+}
+
+// MatchesCandidate reports whether a transcript with the given origin/root
+// identity at path belongs to this workspace. Identity evidence outranks
+// the folder-name fallback, so unrelated repos sharing a generic directory
+// name ("api", "server") are no longer misattributed once either side
+// records git identity. Issue #109.
+func (h *Harvester) MatchesCandidate(candOrigin, candRoot, path string) bool {
+	return ClassifyWorkspaceMatch(h.origin, h.rootCommit, h.folderName, candOrigin, candRoot, path) != MatchNone
+}
+
 // MatchesWorkspace reports whether a transcript path belongs to this
 // workspace. Only files whose path contains the workspace folder name are
 // harvested, so other projects' sessions never leak into this stream.
+//
+// NOTE (issue #109): path-only matching is the weakest fallback — prefer
+// MatchesCandidate whenever transcript origin/root identity is available,
+// since generic folder names ("api", "server") collide across repos.
 func (h *Harvester) MatchesWorkspace(path string) bool {
-	if h.folderName == "" || h.folderName == "." || h.folderName == string(filepath.Separator) {
-		return true
-	}
-	return strings.Contains(strings.ToLower(path), strings.ToLower(h.folderName))
+	return h.MatchesCandidate("", "", path)
 }
 
 // sessionID derives a stable session id from the transcript path.
