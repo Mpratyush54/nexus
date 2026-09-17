@@ -154,11 +154,12 @@ func TestIdleDetection(t *testing.T) {
 }
 
 func TestMatchesWorkspace(t *testing.T) {
-	h := NewHarvester(`D:\central-memory`, nil)
-	if !h.MatchesWorkspace(`C:\Users\x\.claude\projects\D---central-memory\abc.jsonl`) {
+	root := filepath.Join(string(filepath.Separator), "tmp", "central-memory")
+	h := NewHarvester(root, nil)
+	if !h.MatchesWorkspace(filepath.Join("some", "projects", "central-memory", "abc.jsonl")) {
 		t.Fatal("path containing workspace folder name should match")
 	}
-	if h.MatchesWorkspace(`/home/u/.claude/projects/other-project/abc.jsonl`) {
+	if h.MatchesWorkspace(filepath.Join("some", "projects", "other-project", "abc.jsonl")) {
 		t.Fatal("other project's path must not match")
 	}
 	empty := NewHarvester("", nil)

@@ -102,7 +102,7 @@ func TestAssembleXMLSessionOverridesProject(t *testing.T) {
 		ProjectName: "p", Branch: "main",
 		SessionItems: []*store.MemoryItem{mem("testing/framework", "session", "Use unittest just for this spike session work.")},
 		ProjectItems: []*store.MemoryItem{mem("testing/framework", "project", "The team uses pytest with fixture-based setup everywhere.")},
-		Budget: 4000, Now: now,
+		Budget:       4000, Now: now,
 	}
 	got := AssembleXML(in)
 	if strings.Contains(got.XML, "pytest") {

@@ -24,7 +24,7 @@ func TestConfigDirForGOOS(t *testing.T) {
 		if !strings.HasSuffix(got, "nexus") {
 			t.Errorf("goos=%s: got %q, want suffix nexus", tc.goos, got)
 		}
-		if !strings.Contains(got, tc.wantSub) && tc.goos != "linux" {
+		if !strings.Contains(strings.ReplaceAll(got, `\`, `/`), strings.ReplaceAll(tc.wantSub, `\`, `/`)) && tc.goos != "linux" {
 			t.Errorf("goos=%s: got %q, want it to contain %q", tc.goos, got, tc.wantSub)
 		}
 		if strings.Contains(got, "D:") {
