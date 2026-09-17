@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -117,12 +118,28 @@ type Harvester struct {
 	completed  map[string]bool      // path -> SESSION_TRANSCRIPT_COMPLETE sent
 	agents     map[string]string    // path -> agent name
 	batch      map[string][]Turn    // path -> turns since session start
+	// extractors holds per-agent SQLite row extractors (nil value or absent
+	// agent = liveness-only default). Issue #33.
+	extractors map[string]SQLiteExtractor
 }
 
 // fileMeta tracks SQLite/vscdb files we cannot parse without a driver.
 type fileMeta struct {
 	size  int64
 	mtime time.Time
+}
+
+// SQLiteExtractor is the seam for sqlite-format conversation stores
+// (Cursor/Copilot/Antigravity .db/.vscdb/.sqlite). Row parsing needs a SQL
+// driver, and no SQL driver dep is approved (see ADR-033), so the harvester
+// core never imports one. A driver-backed implementation registers itself
+// via SetSQLiteExtractor; the harvester calls it with the DB path and a
+// lower-bound timestamp and emits one CONVERSATION_TURN per returned Turn.
+// No registration (the default) means liveness-only: the harvester refreshes
+// idle timers on file change and logs the explicit reason, but never emits
+// CONVERSATION_TURN for sqlite rows.
+type SQLiteExtractor interface {
+	ExtractNewRows(dbPath string, since time.Time) ([]Turn, error)
 }
 
 // NewHarvester builds a harvester for workspaceRoot. emitter may be nil
@@ -156,7 +173,21 @@ func NewHarvesterWithPoll(workspaceRoot string, emitter EventEmitter, poll, idle
 		completed:    make(map[string]bool),
 		agents:       make(map[string]string),
 		batch:        make(map[string][]Turn),
+		extractors:   make(map[string]SQLiteExtractor),
 	}
+}
+
+// SetSQLiteExtractor registers (or with nil, unregisters) a row extractor
+// for one sqlite agent (cursor, copilot, antigravity). Unregistered agents
+// stay liveness-only. Issue #33.
+func (h *Harvester) SetSQLiteExtractor(agent string, ex SQLiteExtractor) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if ex == nil {
+		delete(h.extractors, agent)
+		return
+	}
+	h.extractors[agent] = ex
 }
 
 func (h *Harvester) emit(ev Event) {
@@ -563,29 +594,81 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 }
 
 // TrackSQLite records the mtime/size of a SQLite/vscdb transcript file.
-// Without a sqlite driver the daemon cannot read rows; a change only marks
-// session activity (deferring the idle trigger) and returns true. The later
-// SESSION_TRANSCRIPT_COMPLETE event carries a hint so the Memory Processor
-// knows full extraction must happen out-of-band.
+// Without a registered SQLiteExtractor the daemon cannot read rows; a change
+// only marks session activity (deferring the idle trigger) and returns true.
+// With an extractor registered (SetSQLiteExtractor), changed files yield one
+// CONVERSATION_TURN per new row. The later SESSION_TRANSCRIPT_COMPLETE event
+// carries a hint when no rows were parsed so the Memory Processor knows full
+// extraction must happen out-of-band.
 func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 	now := h.now().UTC()
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	prev, seen := h.sqlite[path]
 	cur := fileMeta{size: info.Size(), mtime: info.ModTime()}
 	h.sqlite[path] = cur
+	agent := h.agents[path]
 	if !seen {
 		if _, ok := h.lastActive[path]; !ok {
 			h.lastActive[path] = now
 		}
+		h.mu.Unlock()
 		return false
 	}
-	if cur != prev {
+	if cur == prev {
+		h.mu.Unlock()
+		return false
+	}
+	ex := h.extractors[agent]
+	since := h.lastActive[path]
+	h.mu.Unlock()
+
+	// Liveness-only default: no SQL driver dep is approved (see ADR-033).
+	if ex == nil {
+		log.Printf("harvester: sqlite source %q (%s) has no SQLiteExtractor registered — liveness-only (no SQL driver dep, see ADR-033)", agent, path)
+		h.mu.Lock()
 		h.lastActive[path] = now
 		delete(h.completed, path) // new activity re-arms idle detection
+		h.mu.Unlock()
 		return true
 	}
-	return false
+	turns, err := ex.ExtractNewRows(path, since)
+	if err != nil {
+		log.Printf("harvester: sqlite extractor for %q (%s) failed: %v; keeping liveness only", agent, path, err)
+		h.mu.Lock()
+		h.lastActive[path] = now
+		delete(h.completed, path)
+		h.mu.Unlock()
+		return true
+	}
+	if len(turns) == 0 {
+		h.mu.Lock()
+		h.lastActive[path] = now
+		delete(h.completed, path)
+		h.mu.Unlock()
+		return true
+	}
+	last := now
+	h.mu.Lock()
+	for i := range turns {
+		if turns[i].Timestamp.IsZero() {
+			turns[i].Timestamp = now
+		}
+		if turns[i].Timestamp.After(last) {
+			last = turns[i].Timestamp
+		}
+	}
+	h.lastActive[path] = last
+	delete(h.completed, path)
+	h.batch[path] = append(h.batch[path], turns...)
+	h.mu.Unlock()
+	for _, t := range turns {
+		h.emit(Event{
+			Type:      EventConversationTurn,
+			Payload:   turnPayload("conversation_turn", agent, path, t),
+			CreatedAt: now,
+		})
+	}
+	return true
 }
 
 // CheckIdle emits SESSION_TRANSCRIPT_COMPLETE for every session with no new
@@ -605,7 +688,7 @@ func (h *Harvester) CheckIdle() []Event {
 		h.completed[path] = true
 		turns := append([]Turn(nil), h.batch[path]...)
 		detail := strconv.Itoa(len(turns)) + " turns harvested"
-		if _, isSQLite := h.sqlite[path]; isSQLite {
+		if _, isSQLite := h.sqlite[path]; isSQLite && len(turns) == 0 {
 			detail = "sqlite/vscdb source: rows not parsed (no driver); " +
 				"deep extraction must read the store out-of-band"
 		}

@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -229,5 +232,202 @@ func TestTornWriteHeldBack(t *testing.T) {
 	}
 	if len(turns) != 1 || turns[0].Content != "partial encore" {
 		t.Fatalf("completed torn line should parse, got %+v", turns)
+	}
+}
+
+// fakeSQLiteExtractor is a test SQLiteExtractor returning canned turns and
+// recording the dbPath/since it was called with. It honors the since
+// contract: rows are returned only when newer than since (the canned turns
+// carry the fake's epoch, so a non-zero since means "already consumed").
+type fakeSQLiteExtractor struct {
+	mu    sync.Mutex
+	calls []string
+	since []time.Time
+	epoch time.Time
+	turns []Turn
+	err   error
+}
+
+func (f *fakeSQLiteExtractor) ExtractNewRows(dbPath string, since time.Time) ([]Turn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, dbPath)
+	f.since = append(f.since, since)
+	if f.err != nil {
+		return nil, f.err
+	}
+	if !since.IsZero() && !since.Before(f.epoch) {
+		return nil, nil
+	}
+	out := make([]Turn, len(f.turns))
+	copy(out, f.turns)
+	return out, nil
+}
+
+func (f *fakeSQLiteExtractor) ncalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func countTurns(evs []Event) int {
+	n := 0
+	for _, e := range evs {
+		if e.Type == EventConversationTurn {
+			n++
+		}
+	}
+	return n
+}
+
+func TestHarvestSQLiteNilExtractorLiveness(t *testing.T) {
+	// Default (no extractor registered): sqlite files never emit
+	// CONVERSATION_TURN but still refresh idle timers, with the explicit
+	// liveness-only reason logged.
+	now := time.Now()
+	var got []Event
+	h := NewHarvesterWithPoll(t.TempDir(), sliceEmitter{&got}, time.Second, time.Minute)
+	h.now = func() time.Time { return now }
+
+	var logs bytes.Buffer
+	prevOut := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(prevOut)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.vscdb")
+	if err := os.WriteFile(path, []byte("sqlite-format-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.agents[path] = "cursor"
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.TrackSQLite(path, st) {
+		t.Fatal("first sight must only record state, want false")
+	}
+	// Grow the file so the signature changes.
+	if err := os.WriteFile(path, []byte("sqlite-format-data-more"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.TrackSQLite(path, st) {
+		t.Fatal("changed sqlite file must report activity, want true")
+	}
+	if n := countTurns(got); n != 0 {
+		t.Fatalf("nil extractor must not emit CONVERSATION_TURN, got %d", n)
+	}
+	h.mu.Lock()
+	_, ok := h.lastActive[path]
+	h.mu.Unlock()
+	if !ok {
+		t.Fatal("nil-extractor sqlite file must still refresh liveness")
+	}
+	if out := logs.String(); !strings.Contains(out, "liveness-only") {
+		t.Fatalf("expected explicit liveness-only reason in logs, got %q", out)
+	}
+}
+
+func TestHarvestSQLiteFakeExtractorEmitsTurns(t *testing.T) {
+	// A registered extractor turns sqlite changes into CONVERSATION_TURN
+	// events; unregistered agents stay liveness-only.
+	now := time.Now()
+	var got []Event
+	h := NewHarvesterWithPoll(t.TempDir(), sliceEmitter{&got}, time.Second, time.Minute)
+	h.now = func() time.Time { return now }
+	// The fake only returns rows newer than `since`; with a frozen test
+	// clock the first sight records lastActive == now, so the epoch must
+	// sit ahead of now for rows to count as new.
+	fake := &fakeSQLiteExtractor{epoch: now.Add(time.Hour), turns: []Turn{
+		{Speaker: "user", Content: "cursor turn one", Timestamp: now},
+		{Speaker: "assistant", Content: "cursor reply", Timestamp: now},
+	}}
+	h.SetSQLiteExtractor("cursor", fake)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.vscdb")
+	if err := os.WriteFile(path, []byte("sqlite-format-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.agents[path] = "cursor"
+	st, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.TrackSQLite(path, st) {
+		t.Fatal("first sight must only record state, want false")
+	}
+	// Grow the file so the signature changes, then track again.
+	if err := os.WriteFile(path, []byte("sqlite-format-data-more"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.TrackSQLite(path, st) {
+		t.Fatal("changed sqlite file must report activity, want true")
+	}
+	if fake.ncalls() != 1 {
+		t.Fatalf("expected 1 extractor call, got %d", fake.ncalls())
+	}
+	if n := countTurns(got); n != 2 {
+		t.Fatalf("expected 2 CONVERSATION_TURN, got %d", n)
+	}
+	first := got[0].Payload
+	if first["speaker"] != "user" || first["content"] != "cursor turn one" {
+		t.Fatalf("unexpected turn payload: %v", first)
+	}
+	if first["session_id"] != sessionID(path) || first["agent"] != "cursor" {
+		t.Fatalf("unexpected identity fields: %v", first)
+	}
+	if first["path"] != path {
+		t.Fatalf("unexpected attribution fields: %v", first)
+	}
+
+	// A second sqlite file extracts independently through the same seam.
+	path2 := filepath.Join(dir, "other.vscdb")
+	if err := os.WriteFile(path2, []byte("more-sqlite-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.agents[path2] = "cursor"
+	st2, err := os.Stat(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.TrackSQLite(path2, st2) // first sight: record only
+	if err := os.WriteFile(path2, []byte("more-sqlite-data-changed"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st2, err = os.Stat(path2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.TrackSQLite(path2, st2)
+	if n := countTurns(got); n != 4 {
+		t.Fatalf("expected 2 more turns (total 4), got %d", n)
+	}
+
+	// Unregistering restores liveness-only for that agent.
+	h.SetSQLiteExtractor("cursor", nil)
+	if err := os.WriteFile(path, []byte("sqlite-format-data-third"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st, err = os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !h.TrackSQLite(path, st) {
+		t.Fatal("changed file must still report activity after unregister")
+	}
+	if n := countTurns(got); n != 4 {
+		t.Fatalf("unregistered extractor must not emit, got %d total", n)
+	}
+	if fake.ncalls() != 2 {
+		t.Fatalf("unregistered extractor must not be called, calls = %d", fake.ncalls())
 	}
 }
