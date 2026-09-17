@@ -3,78 +3,78 @@
 package platform
 
 import (
-	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
-	"time"
 )
 
-// commandTimeout bounds schtasks invocations so Install/Uninstall/Status
-// never hang the CLI.
-const commandTimeout = 30 * time.Second
+func init() { registerBackend("windows", func() Service { return windowsService{} }) }
 
-type windowsManager struct{}
+// windowsService manages the daemon via the Task Scheduler (schtasks): an
+// ONLOGON task named SchtasksName. schtasks ships with Windows, so this
+// backend needs no third-party service wrapper. Stdlib only (os/exec).
+type windowsService struct{}
 
-// currentManager returns the Windows Task Scheduler manager.
-func currentManager() Manager { return windowsManager{} }
+// taskName allows tests to avoid touching the real scheduler.
+var schtasksTaskName = SchtasksName
 
-// Install creates (or replaces) a logon-triggered Task Scheduler task that
-// auto-starts the daemon. It uses schtasks /SC ONLOGON so no service
-// control manager rights or third-party dependencies are required.
-func (windowsManager) Install(exePath string, args []string) error {
-	exe, err := resolveExe(exePath)
-	if err != nil {
-		return err
+func (windowsService) Install(executable string, args []string) error {
+	if strings.TrimSpace(executable) == "" {
+		var err error
+		executable, err = defaultExecutable()
+		if err != nil {
+			return err
+		}
 	}
-	if args == nil {
-		args = DefaultDaemonArgs()
-	}
-	command := WindowsTaskCommand(exe, args)
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "schtasks", SchtasksCreateArgs(WindowsTaskName(), command)...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("platform: schtasks create task %q: %w (output: %s)", WindowsTaskName(), err, strings.TrimSpace(string(out)))
+	argv := RenderSchtasksCreateArgs(schtasksTaskName, executable, args)
+	if out, err := exec.Command("schtasks", argv...).CombinedOutput(); err != nil {
+		return fmt.Errorf("platform: schtasks create: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// Uninstall deletes the Task Scheduler task. A missing task is success
-// (idempotent) so `nexus daemon uninstall` is safe to repeat.
-func (windowsManager) Uninstall() error {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "schtasks", SchtasksDeleteArgs(WindowsTaskName())...)
-	out, err := cmd.CombinedOutput()
+func (windowsService) Uninstall() error {
+	out, err := exec.Command("schtasks", "/Delete", "/TN", schtasksTaskName, "/F").CombinedOutput()
 	if err != nil {
-		if st, ok := ParseSchtasksStatus(string(out)); ok && st == StatusNotInstalled {
+		// Deleting a missing task is already-uninstalled, not a failure.
+		if strings.Contains(strings.ToLower(string(out)), "cannot find") ||
+			strings.Contains(strings.ToLower(string(out)), "does not exist") {
 			return nil
 		}
-		// schtasks reports ERROR: The system cannot find the file specified.
-		// for a missing task; treat that as success as well.
-		if strings.Contains(strings.ToLower(string(out)), "cannot find") {
-			return nil
-		}
-		return fmt.Errorf("platform: schtasks delete task %q: %w (output: %s)", WindowsTaskName(), err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("platform: schtasks delete: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// Status queries the Task Scheduler task without mutating anything.
-func (windowsManager) Status() (Status, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), commandTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "schtasks", SchtasksQueryArgs(WindowsTaskName())...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		if st, ok := ParseSchtasksStatus(string(out)); ok {
-			return st, nil
-		}
-		return StatusUnknown, fmt.Errorf("platform: schtasks query task %q: %w (output: %s)", WindowsTaskName(), err, strings.TrimSpace(string(out)))
+func (windowsService) Status() (ServiceStatus, error) {
+	out, err := exec.Command("schtasks", "/Query", "/TN", schtasksTaskName, "/FO", "LIST").CombinedOutput()
+	text := strings.ToLower(string(out))
+	switch {
+	case err != nil && (strings.Contains(text, "cannot find") || strings.Contains(text, "does not exist")):
+		return StatusNotInstalled, nil
+	case err != nil:
+		return StatusUnknown, fmt.Errorf("platform: schtasks query: %w: %s", err, strings.TrimSpace(string(out)))
+	case strings.Contains(text, "running"):
+		return StatusRunning, nil
+	default:
+		return StatusStopped, nil
 	}
-	if st, ok := ParseSchtasksStatus(string(out)); ok {
-		return st, nil
+}
+
+// windowsAppDataDir resolves %APPDATA%-adjacent config base without
+// hardcoding drive letters: APPDATA wins, else os.UserConfigDir, else
+// %USERPROFILE%\AppData\Roaming as a last resort.
+func windowsAppDataDir() (string, error) {
+	if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+		return appData, nil
 	}
-	return StatusUnknown, nil
+	if base, err := userConfigDirFunc(); err == nil && strings.TrimSpace(base) != "" {
+		return base, nil
+	}
+	if profile := strings.TrimSpace(os.Getenv("USERPROFILE")); profile != "" {
+		return filepath.Join(profile, "AppData", "Roaming"), nil
+	}
+	return "", fmt.Errorf("platform: windows config base: APPDATA and USERPROFILE unset")
 }

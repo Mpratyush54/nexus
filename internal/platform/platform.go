@@ -1,325 +1,353 @@
-// Package platform abstracts OS-specific daemon service management.
+// Package platform is the cross-platform OS abstraction for the nexus
+// workspace daemon (Mpratyush54/nexus#24).
 //
-// Issue #24 (Cross-Platform Daemon Service Management) owns this package.
-// It provides auto-start-on-login for the nexus workspace daemon on all
-// three supported operating systems behind a single Manager interface:
+// platform.go holds everything portable: the Service interface, XDG-style
+// path helpers built on os.UserConfigDir, configurable project roots, the
+// launchd/systemd text renderers (pure functions so tests run on any GOOS),
+// and the Install/Uninstall/Status CLI hooks (`nexus daemon
+// install|uninstall|status`) that delegate to the current OS backend.
 //
-//   - Windows: Task Scheduler task (schtasks /SC ONLOGON)
-//   - macOS:   launchd user agent (~/Library/LaunchAgents + launchctl)
-//   - Linux:   systemd user unit (~/.config/systemd/user + systemctl --user)
+// OS backends live behind build tags and only add the thin exec layer:
+//   - windows.go (schtasks stub)
+//   - darwin.go  (launchctl manager)
+//   - linux.go   (systemctl --user manager)
 //
-// Design rules for this package:
-//
-//   - No hardcoded drive letters or user paths anywhere. All app
-//     directories derive from os.UserConfigDir / os.UserCacheDir /
-//     os.UserHomeDir at runtime, with the application suffix appended by
-//     the pure helpers ConfigDirForBase / CacheDirForBase (unit-tested
-//     with synthetic per-GOOS bases; no host filesystem dependency).
-//   - All unit-file / command-line generation is done by pure cross-
-//     platform builder functions (LaunchdPlist, SystemdUnit,
-//     WindowsTaskCommand, SchtasksCreateArgs) so `go test` verifies the
-//     per-OS artifacts on every host without installing anything.
-//   - The thin per-OS managers (windows.go, darwin.go, linux.go,
-//     unsupported.go) only perform filesystem writes + os/exec calls and
-//     are never exercised by unit tests (no actual service install).
-//   - CLI hooks (`nexus daemon install` / `nexus daemon uninstall`) are
-//     exposed as package-level Install / Uninstall / Status functions.
-//     main.go is owned by another issue and MUST NOT be edited here; the
-//     exact hook snippet is documented in ADR-024 instead.
+// Stdlib only. Zero hardcoded drive letters or home directories: every path
+// derives from os.UserConfigDir / os.UserHomeDir (injectable via package
+// vars for tests) or from NEXUS_* env overrides.
 package platform
 
 import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
-// AppName is the application directory suffix appended to the OS config
-// and cache base directories (e.g. %APPDATA%/nexus, ~/.config/nexus,
-// ~/Library/Application Support/nexus).
-const AppName = "nexus"
+// ServiceName is the shared daemon service identity across all backends.
+const ServiceName = "nexus-daemon"
 
-// ServiceName is the canonical daemon service name used where the
-// platform accepts a free-form name (systemd unit stem).
-const ServiceName = "nexus"
+// LaunchdLabel is the launchd job label (darwin backend).
+const LaunchdLabel = "com.nexus.daemon"
 
-// LaunchdLabel returns the launchd service label (reverse-DNS).
-func LaunchdLabel() string { return "com." + AppName + ".daemon" }
+// SystemdUnitName is the systemd user unit name (linux backend).
+const SystemdUnitName = "nexus-daemon.service"
 
-// SystemdUnitName returns the systemd user unit file name.
-func SystemdUnitName() string { return ServiceName + ".service" }
+// SchtasksName is the Task Scheduler task name (windows backend).
+const SchtasksName = "nexus-daemon"
 
-// WindowsTaskName returns the Task Scheduler task name.
-func WindowsTaskName() string { return "NexusDaemon" }
-
-// Status describes the daemon service state.
-type Status string
+// ServiceStatus describes whether the daemon background service exists and
+// whether it is currently running.
+type ServiceStatus string
 
 const (
-	// StatusUnknown means the state could not be determined.
-	StatusUnknown Status = "unknown"
-	// StatusRunning means the service is installed and running.
-	StatusRunning Status = "running"
-	// StatusStopped means the service is installed but not running.
-	StatusStopped Status = "stopped"
-	// StatusNotInstalled means no service definition was found.
-	StatusNotInstalled Status = "not-installed"
+	// StatusNotInstalled means no service/task/unit/plist was found.
+	StatusNotInstalled ServiceStatus = "not-installed"
+	// StatusRunning means the service entry exists and the daemon is up.
+	StatusRunning ServiceStatus = "running"
+	// StatusStopped means the service entry exists but the daemon is down.
+	StatusStopped ServiceStatus = "stopped"
+	// StatusUnknown means the backend could not determine the state.
+	StatusUnknown ServiceStatus = "unknown"
 )
 
-// Manager installs, removes and inspects the daemon auto-start service.
-// Implementations live in the per-OS files (windows.go, darwin.go,
-// linux.go, unsupported.go) behind build tags.
-type Manager interface {
-	// Install writes the service definition for exePath (plus args) and
-	// enables auto-start on login. An empty exePath resolves to the
-	// current executable via resolveExe.
-	Install(exePath string, args []string) error
-	// Uninstall disables auto-start and removes the service definition.
-	// Uninstalling a service that is not installed MUST succeed (nil).
+// Service is the OS backend contract. Each backend implements it behind a
+// build tag; Current returns the one for runtime.GOOS.
+type Service interface {
+	// Install writes the OS service definition (scheduled task, plist, or
+	// unit file) for executable+args and enables start-on-login.
+	Install(executable string, args []string) error
+	// Uninstall stops the daemon and removes the OS service definition.
 	Uninstall() error
-	// Status reports the current service state without mutating anything.
-	Status() (Status, error)
+	// Status reports the install/run state of the daemon service.
+	Status() (ServiceStatus, error)
 }
 
-// Current returns the Manager for the OS this binary was built for.
-func Current() Manager { return currentManager() }
-
-// Install registers auto-start-on-login for the daemon using the
-// current-OS manager. It is the `nexus daemon install` hook implementation
-// (see ADR-024 for the main.go wiring owned by the CLI issue).
-func Install(exePath string, args []string) error {
-	return currentManager().Install(exePath, args)
-}
-
-// Uninstall removes the daemon auto-start service (`nexus daemon uninstall`).
-func Uninstall() error { return currentManager().Uninstall() }
-
-// ServiceStatus reports the daemon service state (`nexus daemon status`).
-func ServiceStatus() (Status, error) { return currentManager().Status() }
-
-// DefaultDaemonArgs are the arguments appended to the daemon executable
-// when no explicit args are given: the daemon subcommand from main.go's
-// planned CLI (`nexus daemon [--port PORT]`).
-func DefaultDaemonArgs() []string { return []string{"daemon"} }
-
 // ---------------------------------------------------------------------------
-// App directories (no hardcoded paths)
+// Injectable OS hooks (tests override these; production uses os.*).
 // ---------------------------------------------------------------------------
 
-// ConfigDir returns the per-user configuration directory for nexus:
+var (
+	userConfigDirFunc = os.UserConfigDir
+	userHomeDirFunc   = os.UserHomeDir
+	userCacheDirFunc  = os.UserCacheDir
+)
+
+// ---------------------------------------------------------------------------
+// Config / cache directories.
+// ---------------------------------------------------------------------------
+
+// ConfigDir returns the nexus config dir, derived from os.UserConfigDir:
 //
-//   - Windows: %APPDATA%/nexus      (via os.UserConfigDir)
-//   - macOS:   ~/Library/Application Support/nexus
-//   - Linux:   ~/.config/nexus (or $XDG_CONFIG_HOME/nexus)
+//	Windows: %APPDATA%\nexus
+//	darwin:  ~/Library/Application Support/nexus
+//	linux:   ~/.config/nexus (or $XDG_CONFIG_HOME/nexus)
 //
-// It creates nothing; callers create it as needed.
+// NEXUS_CONFIG_DIR overrides the result when set (non-empty).
 func ConfigDir() (string, error) {
-	base, err := os.UserConfigDir()
+	if override := strings.TrimSpace(os.Getenv("NEXUS_CONFIG_DIR")); override != "" {
+		return override, nil
+	}
+	base, err := userConfigDirFunc()
 	if err != nil {
-		return "", fmt.Errorf("platform: user config dir: %w", err)
+		return "", fmt.Errorf("platform: config dir: %w", err)
 	}
 	if strings.TrimSpace(base) == "" {
-		return "", fmt.Errorf("platform: user config dir is empty")
+		return "", fmt.Errorf("platform: config dir: empty base from os.UserConfigDir")
 	}
-	return ConfigDirForBase(base), nil
+	return filepath.Join(base, "nexus"), nil
 }
 
-// CacheDir returns the per-user cache directory for nexus
-// (%LOCALAPPDATA%/nexus, ~/Library/Caches/nexus, ~/.cache/nexus).
+// CacheDir returns the nexus cache dir, derived from os.UserCacheDir with a
+// UserConfigDir-adjacent fallback (some CI environments lack a cache dir).
+// NEXUS_CACHE_DIR overrides the result when set (non-empty).
 func CacheDir() (string, error) {
-	base, err := os.UserCacheDir()
+	if override := strings.TrimSpace(os.Getenv("NEXUS_CACHE_DIR")); override != "" {
+		return override, nil
+	}
+	if base, err := userCacheDirFunc(); err == nil && strings.TrimSpace(base) != "" {
+		return filepath.Join(base, "nexus"), nil
+	}
+	// Fallback: <config-dir>/cache keeps one root instead of failing.
+	cfg, err := ConfigDir()
 	if err != nil {
-		return "", fmt.Errorf("platform: user cache dir: %w", err)
+		return "", err
 	}
-	if strings.TrimSpace(base) == "" {
-		return "", fmt.Errorf("platform: user cache dir is empty")
-	}
-	return CacheDirForBase(base), nil
+	return filepath.Join(cfg, "cache"), nil
 }
 
-// ConfigDirForBase is the pure, GOOS-independent half of ConfigDir: it
-// appends the application suffix to an OS-provided base directory. Tests
-// feed it synthetic per-GOOS bases (e.g. %APPDATA% on windows,
-// ~/Library/Application Support on darwin, ~/.config on linux) so the
-// per-GOOS path logic is verified on every host.
-func ConfigDirForBase(base string) string {
-	return filepath.Join(base, AppName)
-}
-
-// CacheDirForBase is the pure, GOOS-independent half of CacheDir.
-func CacheDirForBase(base string) string {
-	return filepath.Join(base, AppName)
-}
-
-// ConfigFilePath returns <configDir>/config.json (pure path join).
-func ConfigFilePath(configDir string) string {
-	return filepath.Join(configDir, "config.json")
-}
-
-// ---------------------------------------------------------------------------
-// Executable resolution (no hardcoded paths)
-// ---------------------------------------------------------------------------
-
-// resolveExe returns exePath cleaned to an absolute path, or the current
-// process executable when exePath is blank.
-func resolveExe(exePath string) (string, error) {
-	if strings.TrimSpace(exePath) == "" {
-		self, err := os.Executable()
-		if err != nil {
-			return "", fmt.Errorf("platform: locate executable: %w", err)
+// configDirForGOOS is the pure, injectable mapping used by ConfigDir and by
+// tests to assert per-OS behavior without switching GOOS. Empty appData/home
+// fall back to the configBase (the os.UserConfigDir value for that OS).
+func configDirForGOOS(goos, configBase, appData, home string) string {
+	switch goos {
+	case "windows":
+		if strings.TrimSpace(appData) != "" {
+			return filepath.Join(appData, "nexus")
 		}
-		return filepath.Clean(self), nil
+		return filepath.Join(configBase, "nexus")
+	case "darwin":
+		if strings.TrimSpace(home) != "" {
+			return filepath.Join(home, "Library", "Application Support", "nexus")
+		}
+		return filepath.Join(configBase, "nexus")
+	default: // linux and other unix-likes: honor XDG layout via configBase.
+		if strings.TrimSpace(configBase) != "" {
+			return filepath.Join(configBase, "nexus")
+		}
+		if strings.TrimSpace(home) != "" {
+			return filepath.Join(home, ".config", "nexus")
+		}
+		return filepath.Join(".config", "nexus")
 	}
-	abs, err := filepath.Abs(exePath)
-	if err != nil {
-		return "", fmt.Errorf("platform: resolve executable path: %w", err)
+}
+
+// cacheDirForGOOS mirrors configDirForGOOS for the cache location.
+func cacheDirForGOOS(goos, cacheBase, configBase, home string) string {
+	if strings.TrimSpace(cacheBase) != "" {
+		return filepath.Join(cacheBase, "nexus")
 	}
-	return filepath.Clean(abs), nil
+	// Fallback keeps a single root: <config>/cache.
+	return filepath.Join(configDirForGOOS(goos, configBase, "", home), "cache")
 }
 
 // ---------------------------------------------------------------------------
-// Pure service-definition builders (cross-platform, unit-tested)
+// Project roots.
 // ---------------------------------------------------------------------------
 
-// xmlEscape escapes a string for embedding in launchd plist XML.
-func xmlEscape(s string) string {
-	r := strings.NewReplacer(
-		"&", "&amp;",
-		"<", "&lt;",
-		">", "&gt;",
-		`"`, "&quot;",
-		"'", "&apos;",
-	)
-	return r.Replace(s)
+// ProjectRoots returns the directories the daemon scans for projects. It is
+// configuration, not code: NEXUS_PROJECT_ROOTS (os.PathList-separated) wins;
+// otherwise the user's home directory is the single default root. Never
+// returns hardcoded drive letters — callers must pass roots explicitly on
+// machines where the home dir is wrong.
+func ProjectRoots() []string {
+	if raw := strings.TrimSpace(os.Getenv("NEXUS_PROJECT_ROOTS")); raw != "" {
+		var roots []string
+		for _, p := range filepath.SplitList(raw) {
+			if p = strings.TrimSpace(p); p != "" {
+				roots = append(roots, p)
+			}
+		}
+		if len(roots) > 0 {
+			return roots
+		}
+	}
+	if home, err := userHomeDirFunc(); err == nil && strings.TrimSpace(home) != "" {
+		return []string{home}
+	}
+	return nil
 }
 
-// quoteArg quotes a single command-line argument when it contains
-// whitespace or double quotes (used for schtasks /TR and systemd
-// ExecStart, neither of which runs through a shell).
-func quoteArg(a string) string {
-	if a == "" {
+// ---------------------------------------------------------------------------
+// Service definition renderers (pure — identical output on every GOOS so
+// cross-compile tests stay green).
+// ---------------------------------------------------------------------------
+
+// quoteArg renders one argv element for systemd ExecStart / schtasks /TR.
+// Elements with whitespace or quotes are double-quoted with interior quotes
+// and backslashes escaped.
+func quoteArg(s string) string {
+	if s == "" {
 		return `""`
 	}
-	if !strings.ContainsAny(a, " \t\"") {
-		return a
+	if !strings.ContainsAny(s, " \t\"'") {
+		return s
 	}
-	return `"` + strings.ReplaceAll(a, `"`, `\"`) + `"`
+	r := strings.ReplaceAll(s, `\`, `\\`)
+	r = strings.ReplaceAll(r, `"`, `\"`)
+	return `"` + r + `"`
 }
 
-// commandLine joins an executable path and args into a shell-free command
-// line with quoting applied per argument.
-func commandLine(exePath string, args []string) string {
+// execCommandLine joins executable+args into a single command line for
+// ExecStart= and schtasks /TR.
+func execCommandLine(executable string, args []string) string {
 	parts := make([]string, 0, len(args)+1)
-	parts = append(parts, quoteArg(exePath))
+	parts = append(parts, quoteArg(executable))
 	for _, a := range args {
 		parts = append(parts, quoteArg(a))
 	}
 	return strings.Join(parts, " ")
 }
 
-// WindowsTaskCommand builds the schtasks /TR command string that launches
-// the daemon (pure; the schtasks invocation itself lives in windows.go).
-func WindowsTaskCommand(exePath string, args []string) string {
-	return commandLine(exePath, args)
+// RenderSystemdUnit renders a systemd --user unit that starts the daemon on
+// login (WantedBy=default.target). Contains an ExecStart= line with the full
+// command. The caller writes it to
+// ~/.config/systemd/user/nexus-daemon.service.
+func RenderSystemdUnit(description, executable string, args []string) string {
+	if strings.TrimSpace(description) == "" {
+		description = "Nexus workspace daemon"
+	}
+	var b strings.Builder
+	b.WriteString("[Unit]\n")
+	fmt.Fprintf(&b, "Description=%s\n", description)
+	b.WriteString("After=network-online.target\n")
+	b.WriteString("Wants=network-online.target\n")
+	b.WriteString("\n[Service]\n")
+	b.WriteString("Type=simple\n")
+	fmt.Fprintf(&b, "ExecStart=%s\n", execCommandLine(executable, args))
+	b.WriteString("Restart=on-failure\n")
+	b.WriteString("RestartSec=5s\n")
+	b.WriteString("\n[Install]\n")
+	b.WriteString("WantedBy=default.target\n")
+	return b.String()
 }
 
-// SchtasksCreateArgs builds the `schtasks /Create` argument vector for a
-// logon-triggered task (pure; executed by windows.go).
-func SchtasksCreateArgs(taskName, command string) []string {
+// RenderLaunchdPlist renders a launchd plist that starts the daemon at login
+// (RunAtLoad + KeepAlive). ProgramArguments carries executable+args verbatim
+// as an array so no shell quoting is involved; the executable path is always
+// present in the output.
+func RenderLaunchdPlist(label, executable string, args []string) string {
+	if strings.TrimSpace(label) == "" {
+		label = LaunchdLabel
+	}
+	var b strings.Builder
+	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
+	b.WriteString("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
+	b.WriteString("<plist version=\"1.0\">\n<dict>\n")
+	fmt.Fprintf(&b, "\t<key>Label</key>\n\t<string>%s</string>\n", plistEscape(label))
+	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n")
+	fmt.Fprintf(&b, "\t\t<string>%s</string>\n", plistEscape(executable))
+	for _, a := range args {
+		fmt.Fprintf(&b, "\t\t<string>%s</string>\n", plistEscape(a))
+	}
+	b.WriteString("\t</array>\n")
+	b.WriteString("\t<key>RunAtLoad</key>\n\t<true/>\n")
+	b.WriteString("\t<key>KeepAlive</key>\n\t<true/>\n")
+	b.WriteString("</dict>\n</plist>\n")
+	return b.String()
+}
+
+// plistEscape escapes the five XML special chars for plist <string> bodies.
+func plistEscape(s string) string {
+	r := strings.ReplaceAll(s, "&", "&amp;")
+	r = strings.ReplaceAll(r, "<", "&lt;")
+	r = strings.ReplaceAll(r, ">", "&gt;")
+	r = strings.ReplaceAll(r, `"`, "&quot;")
+	return r
+}
+
+// RenderSchtasksCreateArgs builds the `schtasks /Create` argv for an
+// ONLOGON task. Kept pure so the quoting is unit-testable on any GOOS; the
+// windows backend executes it.
+func RenderSchtasksCreateArgs(taskName, executable string, args []string) []string {
 	return []string{
 		"/Create",
 		"/TN", taskName,
-		"/TR", command,
+		"/TR", execCommandLine(executable, args),
 		"/SC", "ONLOGON",
+		"/RL", "HIGHEST",
 		"/F",
 	}
 }
 
-// SchtasksDeleteArgs builds the `schtasks /Delete` argument vector (pure).
-func SchtasksDeleteArgs(taskName string) []string {
-	return []string{"/Delete", "/TN", taskName, "/F"}
-}
+// ---------------------------------------------------------------------------
+// Backend registry + CLI hooks.
+// ---------------------------------------------------------------------------
 
-// SchtasksQueryArgs builds the `schtasks /Query` argument vector used by
-// Status (pure).
-func SchtasksQueryArgs(taskName string) []string {
-	return []string{"/Query", "/TN", taskName, "/FO", "LIST", "/V"}
-}
-
-// ParseSchtasksStatus maps `schtasks /Query /FO LIST` output to a Status.
-// Missing-task output (matches "could not be found" / "cannot find")
-// maps to StatusNotInstalled with ok=true. Unrecognized output returns
-// ok=false so the caller can surface StatusUnknown.
-func ParseSchtasksStatus(output string) (Status, bool) {
-	lower := strings.ToLower(output)
-	if strings.Contains(lower, "could not be found") ||
-		strings.Contains(lower, "cannot find") ||
-		strings.Contains(lower, "the system cannot find") {
-		return StatusNotInstalled, true
+// Current returns the Service backend for runtime.GOOS, or an error on
+// unsupported platforms. Backends are registered by the build-tagged files.
+func Current() (Service, error) {
+	if factory, ok := backends[runtime.GOOS]; ok {
+		return factory(), nil
 	}
-	for _, line := range strings.Split(output, "\n") {
-		name, value, found := strings.Cut(strings.TrimSpace(line), ":")
-		if !found {
-			continue
+	return nil, fmt.Errorf("platform: unsupported GOOS %q", runtime.GOOS)
+}
+
+var backends = map[string]func() Service{}
+
+// registerBackend is called from init() in the build-tagged backend files.
+func registerBackend(goos string, factory func() Service) {
+	backends[goos] = factory
+}
+
+// defaultExecutable resolves the daemon binary for Install when the caller
+// passes an empty executable: NEXUS_DAEMON_BIN wins, else the current
+// process binary.
+func defaultExecutable() (string, error) {
+	if bin := strings.TrimSpace(os.Getenv("NEXUS_DAEMON_BIN")); bin != "" {
+		return bin, nil
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		return "", fmt.Errorf("platform: resolve daemon binary: %w", err)
+	}
+	return exe, nil
+}
+
+// Install is the `nexus daemon install` hook: registers the daemon service
+// for executable+args (empty executable resolves via NEXUS_DAEMON_BIN or the
+// current binary) and enables start-on-login on the current OS.
+func Install(executable string, args []string) error {
+	if strings.TrimSpace(executable) == "" {
+		var err error
+		executable, err = defaultExecutable()
+		if err != nil {
+			return err
 		}
-		if !strings.EqualFold(strings.TrimSpace(name), "status") {
-			continue
-		}
-		switch strings.ToLower(strings.TrimSpace(value)) {
-		case "running":
-			return StatusRunning, true
-		case "ready", "disabled":
-			return StatusStopped, true
-		}
 	}
-	return StatusUnknown, false
+	svc, err := Current()
+	if err != nil {
+		return err
+	}
+	return svc.Install(executable, args)
 }
 
-// LaunchdPlist renders the launchd agent plist that starts the daemon at
-// login and keeps it alive (pure; written to
-// ~/Library/LaunchAgents/<label>.plist by darwin.go).
-func LaunchdPlist(label, exePath string, args []string) string {
-	programArgs := make([]string, 0, len(args)+1)
-	programArgs = append(programArgs, "    <string>"+xmlEscape(exePath)+"</string>")
-	for _, a := range args {
-		programArgs = append(programArgs, "    <string>"+xmlEscape(a)+"</string>")
+// Uninstall is the `nexus daemon uninstall` hook: stops the daemon and
+// removes the OS service definition on the current OS.
+func Uninstall() error {
+	svc, err := Current()
+	if err != nil {
+		return err
 	}
-	return `<?xml version="1.0" encoding="UTF-8"?>` + "\n" +
-		`<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">` + "\n" +
-		`<plist version="1.0">` + "\n" +
-		`<dict>` + "\n" +
-		`  <key>Label</key>` + "\n" +
-		`  <string>` + xmlEscape(label) + `</string>` + "\n" +
-		`  <key>ProgramArguments</key>` + "\n" +
-		`  <array>` + "\n" +
-		strings.Join(programArgs, "\n") + "\n" +
-		`  </array>` + "\n" +
-		`  <key>RunAtLoad</key>` + "\n" +
-		`  <true/>` + "\n" +
-		`  <key>KeepAlive</key>` + "\n" +
-		`  <true/>` + "\n" +
-		`</dict>` + "\n" +
-		`</plist>` + "\n"
+	return svc.Uninstall()
 }
 
-// SystemdUnit renders the systemd --user unit that starts the daemon at
-// login (pure; written to ~/.config/systemd/user/nexus.service by
-// linux.go and enabled via `systemctl --user enable --now`).
-func SystemdUnit(description, exePath string, args []string) string {
-	if strings.TrimSpace(description) == "" {
-		description = "nexus workspace daemon"
+// Status reports the daemon service state on the current OS.
+func Status() (ServiceStatus, error) {
+	svc, err := Current()
+	if err != nil {
+		return StatusUnknown, err
 	}
-	return "[Unit]\n" +
-		"Description=" + description + "\n" +
-		"After=network-online.target\n" +
-		"\n" +
-		"[Service]\n" +
-		"Type=simple\n" +
-		"ExecStart=" + commandLine(exePath, args) + "\n" +
-		"Restart=always\n" +
-		"RestartSec=5\n" +
-		"\n" +
-		"[Install]\n" +
-		"WantedBy=default.target\n"
+	return svc.Status()
 }

@@ -1,636 +1,492 @@
-// Tests for the WebSocket hub (issue #13, plan §§3.2, 3.4). All DB-free:
-// hub tests drive Hub synchronously through Client.Send channels (fake
-// conns, no network); handler tests swap wsUpgrader for a stub. Clocks are
-// controllable, so presence transitions run in milliseconds and fan-out is
-// asserted sub-second.
 package server
 
+// Hub fan-out tests (nexus issue #13): project/session routing, presence,
+// typing, backpressure, and the HTTP upgrade/auth gate. All hub tests run
+// in-memory (no sockets); only the upgrade-gate tests touch HTTP.
+
 import (
+	"bufio"
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
-	"errors"
+	"io"
+	"net"
 	"net/http"
-	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
+
+	"central-memory/internal/store"
 )
 
-// ---------------------------------------------------------------------------
-// Fakes
-// ---------------------------------------------------------------------------
-
-// fakeWSConn is a channel-backed WSConn: tests push inbound frames and pull
-// outbound frames without touching the network.
-type fakeWSConn struct {
-	mu       sync.Mutex
-	inbound  chan []byte
-	outbound chan []byte
-	closed   chan struct{}
-	once     sync.Once
-	pong     func()
-	pongs    int
+func newHubClient(h *Hub, user, project, session string) *Client {
+	c := &Client{ID: newWSClientID(), UserID: user, ProjectID: project, SessionID: session}
+	h.Add(c)
+	return c
 }
 
-func newFakeWSConn() *fakeWSConn {
-	return &fakeWSConn{
-		inbound:  make(chan []byte, 16),
-		outbound: make(chan []byte, 64),
-		closed:   make(chan struct{}),
-	}
-}
-
-func (f *fakeWSConn) ReadText() ([]byte, error) {
-	select {
-	case m := <-f.inbound:
-		return m, nil
-	case <-f.closed:
-		return nil, ErrWSClosed
-	}
-}
-
-func (f *fakeWSConn) WriteText(p []byte) error {
-	cp := append([]byte(nil), p...)
-	select {
-	case f.outbound <- cp:
-		return nil
-	case <-f.closed:
-		return errors.New("closed")
-	}
-}
-
-func (f *fakeWSConn) Ping() error { return nil }
-
-func (f *fakeWSConn) SetReadDeadline(time.Time) error  { return nil }
-func (f *fakeWSConn) SetWriteDeadline(time.Time) error { return nil }
-
-func (f *fakeWSConn) SetPongHandler(h func()) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.pong = h
-}
-
-func (f *fakeWSConn) firePong() {
-	f.mu.Lock()
-	h := f.pong
-	f.pongs++
-	f.mu.Unlock()
-	if h != nil {
-		h()
-	}
-}
-
-func (f *fakeWSConn) Close() error {
-	f.once.Do(func() { close(f.closed) })
-	return nil
-}
-
-// stubUpgrader captures created conns so handler tests can drive and close
-// the server side of the connection.
-type stubUpgrader struct {
-	mu    sync.Mutex
-	conns []*fakeWSConn
-}
-
-func (s *stubUpgrader) Upgrade(w http.ResponseWriter, r *http.Request) (WSConn, error) {
-	c := newFakeWSConn()
-	s.mu.Lock()
-	s.conns = append(s.conns, c)
-	s.mu.Unlock()
-	return c, nil
-}
-
-func (s *stubUpgrader) last() *fakeWSConn {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.conns) == 0 {
-		return nil
-	}
-	return s.conns[len(s.conns)-1]
-}
-
-func (s *stubUpgrader) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return len(s.conns)
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-func readOne(t *testing.T, c *Client, d time.Duration) ServerMessage {
+func readMsg(t *testing.T, c *Client) WSMessage {
 	t.Helper()
 	select {
 	case raw := <-c.Send:
-		var m ServerMessage
+		var m WSMessage
 		if err := json.Unmarshal(raw, &m); err != nil {
-			t.Fatalf("decode server frame: %v (%s)", err, raw)
+			t.Fatalf("decode hub message: %v", err)
 		}
 		return m
-	case <-time.After(d):
-		t.Fatalf("timeout waiting for frame for client %s", c.ID)
-		return ServerMessage{}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for hub message")
+		return WSMessage{}
 	}
 }
 
-func drainClient(c *Client) {
-	for {
-		select {
-		case <-c.Send:
-		default:
-			return
-		}
-	}
-}
-
-func expectSilent(t *testing.T, c *Client, d time.Duration) {
+func mustSubscribe(t *testing.T, h *Hub, c *Client, project, session string) {
 	t.Helper()
-	select {
-	case raw := <-c.Send:
-		t.Fatalf("unexpected frame for client %s: %s", c.ID, raw)
-	case <-time.After(d):
-	}
-}
-
-func waitFor(t *testing.T, d time.Duration, cond func() bool, msg string) {
-	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !cond() {
-		t.Fatalf("timeout waiting: %s", msg)
-	}
-}
-
-func findChange(changes []PresenceChange, user, to string) bool {
-	for _, ch := range changes {
-		if ch.UserID == user && ch.To == to {
-			return true
-		}
-	}
-	return false
-}
-
-// ---------------------------------------------------------------------------
-// Fan-out (§3.2 protocol)
-// ---------------------------------------------------------------------------
-
-// TestHubFanoutSubSecond: two subscribers in one project/session both get an
-// event in <1s; a client in another project gets nothing.
-func TestHubFanoutSubSecond(t *testing.T) {
-	hub := NewHub(HubOptions{})
-	a := hub.NewClient("alice", "p1", "s1", nil)
-	b := hub.NewClient("bob", "p1", "s1", nil)
-	other := hub.NewClient("mallory", "p2", "s1", nil)
-	hub.Register(a)
-	hub.Register(b)
-	hub.Register(other)
-	drainClient(a)
-	drainClient(b)
-	drainClient(other)
-
-	start := time.Now()
-	n, err := hub.PublishEvent("p1", "s1", map[string]any{
-		"event_type": "MESSAGE_SENT", "payload": map[string]string{"text": "hi"},
-	})
-	if err != nil {
-		t.Fatalf("publish: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("receivers = %d, want 2", n)
-	}
-	ma := readOne(t, a, 500*time.Millisecond)
-	mb := readOne(t, b, 500*time.Millisecond)
-	if time.Since(start) > time.Second {
-		t.Fatalf("fan-out took %v, want <1s", time.Since(start))
-	}
-	for i, m := range []ServerMessage{ma, mb} {
-		if m.Type != MsgEvent {
-			t.Fatalf("frame[%d].type = %q, want event", i, m.Type)
-		}
-		var evt struct {
-			EventType string `json:"event_type"`
-		}
-		if err := json.Unmarshal(m.Event, &evt); err != nil || evt.EventType != "MESSAGE_SENT" {
-			t.Fatalf("frame[%d].event = %s, want MESSAGE_SENT", i, m.Event)
-		}
-	}
-	expectSilent(t, other, 50*time.Millisecond)
-}
-
-// TestHubSessionIsolation: session-scoped events reach only the matching
-// session (+ project-level watchers); project-wide events reach everyone in
-// the project.
-func TestHubSessionIsolation(t *testing.T) {
-	hub := NewHub(HubOptions{})
-	a := hub.NewClient("alice", "p1", "s1", nil)
-	b := hub.NewClient("bob", "p1", "s2", nil)
-	watch := hub.NewClient("dash", "p1", "", nil) // project-level watcher
-	hub.Register(a)
-	hub.Register(b)
-	hub.Register(watch)
-	drainClient(a)
-	drainClient(b)
-	drainClient(watch)
-
-	if n, err := hub.PublishEvent("p1", "s1", map[string]string{"m": "1"}); err != nil || n != 2 {
-		t.Fatalf("session publish: n=%d err=%v, want n=2", n, err)
-	}
-	if m := readOne(t, a, 300*time.Millisecond); m.Type != MsgEvent {
-		t.Fatalf("a got %q, want event", m.Type)
-	}
-	if m := readOne(t, watch, 300*time.Millisecond); m.Type != MsgEvent {
-		t.Fatalf("watcher got %q, want event", m.Type)
-	}
-	expectSilent(t, b, 50*time.Millisecond)
-
-	if n, err := hub.PublishEvent("p1", "", map[string]string{"m": "wide"}); err != nil || n != 3 {
-		t.Fatalf("project-wide publish: n=%d err=%v, want n=3", n, err)
-	}
-	for _, c := range []*Client{a, b, watch} {
-		if m := readOne(t, c, 300*time.Millisecond); m.Type != MsgEvent {
-			t.Fatalf("%s got %q for project-wide, want event", c.ID, m.Type)
-		}
-	}
-}
-
-// TestHubPublishMemoryEpisode covers memory_update/episode_update fan-out
-// plus action-vocabulary validation.
-func TestHubPublishMemoryEpisode(t *testing.T) {
-	hub := NewHub(HubOptions{})
-	a := hub.NewClient("alice", "p1", "s1", nil)
-	hub.Register(a)
-	drainClient(a)
-
-	if _, err := hub.PublishMemoryUpdate("p1", "s1", map[string]string{"key": "k"}, "bogus"); err == nil {
-		t.Fatal("bad memory action accepted")
-	}
-	if _, err := hub.PublishEpisodeUpdate("p1", "s1", map[string]string{"t": "e"}, "bogus"); err == nil {
-		t.Fatal("bad episode action accepted")
-	}
-	if _, err := hub.PublishEvent("", "s1", map[string]string{"m": "x"}); err == nil {
-		t.Fatal("empty project publish accepted")
-	}
-
-	n, err := hub.PublishMemoryUpdate("p1", "s1", map[string]string{"key": "testing/x"}, "confirmed")
-	if err != nil || n != 1 {
-		t.Fatalf("memory publish: n=%d err=%v", n, err)
-	}
-	m := readOne(t, a, 300*time.Millisecond)
-	if m.Type != MsgMemoryUpdate || m.Action != "confirmed" {
-		t.Fatalf("got %+v, want memory_update/confirmed", m)
-	}
-	var item map[string]string
-	if err := json.Unmarshal(m.Item, &item); err != nil || item["key"] != "testing/x" {
-		t.Fatalf("item = %s", m.Item)
-	}
-
-	n, err = hub.PublishEpisodeUpdate("p1", "", map[string]string{"title": "bug"}, "opened")
-	if err != nil || n != 1 {
-		t.Fatalf("episode publish: n=%d err=%v", n, err)
-	}
-	m = readOne(t, a, 300*time.Millisecond)
-	if m.Type != MsgEpisodeUpdate || m.Action != "opened" {
-		t.Fatalf("got %+v, want episode_update/opened", m)
-	}
-}
-
-// TestHubSlowClientDrop: a client that never drains sheds load (bounded
-// Send) and is evicted past the drop budget; healthy fan-out is unaffected.
-func TestHubSlowClientDrop(t *testing.T) {
-	hub := NewHub(HubOptions{SendBufferSize: 1, MaxDropsBeforeEvict: 4})
-	slow := hub.NewClient("slow", "p1", "s1", nil)
-	fast := hub.NewClient("fast", "p1", "s1", nil)
-	hub.Register(slow)
-	hub.Register(fast)
-	// Register's hello fills slow's size-1 buffer; fast drains freely.
-	drainClient(fast)
-
-	for i := 0; i < 6; i++ {
-		if _, err := hub.PublishEvent("p1", "s1", map[string]int{"n": i}); err != nil {
-			t.Fatalf("publish %d: %v", i, err)
-		}
-		// Fast keeps up; slow never reads.
-		for {
-			select {
-			case <-fast.Send:
-			default:
-				goto drained
-			}
-		}
-	drained:
-	}
-	if got := slow.Dropped(); got < 4 {
-		t.Fatalf("slow dropped = %d, want >= 4", got)
-	}
-	if n := len(slow.Send); n > 1 {
-		t.Fatalf("slow outbox len = %d, want <= cap 1", n)
-	}
-	waitFor(t, time.Second, func() bool { return hub.ClientCount() == 1 }, "slow client evicted")
-	if hub.ClientCount() != 1 {
-		t.Fatalf("count = %d, want 1 (fast survives)", hub.ClientCount())
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Presence (§3.4)
-// ---------------------------------------------------------------------------
-
-// TestPresenceTransitions: online → typing → (decay) online → idle →
-// offline, with every step announced to peers and visible in snapshots.
-func TestPresenceTransitions(t *testing.T) {
-	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	now := base
-	hub := NewHub(HubOptions{
-		Now:           func() time.Time { return now },
-		IdleAfter:     50 * time.Millisecond,
-		TypingTimeout: 20 * time.Millisecond,
-		OfflineAfter:  100 * time.Millisecond,
-	})
-	a := hub.NewClient("alice", "p1", "s1", nil)
-	b := hub.NewClient("bob", "p1", "s1", nil)
-	hub.Register(a)
-	drainClient(a)
-	hub.Register(b)
-	drainClient(b)
-
-	// Bob's register announces online to Alice.
-	m := readOne(t, a, 300*time.Millisecond)
-	if m.Type != MsgPresence || m.UserID != "bob" || m.Status != PresenceOnline {
-		t.Fatalf("hello = %+v, want presence/bob/online", m)
-	}
-	if got := hub.PresenceSnapshot("p1", "s1")["bob"]; got != PresenceOnline {
-		t.Fatalf("snapshot bob = %q, want online", got)
-	}
-
-	// Bob types → Alice sees typing.
-	if err := hub.HandleClientMessage(b, []byte(`{"type":"presence","status":"typing"}`)); err != nil {
-		t.Fatalf("typing: %v", err)
-	}
-	m = readOne(t, a, 300*time.Millisecond)
-	if m.Status != PresenceTyping || m.UserID != "bob" {
-		t.Fatalf("typing frame = %+v", m)
-	}
-
-	// Typing decays to online past TypingTimeout.
-	now = base.Add(30 * time.Millisecond)
-	changes := hub.ReapStale(now)
-	if !findChange(changes, "bob", PresenceOnline) {
-		t.Fatalf("no typing→online decay in %+v", changes)
-	}
-	m = readOne(t, a, 300*time.Millisecond)
-	if m.Status != PresenceOnline {
-		t.Fatalf("decay frame = %+v, want online", m)
-	}
-
-	// Silence past IdleAfter → idle.
-	now = base.Add(90 * time.Millisecond)
-	changes = hub.ReapStale(now)
-	if !findChange(changes, "bob", PresenceIdle) {
-		t.Fatalf("no online→idle in %+v", changes)
-	}
-	// Alice also idles here; skip to Bob's frame.
-	deadline := time.Now().Add(300 * time.Millisecond)
-	for {
-		m = readOne(t, a, time.Until(deadline))
-		if m.UserID == "bob" {
-			break
-		}
-	}
-	if m.Status != PresenceIdle {
-		t.Fatalf("idle frame = %+v", m)
-	}
-	if got := hub.PresenceSnapshot("p1", "s1")["bob"]; got != PresenceIdle {
-		t.Fatalf("snapshot bob = %q, want idle", got)
-	}
-
-	// Keep Alice alive so only Bob is reaped below: her action refreshes
-	// lastActive (and broadcasts one event frame to drain).
-	if err := hub.HandleClientMessage(a, []byte(`{"type":"action","event_type":"MESSAGE_SENT","payload":{"text":"still here"}}`)); err != nil {
-		t.Fatalf("alice action: %v", err)
-	}
-	drainClient(a)
-	drainClient(b)
-
-	// Silence past OfflineAfter → evicted + offline announced.
-	now = base.Add(120 * time.Millisecond)
-	changes = hub.ReapStale(now)
-	if !findChange(changes, "bob", PresenceOffline) {
-		t.Fatalf("no →offline in %+v", changes)
-	}
-	m = readOne(t, a, 300*time.Millisecond)
-	if m.UserID != "bob" || m.Status != PresenceOffline {
-		t.Fatalf("offline frame = %+v", m)
-	}
-	if hub.ClientCount() != 1 {
-		t.Fatalf("count = %d, want 1 (alice survives)", hub.ClientCount())
-	}
-	if _, ok := hub.PresenceSnapshot("p1", "s1")["bob"]; ok {
-		t.Fatal("bob still in snapshot after eviction")
-	}
-}
-
-// TestPresenceHeartbeatRevival: an idle client revives to online on
-// heartbeat (pong path) and the revival is announced.
-func TestPresenceHeartbeatRevival(t *testing.T) {
-	base := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	now := base
-	hub := NewHub(HubOptions{
-		Now:           func() time.Time { return now },
-		IdleAfter:     50 * time.Millisecond,
-		TypingTimeout: 20 * time.Millisecond,
-		OfflineAfter:  10 * time.Second,
-	})
-	a := hub.NewClient("alice", "p1", "s1", nil)
-	b := hub.NewClient("bob", "p1", "s1", nil)
-	hub.Register(a)
-	hub.Register(b)
-	drainClient(a)
-	drainClient(b)
-
-	now = base.Add(100 * time.Millisecond) // past IdleAfter (50ms), well below OfflineAfter (10s)
-	changes := hub.ReapStale(now)
-	if !findChange(changes, "bob", PresenceIdle) {
-		t.Fatalf("bob did not idle: %+v", changes)
-	}
-	drainClient(a)
-
-	hub.NoteHeartbeat("bob", "p1", "s1")
-	if got := hub.PresenceSnapshot("p1", "s1")["bob"]; got != PresenceOnline {
-		t.Fatalf("snapshot bob = %q, want online after heartbeat", got)
-	}
-	m := readOne(t, a, 300*time.Millisecond)
-	if m.UserID != "bob" || m.Status != PresenceOnline {
-		t.Fatalf("revival frame = %+v", m)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Client message validation
-// ---------------------------------------------------------------------------
-
-// TestWSClientMessageValidation: malformed/unknown/underspecified frames are
-// rejected (→ "error" reply upstream); well-formed ones apply.
-func TestWSClientMessageValidation(t *testing.T) {
-	hub := NewHub(HubOptions{})
-	c := hub.NewClient("alice", "", "", nil)
-	hub.Register(c)
-
-	bad := []struct {
-		name string
-		raw  string
-		want string
-	}{
-		{"not json", `{`, "invalid JSON"},
-		{"unknown type", `{"type":"teleport"}`, "unknown message type"},
-		{"empty type", `{}`, "unknown message type"},
-		{"subscribe w/o project", `{"type":"subscribe"}`, "subscribe requires project_id"},
-		{"presence w/o subscribe", `{"type":"presence","status":"typing"}`, "subscribe before sending presence"},
-		{"action w/o subscribe", `{"type":"action","event_type":"MESSAGE_SENT"}`, "subscribe before sending actions"},
-	}
-	for _, tc := range bad {
-		t.Run(tc.name, func(t *testing.T) {
-			err := hub.HandleClientMessage(c, []byte(tc.raw))
-			if err == nil {
-				t.Fatal("accepted, want error")
-			}
-			if got := string(NewErrorMessage(err.Error())); got == "" {
-				t.Fatal("error frame is empty")
-			}
-		})
-	}
-
-	// Subscribe, then presence/action-scoped rejections.
-	if err := hub.HandleClientMessage(c, []byte(`{"type":"subscribe","project_id":"p1","session_id":"s1"}`)); err != nil {
+	raw, _ := json.Marshal(WSMessage{Type: WSMsgSubscribe, ProjectID: project, SessionID: session})
+	if err := h.HandleClientMessage(c.ID, raw); err != nil {
 		t.Fatalf("subscribe: %v", err)
 	}
-	for _, tc := range []struct {
-		name string
-		raw  string
-	}{
-		{"bad presence", `{"type":"presence","status":"offline"}`},
-		{"action w/o type", `{"type":"action"}`},
-		{"action bad type", `{"type":"action","event_type":"NOPE"}`},
-		{"action bad json", `{"type":"action","event_type":"MESSAGE_SENT","payload":{"a":}}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := hub.HandleClientMessage(c, []byte(tc.raw)); err == nil {
-				t.Fatal("accepted, want error")
-			}
-		})
-	}
-
-	// Well-formed frames apply: presence flips status, action fans out.
-	if err := hub.HandleClientMessage(c, []byte(`{"type":"presence","status":"typing"}`)); err != nil {
-		t.Fatalf("presence: %v", err)
-	}
-	if got := c.Status(); got != PresenceTyping {
-		t.Fatalf("status = %q, want typing", got)
-	}
-	drainClient(c)
-	if err := hub.HandleClientMessage(c, []byte(`{"type":"action","event_type":"MESSAGE_SENT","payload":{"text":"hi"}}`)); err != nil {
-		t.Fatalf("action: %v", err)
-	}
-	found := false
-	for {
-		select {
-		case raw := <-c.Send:
-			var m ServerMessage
-			_ = json.Unmarshal(raw, &m)
-			if m.Type == MsgEvent {
-				found = true
-			}
-		default:
-			goto done
-		}
-	}
-done:
-	if !found {
-		t.Fatal("action did not fan out an event frame to the sender's scope")
+	ack := readMsg(t, c)
+	if ack.Type != WSMsgSubscribed {
+		t.Fatalf("want subscribed ack, got %+v", ack)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// Upgrade + JWT auth (stub transport)
-// ---------------------------------------------------------------------------
+// Alice sends an action; Bob (same session) receives it as an event.
+func TestHubSessionFanOut(t *testing.T) {
+	h := NewHub()
+	alice := newHubClient(h, "alice", "", "")
+	bob := newHubClient(h, "bob", "", "")
+	mustSubscribe(t, h, alice, "proj1", "sess1")
+	mustSubscribe(t, h, bob, "proj1", "sess1")
 
-// TestWSUpgradeAuth: /ws rejects missing/bad JWTs with 401, accepts both
-// the Authorization header and the ?token= browser fallback, registers the
-// client with its query subscription, and unregisters on disconnect.
-func TestWSUpgradeAuth(t *testing.T) {
-	h := newHarness(t)
-	h.srv.EnableWS()
-	h.srv.EnableWS() // idempotent: no panic, no duplicate pattern
+	raw, _ := json.Marshal(WSMessage{Type: WSMsgAction, EventType: "MESSAGE_SENT",
+		Payload: map[string]any{"text": "hello bob"}})
+	if err := h.HandleClientMessage(alice.ID, raw); err != nil {
+		t.Fatalf("action: %v", err)
+	}
+	// Bob gets the event; Alice (sender) does not get an echo.
+	ev := readMsg(t, bob)
+	if ev.Type != WSMsgEvent || ev.EventType != "MESSAGE_SENT" || ev.UserID != "alice" {
+		t.Fatalf("bob got %+v; want MESSAGE_SENT from alice", ev)
+	}
+	select {
+	case extra := <-alice.Send:
+		t.Fatalf("sender got unexpected echo: %s", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
 
-	old := wsUpgrader
-	defer func() { wsUpgrader = old }()
-	stub := &stubUpgrader{}
-	wsUpgrader = stub
-	hub := h.srv.Hub()
+// Project broadcast reaches session members; session broadcast skips
+// project-only subscribers; other projects get nothing.
+func TestHubProjectVsSessionRouting(t *testing.T) {
+	h := NewHub()
+	inSession := newHubClient(h, "s", "proj1", "sess1")
+	projOnly := newHubClient(h, "p", "proj1", "")
+	other := newHubClient(h, "o", "proj2", "")
+	_ = inSession
+	_ = projOnly
+	_ = other
+	// Drain the subscribe acks where used; here clients were pre-scoped, so
+	// no acks are pending.
 
-	serve := func(target string, header string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest("GET", target, nil)
-		if header != "" {
-			req.Header.Set("Authorization", header)
-		}
-		rec := httptest.NewRecorder()
-		h.srv.Handler().ServeHTTP(rec, req)
-		return rec
+	h.BroadcastToProject("proj1", WSMessage{Type: WSMsgMemoryUpdate, Action: "proposed"})
+	if m := readMsg(t, inSession); m.Type != WSMsgMemoryUpdate {
+		t.Fatalf("session member missed project broadcast: %+v", m)
+	}
+	if m := readMsg(t, projOnly); m.Type != WSMsgMemoryUpdate {
+		t.Fatalf("project subscriber missed project broadcast: %+v", m)
+	}
+	select {
+	case extra := <-other.Send:
+		t.Fatalf("other project got message: %s", extra)
+	case <-time.After(100 * time.Millisecond):
 	}
 
-	if rec := serve("/ws", ""); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("no token: status = %d, want 401", rec.Code)
+	h.BroadcastToSession("sess1", WSMessage{Type: WSMsgEpisodeUpdate, Action: "opened"})
+	if m := readMsg(t, inSession); m.Type != WSMsgEpisodeUpdate {
+		t.Fatalf("session member missed session broadcast: %+v", m)
 	}
-	if rec := serve("/ws?token=bogus", ""); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("bad token: status = %d, want 401", rec.Code)
+	select {
+	case extra := <-projOnly.Send:
+		t.Fatalf("project-only client got session message: %s", extra)
+	case <-time.After(100 * time.Millisecond):
 	}
-	if rec := serve("/ws", "Bearer bogus"); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("bad header token: status = %d, want 401", rec.Code)
+}
+
+func TestHubPresenceTyping(t *testing.T) {
+	h := NewHub()
+	alice := newHubClient(h, "alice", "proj1", "sess1")
+	bob := newHubClient(h, "bob", "proj1", "sess1")
+
+	raw, _ := json.Marshal(WSMessage{Type: WSMsgPresence, Status: PresenceTyping})
+	if err := h.HandleClientMessage(alice.ID, raw); err != nil {
+		t.Fatalf("typing: %v", err)
+	}
+	p := readMsg(t, bob)
+	if p.Type != WSMsgPresenceEvent || p.Status != PresenceTyping || p.UserID != "alice" {
+		t.Fatalf("bob got %+v; want typing presence for alice", p)
+	}
+	select {
+	case extra := <-alice.Send:
+		t.Fatalf("sender got own presence echo: %s", extra)
+	case <-time.After(100 * time.Millisecond):
 	}
 
-	// Query-token path (no Authorization header): the connection lives in
-	// the stub, so the handler blocks in its read loop — run it async.
+	// Unknown status → error reply to sender, no fan-out.
+	bad, _ := json.Marshal(WSMessage{Type: WSMsgPresence, Status: "invisible"})
+	if err := h.HandleClientMessage(alice.ID, bad); err == nil {
+		t.Fatal("expected unknown presence status to fail")
+	}
+	errReply := readMsg(t, alice)
+	if errReply.Type != WSMsgError {
+		t.Fatalf("want error reply, got %+v", errReply)
+	}
+	select {
+	case extra := <-bob.Send:
+		t.Fatalf("bob got fan-out for bad presence: %s", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// Slow consumers must not stall the hub: full buffers shed + count drops.
+func TestHubBackpressure(t *testing.T) {
+	h := NewHub()
+	fast := newHubClient(h, "fast", "proj1", "")
+	slow := newHubClient(h, "slow", "proj1", "")
+	// Fill slow's buffer to the brim.
+	for i := 0; i < SendBufferSize; i++ {
+		slow.Send <- []byte(`{"type":"fill"}`)
+	}
 	done := make(chan struct{})
 	go func() {
-		defer close(done)
-		serve("/ws?token="+h.token+"&project_id=p1&session_id=s1", "")
+		h.BroadcastToProject("proj1", WSMessage{Type: WSMsgEvent, EventType: "X"})
+		close(done)
 	}()
-	waitFor(t, time.Second, func() bool { return hub.ClientCount() == 1 }, "query-token client registered")
-	if stub.count() != 1 {
-		t.Fatalf("upgrades = %d, want 1", stub.count())
-	}
-	if got := hub.PresenceSnapshot("p1", "s1")["user-1"]; got != PresenceOnline {
-		t.Fatalf("snapshot user-1 = %q, want online", got)
-	}
-
-	// Header path works too.
-	done2 := make(chan struct{})
-	go func() {
-		defer close(done2)
-		serve("/ws?project_id=p1", "Bearer "+h.token)
-	}()
-	waitFor(t, time.Second, func() bool { return hub.ClientCount() == 2 }, "header client registered")
-
-	// Disconnects unregister (offline announced, pumps unwind).
-	stub.mu.Lock()
-	conns := append([]*fakeWSConn(nil), stub.conns...)
-	stub.mu.Unlock()
-	for _, c := range conns {
-		_ = c.Close()
-	}
-	waitFor(t, time.Second, func() bool { return hub.ClientCount() == 0 }, "clients unregistered")
 	select {
 	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("query-token handler did not return after close")
+	case <-time.After(2 * time.Second):
+		t.Fatal("broadcast blocked on slow client")
+	}
+	if got := h.Dropped(slow.ID); got != 1 {
+		t.Fatalf("slow client dropped = %d, want 1", got)
+	}
+	if got := h.Dropped(fast.ID); got != 0 {
+		t.Fatalf("fast client dropped = %d, want 0", got)
+	}
+}
+
+// SweepOffline marks stale clients offline; typing demotes to online.
+func TestHubSweepOffline(t *testing.T) {
+	now := time.Now()
+	h := &Hub{clients: make(map[string]*Client), now: func() time.Time { return now }}
+	stale := newHubClient(h, "stale", "proj1", "sess1")
+	watcher := newHubClient(h, "watcher", "proj1", "sess1")
+	stale.lastSeen = now.Add(-10 * time.Minute)
+
+	ids := h.SweepOffline(90 * time.Second)
+	if len(ids) != 1 || ids[0] != stale.ID {
+		t.Fatalf("swept = %v; want [%s]", ids, stale.ID)
+	}
+	p := readMsg(t, watcher)
+	if p.Type != WSMsgPresenceEvent || p.Status != PresenceOffline || p.UserID != "stale" {
+		t.Fatalf("watcher got %+v; want offline for stale", p)
+	}
+}
+
+// /ws requires auth and a real WebSocket upgrade.
+func TestWSUpgradeGate(t *testing.T) {
+	s := NewServer(store.NewMemStore())
+	s.AttachHub(NewHub())
+	token := loginAs(t, s, "alice")
+
+	// No token → 401.
+	rec := doJSON(t, s, http.MethodGet, "/ws", "", nil)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("no-token status = %d, want 401", rec.Code)
+	}
+	// Token but plain GET (no Upgrade headers) → 426.
+	r := doAuthedGet(t, s, token)
+	if r != http.StatusUpgradeRequired {
+		t.Fatalf("plain-GET status = %d, want 426", r)
+	}
+}
+
+// doAuthedGet performs an authenticated plain GET /ws (no upgrade headers).
+func doAuthedGet(t *testing.T, s *Server, token string) int {
+	t.Helper()
+	r, err := http.NewRequest(http.MethodGet, "/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := &captureWriter{header: http.Header{}}
+	s.ServeHTTP(w, r)
+	return w.code
+}
+
+type captureWriter struct {
+	header http.Header
+	code   int
+}
+
+func (w *captureWriter) Header() http.Header { return w.header }
+func (w *captureWriter) Write(b []byte) (int, error) {
+	if w.code == 0 {
+		w.code = http.StatusOK
+	}
+	return len(b), nil
+}
+func (w *captureWriter) WriteHeader(code int) { w.code = code }
+
+// --- RFC 6455 fragmentation tests (nexus issue #13 follow-up) ---------------
+
+var wsTestMask = [4]byte{0x01, 0x02, 0x03, 0x04}
+
+// encodeMaskedFrame builds one raw client→server frame (always masked).
+func encodeMaskedFrame(fin bool, op byte, payload []byte) []byte {
+	var out bytes.Buffer
+	b0 := op & 0x0F
+	if fin {
+		b0 |= 0x80
+	}
+	out.WriteByte(b0)
+	switch {
+	case len(payload) <= 125:
+		out.WriteByte(0x80 | byte(len(payload)))
+	case len(payload) <= 65535:
+		out.WriteByte(0x80 | 126)
+		_ = binary.Write(&out, binary.BigEndian, uint16(len(payload)))
+	default:
+		out.WriteByte(0x80 | 127)
+		_ = binary.Write(&out, binary.BigEndian, uint64(len(payload)))
+	}
+	out.Write(wsTestMask[:])
+	masked := make([]byte, len(payload))
+	for i := range payload {
+		masked[i] = payload[i] ^ wsTestMask[i%4]
+	}
+	out.Write(masked)
+	return out.Bytes()
+}
+
+// writeClientFrame writes one masked client frame onto w.
+func writeClientFrame(t *testing.T, w io.Writer, fin bool, op byte, payload []byte) {
+	t.Helper()
+	if _, err := w.Write(encodeMaskedFrame(fin, op, payload)); err != nil {
+		t.Fatalf("write client frame: %v", err)
+	}
+}
+
+// readServerFrame reads one unmasked server→client frame.
+func readServerFrame(t *testing.T, r io.Reader) (fin bool, op byte, payload []byte) {
+	t.Helper()
+	hdr := make([]byte, 2)
+	if _, err := io.ReadFull(r, hdr); err != nil {
+		t.Fatalf("read server frame header: %v", err)
+	}
+	fin = hdr[0]&0x80 != 0
+	op = hdr[0] & 0x0F
+	length := int64(hdr[1] & 0x7F)
+	switch length {
+	case 126:
+		var ext [2]byte
+		if _, err := io.ReadFull(r, ext[:]); err != nil {
+			t.Fatalf("read server frame ext16: %v", err)
+		}
+		length = int64(binary.BigEndian.Uint16(ext[:]))
+	case 127:
+		var ext [8]byte
+		if _, err := io.ReadFull(r, ext[:]); err != nil {
+			t.Fatalf("read server frame ext64: %v", err)
+		}
+		length = int64(binary.BigEndian.Uint64(ext[:]))
+	}
+	if hdr[1]&0x80 != 0 {
+		t.Fatal("server frames must not be masked")
+	}
+	payload = make([]byte, length)
+	if _, err := io.ReadFull(r, payload); err != nil {
+		t.Fatalf("read server frame payload: %v", err)
+	}
+	return fin, op, payload
+}
+
+// startWSReadLoop runs wsReadLoop over a net.Pipe; returns the test-side
+// conn (test writes client frames here) and a done channel closed when the
+// loop exits. Caller must close testConn at the end to stop the loop.
+func startWSReadLoop(h *Hub, c *Client) (testConn net.Conn, done chan struct{}) {
+	serverConn, clientConn := net.Pipe()
+	rw := bufio.NewReadWriter(bufio.NewReader(serverConn), bufio.NewWriter(serverConn))
+	done = make(chan struct{})
+	go func() {
+		defer close(done)
+		wsReadLoop(serverConn, rw, h, c)
+	}()
+	return clientConn, done
+}
+
+func drainSend(c *Client) []byte {
+	select {
+	case raw := <-c.Send:
+		return raw
+	default:
+		return nil
+	}
+}
+
+// wsReadFrame must surface the FIN bit (hdr[0] & 0x80), not just the opcode.
+func TestWSReadFrameFINBit(t *testing.T) {
+	raw := encodeMaskedFrame(false, wsOpText, []byte("hi"))
+	rw := bufio.NewReadWriter(bufio.NewReader(bytes.NewReader(raw)), bufio.NewWriter(io.Discard))
+	op, fin, payload, err := wsReadFrame(rw)
+	if err != nil {
+		t.Fatalf("wsReadFrame FIN=0: %v", err)
+	}
+	if op != wsOpText || fin {
+		t.Fatalf("FIN=0 frame: op=%#x fin=%v, want op=text fin=false", op, fin)
+	}
+	if string(payload) != "hi" {
+		t.Fatalf("payload = %q, want %q", payload, "hi")
+	}
+
+	raw = encodeMaskedFrame(true, wsOpContinuation, []byte("yo"))
+	rw = bufio.NewReadWriter(bufio.NewReader(bytes.NewReader(raw)), bufio.NewWriter(io.Discard))
+	op, fin, payload, err = wsReadFrame(rw)
+	if err != nil {
+		t.Fatalf("wsReadFrame FIN=1: %v", err)
+	}
+	if op != wsOpContinuation || !fin {
+		t.Fatalf("FIN=1 frame: op=%#x fin=%v, want op=continuation fin=true", op, fin)
+	}
+	if string(payload) != "yo" {
+		t.Fatalf("payload = %q, want %q", payload, "yo")
+	}
+}
+
+// A JSON message split into text(FIN=0) + continuation(FIN=1) must dispatch
+// exactly once, with the complete payload — no premature dispatch of the
+// first fragment (which alone is invalid JSON).
+func TestWSFragmentedMessageSingleDispatch(t *testing.T) {
+	h := NewHub()
+	c := newHubClient(h, "frag-user", "", "")
+	testConn, done := startWSReadLoop(h, c)
+	defer func() { _ = testConn.Close(); <-done }()
+
+	full, _ := json.Marshal(WSMessage{Type: WSMsgSubscribe, ProjectID: "proj1", SessionID: "sess1"})
+	split := len(full) / 2
+	writeClientFrame(t, testConn, false, wsOpText, full[:split])
+
+	// First fragment alone must NOT dispatch (no error reply for bad JSON).
+	select {
+	case extra := <-c.Send:
+		t.Fatalf("premature dispatch after first fragment: %s", extra)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	writeClientFrame(t, testConn, true, wsOpContinuation, full[split:])
+
+	select {
+	case raw := <-c.Send:
+		var ack WSMessage
+		if err := json.Unmarshal(raw, &ack); err != nil {
+			t.Fatalf("decode ack: %v", err)
+		}
+		if ack.Type != WSMsgSubscribed || ack.ProjectID != "proj1" || ack.SessionID != "sess1" {
+			t.Fatalf("ack = %+v; want subscribed proj1/sess1", ack)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for reassembled dispatch")
+	}
+	// Exactly one dispatch: nothing else pending.
+	select {
+	case extra := <-c.Send:
+		t.Fatalf("extra dispatch after reassembly: %s", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if c.ProjectID != "proj1" || c.SessionID != "sess1" {
+		t.Fatalf("client scope = %q/%q; want proj1/sess1", c.ProjectID, c.SessionID)
+	}
+}
+
+// Unfragmented single-frame messages (text FIN=1) must keep working.
+func TestWSUnfragmentedStillWorks(t *testing.T) {
+	h := NewHub()
+	c := newHubClient(h, "u", "", "")
+	testConn, done := startWSReadLoop(h, c)
+	defer func() { _ = testConn.Close(); <-done }()
+
+	raw, _ := json.Marshal(WSMessage{Type: WSMsgSubscribe, ProjectID: "p", SessionID: "s"})
+	writeClientFrame(t, testConn, true, wsOpText, raw)
+
+	select {
+	case got := <-c.Send:
+		var ack WSMessage
+		if err := json.Unmarshal(got, &ack); err != nil {
+			t.Fatalf("decode ack: %v", err)
+		}
+		if ack.Type != WSMsgSubscribed {
+			t.Fatalf("want subscribed ack, got %+v", ack)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for unfragmented dispatch")
+	}
+}
+
+// An interleaved ping between fragments must be answered with pong and must
+// not corrupt the reassembly buffer.
+func TestWSInterleavedPingPreservesFrag(t *testing.T) {
+	h := NewHub()
+	c := newHubClient(h, "ping-user", "", "")
+	testConn, done := startWSReadLoop(h, c)
+	defer func() { _ = testConn.Close(); <-done }()
+
+	full, _ := json.Marshal(WSMessage{Type: WSMsgSubscribe, ProjectID: "proj1", SessionID: "sess1"})
+	split := len(full) / 2
+	writeClientFrame(t, testConn, false, wsOpText, full[:split])
+	writeClientFrame(t, testConn, true, wsOpPing, []byte("ping1"))
+
+	_ = testConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	fin, op, payload := readServerFrame(t, testConn)
+	_ = testConn.SetReadDeadline(time.Time{})
+	if op != wsOpPong || !fin || string(payload) != "ping1" {
+		t.Fatalf("pong = op=%#x fin=%v payload=%q; want pong fin=true %q", op, fin, payload, "ping1")
+	}
+
+	writeClientFrame(t, testConn, true, wsOpContinuation, full[split:])
+
+	select {
+	case raw := <-c.Send:
+		var ack WSMessage
+		if err := json.Unmarshal(raw, &ack); err != nil {
+			t.Fatalf("decode ack: %v", err)
+		}
+		if ack.Type != WSMsgSubscribed || ack.ProjectID != "proj1" {
+			t.Fatalf("ack = %+v; want subscribed proj1", ack)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for dispatch after interleaved ping")
 	}
 	select {
-	case <-done2:
-	case <-time.After(time.Second):
-		t.Fatal("header handler did not return after close")
+	case extra := <-c.Send:
+		t.Fatalf("extra dispatch after ping test: %s", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// A continuation with no open fragment must be ignored, not dispatched.
+func TestWSStrayContinuationIgnored(t *testing.T) {
+	h := NewHub()
+	c := newHubClient(h, "stray", "", "")
+	testConn, done := startWSReadLoop(h, c)
+	defer func() { _ = testConn.Close(); <-done }()
+
+	writeClientFrame(t, testConn, true, wsOpContinuation, []byte(`{"type":"subscribe"}`))
+	select {
+	case extra := <-c.Send:
+		t.Fatalf("stray continuation dispatched: %s", extra)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if got := drainSend(c); got != nil {
+		t.Fatalf("unexpected message after stray continuation: %s", got)
 	}
 }
