@@ -62,6 +62,13 @@ type Daemon struct {
 	// Sent on every heartbeat and persisted to disk (see workspaceFileName)
 	// so heartbeats survive restarts. Guarded by mu. Issue #31.
 	WorkspaceID string
+	// Interceptor is the Layer-1 passive tool-event emitter (issue #32).
+	// Nil-safe: emission helpers no-op when it is nil; use SetEventSink to
+	// attach a downstream sink (tests, server client wiring).
+	Interceptor *Interceptor
+	// lastHEAD is the last observed HEAD SHA for the GIT_COMMITTED
+	// HEAD-change detector (see checkGitCommit). Guarded by mu. Issue #32.
+	lastHEAD string
 
 	mux *http.ServeMux
 	srv *http.Server
@@ -101,15 +108,20 @@ func NewDaemon(root, token string) (*Daemon, error) {
 		machine = "unknown"
 	}
 	d := &Daemon{
-		Root:      abs,
-		Token:     token,
-		MachineID: machine,
-		client:    &http.Client{Timeout: 15 * time.Second},
+		Root:        abs,
+		Token:       token,
+		MachineID:   machine,
+		Interceptor: NewInterceptor(0, nil),
+		client:      &http.Client{Timeout: 15 * time.Second},
 	}
 	// Best-effort: pick up a workspace ID persisted by a previous run so a
 	// restarted daemon can heartbeat without re-registering. Issue #31.
 	if wsID, err := LoadWorkspaceID(abs); err == nil {
 		d.WorkspaceID = strings.TrimSpace(wsID)
+	}
+	// Seed the GIT_COMMITTED HEAD detector (issue #32); empty repos stay "".
+	if _, head, _, _, _ := GitStatus(abs); head != "" {
+		d.lastHEAD = head
 	}
 	d.mux = http.NewServeMux()
 	d.mux.HandleFunc("/register", d.requireAuth(d.handleRegister))
@@ -125,6 +137,59 @@ func NewDaemon(root, token string) (*Daemon, error) {
 
 // Handler returns the daemon HTTP handler (for tests and embedding).
 func (d *Daemon) Handler() http.Handler { return d.mux }
+
+// SetEventSink attaches (or replaces) the Layer-1 downstream event sink
+// (issue #32). A nil sink means queued/no-op emission. It never fails and
+// tolerates a nil receiver.
+func (d *Daemon) SetEventSink(sink ToolEventEmitter) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.Interceptor == nil {
+		d.Interceptor = NewInterceptor(0, sink)
+		return
+	}
+	d.Interceptor.setDownstream(sink)
+}
+
+// emit enqueues a tool event when an Interceptor is present; nil-safe.
+func (d *Daemon) emit(ev ToolEvent) {
+	if d == nil || d.Interceptor == nil {
+		return
+	}
+	d.Interceptor.emitTry(ev)
+}
+
+// checkGitCommit is the HEAD-change detector feeding GIT_COMMITTED
+// (issue #32). It compares the current HEAD SHA against the last observed
+// one and logs a GIT_COMMITTED event on change (message/stat best-effort).
+// Git errors and empty repos are silent no-ops; it never fails the caller.
+func (d *Daemon) checkGitCommit() {
+	if d == nil {
+		return
+	}
+	_, head, _, _, err := GitStatus(d.Root)
+	head = strings.TrimSpace(head)
+	if err != nil || head == "" {
+		return
+	}
+	d.mu.Lock()
+	if head == d.lastHEAD {
+		d.mu.Unlock()
+		return
+	}
+	d.lastHEAD = head
+	d.mu.Unlock()
+	msg := ""
+	if out, err := GitLog(d.Root, 1); err == nil {
+		msg = Truncate(strings.TrimSpace(out), MaxMessageBytes)
+	}
+	if d.Interceptor != nil {
+		d.Interceptor.LogGitCommitted(head, msg, "")
+	}
+}
 
 // Start serves the daemon on addr (e.g. "127.0.0.1:0" is rejected — pass an
 // explicit port). It blocks until the server stops.
@@ -579,6 +644,10 @@ func (d *Daemon) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		writeFileErr(w, err)
 		return
 	}
+	// Issue #32: passive FILE_READ event (secret-screened in normalize).
+	if d.Interceptor != nil {
+		d.Interceptor.LogFileRead(req.Path, int64(len(data)), string(data))
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path":    req.Path,
 		"size":    len(data),
@@ -604,9 +673,15 @@ func (d *Daemon) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "path is required")
 		return
 	}
+	// Best-effort snapshot for the FILE_MODIFIED diff (issue #32).
+	oldContent, _ := ReadFile(d.Root, req.Path)
 	if err := WriteFile(d.Root, req.Path, []byte(req.Content)); err != nil {
 		writeFileErr(w, err)
 		return
+	}
+	// Issue #32: passive FILE_MODIFIED event (secret-screened in normalize).
+	if d.Interceptor != nil {
+		d.Interceptor.LogFileModified(req.Path, string(oldContent), req.Content, int64(len(req.Content)))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": len(req.Content)})
 }
@@ -644,6 +719,8 @@ func (d *Daemon) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Issue #32: HEAD-change detector feeding GIT_COMMITTED.
+	d.checkGitCommit()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"branch": branch, "commit": commit, "is_dirty": dirty, "porcelain": porcelain,
 	})
@@ -676,6 +753,11 @@ func (d *Daemon) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ref": ref, "diff": diff})
+	// Issue #32: passive GIT_DIFF_VIEWED event + HEAD-change detector.
+	if d.Interceptor != nil {
+		d.Interceptor.LogGitDiff(ref, diff, DiffStat(diff))
+	}
+	d.checkGitCommit()
 }
 
 func (d *Daemon) handleGitLog(w http.ResponseWriter, r *http.Request) {
@@ -735,6 +817,14 @@ func (d *Daemon) handleCommandRun(w http.ResponseWriter, r *http.Request) {
 		}
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Issue #32: passive COMMAND_EXECUTED event (secret-screened in normalize).
+	// A `git` invocation may have moved HEAD: run the commit detector.
+	if d.Interceptor != nil {
+		d.Interceptor.LogCommand(res.Command, res.Args, res.ExitCode, res.Output)
+	}
+	if len(argv) > 0 && baseName(argv[0]) == "git" {
+		d.checkGitCommit()
 	}
 	writeJSON(w, http.StatusOK, res)
 }

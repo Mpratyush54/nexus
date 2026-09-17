@@ -15,11 +15,62 @@
 package daemon
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"central-memory/internal/scan"
 )
+
+// RedactedPlaceholder replaces secret matches in event payloads (issue #32).
+// Payloads are redacted, never dropped: the event is still emitted so the
+// Layer-1 stream stays complete, but the secret bytes never reach the store.
+const RedactedPlaceholder = "[REDACTED]"
+
+// RedactSecrets replaces every internal/scan NeverPattern match in s with
+// RedactedPlaceholder (pure). It reports whether anything was redacted.
+// A no-match input is returned unchanged.
+func RedactSecrets(s string) (string, bool) {
+	redacted := false
+	out := s
+	for _, re := range scan.NeverPatterns {
+		if re.MatchString(out) {
+			out = re.ReplaceAllString(out, RedactedPlaceholder)
+			redacted = true
+		}
+	}
+	return out, redacted
+}
+
+// redact always returns the redacted string, discarding the hit flag.
+func redact(s string) string {
+	out, _ := RedactSecrets(s)
+	return out
+}
+
+// DiffStat summarizes a diff for GIT_DIFF_VIEWED-style stat fields (pure):
+// "<added> added / <removed> removed / <n> lines, <m> bytes". Counts ignore
+// the "+++"/"---" file-header lines. Empty diffs report "(empty diff)".
+func DiffStat(diff string) string {
+	if diff == "" {
+		return "(empty diff)"
+	}
+	var added, removed int
+	lines := splitLines(diff)
+	for _, ln := range lines {
+		switch {
+		case strings.HasPrefix(ln, "+++"), strings.HasPrefix(ln, "---"):
+			// File headers, not content lines.
+		case strings.HasPrefix(ln, "+"):
+			added++
+		case strings.HasPrefix(ln, "-"):
+			removed++
+		}
+	}
+	return fmt.Sprintf("%d added / %d removed / %d lines, %d bytes", added, removed, len(lines), len(diff))
+}
 
 // ToolEventType is the wire-visible type of a daemon-emitted event.
 // Names match the event store vocabulary (plan §2.1).
@@ -113,8 +164,11 @@ func (c *ChanEmitter) Dropped() int64 { return c.dropped.Load() }
 // LogAction never blocks: it builds the ToolEvent, attempts a non-blocking send
 // on the internal queue, and returns the ToolEvent either way.
 type Interceptor struct {
-	queue      chan ToolEvent
-	downstream ToolEventEmitter // optional; drained by background goroutine
+	queue chan ToolEvent
+	// downstream is optional; drained by background goroutine. Atomic so
+	// SetEventSink-style swaps are race-free against the forwarder.
+	downstream atomic.Pointer[ToolEventEmitter]
+	fwdRunning atomic.Bool
 
 	dropped atomic.Int64
 
@@ -131,18 +185,36 @@ func NewInterceptor(bufferSize int, downstream ToolEventEmitter) *Interceptor {
 		bufferSize = DefaultToolEventBuffer
 	}
 	in := &Interceptor{
-		queue:      make(chan ToolEvent, bufferSize),
-		downstream: downstream,
-		quit:       make(chan struct{}),
+		queue: make(chan ToolEvent, bufferSize),
+		quit:  make(chan struct{}),
 	}
 	if downstream != nil {
-		in.wg.Add(1)
-		go in.run()
+		in.setDownstream(downstream)
 	}
 	return in
 }
 
-// run drains the queue into downstream. Started only when downstream != nil.
+// setDownstream atomically swaps the forward sink. A nil sink pauses
+// forwarding (events stay queued); the forwarder goroutine is nil-safe.
+func (in *Interceptor) setDownstream(downstream ToolEventEmitter) {
+	if downstream == nil {
+		in.downstream.Store(nil)
+		return
+	}
+	in.downstream.Store(&downstream)
+	in.ensureForwarder()
+}
+
+// ensureForwarder starts the background drain exactly once.
+func (in *Interceptor) ensureForwarder() {
+	if in.fwdRunning.CompareAndSwap(false, true) {
+		in.wg.Add(1)
+		go in.run()
+	}
+}
+
+// run drains the queue into downstream. Nil-safe: with no sink the event is
+// dropped (counted) instead of dereferencing a nil interface.
 func (in *Interceptor) run() {
 	defer in.wg.Done()
 	for {
@@ -150,7 +222,11 @@ func (in *Interceptor) run() {
 		case <-in.quit:
 			return
 		case ev := <-in.queue:
-			in.downstream.Emit(ev)
+			if d := in.downstream.Load(); d != nil {
+				(*d).Emit(ev)
+			} else {
+				in.dropped.Add(1)
+			}
 		}
 	}
 }
@@ -216,12 +292,28 @@ func eventTypeForAction(action string) ToolEventType {
 	}
 }
 
-// normalizePayload applies per-action caps so oversized tool outputs cannot
-// flood the event stream. It copies the input map (never mutates caller's).
+// normalizePayload applies secret redaction (issue #32) then per-action
+// caps so oversized tool outputs cannot flood the event stream. Redaction
+// runs before truncation so a secret straddling a cap boundary cannot leak
+// a partial match. It copies the input map (never mutates caller's).
 func normalizePayload(action string, payload map[string]any) map[string]any {
 	out := make(map[string]any, len(payload)+2)
 	for k, v := range payload {
 		out[k] = v
+	}
+	// Secret-screen every free-text field; hashes/SHAs pass through.
+	for _, k := range []string{"path", "preview", "before", "after", "diff", "output", "stdout", "stderr", "command", "message", "stat", "stats"} {
+		if s, ok := out[k].(string); ok && s != "" {
+			out[k] = redact(s)
+		}
+	}
+	// Argument vectors may carry secrets (tokens, -password values).
+	if args, ok := out["args"].([]string); ok {
+		redacted := make([]string, len(args))
+		for i, a := range args {
+			redacted[i] = redact(a)
+		}
+		out["args"] = redacted
 	}
 	switch strings.ToLower(strings.TrimSpace(action)) {
 	case ActionFileRead:
