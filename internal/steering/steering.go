@@ -133,10 +133,10 @@ func (b *RecordingBridge) Count() int {
 
 // Run states.
 const (
-	StateRunning         = "running"
-	StatePauseRequested  = "pause_requested" // interrupt sent, daemon not yet acked
-	StatePaused          = "paused"          // daemon acked; steering prompts accepted
-	StateFinished        = "finished"        // run unregistered/completed
+	StateRunning        = "running"
+	StatePauseRequested = "pause_requested" // interrupt sent, daemon not yet acked
+	StatePaused         = "paused"          // daemon acked; steering prompts accepted
+	StateFinished       = "finished"        // run unregistered/completed
 )
 
 var (

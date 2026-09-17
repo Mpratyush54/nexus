@@ -144,11 +144,11 @@ func textSimilarity(queryText string, item *store.MemoryItem) float64 {
 
 // ScoredItem pairs a memory with its retrieval signals and final score.
 type ScoredItem struct {
-	Item       *store.MemoryItem
-	Similarity float64
+	Item        *store.MemoryItem
+	Similarity  float64
 	TagKeyBoost float64
-	Recency    float64
-	Score      float64
+	Recency     float64
+	Score       float64
 }
 
 // HybridSearch ranks candidates with vector similarity as the primary

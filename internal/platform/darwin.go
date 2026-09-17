@@ -17,7 +17,7 @@ func init() { registerBackend("darwin", func() Service { return darwinService{} 
 // loaded with launchctl bootstrap/bootout. Stdlib only (os/exec).
 type darwinService struct {
 	// label and agentsDir are overridable for tests.
-	label    string
+	label     string
 	agentsDir string
 }
 
