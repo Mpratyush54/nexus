@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Central Memory — Dashboard</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Central Memory</h1>
+      <span id="conn-dot" class="dot offline" title="WebSocket status"></span>
+      <span id="conn-label">disconnected</span>
+    </div>
+    <form id="login-form" class="login" autocomplete="off">
+      <input id="login-user" type="text" placeholder="username" aria-label="username" />
+      <input id="login-pass" type="password" placeholder="password" aria-label="password" />
+      <button type="submit">Login</button>
+      <span id="login-state" class="muted"></span>
+    </form>
+  </header>
+
+  <section class="toolbar">
+    <label>Project ID
+      <input id="project-id" type="text" placeholder="proj-…" aria-label="project id" />
+    </label>
+    <label>Session ID
+      <input id="session-id" type="text" placeholder="sess-… (optional)" aria-label="session id" />
+    </label>
+    <button id="connect-btn" type="button">Connect live</button>
+    <button id="health-btn" type="button" title="GET /healthz">Health</button>
+    <span id="toolbar-msg" class="muted" role="status"></span>
+  </section>
+
+  <main class="grid">
+    <section class="card" id="feed-card">
+      <h2>Live activity <span id="feed-count" class="pill">0</span></h2>
+      <p class="hint">WebSocket feed — new events prepend, no page refresh.</p>
+      <ul id="feed" class="feed" aria-live="polite"></ul>
+    </section>
+
+    <section class="card" id="sessions-card">
+      <h2>Sessions &amp; participants</h2>
+      <p class="hint">Active workspaces via <code>GET /workspaces/{id}/active</code> + live presence from WS.</p>
+      <button id="refresh-workspaces" type="button">Refresh workspaces</button>
+      <h3>Presence (live)</h3>
+      <ul id="presence" class="roster"></ul>
+      <h3>Active workspaces</h3>
+      <ul id="workspaces" class="roster"></ul>
+    </section>
+
+    <section class="card" id="memory-card">
+      <h2>Memory Explorer</h2>
+      <form id="memory-filter" class="filters" autocomplete="off">
+        <input id="mem-q" type="search" placeholder="search key / content…" aria-label="memory search" />
+        <select id="mem-level" aria-label="level filter">
+          <option value="">All levels</option>
+          <option value="organization">Organization</option>
+          <option value="project">Project</option>
+          <option value="personal">Personal</option>
+          <option value="session">Session</option>
+        </select>
+        <select id="mem-status" aria-label="status filter">
+          <option value="">All statuses</option>
+          <option value="PROPOSED">Proposed</option>
+          <option value="CONFIRMED">Confirmed</option>
+          <option value="REJECTED">Rejected</option>
+          <option value="SUPERSEDED">Superseded</option>
+        </select>
+        <button type="submit">Search</button>
+      </form>
+      <p class="hint">Level filters server-side (<code>?level=</code>); status filters client-side — <code>GET /memory/search</code> has no status param.</p>
+      <ul id="memories" class="items"></ul>
+    </section>
+
+    <section class="card" id="episode-card">
+      <h2>Episode Inspector</h2>
+      <form id="episode-filter" class="filters" autocomplete="off">
+        <input id="ep-q" type="search" placeholder="search trigger / root cause…" aria-label="episode search" />
+        <input id="ep-error" type="text" placeholder="error pattern…" aria-label="error pattern" />
+        <input id="ep-file" type="text" placeholder="file involved…" aria-label="file involved" />
+        <select id="ep-status" aria-label="episode status filter">
+          <option value="">Any status</option>
+          <option value="OPEN">Open</option>
+          <option value="INVESTIGATING">Investigating</option>
+          <option value="RESOLVED">Resolved</option>
+          <option value="WONT_FIX">Won't fix</option>
+        </select>
+        <button type="submit">Search</button>
+      </form>
+      <div class="ep-split">
+        <ul id="episodes" class="items"></ul>
+        <article id="episode-detail" class="detail">
+          <p class="muted">Select an episode to see trigger → root-cause → fix.</p>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot muted">
+    Static SPA — no build step. REST: <code>/auth/login /memory/search /episodes/search /workspaces/{id}/active</code>.
+    WS: <code>/ws</code> with plan §3.2 message shapes (see app.js).
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
