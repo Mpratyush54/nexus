@@ -28,9 +28,10 @@ import (
 	"central-memory/internal/store"
 )
 
-// EmbedDims is the vector width every backend must produce: it matches the
-// schema's vector(1536) columns, so HashEmbed and LLM rows share one index.
-const EmbedDims = 1536
+// EmbedDims is the vector width every backend must produce: it aliases the
+// store's vector(1536) contract (issue #105) so HashEmbed and LLM rows share
+// one index and can never drift apart.
+const EmbedDims = store.EmbeddingDim
 
 // Embedder generates one L2-normalized vector per text. Implementations must
 // return exactly EmbedDims components; errors fail the write/backfill item,

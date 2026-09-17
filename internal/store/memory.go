@@ -10,6 +10,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -198,6 +199,12 @@ func nilTextArray(tags []string) any {
 // SearchMemoryVector is the primary semantic path (plan §1.5): cosine
 // similarity over pgvector, CONFIRMED only, confidence floor 0.3.
 func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
+	if len(queryVec) == 0 {
+		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
+	}
+	if err := ValidateEmbeddingDim(queryVec); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 20
 	}

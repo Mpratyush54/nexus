@@ -303,6 +303,12 @@ func sqrtFloat(x float64) float64 {
 // queryVec, descending (plan §2.4 query #2). Episodes without embeddings or
 // with dimension mismatches are skipped. Ties break by ID for determinism.
 func (s *MemStore) SearchEpisodesSemantic(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*Episode, error) {
+	if len(queryVec) == 0 {
+		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
+	}
+	if err := ValidateEmbeddingDim(queryVec); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 5 // plan §2.4 caps semantic results at 5
 	}
@@ -340,6 +346,12 @@ func (s *MemStore) SearchEpisodesSemantic(ctx context.Context, projectID string,
 // SearchEpisodesSemantic is the production semantic path (mirrors
 // SearchMemoryVector): pgvector cosine ordering over episode narratives.
 func (s *PostgresStore) SearchEpisodesSemantic(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*Episode, error) {
+	if len(queryVec) == 0 {
+		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
+	}
+	if err := ValidateEmbeddingDim(queryVec); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 5
 	}

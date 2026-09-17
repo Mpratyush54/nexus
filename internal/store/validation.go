@@ -20,6 +20,24 @@ import (
 // sessions and never promoted — they expire instead (see lifecycle.go).
 const LevelEphemeral = "ephemeral"
 
+// EmbeddingDim is the pgvector contract: memory_items.embedding and
+// episodes.embedding are vector(1536) (migrations/001). Empty means "no
+// embedding yet" (NULL); anything else must be exactly 1536 wide, or
+// Postgres fails the query at runtime (issue #105).
+const EmbeddingDim = 1536
+
+// ValidateEmbeddingDim rejects wrong-width vectors before SQL. Nil/empty is
+// the legitimate "no embedding" state and passes.
+func ValidateEmbeddingDim(vec []float32) error {
+	if len(vec) == 0 {
+		return nil
+	}
+	if len(vec) != EmbeddingDim {
+		return fmt.Errorf("store: embedding has %d dimensions, want %d (vector(1536) schema)", len(vec), EmbeddingDim)
+	}
+	return nil
+}
+
 // ValidEpisodeTypes mirrors the episode_type CHECK (migrations/001): six
 // values including onboarding, which the old Go lists omitted (issue #119).
 var ValidEpisodeTypes = []string{
@@ -154,6 +172,9 @@ func validateMemoryItemForCreate(item *MemoryItem) error {
 		if err := ValidateMemoryConfidence(float64(item.Confidence)); err != nil {
 			return err
 		}
+	}
+	if err := ValidateEmbeddingDim(item.Embedding); err != nil {
+		return err
 	}
 	status := item.Status
 	if strings.TrimSpace(status) == "" {

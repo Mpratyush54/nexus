@@ -431,6 +431,9 @@ func (s *MemStore) CreateEpisode(ctx context.Context, ep *Episode) error {
 	if err := ValidateEpisodeType(ep.EpisodeType); err != nil {
 		return err
 	}
+	if err := ValidateEmbeddingDim(ep.Embedding); err != nil {
+		return err
+	}
 	status := ep.Status
 	if strings.TrimSpace(status) == "" {
 		status = "OPEN"

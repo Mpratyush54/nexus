@@ -77,6 +77,9 @@ func (s *PostgresStore) CreateEpisode(ctx context.Context, ep *Episode) error {
 	if err := ValidateEpisodeType(ep.EpisodeType); err != nil {
 		return err
 	}
+	if err := ValidateEmbeddingDim(ep.Embedding); err != nil {
+		return err
+	}
 	if strings.TrimSpace(ep.Status) == "" {
 		ep.Status = "OPEN"
 	} else {

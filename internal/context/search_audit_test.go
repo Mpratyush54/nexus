@@ -49,15 +49,13 @@ func TestAuditCosineEdgeCases(t *testing.T) {
 	if got := CosineSimilarity([]float32{0, 0, 0}, []float32{1, 2, 3}); got != 0 {
 		t.Errorf("zero-magnitude = %v, want 0", got)
 	}
-	// DIVERGENCE PIN: mismatched dims compare over shared prefix (min length),
-	// NOT strict-0. E.g. [1,0] vs [1,0,99] scores 1.0 on the shared prefix.
-	if got := CosineSimilarity([]float32{1, 0}, []float32{1, 0, 99}); math.Abs(got-1) > 1e-6 {
-		t.Errorf("prefix-match divergence: got %v, want 1 (shared-prefix semantics)", got)
+	// FIXED (#105): mismatched dims score strict 0, matching pgvector's
+	// reject-on-mismatch. E.g. [1,0] vs [1,0,99] is 0, not 1.
+	if got := CosineSimilarity([]float32{1, 0}, []float32{1, 0, 99}); got != 0 {
+		t.Errorf("dim mismatch = %v, want 0 (strict, issue #105)", got)
 	}
-	// A strict dim-mismatch policy would return 0 here; document that this
-	// package does NOT do that.
 	if got := CosineSimilarity([]float32{1}, []float32{0, 1}); got != 0 {
-		t.Errorf("single-overlap orthogonal prefix = %v, want 0", got)
+		t.Errorf("dim mismatch = %v, want 0 (strict, issue #105)", got)
 	}
 	// Raw cosine preserves sign; HybridSearch clamps negatives to 0.
 	if got := CosineSimilarity([]float32{1, 0}, []float32{-1, 0}); math.Abs(got+1) > 1e-6 {
