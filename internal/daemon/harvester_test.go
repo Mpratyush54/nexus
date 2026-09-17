@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -425,5 +427,174 @@ func TestHarvestConversationFilesClassifyFilter(t *testing.T) {
 	}
 	if len(files) != 1 || files[0] != good {
 		t.Fatalf("expected only the transcript, got %v", files)
+	}
+}
+
+// fakeSQLiteExtractor is a test SQLiteExtractor returning canned turns and
+// recording the dbPath/since it was called with. It honors the since
+// contract: rows are returned only when newer than since (the canned turns
+// carry the fake's epoch, so a non-zero since means "already consumed").
+type fakeSQLiteExtractor struct {
+	mu    sync.Mutex
+	calls []string
+	since []time.Time
+	epoch time.Time
+	turns []Turn
+	err   error
+}
+
+func (f *fakeSQLiteExtractor) ExtractNewRows(dbPath string, since time.Time) ([]Turn, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, dbPath)
+	f.since = append(f.since, since)
+	if f.err != nil {
+		return nil, f.err
+	}
+	if !since.IsZero() && !since.Before(f.epoch) {
+		return nil, nil
+	}
+	out := make([]Turn, len(f.turns))
+	copy(out, f.turns)
+	return out, nil
+}
+
+func (f *fakeSQLiteExtractor) ncalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.calls)
+}
+
+func TestHarvestSQLiteNilExtractorLiveness(t *testing.T) {
+	// Default (no extractor registered): sqlite files never emit
+	// CONVERSATION_TURN but still refresh idle timers, with the explicit
+	// liveness-only reason logged.
+	now := time.Now()
+	clock := func() time.Time { return now }
+	var logs bytes.Buffer
+	cap := &capturedSink{}
+	h := NewHarvester(t.TempDir(), cap.fn(),
+		WithClock(clock), WithLogger(log.New(&logs, "", 0)))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.vscdb")
+	if err := os.WriteFile(path, []byte("sqlite-format-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tf := TrackedFile{
+		Path:      path,
+		Agent:     "cursor",
+		Format:    "sqlite",
+		SessionID: SessionIDFor("cursor", path),
+		Project:   "test-proj",
+	}
+	h.files[path] = tf
+	h.sessFile[tf.SessionID] = tf
+
+	if err := h.processFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if cap.count(EventConversationTurn) != 0 {
+		t.Fatalf("nil extractor must not emit CONVERSATION_TURN, got %d",
+			cap.count(EventConversationTurn))
+	}
+	if _, ok := h.idle.Last(tf.SessionID); !ok {
+		t.Fatal("nil-extractor sqlite file must still refresh liveness")
+	}
+	if got := logs.String(); !strings.Contains(got, "liveness-only") {
+		t.Fatalf("expected explicit liveness-only reason in logs, got %q", got)
+	}
+
+	// Registry default: sqlite sources carry a nil extractor slot.
+	for _, s := range h.Sources() {
+		if s.Format == "sqlite" && s.Extractor != nil {
+			t.Fatalf("source %q: default extractor must be nil, got %T", s.Agent, s.Extractor)
+		}
+	}
+}
+
+func TestHarvestSQLiteFakeExtractorEmitsTurns(t *testing.T) {
+	// A registered extractor turns sqlite changes into CONVERSATION_TURN
+	// events, via both processFile and the poller; the registry wires the
+	// extractor onto its agent's source row only.
+	now := time.Now()
+	clock := func() time.Time { return now }
+	cap := &capturedSink{}
+	fake := &fakeSQLiteExtractor{epoch: now, turns: []Turn{
+		{Speaker: "user", Content: "cursor turn one", Timestamp: now},
+		{Speaker: "assistant", Content: "cursor reply", Timestamp: now},
+	}}
+	h := NewHarvester(t.TempDir(), cap.fn(),
+		WithClock(clock), WithSQLiteExtractor("cursor", fake))
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.vscdb")
+	if err := os.WriteFile(path, []byte("sqlite-format-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tf := TrackedFile{
+		Path:      path,
+		Agent:     "cursor",
+		Format:    "sqlite",
+		SessionID: SessionIDFor("cursor", path),
+		Project:   "test-proj",
+	}
+	h.files[path] = tf
+	h.sessFile[tf.SessionID] = tf
+
+	if err := h.processFile(path); err != nil {
+		t.Fatal(err)
+	}
+	if fake.ncalls() != 1 {
+		t.Fatalf("expected 1 extractor call, got %d", fake.ncalls())
+	}
+	if cap.count(EventConversationTurn) != 2 {
+		t.Fatalf("expected 2 CONVERSATION_TURN, got %d", cap.count(EventConversationTurn))
+	}
+	got := cap.payloads[0]
+	if got["speaker"] != "user" || got["content"] != "cursor turn one" {
+		t.Fatalf("unexpected turn payload: %v", got)
+	}
+	if got["session_id"] != tf.SessionID || got["agent"] != "cursor" {
+		t.Fatalf("unexpected identity fields: %v", got)
+	}
+	if got["transcript_path"] != path || got["project"] != "test-proj" {
+		t.Fatalf("unexpected attribution fields: %v", got)
+	}
+
+	// The poller also extracts: an unseen sqlite file is treated as changed.
+	path2 := filepath.Join(dir, "other.vscdb")
+	if err := os.WriteFile(path2, []byte("more-sqlite-data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tf2 := TrackedFile{
+		Path:      path2,
+		Agent:     "cursor",
+		Format:    "sqlite",
+		SessionID: SessionIDFor("cursor", path2),
+		Project:   "test-proj",
+	}
+	h.mu.Lock()
+	h.files[path2] = tf2
+	h.sessFile[tf2.SessionID] = tf2
+	h.mu.Unlock()
+	h.pollSQLite()
+	if cap.count(EventConversationTurn) != 4 {
+		t.Fatalf("expected poller to emit 2 more turns (total 4), got %d",
+			cap.count(EventConversationTurn))
+	}
+
+	// Registry wiring: only the cursor source row carries the extractor.
+	wired := map[string]bool{}
+	for _, s := range h.Sources() {
+		wired[s.Agent] = s.Extractor != nil
+	}
+	if !wired["cursor"] {
+		t.Error("cursor source should carry the registered extractor")
+	}
+	for _, agent := range []string{"copilot", "antigravity"} {
+		if wired[agent] {
+			t.Errorf("%s source must stay nil-extractor (liveness-only)", agent)
+		}
 	}
 }

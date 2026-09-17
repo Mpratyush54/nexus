@@ -1,13 +1,16 @@
 // Package daemon implements the local workspace daemon (plan §1.3).
 //
-// This file is Layer 2 — the Transcript Harvester, the backbone of passive
+// This file is Layer 2 — the Transcript Harvester for JSONL-first passive
 // memory extraction (plan §1.3 "Transcript Harvester", §2.2 "Layer 2").
 //
-// It tails agent conversation files on disk — completely invisible to the
-// user and the agent — and emits CONVERSATION_TURN events, one per meaningful
-// turn. When a session goes quiet for 5+ minutes it emits
-// SESSION_TRANSCRIPT_COMPLETE so the Memory Processor can run its highest-
-// quality end-of-session extraction pass.
+// It tails agent JSONL conversation files on disk — completely invisible to
+// the user and the agent — and emits CONVERSATION_TURN events, one per
+// meaningful turn. SQLite-format stores (Cursor/Copilot/Antigravity) do NOT
+// emit CONVERSATION_TURN by default: without a SQL driver they only refresh
+// idle timers (liveness), and emit turns only when a SQLiteExtractor is
+// registered (see ADR-033). When a session goes quiet for 5+ minutes it
+// emits SESSION_TRANSCRIPT_COMPLETE so the Memory Processor can run its
+// highest-quality end-of-session extraction pass.
 //
 // Design rules for this file:
 //   - Read-only: transcript files are opened read-only and never modified.
@@ -26,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -417,11 +421,25 @@ func (d *IdleDetector) IdleSessions() []string {
 	return out
 }
 
+// SQLiteExtractor is the seam for sqlite-format conversation stores
+// (Cursor/Copilot/Antigravity .db/.vscdb/.sqlite). Row parsing needs a SQL
+// driver, and no SQL driver dep is approved (see ADR-033), so the harvester
+// core never imports one. A driver-backed implementation can be supplied
+// from outside this package via WithSQLiteExtractor; the harvester calls it
+// with the DB path and a lower-bound timestamp and emits one
+// CONVERSATION_TURN per returned Turn. A nil extractor (the default) means
+// liveness-only: the harvester refreshes idle timers on file change and
+// logs the explicit reason, but never emits CONVERSATION_TURN.
+type SQLiteExtractor interface {
+	ExtractNewRows(dbPath string, since time.Time) ([]Turn, error)
+}
+
 // TranscriptSource is one agent conversation store (plan §1.3 sources table).
 type TranscriptSource struct {
-	Agent  string
-	Dirs   []string // resolved absolute directories (may not exist)
-	Format string   // "jsonl" | "sqlite"
+	Agent     string
+	Dirs      []string // resolved absolute directories (may not exist)
+	Format    string   // "jsonl" | "sqlite"
+	Extractor SQLiteExtractor // sqlite row extractor; nil = liveness-only
 }
 
 // TranscriptSources resolves the plan §1.3 sources table. Home-scoped dirs
@@ -639,6 +657,8 @@ type Harvester struct {
 	counts     map[string]int         // turns emitted per session
 	completed  map[string]bool        // session-complete already emitted
 	sqliteSnap map[string][2]int64    // path -> {size, mtimeNano}
+	extractors map[string]SQLiteExtractor // agent -> sqlite row extractor (nil = liveness-only)
+	logger     *log.Logger
 }
 
 // Option customizes a Harvester.
@@ -671,6 +691,49 @@ func WithSQLitePollInterval(d time.Duration) Option {
 	return func(h *Harvester) { h.sqlitePoll = d }
 }
 
+// WithSQLiteExtractor registers a SQLiteExtractor for one sqlite agent
+// (cursor, copilot, antigravity). A nil extractor removes the registration
+// and restores liveness-only behavior for that agent.
+func WithSQLiteExtractor(agent string, ex SQLiteExtractor) Option {
+	return func(h *Harvester) {
+		if h.extractors == nil {
+			h.extractors = map[string]SQLiteExtractor{}
+		}
+		if ex == nil {
+			delete(h.extractors, agent)
+			return
+		}
+		h.extractors[agent] = ex
+	}
+}
+
+// WithSQLiteExtractors registers extractors for several agents at once.
+func WithSQLiteExtractors(m map[string]SQLiteExtractor) Option {
+	return func(h *Harvester) {
+		if h.extractors == nil {
+			h.extractors = map[string]SQLiteExtractor{}
+		}
+		for agent, ex := range m {
+			if ex == nil {
+				delete(h.extractors, agent)
+				continue
+			}
+			h.extractors[agent] = ex
+		}
+	}
+}
+
+// WithLogger overrides the harvester logger (tests capture output with an
+// io.Discard or bytes.Buffer-backed *log.Logger). A nil logger keeps the
+// default.
+func WithLogger(l *log.Logger) Option {
+	return func(h *Harvester) {
+		if l != nil {
+			h.logger = l
+		}
+	}
+}
+
 // NewHarvester builds a harvester for workspaceRoot emitting to sink
 // (nil sink = track only, useful for dry runs).
 func NewHarvester(workspaceRoot string, sink EventSink, opts ...Option) *Harvester {
@@ -686,6 +749,8 @@ func NewHarvester(workspaceRoot string, sink EventSink, opts ...Option) *Harvest
 		counts:        map[string]int{},
 		completed:     map[string]bool{},
 		sqliteSnap:    map[string][2]int64{},
+		extractors:    map[string]SQLiteExtractor{},
+		logger:        log.Default(),
 	}
 	if home, err := os.UserHomeDir(); err == nil {
 		h.home = home
@@ -698,8 +763,20 @@ func NewHarvester(workspaceRoot string, sink EventSink, opts ...Option) *Harvest
 }
 
 // Sources returns the resolved transcript sources for this harvester.
+// SQLite rows carry the registered extractor for their agent (nil when none
+// is registered, meaning liveness-only); JSONL rows never use an extractor.
 func (h *Harvester) Sources() []TranscriptSource {
-	return TranscriptSources(h.home, h.appData)
+	srcs := TranscriptSources(h.home, h.appData)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i, s := range srcs {
+		if s.Format == "sqlite" {
+			if ex, ok := h.extractors[s.Agent]; ok && ex != nil {
+				srcs[i].Extractor = ex
+			}
+		}
+	}
+	return srcs
 }
 
 // Discover scans all sources for workspace-matching conversation files,
@@ -784,37 +861,37 @@ func (h *Harvester) classify(path string) TrackedFile {
 	return TrackedFile{}
 }
 
-// processFile tails one transcript and emits a CONVERSATION_TURN per new
-// meaningful turn. Unknown files are ignored; sqlite files only refresh
-// liveness (row parsing needs a SQL driver — follow-up, see ADR).
-func (h *Harvester) processFile(path string) error {
+// extractorFor returns the registered SQLiteExtractor for agent, or nil
+// when none is registered (liveness-only mode).
+func (h *Harvester) extractorFor(agent string) SQLiteExtractor {
 	h.mu.Lock()
-	tf, ok := h.files[path]
-	h.mu.Unlock()
-	if !ok {
-		tf = h.classify(path)
-		if tf.Agent == "" {
-			return nil
-		}
-		if !WorkspaceMatchesFile(h.workspaceRoot, path, h.home) {
-			return nil
-		}
-		h.mu.Lock()
-		h.files[path] = tf
-		h.sessFile[tf.SessionID] = tf
-		h.mu.Unlock()
+	defer h.mu.Unlock()
+	return h.extractors[agent]
+}
+
+// sqliteSince returns the lower-bound timestamp for extraction: the session's
+// last activity, or zero when the session was never seen.
+func (h *Harvester) sqliteSince(sessionID string) time.Time {
+	if last, ok := h.idle.Last(sessionID); ok {
+		return last
 	}
-	if tf.Format == "sqlite" {
-		h.touch(tf.SessionID)
-		return nil
+	return time.Time{}
+}
+
+// logf writes to the harvester logger (never nil; falls back to std log).
+func (h *Harvester) logf(format string, args ...any) {
+	if h.logger != nil {
+		h.logger.Printf(format, args...)
+		return
 	}
-	turns, newOff, err := TailTurns(path, h.offsets.Get(path))
-	if err != nil {
-		return err
-	}
-	h.offsets.Set(path, newOff)
+	log.Printf(format, args...)
+}
+
+// emitTurns emits one CONVERSATION_TURN per turn for tf, records counts, and
+// refreshes liveness (re-arming completion when the session resumes).
+func (h *Harvester) emitTurns(tf TrackedFile, path string, turns []Turn) {
 	if len(turns) == 0 {
-		return nil
+		return
 	}
 	h.touch(tf.SessionID)
 	h.mu.Lock()
@@ -833,6 +910,68 @@ func (h *Harvester) processFile(path string) error {
 			"project":         tf.Project,
 		})
 	}
+}
+
+// processSQLiteFile handles one sqlite transcript change. With no extractor
+// registered it refreshes liveness only and logs the explicit reason (no SQL
+// driver dep — see ADR-033); with an extractor it emits CONVERSATION_TURN
+// per new row. Extraction errors are logged and keep liveness (the file did
+// change) without failing the watch loop.
+func (h *Harvester) processSQLiteFile(path string, tf TrackedFile) {
+	ex := h.extractorFor(tf.Agent)
+	if ex == nil {
+		h.logf("harvester: sqlite source %q (%s) has no SQLiteExtractor registered — liveness-only (no SQL driver dep, see ADR-033); skipping CONVERSATION_TURN extraction", tf.Agent, path)
+		h.touch(tf.SessionID)
+		return
+	}
+	since := h.sqliteSince(tf.SessionID)
+	turns, err := ex.ExtractNewRows(path, since)
+	if err != nil {
+		h.logf("harvester: sqlite extractor for %q (%s) failed: %v; keeping liveness only", tf.Agent, path, err)
+		h.touch(tf.SessionID)
+		return
+	}
+	for i := range turns {
+		turns[i].Path = path
+	}
+	h.emitTurns(tf, path, turns)
+}
+
+// processFile tails one transcript and emits a CONVERSATION_TURN per new
+// meaningful turn. Unknown files are ignored. JSONL files are tailed from
+// disk; sqlite files need a registered SQLiteExtractor to emit turns —
+// without one they only refresh liveness and log the reason (no SQL driver
+// dep, see ADR-033).
+func (h *Harvester) processFile(path string) error {
+	h.mu.Lock()
+	tf, ok := h.files[path]
+	h.mu.Unlock()
+	if !ok {
+		tf = h.classify(path)
+		if tf.Agent == "" {
+			return nil
+		}
+		if !WorkspaceMatchesFile(h.workspaceRoot, path, h.home) {
+			return nil
+		}
+		h.mu.Lock()
+		h.files[path] = tf
+		h.sessFile[tf.SessionID] = tf
+		h.mu.Unlock()
+	}
+	if tf.Format == "sqlite" {
+		h.processSQLiteFile(path, tf)
+		return nil
+	}
+	turns, newOff, err := TailTurns(path, h.offsets.Get(path))
+	if err != nil {
+		return err
+	}
+	h.offsets.Set(path, newOff)
+	if len(turns) == 0 {
+		return nil
+	}
+	h.emitTurns(tf, path, turns)
 	return nil
 }
 
@@ -880,8 +1019,10 @@ func (h *Harvester) CheckIdle() int {
 }
 
 // pollSQLite stats tracked sqlite files (plus -wal/-shm siblings, which is
-// where the real churn shows) and marks changed sessions active. fsnotify
-// misses these writes, hence the 30s poll (plan §1.3 behavior 6).
+// where the real churn shows) and handles changed sessions. fsnotify misses
+// these writes, hence the 30s poll (plan §1.3 behavior 6). Changed files go
+// through processSQLiteFile: liveness-only with a logged reason when no
+// SQLiteExtractor is registered, CONVERSATION_TURN emission when one is.
 func (h *Harvester) pollSQLite() {
 	h.mu.Lock()
 	paths := make([]string, 0, len(h.files))
@@ -901,7 +1042,7 @@ func (h *Harvester) pollSQLite() {
 			h.sqliteSnap[p] = sig
 			tf := h.files[p]
 			h.mu.Unlock()
-			h.touch(tf.SessionID)
+			h.processSQLiteFile(p, tf)
 		}
 	}
 }
