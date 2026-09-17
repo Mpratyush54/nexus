@@ -1,427 +1,286 @@
-// Package daemon implements the local workspace daemon (plan §1.3).
+// Package daemon implements the local workspace daemon.
 //
-// This file is the Memory Processor (plan §§2.3, 2.6–2.8, issue #10): a
-// background goroutine that runs only on is_designated_processor workspaces,
-// batches harvested events, extracts memories via the user's own LLM key, and
-// delegates every write to the store layer through ProcessorStore.
+// processor.go is the Memory Processor (implementation-plan.md §2.6/§2.7/§2.8,
+// §1.7 + GitHub Mpratyush54/nexus issue #10): a background goroutine that runs
+// on the DESIGNATED workspace only (workspaces.is_designated_processor, the
+// project owner's daemon) and turns raw events from all four extraction layers
+// into structured memory proposals. No server-side LLM cost: extraction runs
+// here, on the user's device, under the user's own LLM key.
 //
-// Pipeline:
-//
-//	Layer 1–4 events → Processor.Ingest (via Sink adapter)
-//	    → batch on 5-min idle or SESSION_TRANSCRIPT_COMPLETE
-//	    → BuildExtractionPrompt (§2.6) → LLMClient.Complete
-//	    → ParseExtractedMemories → NormalizeLevel/Scope (default SESSION)
-//	    → dedup skip when cosine > 0.9 vs CONFIRMED
-//	    → SaveProposed with auto-confirm timer (24h / 4h / 1h, §2.8)
-//	    → DetectEpisode hook (§2.3) → SaveEpisode
-//
-// Design rules for this file:
-//   - Ownership: ONLY this file (+ its test) and docs/ may be touched by
-//     issue #10. harvester.go, interceptor.go, watcher.go and daemon.go are
-//     read-only — their EventSink type, Clock type and event-type constants
-//     are reused, never redeclared.
-//   - No new SDK deps (plan §1.9 + issue constraint): LLM access is the
-//     LLMClient interface plus a stub and an Ollama HTTP implementation over
-//     net/http. OpenAI/Anthropic callers implement the same one-method
-//     interface with the user's key; no vendor SDK is imported. The only
-//     non-stdlib import is the local internal/governance package (itself
-//     stdlib-only) for budget gating and token accounting.
-//   - Persistence is delegated: ProcessorStore is the seam the store layer
-//     (issue #2, internal/store) implements — ListConfirmed / SaveProposed /
-//     SaveEpisode plus the issue-#35 additions ConfirmDue (auto-confirm
-//     sweep), CountKeySessions and PromoteKey (plan §2.7 promotion). The
-//     processor never imports internal/store and never touches SQL; method
-//     signatures on both sides use stdlib-only types so the store structs
-//     satisfy the new methods structurally.
-//   - Pure/testable core: prompt building, response parsing, level/scope
-//     normalization, cosine math, confirm-timer rules and episode detection
-//     are pure functions. The live ticker loop is a thin shell around them,
-//     and every test uses a fake LLM + fake store with no network.
+// It reuses the existing Event (harvester.go, Layer 2 conversation turns +
+// SESSION_TRANSCRIPT_COMPLETE batches) and ToolEvent (interceptor.go, Layer 1
+// tool/file/git activity) envelopes — neither is redefined here. Stdlib only.
 package daemon
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
-	"math"
-	"net/http"
-	"sort"
+	"os"
 	"strings"
 	"sync"
 	"time"
-
-	"central-memory/internal/governance"
+	"unicode"
 )
 
-// Tuning constants (plan §§2.3, 2.6–2.8).
-const (
-	// ProcessorIdleAfter mirrors the harvester's 5-minute end-of-session
-	// threshold (plan §§1.3, 2.2): a session quiet this long is flushed as
-	// a batch even without SESSION_TRANSCRIPT_COMPLETE.
-	ProcessorIdleAfter = 5 * time.Minute
-	// ProcessorSweepInterval is how often the background loop checks for
-	// idle-due sessions (mirrors the harvester's 1-minute idle sweep).
-	ProcessorSweepInterval = time.Minute
+// ---------------------------------------------------------------------------
+// Memory taxonomy (plan §1.1 memory_items, §2.6 classification prompt)
+// ---------------------------------------------------------------------------
 
-	// DedupCosineThreshold: an extracted candidate whose cosine similarity
-	// exceeds this against any CONFIRMED memory is skipped as a duplicate.
-	DedupCosineThreshold = 0.9
-	// HighConfidenceThreshold gates the 4h fast-confirm timer (§2.8).
+// MemoryLevel is the lifetime/scope tier of a memory item.
+// Resolution order (lower overrides higher): SESSION > PERSONAL > PROJECT >
+// ORGANIZATION (plan §1.6).
+type MemoryLevel string
+
+const (
+	LevelOrganization MemoryLevel = "organization"
+	LevelProject      MemoryLevel = "project"
+	LevelPersonal     MemoryLevel = "personal"
+	LevelSession      MemoryLevel = "session"
+)
+
+// MemoryScope is the kind of knowledge a memory item carries (plan §2.6).
+type MemoryScope string
+
+const (
+	ScopeFact           MemoryScope = "fact"
+	ScopePreference     MemoryScope = "preference"
+	ScopeDecision       MemoryScope = "decision"
+	ScopeConstraint     MemoryScope = "constraint"
+	ScopePattern        MemoryScope = "pattern"
+	ScopeEpisodeSummary MemoryScope = "episode_summary"
+)
+
+// ---------------------------------------------------------------------------
+// Records, proposals, store interface
+// ---------------------------------------------------------------------------
+
+// MemoryRecord is an already-known (confirmed or proposed) memory item the
+// processor deduplicates against. It mirrors the store.memory_items row shape
+// without importing internal/store (which needs pgx/pgvector while the daemon
+// stays stdlib-only) — field names match so mapping is a plain struct copy.
+type MemoryRecord struct {
+	Key        string
+	Content    string
+	Level      MemoryLevel
+	Scope      MemoryScope
+	Confidence float64
+	SessionID  string
+}
+
+// Proposal is one extracted memory candidate awaiting confirmation.
+type Proposal struct {
+	Key        string
+	Content    string
+	Level      MemoryLevel
+	Scope      MemoryScope
+	Confidence float64
+	Source     string // e.g. "processor:conversation", "processor:episode"
+	Explicit   bool   // extracted from an explicit user statement (1h confirm)
+	// ConfirmAfter is populated by ConfirmationDelay; how long after proposal
+	// the item auto-confirms if nobody rejects it (plan §2.8).
+	ConfirmAfter time.Duration
+	// ProposedAt is set by the Processor when the proposal is created.
+	ProposedAt time.Time
+}
+
+// MemoryStore is the minimal persistence surface the Processor needs. The
+// production wiring backs it with internal/store (Postgres); tests and the
+// local-device path use InMemoryStore. Kept local to this file so the daemon
+// package never imports the pgx-backed store.
+type MemoryStore interface {
+	// Existing returns confirmed (and proposed) memories for dedup.
+	Existing() []MemoryRecord
+	// Save persists one proposal.
+	Save(p Proposal) error
+}
+
+// InMemoryStore is a mutex-guarded MemoryStore for tests and offline runs.
+type InMemoryStore struct {
+	mu    sync.Mutex
+	items []MemoryRecord
+	saved []Proposal
+}
+
+// NewInMemoryStore seeds a store with already-known memories.
+func NewInMemoryStore(seed []MemoryRecord) *InMemoryStore {
+	return &InMemoryStore{items: append([]MemoryRecord(nil), seed...)}
+}
+
+// Existing implements MemoryStore.
+func (s *InMemoryStore) Existing() []MemoryRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]MemoryRecord(nil), s.items...)
+}
+
+// Save implements MemoryStore.
+func (s *InMemoryStore) Save(p Proposal) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.saved = append(s.saved, p)
+	s.items = append(s.items, MemoryRecord{
+		Key:        p.Key,
+		Content:    p.Content,
+		Level:      p.Level,
+		Scope:      p.Scope,
+		Confidence: p.Confidence,
+	})
+	return nil
+}
+
+// Saved returns proposals accepted so far (inspection helper for tests).
+func (s *InMemoryStore) Saved() []Proposal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]Proposal(nil), s.saved...)
+}
+
+// ---------------------------------------------------------------------------
+// Confirmation timers (plan §2.8)
+// ---------------------------------------------------------------------------
+
+const (
+	// DefaultConfirmAfter: PROPOSED items auto-confirm after 24h.
+	DefaultConfirmAfter = 24 * time.Hour
+	// HighConfidenceConfirmAfter: items with confidence > 0.9 confirm after 4h.
+	HighConfidenceConfirmAfter = 4 * time.Hour
+	// ExplicitConfirmAfter: items from explicit user statements confirm after 1h.
+	ExplicitConfirmAfter = 1 * time.Hour
+	// HighConfidenceThreshold marks "high-confidence" items.
 	HighConfidenceThreshold = 0.9
-
-	// ConfirmAfterDefault: PROPOSED items auto-confirm after 24h (§2.8).
-	ConfirmAfterDefault = 24 * time.Hour
-	// ConfirmAfterHighConfidence: items with confidence > 0.9 confirm after 4h.
-	ConfirmAfterHighConfidence = 4 * time.Hour
-	// ConfirmAfterExplicitUser: items from explicit user statements confirm
-	// after 1h (detected by the processor via explicit_user_statement).
-	ConfirmAfterExplicitUser = time.Hour
-
-	// MinContentChars / MaxContentChars mirror the memory_items content
-	// CHECK (plan §1.1: 20–2000 chars). Candidates outside the range are
-	// dropped before persistence so the store never sees a CHECK violation.
-	MinContentChars = 20
-	MaxContentChars = 2000
 )
 
-// ---------------------------------------------------------------------------
-// Events
-// ---------------------------------------------------------------------------
-
-// ProcessorEvent is one harvested event buffered for extraction. SessionID
-// routes the event to its per-session batch; At anchors idle math (zero At
-// is stamped with the processor clock on ingest).
-type ProcessorEvent struct {
-	Type      string
-	Payload   map[string]any
-	At        time.Time
-	SessionID string
-}
-
-// sessionIDOf extracts the session id from a sink payload ("session_id").
-func sessionIDOf(payload map[string]any) string {
-	if payload == nil {
-		return ""
+// ConfirmationDelay returns how long a proposal waits before auto-confirming:
+// explicit user statements → 1h; confidence > 0.9 → 4h; otherwise 24h.
+func ConfirmationDelay(p Proposal) time.Duration {
+	if p.Explicit {
+		return ExplicitConfirmAfter
 	}
-	if s, ok := payload["session_id"].(string); ok {
-		return s
+	if p.Confidence > HighConfidenceThreshold {
+		return HighConfidenceConfirmAfter
 	}
-	return ""
+	return DefaultConfirmAfter
 }
 
 // ---------------------------------------------------------------------------
-// Extracted memories
+// Classification (plan §2.6 prompt)
 // ---------------------------------------------------------------------------
 
-// ExtractedMemory is one LLM-proposed fact (plan §2.6 classification).
-// Explicit marks items drawn from a direct user statement ("I prefer…",
-// "we decided…") as reported by the LLM via explicit_user_statement; it
-// drives the 1h fast-confirm timer (§2.8).
-type ExtractedMemory struct {
-	Key            string
-	Content        string
-	ContextSnippet string
-	Level          string
-	Scope          string
-	Confidence     float64
-	Tags           []string
-	Explicit       bool
-	SessionID      string
+// personalMarkers signal PERSONAL level ("I prefer", "I like", "I always").
+var personalMarkers = []string{
+	"i prefer", "i like", "i love", "i hate", "i always", "i never",
+	"my preference", "my style", "i want you to",
 }
 
-// NormalizeLevel maps an LLM label to the memory_items level CHECK set
-// (plan §1.1). Plan §2.6: "Default to SESSION level if unsure (safer — can
-// be promoted later)", so unknown/empty labels become session.
-func NormalizeLevel(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case LevelOrganization:
-		return LevelOrganization
-	case LevelProject:
-		return LevelProject
-	case LevelPersonal:
-		return LevelPersonal
-	case LevelSession:
-		return LevelSession
-	default:
-		return LevelSession
-	}
+// sessionMarkers signal SESSION level ("for now", "right now", ...).
+var sessionMarkers = []string{
+	"for now", "right now", "during this", "in this task", "in this session",
+	"temporarily", "just for this", "don't touch", "do not touch",
+	"do not modify", "don't modify",
 }
 
-// Level constants mirror the memory_items CHECK constraint (plan §1.1) and
-// the store layer's vocabulary (internal/store/memory.go) without importing
-// it — this package stays decoupled from internal/store by design.
-const (
-	LevelOrganization = "organization"
-	LevelProject      = "project"
-	LevelPersonal     = "personal"
-	LevelSession      = "session"
-)
-
-// NormalizeScope maps an LLM label to the scope CHECK set (plan §1.1:
-// fact, preference, decision, constraint, pattern, episode_summary).
-// Unknown/empty labels default to "fact" — the neutral, objective bucket;
-// a wrong guess here is harmless because scope never gates visibility.
-func NormalizeScope(s string) string {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "fact":
-		return "fact"
-	case "preference":
-		return "preference"
-	case "decision":
-		return "decision"
-	case "constraint":
-		return "constraint"
-	case "pattern":
-		return "pattern"
-	case "episode_summary":
-		return "episode_summary"
-	default:
-		return "fact"
-	}
+// organizationMarkers signal ORGANIZATION level (universal policy).
+var organizationMarkers = []string{
+	"all apis", "all projects", "every project", "across all",
+	"company policy", "company-wide", "company wide", "org-wide",
+	"organization policy", "all services must", "all apis must",
 }
 
-// ConfirmAfterFor is the plan §2.8 auto-confirm rule, most-urgent first:
-// explicit user statement → 1h; confidence > 0.9 → 4h; otherwise 24h.
-func ConfirmAfterFor(m ExtractedMemory) time.Duration {
-	if m.Explicit {
-		return ConfirmAfterExplicitUser
-	}
-	if m.Confidence > HighConfidenceThreshold {
-		return ConfirmAfterHighConfidence
-	}
-	return ConfirmAfterDefault
+// projectMarkers signal PROJECT level (team decision / codebase fact).
+var projectMarkers = []string{
+	"we use", "we decided", "team decided", "team uses", "our stack",
+	"our codebase", "the project uses", "we chose", "agreed by the team",
 }
 
-// ---------------------------------------------------------------------------
-// Extraction prompt (plan §2.6)
-// ---------------------------------------------------------------------------
-
-// BuildExtractionPrompt renders the plan §2.6 processor prompt: level + scope
-// classification rules with the SESSION default, the CONFIRMED-memory
-// do-not-duplicate list, the new event batch, and the JSON output contract
-// the parser (ParseExtractedMemories) consumes.
-func BuildExtractionPrompt(projectName string, existing []string, batch []ProcessorEvent) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "Given these events from project %q, extract memories.\n\n", projectName)
-	b.WriteString(`Classify each memory's level:
-- ORGANIZATION: universal policy across all projects (e.g., "all APIs use JWT")
-- PROJECT: team decision or codebase fact (e.g., "we use pytest")
-- PERSONAL: individual preference (e.g., "Alice prefers verbose errors")
-  → Look for "I prefer", "I like", "I always"
-- SESSION: temporary, task-specific (e.g., "don't touch payments/ right now")
-  → Look for "for now", "right now", "during this", "in this task"
-
-Classify each memory's scope:
-- fact: objective truth about the codebase
-- preference: subjective choice
-- decision: deliberate team choice with reasoning
-- constraint: hard rule that must not be violated
-- pattern: recurring code/architecture pattern
-- episode_summary: condensed bug/incident takeaway
-
-Default to SESSION level if unsure (safer — can be promoted later).
-`)
-	b.WriteString("\nExisting confirmed memories (do not duplicate):\n")
-	if len(existing) == 0 {
-		b.WriteString("(none)\n")
-	} else {
-		for _, m := range existing {
-			b.WriteString("- " + m + "\n")
+// ClassifyLevel assigns a memory level using the §2.6 heuristics. Priority:
+// personal markers → session markers → organization markers → project
+// markers → SESSION (safe default: session items can be promoted later, plan
+// §2.7, while an over-scoped item would leak across sessions).
+func ClassifyLevel(text string) MemoryLevel {
+	lowered := strings.ToLower(text)
+	for _, m := range personalMarkers {
+		if strings.Contains(lowered, m) {
+			return LevelPersonal
 		}
 	}
-	b.WriteString("\nNew events to process:\n")
-	if len(batch) == 0 {
-		b.WriteString("(none)\n")
-	} else {
-		for _, ev := range batch {
-			fmt.Fprintf(&b, "[%s] %s %s\n", ev.Type, ev.SessionID, renderPayload(ev.Payload))
+	for _, m := range sessionMarkers {
+		if strings.Contains(lowered, m) {
+			return LevelSession
 		}
 	}
-	b.WriteString(`
-Reply with a JSON array only (no prose, no markdown fences). One object per memory:
-[{"key": "area/name", "content": "natural-language fact, 20-500 chars",
-  "context_snippet": "1-2 line provenance, e.g. decided by Alice during auth refactor",
-  "level": "organization|project|personal|session",
-  "scope": "fact|preference|decision|constraint|pattern|episode_summary",
-  "confidence": 0.0-1.0,
-  "tags": ["optional", "keywords"],
-  "explicit_user_statement": true if the user stated this directly, else false}]
-Omit memories with nothing durable to record — an empty array [] is a valid answer.`)
-	return b.String()
+	for _, m := range organizationMarkers {
+		if strings.Contains(lowered, m) {
+			return LevelOrganization
+		}
+	}
+	for _, m := range projectMarkers {
+		if strings.Contains(lowered, m) {
+			return LevelProject
+		}
+	}
+	return LevelSession
 }
 
-// renderPayload flattens an event payload to one stable, prompt-safe line.
-func renderPayload(payload map[string]any) string {
-	if len(payload) == 0 {
-		return "{}"
-	}
-	keys := make([]string, 0, len(payload))
-	for k := range payload {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	var b strings.Builder
-	b.WriteString("{")
-	for i, k := range keys {
-		if i > 0 {
-			b.WriteString(", ")
+// ClassifyScope assigns a memory scope using the §2.6 heuristics. Priority:
+// constraint (hard rules must win) → episode_summary → decision → preference
+// → pattern → fact (neutral default).
+func ClassifyScope(text string) MemoryScope {
+	lowered := strings.ToLower(text)
+	for _, m := range []string{
+		"must not", "must never", "never ", "do not ", "don't ",
+		"required", "forbidden", "prohibited", "always use jwt",
+		"no api key",
+	} {
+		if strings.Contains(lowered, m) {
+			return ScopeConstraint
 		}
-		s := fmt.Sprint(payload[k])
-		if len([]rune(s)) > 400 {
-			s = string([]rune(s)[:400]) + "…[truncated]"
-		}
-		s = strings.ReplaceAll(s, "\n", " ")
-		fmt.Fprintf(&b, "%s: %s", k, s)
 	}
-	b.WriteString("}")
-	return b.String()
+	for _, m := range []string{
+		"root cause", "root-cause", "bug fix", "bugfix", "incident",
+		"postmortem", "post-mortem", "how we fixed",
+	} {
+		if strings.Contains(lowered, m) {
+			return ScopeEpisodeSummary
+		}
+	}
+	for _, m := range []string{
+		"decided", "decision", "chose ", "chosen", "agreed",
+		"over memcached", "over ", "trade-off", "tradeoff",
+	} {
+		if strings.Contains(lowered, m) {
+			return ScopeDecision
+		}
+	}
+	for _, m := range []string{
+		"prefer", "preference", "i like", "i love", "i hate", "my style",
+	} {
+		if strings.Contains(lowered, m) {
+			return ScopePreference
+		}
+	}
+	for _, m := range []string{
+		"pattern", "convention", "typically", "usually", "best practice",
+	} {
+		if strings.Contains(lowered, m) {
+			return ScopePattern
+		}
+	}
+	return ScopeFact
 }
 
-// extractedJSON is the wire shape ParseExtractedMemories accepts (a subset
-// of ExtractedMemory with JSON tags matching the prompt contract).
-type extractedJSON struct {
-	Key              string   `json:"key"`
-	Content          string   `json:"content"`
-	ContextSnippet   string   `json:"context_snippet"`
-	Level            string   `json:"level"`
-	Scope            string   `json:"scope"`
-	Confidence       float64  `json:"confidence"`
-	Tags             []string `json:"tags"`
-	ExplicitUserStmt bool     `json:"explicit_user_statement"`
+// explicitMarkers detect explicit user statements (1h auto-confirm lane).
+// These are first-person declarations or imperatives, not inferred context.
+var explicitMarkers = []string{
+	"i prefer", "i like", "i want", "i decided", "we decided",
+	"let's use", "lets use", "use redis", "must ", "never ",
+	"always ", "do not ", "don't ",
 }
 
-// ParseExtractedMemories parses one LLM completion into normalized memories.
-// It tolerates prose around the JSON array (takes the outermost [...] span),
-// normalizes level/scope, clamps confidence to [0,1], trims over-long
-// content to MaxContentChars, and drops entries with an empty key or empty
-// content — those can never satisfy the memory_items constraints.
-func ParseExtractedMemories(resp, sessionID string) []ExtractedMemory {
-	start := strings.Index(resp, "[")
-	end := strings.LastIndex(resp, "]")
-	if start < 0 || end < 0 || end <= start {
-		return nil
-	}
-	var raw []extractedJSON
-	if err := json.Unmarshal([]byte(resp[start:end+1]), &raw); err != nil {
-		return nil
-	}
-	out := make([]ExtractedMemory, 0, len(raw))
-	for _, r := range raw {
-		key := strings.TrimSpace(r.Key)
-		content := strings.TrimSpace(r.Content)
-		if key == "" || content == "" {
-			continue
-		}
-		if n := len([]rune(content)); n > MaxContentChars {
-			content = string([]rune(content)[:MaxContentChars])
-		}
-		conf := r.Confidence
-		if math.IsNaN(conf) {
-			conf = 0
-		}
-		if conf < 0 {
-			conf = 0
-		}
-		if conf > 1 {
-			conf = 1
-		}
-		out = append(out, ExtractedMemory{
-			Key:            key,
-			Content:        content,
-			ContextSnippet: strings.TrimSpace(r.ContextSnippet),
-			Level:          NormalizeLevel(r.Level),
-			Scope:          NormalizeScope(r.Scope),
-			Confidence:     conf,
-			Tags:           append([]string(nil), r.Tags...),
-			Explicit:       r.ExplicitUserStmt,
-			SessionID:      sessionID,
-		})
-	}
-	return out
-}
-
-// ---------------------------------------------------------------------------
-// Dedup (cosine > 0.9 vs CONFIRMED skips)
-// ---------------------------------------------------------------------------
-
-// VecCosine is cosine similarity in [-1,1] over embedding vectors; it
-// returns 0 for empty, mismatched or zero-norm inputs (never NaN), matching
-// the store layer's CosineSimilarity semantics without importing it.
-func VecCosine(a, b []float32) float64 {
-	if len(a) == 0 || len(a) != len(b) {
-		return 0
-	}
-	var dot, na, nb float64
-	for i := range a {
-		x, y := float64(a[i]), float64(b[i])
-		dot += x * y
-		na += x * x
-		nb += y * y
-	}
-	if na == 0 || nb == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(na) * math.Sqrt(nb))
-}
-
-// TokenCosineSimilarity is the embedding-free fallback: cosine over
-// lowercase word-frequency vectors. Identical texts score exactly 1;
-// disjoint texts score 0. Used when either side lacks an embedding.
-func TokenCosineSimilarity(a, b string) float64 {
-	freq := func(s string) map[string]float64 {
-		m := map[string]float64{}
-		for _, tok := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-			return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_')
-		}) {
-			m[tok]++
-		}
-		return m
-	}
-	fa, fb := freq(a), freq(b)
-	if len(fa) == 0 || len(fb) == 0 {
-		return 0
-	}
-	var dot, na, nb float64
-	for tok, x := range fa {
-		na += x * x
-		if y, ok := fb[tok]; ok {
-			dot += x * y
-		}
-	}
-	for _, y := range fb {
-		nb += y * y
-	}
-	if na == 0 || nb == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(na) * math.Sqrt(nb))
-}
-
-// ConfirmedMemory is the dedup surface the processor needs from the store:
-// content plus an optional embedding. The store owner maps store.MemoryItem
-// onto this at the boundary (same decoupling as context.Item).
-type ConfirmedMemory struct {
-	Key       string
-	Content   string
-	Embedding []float32
-}
-
-// IsNearDuplicate reports whether candidate content matches any CONFIRMED
-// memory with cosine > DedupCosineThreshold (0.9). Embedding cosine wins
-// when both sides carry same-length embeddings; otherwise the token
-// fallback compares raw text.
-func IsNearDuplicate(content string, embedding []float32, existing []ConfirmedMemory) bool {
-	for _, e := range existing {
-		var sim float64
-		if len(embedding) > 0 && len(e.Embedding) == len(embedding) {
-			sim = VecCosine(embedding, e.Embedding)
-		} else {
-			sim = TokenCosineSimilarity(content, e.Content)
-		}
-		if sim > DedupCosineThreshold {
+// IsExplicitStatement reports whether text looks like an explicit user
+// statement rather than inferred background context.
+func IsExplicitStatement(text string) bool {
+	lowered := strings.ToLower(text)
+	for _, m := range explicitMarkers {
+		if strings.Contains(lowered, m) {
 			return true
 		}
 	}
@@ -429,886 +288,578 @@ func IsNearDuplicate(content string, embedding []float32, existing []ConfirmedMe
 }
 
 // ---------------------------------------------------------------------------
-// Episode auto-detection (plan §2.3)
+// Deduplication (issue #10: skip proposal if similarity > 0.9)
 // ---------------------------------------------------------------------------
 
-// EpisodeDraft is the bug/incident arc DetectEpisode assembles from an event
-// batch. Persistence (episodes row + episode_events links + embedding) is
-// the store layer's job via ProcessorStore.SaveEpisode.
-type EpisodeDraft struct {
-	Title         string
-	EpisodeType   string // "bug_fix" for the auto-detected arc (§2.3)
-	Trigger       string
-	Investigation string
-	RootCause     string
-	Resolution    string
-	Verification  string
-	ErrorPatterns []string
-	FilesInvolved []string
-	SessionID     string
+// DuplicateSimilarityThreshold mirrors the issue: cosine similarity > 0.9
+// against an existing confirmed memory discards the proposal.
+const DuplicateSimilarityThreshold = 0.9
+
+// tokenize lowercases text into alphanumeric word tokens (stdlib-only
+// embedding substitute: bag-of-words vectors, no model dependency).
+func tokenize(text string) []string {
+	return strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
 }
 
-// EpisodeEventRef links a batch index to its episode_events role (plan §1.1
-// CHECK: trigger, investigation, attempt, fix, verification, context).
-type EpisodeEventRef struct {
-	Index int
-	Role  string
+// CosineSimilarity returns the cosine similarity of two texts' bag-of-words
+// vectors in [0, 1]. Production replaces this with pgvector embedding cosine
+// distance; the threshold semantics (> 0.9 ⇒ duplicate) stay identical.
+func CosineSimilarity(a, b string) float64 {
+	fa := map[string]float64{}
+	for _, t := range tokenize(a) {
+		fa[t]++
+	}
+	fb := map[string]float64{}
+	for _, t := range tokenize(b) {
+		fb[t]++
+	}
+	if len(fa) == 0 || len(fb) == 0 {
+		return 0
+	}
+	var dot, na, nb float64
+	for tok, ca := range fa {
+		na += ca * ca
+		if cb, ok := fb[tok]; ok {
+			dot += ca * cb
+		}
+	}
+	for _, cb := range fb {
+		nb += cb * cb
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / (sqrt(na) * sqrt(nb))
 }
 
-// payloadString coerces payload values to string.
-func payloadString(payload map[string]any, key string) string {
-	if payload == nil {
-		return ""
+// sqrt is a local square-root helper (Newton iteration) so this file stays
+// import-lean; semantics match math.Sqrt for the non-negative inputs used.
+func sqrt(x float64) float64 {
+	if x <= 0 {
+		return 0
 	}
-	if s, ok := payload[key].(string); ok {
-		return s
+	z := x / 2
+	if z == 0 {
+		z = 1
 	}
-	if v, ok := payload[key]; ok && v != nil {
-		return fmt.Sprint(v)
+	for i := 0; i < 32; i++ {
+		z -= (z*z - x) / (2 * z)
+	}
+	return z
+}
+
+// IsDuplicate reports whether content is a near-duplicate (> 0.9 similarity)
+// of any existing memory, with the best score found.
+func IsDuplicate(content string, existing []MemoryRecord) (bool, float64) {
+	best := 0.0
+	for _, m := range existing {
+		if s := CosineSimilarity(content, m.Content); s > best {
+			best = s
+		}
+	}
+	return best > DuplicateSimilarityThreshold, best
+}
+
+// Deduplicate filters proposals, dropping any that duplicate existing
+// memories OR earlier proposals in the same batch (keeps first occurrence).
+func Deduplicate(proposals []Proposal, existing []MemoryRecord) []Proposal {
+	seen := append([]MemoryRecord(nil), existing...)
+	out := make([]Proposal, 0, len(proposals))
+	for _, p := range proposals {
+		if dup, _ := IsDuplicate(p.Content, seen); dup {
+			continue
+		}
+		out = append(out, p)
+		seen = append(seen, MemoryRecord{
+			Key: p.Key, Content: p.Content, Level: p.Level,
+			Scope: p.Scope, Confidence: p.Confidence,
+		})
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Promotion (plan §2.7)
+// ---------------------------------------------------------------------------
+
+// PromotionSessionThreshold: a SESSION fact seen in 3+ sessions is
+// auto-proposed for promotion to PROJECT.
+const PromotionSessionThreshold = 3
+
+// ShouldPromoteSessionToProject reports whether a session-scoped fact observed
+// in sessionCount distinct sessions should be promoted to project scope.
+func ShouldPromoteSessionToProject(sessionCount int) bool {
+	return sessionCount >= PromotionSessionThreshold
+}
+
+// PromotionFor maps a record + its distinct-session count to the level it
+// should hold: SESSION records at/above threshold become PROJECT; everything
+// else keeps its level ("" means "no promotion").
+func PromotionFor(rec MemoryRecord, sessionCount int) MemoryLevel {
+	if rec.Level == LevelSession && ShouldPromoteSessionToProject(sessionCount) {
+		return LevelProject
 	}
 	return ""
 }
 
-// payloadExitCode coerces exit_code across int/float64/json.Number encodings;
-// ok=false when absent or unparseable.
-func payloadExitCode(payload map[string]any) (code int, ok bool) {
-	if payload == nil {
-		return 0, false
+// ---------------------------------------------------------------------------
+// Episode auto-detection (plan §2.3)
+// ---------------------------------------------------------------------------
+
+// Episode is a detected bug/incident arc over Layer 1 tool events.
+type Episode struct {
+	Type          string   // e.g. "bug_fix"
+	Title         string   // short human title derived from the trigger
+	Trigger       string   // failing command + output excerpt
+	Investigation string   // files read during diagnosis
+	Resolution    string   // files modified + commit message
+	Verification  string   // passing re-run of the same command
+	FilesInvolved []string // modified files
+	ErrorPatterns []string // first error-ish line(s) of the trigger output
+	Status        string   // "OPEN" | "RESOLVED" (commit present ⇒ RESOLVED)
+}
+
+func toolStr(payload map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if s, ok := payload[k].(string); ok && s != "" {
+			return s
+		}
 	}
-	switch v := payload["exit_code"].(type) {
-	case int:
-		return v, true
-	case int64:
-		return int(v), true
-	case float64:
-		return int(v), true
-	case json.Number:
-		if i, err := v.Int64(); err == nil {
-			return int(i), true
+	return ""
+}
+
+func toolInt(payload map[string]any, keys ...string) (int, bool) {
+	for _, k := range keys {
+		switch v := payload[k].(type) {
+		case int:
+			return v, true
+		case int64:
+			return int(v), true
+		case float64:
+			return int(v), true
 		}
 	}
 	return 0, false
 }
 
-// DetectEpisode scans a session batch for the plan §2.3 bug arc:
+func toolCommandKey(payload map[string]any) string {
+	cmd := toolStr(payload, "command")
+	var args []string
+	if a, ok := payload["args"].([]string); ok {
+		args = a
+	} else if a, ok := payload["args"].([]any); ok {
+		for _, x := range a {
+			if s, ok := x.(string); ok {
+				args = append(args, s)
+			}
+		}
+	}
+	return strings.TrimSpace(cmd + " " + strings.Join(args, " "))
+}
+
+// errorExcerpt pulls the first non-empty output line as the error pattern.
+func errorExcerpt(payload map[string]any) string {
+	out := toolStr(payload, "output", "stderr", "stdout")
+	for _, line := range strings.Split(out, "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			if len(s) > 200 {
+				s = s[:200]
+			}
+			return s
+		}
+	}
+	return ""
+}
+
+// DetectEpisodePattern scans Layer 1 ToolEvents for the §2.3 bug arc:
 //
-//	COMMAND_EXECUTED exit≠0 (trigger) → FILE_READ series (investigation) →
-//	FILE_MODIFIED (fix) → COMMAND_EXECUTED exit=0 (verification) →
-//	GIT_COMMITTED (resolution)
+//	COMMAND_EXECUTED(exit≠0) → FILE_READ(s) → FILE_MODIFIED →
+//	COMMAND_EXECUTED(same command, exit=0) → GIT_COMMITTED
 //
-// It returns nil when there is no failure trigger, or when the failure
-// stands alone with no follow-up (a lone failing command is noise, not an
-// episode — the arc needs at least one of investigation/fix/verification).
-// RootCause is left empty for the LLM/store to fill: raw tool events show
-// what happened, not why.
-func DetectEpisode(batch []ProcessorEvent) (*EpisodeDraft, []EpisodeEventRef) {
-	triggerIdx := -1
-	for i, ev := range batch {
-		if ev.Type != EventCommandExecuted {
+// It returns the first complete arc found, or nil. Investigation reads and
+// the closing commit are optional (arc still counts without them); the
+// trigger, fix, and passing re-run are required.
+func DetectEpisodePattern(evs []ToolEvent) *Episode {
+	for i := 0; i < len(evs); i++ {
+		if evs[i].Type != ToolEventCommandExecuted {
 			continue
 		}
-		if code, ok := payloadExitCode(ev.Payload); ok && code != 0 {
-			triggerIdx = i
-			break
+		code, ok := toolInt(evs[i].Payload, "exit_code")
+		if !ok || code == 0 {
+			continue
 		}
-	}
-	if triggerIdx < 0 {
-		return nil, nil
-	}
-	trigger := batch[triggerIdx]
-	triggerCmd := payloadString(trigger.Payload, "cmdline")
-	stderr := payloadString(trigger.Payload, "stderr")
+		triggerCmd := toolCommandKey(evs[i].Payload)
+		triggerErr := errorExcerpt(evs[i].Payload)
 
-	var reads, fixes []string
-	seen := map[string]bool{}
-	verifyIdx, commitIdx := -1, -1
-	var verifyCmd string
-	for i := triggerIdx + 1; i < len(batch); i++ {
-		ev := batch[i]
-		switch ev.Type {
-		case EventFileRead:
-			if p := payloadString(ev.Payload, "path"); p != "" && !seen["r"+p] {
-				seen["r"+p] = true
-				reads = append(reads, p)
+		var reads, fixes []string
+		fixIdx := -1
+		for j := i + 1; j < len(evs); j++ {
+			switch evs[j].Type {
+			case ToolEventFileRead:
+				if p := toolStr(evs[j].Payload, "path"); p != "" {
+					reads = append(reads, p)
+				}
+			case ToolEventFileModified:
+				if p := toolStr(evs[j].Payload, "path"); p != "" {
+					fixes = append(fixes, p)
+				}
+				if fixIdx == -1 {
+					fixIdx = j
+				}
 			}
-		case EventFileModified:
-			if p := payloadString(ev.Payload, "path"); p != "" && !seen["w"+p] {
-				seen["w"+p] = true
-				fixes = append(fixes, p)
-			}
-		case EventCommandExecuted:
-			code, ok := payloadExitCode(ev.Payload)
-			if !ok || code != 0 || verifyIdx >= 0 {
+		}
+		if fixIdx == -1 {
+			continue // no attempted fix after this trigger
+		}
+		verifyIdx := -1
+		var verification string
+		for j := fixIdx + 1; j < len(evs); j++ {
+			if evs[j].Type != ToolEventCommandExecuted {
 				continue
 			}
-			cmd := payloadString(ev.Payload, "cmdline")
-			if triggerCmd == "" || cmd == "" || cmd == triggerCmd {
-				verifyIdx = i
-				verifyCmd = cmd
-			} else if verifyIdx < 0 {
-				// A different command passing still verifies recovery when
-				// nothing else does; prefer the same-command rerun below.
-				verifyIdx = i
-				verifyCmd = cmd
+			code, ok := toolInt(evs[j].Payload, "exit_code")
+			if !ok || code != 0 {
+				continue
 			}
-		case EventGitCommitted:
-			if commitIdx < 0 {
-				commitIdx = i
+			if triggerCmd != "" && toolCommandKey(evs[j].Payload) != triggerCmd {
+				continue // must be the SAME command re-run
 			}
+			verifyIdx = j
+			verification = toolCommandKey(evs[j].Payload)
+			break
 		}
-	}
-	if len(reads) == 0 && len(fixes) == 0 && verifyIdx < 0 && commitIdx < 0 {
-		return nil, nil // bare failure, no arc
-	}
-
-	var refs []EpisodeEventRef
-	refs = append(refs, EpisodeEventRef{Index: triggerIdx, Role: "trigger"})
-	for i := triggerIdx + 1; i < len(batch); i++ {
-		switch batch[i].Type {
-		case EventFileRead:
-			refs = append(refs, EpisodeEventRef{Index: i, Role: "investigation"})
-		case EventFileModified:
-			refs = append(refs, EpisodeEventRef{Index: i, Role: "fix"})
-		case EventCommandExecuted:
-			if i == verifyIdx {
-				refs = append(refs, EpisodeEventRef{Index: i, Role: "verification"})
-			}
-		case EventGitCommitted:
-			if i == commitIdx {
-				refs = append(refs, EpisodeEventRef{Index: i, Role: "verification"})
-			}
+		if verifyIdx == -1 {
+			continue // fix never verified green
 		}
-	}
-
-	draft := &EpisodeDraft{
-		Title:         "Bug fix: " + episodeFirstLine(triggerCmdOrErr(triggerCmd, stderr)),
-		EpisodeType:   "bug_fix",
-		Trigger:       describeTrigger(triggerCmd, stderr),
-		Investigation: describeList("Read", reads),
-		Resolution:    describeList("Patched", fixes),
-		FilesInvolved: append(append([]string(nil), reads...), fixes...),
-		SessionID:     trigger.SessionID,
-	}
-	if patterns := errorPatterns(stderr); len(patterns) > 0 {
-		draft.ErrorPatterns = patterns
-	}
-	if verifyIdx >= 0 {
-		draft.Verification = "Reran " + quoteOr(verifyCmd, "failing command") + ": exit 0."
-	}
-	if commitIdx >= 0 {
-		hash := payloadString(batch[commitIdx].Payload, "hash")
-		msg := payloadString(batch[commitIdx].Payload, "message")
-		note := "Committed"
-		if hash != "" {
-			note += " " + hash
-		}
-		if msg != "" {
-			note += " — " + firstLine(msg)
-		}
-		note += "."
-		if draft.Verification != "" {
-			draft.Verification += " " + note
-		} else {
-			draft.Verification = note
-		}
-		if draft.Resolution != "" {
-			draft.Resolution += " " + note
-		} else {
-			draft.Resolution = note
-		}
-	}
-	return draft, refs
-}
-
-func triggerCmdOrErr(cmd, stderr string) string {
-	if cmd != "" {
-		return cmd
-	}
-	return episodeFirstLine(stderr)
-}
-
-func describeTrigger(cmd, stderr string) string {
-	if cmd == "" && stderr == "" {
-		return "A command failed."
-	}
-	s := "Command failed: " + quoteOr(cmd, "unknown command") + "."
-	if fl := episodeFirstLine(stderr); fl != "" {
-		s += " Stderr: " + fl
-	}
-	return s
-}
-
-func describeList(verb string, files []string) string {
-	if len(files) == 0 {
-		return ""
-	}
-	return verb + ": " + strings.Join(files, ", ") + "."
-}
-
-func quoteOr(s, fallback string) string {
-	if s == "" {
-		return fallback
-	}
-	return "`" + s + "`"
-}
-
-func episodeFirstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return ""
-	}
-	if i := strings.Index(s, "\n"); i >= 0 {
-		s = s[:i]
-	}
-	s = strings.TrimSpace(s)
-	if len([]rune(s)) > 160 {
-		s = string([]rune(s)[:160]) + "…"
-	}
-	return s
-}
-
-// errorPatterns extracts a stable error signature from stderr: the first
-// non-empty line, capped at 160 chars. The store layer may refine this with
-// embedding similarity; the processor only needs a deterministic seed.
-func errorPatterns(stderr string) []string {
-	if fl := episodeFirstLine(stderr); fl != "" {
-		return []string{fl}
-	}
-	return nil
-}
-
-// ---------------------------------------------------------------------------
-// LLM clients (user key, no SDK deps)
-// ---------------------------------------------------------------------------
-
-// LLMClient is the single-method seam for memory extraction. Production
-// callers inject an OllamaClient (below) or their own OpenAI/Anthropic HTTP
-// implementation holding the user's key — the interface is deliberately
-// provider-agnostic so no vendor SDK ever enters go.mod.
-type LLMClient interface {
-	Complete(ctx context.Context, prompt string) (string, error)
-}
-
-// LLMFunc adapts a plain func to LLMClient (handy for fakes and for wiring
-// user-key HTTP calls without a struct).
-type LLMFunc func(ctx context.Context, prompt string) (string, error)
-
-// Complete implements LLMClient.
-func (f LLMFunc) Complete(ctx context.Context, prompt string) (string, error) {
-	return f(ctx, prompt)
-}
-
-// StubLLMClient returns a canned response (tests, offline runs). Every call
-// records its prompt so tests can assert on classification input.
-// EmbedVec/EmbedErr script the optional Embedder path: a nil EmbedVec with
-// nil EmbedErr reports "no embedding" so the token fallback engages.
-type StubLLMClient struct {
-	Response string
-	Err      error
-	EmbedVec []float32
-	EmbedErr error
-
-	mu      sync.Mutex
-	Prompts []string
-	Calls   int
-}
-
-// Complete implements LLMClient.
-func (s *StubLLMClient) Complete(_ context.Context, prompt string) (string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Prompts = append(s.Prompts, prompt)
-	s.Calls++
-	return s.Response, s.Err
-}
-
-// Embed implements Embedder.
-func (s *StubLLMClient) Embed(_ context.Context, _ string) ([]float32, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.EmbedErr != nil {
-		return nil, s.EmbedErr
-	}
-	return append([]float32(nil), s.EmbedVec...), nil
-}
-
-// Embedder is the optional embedding seam: LLM clients that can embed
-// (Ollama, hosted providers over the user's key) implement
-// Embed(ctx, text) and the processor threads the vector into dedup.
-// Clients without it simply do not implement the interface and the
-// token-cosine fallback in IsNearDuplicate engages — absence is normal,
-// never an error.
-type Embedder interface {
-	Embed(ctx context.Context, text string) ([]float32, error)
-}
-
-// Compile-time proofs that the bundled clients thread embeddings.
-var (
-	_ Embedder = (*StubLLMClient)(nil)
-	_ Embedder = (*OllamaClient)(nil)
-)
-
-// OllamaClient runs extraction against a local Ollama server
-// (POST {BaseURL}/api/generate, {"stream": false}) over plain net/http —
-// no SDK dependency. The model runs on the user's device alongside the
-// daemon (plan: "User's device … user supplies own API keys").
-type OllamaClient struct {
-	BaseURL string // e.g. "http://localhost:11434"
-	Model   string // e.g. "llama3.1"
-	HTTP    *http.Client
-}
-
-func (c *OllamaClient) httpClient() *http.Client {
-	if c.HTTP != nil {
-		return c.HTTP
-	}
-	return &http.Client{Timeout: 120 * time.Second}
-}
-
-// Complete implements LLMClient.
-func (c *OllamaClient) Complete(ctx context.Context, prompt string) (string, error) {
-	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
-	if base == "" {
-		return "", fmt.Errorf("processor: ollama: empty base URL")
-	}
-	if c.Model == "" {
-		return "", fmt.Errorf("processor: ollama: empty model")
-	}
-	body, _ := json.Marshal(map[string]any{
-		"model":  c.Model,
-		"prompt": prompt,
-		"stream": false,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/generate", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("processor: ollama: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return "", fmt.Errorf("processor: ollama: post: %w", err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return "", fmt.Errorf("processor: ollama: read response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("processor: ollama: server status %s", resp.Status)
-	}
-	var out struct {
-		Response string `json:"response"`
-	}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return "", fmt.Errorf("processor: ollama: decode response: %w", err)
-	}
-	return out.Response, nil
-}
-
-// Embed implements Embedder via POST {BaseURL}/api/embeddings
-// ({"model", "prompt"} → {"embedding"}) over plain net/http — no SDK. An
-// empty embedding with nil error reports "absent" so the caller falls back
-// to token cosine; transport and non-2xx failures are real errors.
-func (c *OllamaClient) Embed(ctx context.Context, text string) ([]float32, error) {
-	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
-	if base == "" {
-		return nil, fmt.Errorf("processor: ollama: empty base URL")
-	}
-	if c.Model == "" {
-		return nil, fmt.Errorf("processor: ollama: empty model")
-	}
-	body, _ := json.Marshal(map[string]any{
-		"model":  c.Model,
-		"prompt": text,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("processor: ollama: build embed request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("processor: ollama: post embed: %w", err)
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
-	if err != nil {
-		return nil, fmt.Errorf("processor: ollama: read embed response: %w", err)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("processor: ollama: embed server status %s", resp.Status)
-	}
-	var out struct {
-		Embedding []float32 `json:"embedding"`
-	}
-	if err := json.Unmarshal(data, &out); err != nil {
-		return nil, fmt.Errorf("processor: ollama: decode embed response: %w", err)
-	}
-	return out.Embedding, nil
-}
-
-// ---------------------------------------------------------------------------
-// Store seam (persistence delegated to the store layer)
-// ---------------------------------------------------------------------------
-
-// ProposedMemory is one deduped candidate ready for persistence with its
-// §2.8 auto-confirm delay attached. Embedding carries the candidate vector
-// when the LLM client implements Embedder; it is nil under the token
-// fallback and the store persists NULL for later backfill.
-type ProposedMemory struct {
-	ExtractedMemory
-	ConfirmAfter time.Duration
-	Embedding    []float32
-}
-
-// PromotionThreshold mirrors store.PromotionThreshold (plan §2.7: same key
-// in 3+ sessions proposes SESSION → PROJECT promotion) without importing
-// internal/store — same decoupling as the Level constants.
-const PromotionThreshold = 3
-
-// ErrHalted marks a flush skipped by the governance budget ceiling. It
-// wraps the tripped-axis reason; the event buffer is always retained so the
-// next sweep retries after the ceiling lifts.
-var ErrHalted = errors.New("processor: extraction halted by budget ceiling")
-
-// ProcessorStore is the persistence seam. The store layer (internal/store,
-// issue #2 plus the issue-#35 memory_transitions.go / sessions.go seam)
-// implements it: ListConfirmed serves CONFIRMED items for the prompt +
-// dedup, SaveProposed inserts a PROPOSED row with its confirm timer,
-// SaveEpisode inserts the episode row + episode_events links + embedding,
-// ConfirmDue flips due PROPOSED rows to CONFIRMED (the §2.8 due-sweeper),
-// CountKeySessions reports the plan §2.7 promotion signal per key, and
-// PromoteKey NULLs session_id (SESSION → PROJECT). The processor never
-// touches SQL. ConfirmDue / CountKeySessions / PromoteKey use stdlib-only
-// signatures identical to the store side so the store structs satisfy them
-// structurally.
-type ProcessorStore interface {
-	ListConfirmed(ctx context.Context) ([]ConfirmedMemory, error)
-	SaveProposed(ctx context.Context, m ProposedMemory) error
-	SaveEpisode(ctx context.Context, e EpisodeDraft, refs []EpisodeEventRef) error
-	ConfirmDue(ctx context.Context, now time.Time) (int64, error)
-	CountKeySessions(ctx context.Context, projectID, key string) (int, error)
-	PromoteKey(ctx context.Context, projectID, key string) (int64, error)
-}
-
-// ---------------------------------------------------------------------------
-// Processor: batching + background loop
-// ---------------------------------------------------------------------------
-
-// ProcessResult reports one flushed session batch.
-type ProcessResult struct {
-	SessionID         string
-	Proposed          []ProposedMemory
-	SkippedDuplicates int
-	SkippedInvalid    int
-	Episode           *EpisodeDraft
-	Promoted          []string // keys flipped SESSION → PROJECT this flush
-}
-
-// Processor buffers per-session events and flushes them through the LLM.
-// It runs only when designated (plan: "Designated processor (project
-// owner's daemon) for v1"); a non-designated instance buffers nothing and
-// its Start returns immediately.
-//
-// projectID is the store identity used by the promotion check (CountKey /
-// PromoteKey); project (the name) renders into the extraction prompt. A
-// nil budget or nil ledger disables gating/accounting respectively — both
-// must be set for ceiling enforcement.
-type Processor struct {
-	project    string
-	projectID  string
-	designated bool
-	llm        LLMClient
-	store      ProcessorStore
-	clock      Clock
-	idleAfter  time.Duration
-	sweep      time.Duration
-	budget     *governance.Budget
-	ledger     *governance.Ledger
-
-	mu         sync.Mutex
-	pending    map[string][]ProcessorEvent
-	lastActive map[string]time.Time
-	complete   map[string]bool // SESSION_TRANSCRIPT_COMPLETE seen
-}
-
-// ProcessorOption customizes a Processor.
-type ProcessorOption func(*Processor)
-
-// WithProcessorClock injects the time source (tests).
-func WithProcessorClock(c Clock) ProcessorOption {
-	return func(p *Processor) { p.clock = c }
-}
-
-// WithProcessorIdleAfter overrides the 5-minute batch threshold (tests).
-func WithProcessorIdleAfter(d time.Duration) ProcessorOption {
-	return func(p *Processor) { p.idleAfter = d }
-}
-
-// WithProcessorSweepInterval overrides the background sweep period (tests).
-func WithProcessorSweepInterval(d time.Duration) ProcessorOption {
-	return func(p *Processor) { p.sweep = d }
-}
-
-// WithProcessorProjectID sets the store project identity used by the
-// post-flush promotion check. Empty (default) disables promotion —
-// extraction still persists, only the count/promote calls are skipped.
-func WithProcessorProjectID(id string) ProcessorOption {
-	return func(p *Processor) { p.projectID = id }
-}
-
-// WithProcessorBudget sets the governance ceiling consulted before every
-// flush. Nil (default) means unlimited. Enforcement additionally requires
-// a ledger (WithProcessorLedger); without usage history there is nothing
-// to halt on.
-func WithProcessorBudget(b *governance.Budget) ProcessorOption {
-	return func(p *Processor) { p.budget = b }
-}
-
-// WithProcessorLedger sets the governance ledger recording per-flush token
-// usage. Nil (default) disables accounting.
-func WithProcessorLedger(l *governance.Ledger) ProcessorOption {
-	return func(p *Processor) { p.ledger = l }
-}
-
-// NewProcessor builds a processor for projectName. llm and store may be nil
-// only for dry-run track-only use — FlushSession reports an error instead of
-// calling the network/database.
-func NewProcessor(projectName string, designated bool, llm LLMClient, store ProcessorStore, opts ...ProcessorOption) *Processor {
-	p := &Processor{
-		project:    projectName,
-		designated: designated,
-		llm:        llm,
-		store:      store,
-		clock:      time.Now,
-		idleAfter:  ProcessorIdleAfter,
-		sweep:      ProcessorSweepInterval,
-		pending:    map[string][]ProcessorEvent{},
-		lastActive: map[string]time.Time{},
-		complete:   map[string]bool{},
-	}
-	for _, o := range opts {
-		o(p)
-	}
-	if p.clock == nil {
-		p.clock = time.Now
-	}
-	return p
-}
-
-// IsDesignated reports whether this instance is the project's Memory
-// Processor (workspaces.is_designated_processor).
-func (p *Processor) IsDesignated() bool { return p.designated }
-
-// Ingest buffers one event into its session batch. SESSION_TRANSCRIPT_
-// COMPLETE (harvester.go) marks the session for immediate flush; every other
-// event just refreshes the session's idle clock. Non-designated instances
-// drop everything — only the owner's daemon extracts.
-func (p *Processor) Ingest(ev ProcessorEvent) {
-	if !p.designated {
-		return
-	}
-	if ev.At.IsZero() {
-		ev.At = p.clock()
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if ev.Type == EventSessionTranscriptComplete {
-		if id := sessionIDOf(ev.Payload); id != "" {
-			ev.SessionID = id
-		}
-		if ev.SessionID != "" {
-			p.complete[ev.SessionID] = true
-			if _, ok := p.lastActive[ev.SessionID]; !ok {
-				p.lastActive[ev.SessionID] = ev.At
-			}
-		}
-		return // the marker itself carries no extractable content
-	}
-	if ev.SessionID == "" {
-		if id := sessionIDOf(ev.Payload); id != "" {
-			ev.SessionID = id
-		} else {
-			ev.SessionID = "default"
-		}
-	}
-	p.pending[ev.SessionID] = append(p.pending[ev.SessionID], ev)
-	p.lastActive[ev.SessionID] = ev.At
-}
-
-// Sink adapts Ingest to the shared EventSink signature so the daemon core
-// can wire harvester/interceptor/watcher output straight in:
-//
-//	harvester := NewHarvester(root, proc.Sink())
-func (p *Processor) Sink() EventSink {
-	return func(eventType string, payload map[string]any) {
-		p.Ingest(ProcessorEvent{Type: eventType, Payload: payload})
-	}
-}
-
-// PendingSessions returns session ids with buffered events (tests/introspection).
-func (p *Processor) PendingSessions() []string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	out := make([]string, 0, len(p.pending))
-	for id, evs := range p.pending {
-		if len(evs) > 0 {
-			out = append(out, id)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
-// halted evaluates the governance ceiling (Budget.Halted over the ledger
-// snapshot at the processor clock). It reports false when no budget or no
-// ledger is wired — gating needs both a ceiling and a usage history.
-func (p *Processor) halted() (bool, string) {
-	if p.budget == nil || p.ledger == nil {
-		return false, ""
-	}
-	return p.budget.Halted(p.ledger.Snapshot(p.clock()))
-}
-
-// embedFor threads the optional Embedder seam: clients implementing
-// Embed(ctx, text) supply the candidate vector for embedding-cosine dedup.
-// A missing implementation, an error, or an empty vector all yield nil so
-// IsNearDuplicate falls back to token cosine — embedding absence is a
-// normal path, never a flush failure.
-func (p *Processor) embedFor(ctx context.Context, text string) []float32 {
-	e, ok := p.llm.(Embedder)
-	if !ok || e == nil {
-		return nil
-	}
-	vec, err := e.Embed(ctx, text)
-	if err != nil || len(vec) == 0 {
-		return nil
-	}
-	return vec
-}
-
-// FlushSession extracts, dedups and persists one session batch. The buffer
-// is cleared only on success — an LLM or store error retains the events for
-// the next sweep. A governance halt (Budget.Halted) skips the flush before
-// touching the buffer, so halted sessions are retained with identical
-// semantics to failures. Non-designated instances and empty batches return
-// a zero result without touching the LLM or store.
-func (p *Processor) FlushSession(ctx context.Context, sessionID string) (ProcessResult, error) {
-	if !p.designated {
-		return ProcessResult{SessionID: sessionID}, nil
-	}
-	if halted, reason := p.halted(); halted {
-		return ProcessResult{SessionID: sessionID}, fmt.Errorf("%w: %s", ErrHalted, reason)
-	}
-	p.mu.Lock()
-	batch := p.pending[sessionID]
-	delete(p.pending, sessionID)
-	delete(p.complete, sessionID)
-	p.mu.Unlock()
-
-	if len(batch) == 0 {
-		return ProcessResult{SessionID: sessionID}, nil
-	}
-	if p.llm == nil {
-		return ProcessResult{}, fmt.Errorf("processor: nil LLM client")
-	}
-	if p.store == nil {
-		return ProcessResult{}, fmt.Errorf("processor: nil store")
-	}
-
-	var res ProcessResult
-	res.SessionID = sessionID
-	if err := p.processBatch(ctx, sessionID, batch, &res); err != nil {
-		// Retain for retry: re-queue at the front of the session buffer.
-		p.mu.Lock()
-		p.pending[sessionID] = append(batch, p.pending[sessionID]...)
-		if _, ok := p.lastActive[sessionID]; !ok {
-			p.lastActive[sessionID] = p.clock()
-		}
-		p.mu.Unlock()
-		return ProcessResult{SessionID: sessionID}, err
-	}
-	// Post-flush promotion check (plan §2.7): best-effort — extraction is
-	// already durable, so promotion errors never fail the flush.
-	p.promoteKeys(ctx, &res)
-	p.mu.Lock()
-	delete(p.lastActive, sessionID)
-	p.mu.Unlock()
-	return res, nil
-}
-
-// processBatch is the single flush path shared by FlushSession and
-// CheckIdle: episode hook (pure, no LLM) → prompt → LLM → parse → validate
-// → dedup → persist with timers → persist episode.
-func (p *Processor) processBatch(ctx context.Context, sessionID string, batch []ProcessorEvent, res *ProcessResult) error {
-	draft, refs := DetectEpisode(batch)
-
-	confirmed, err := p.store.ListConfirmed(ctx)
-	if err != nil {
-		return fmt.Errorf("processor: list confirmed: %w", err)
-	}
-	existing := make([]string, 0, len(confirmed))
-	for _, c := range confirmed {
-		existing = append(existing, c.Key+": "+c.Content)
-	}
-	prompt := BuildExtractionPrompt(p.project, existing, batch)
-	resp, err := p.llm.Complete(ctx, prompt)
-	if err != nil {
-		return fmt.Errorf("processor: llm complete: %w", err)
-	}
-	for _, m := range ParseExtractedMemories(resp, sessionID) {
-		if len([]rune(m.Content)) < MinContentChars {
-			res.SkippedInvalid++
-			continue
-		}
-		emb := p.embedFor(ctx, m.Content)
-		if IsNearDuplicate(m.Content, emb, confirmed) {
-			res.SkippedDuplicates++
-			continue
-		}
-		pm := ProposedMemory{ExtractedMemory: m, ConfirmAfter: ConfirmAfterFor(m), Embedding: emb}
-		if err := p.store.SaveProposed(ctx, pm); err != nil {
-			return fmt.Errorf("processor: save proposed: %w", err)
-		}
-		res.Proposed = append(res.Proposed, pm)
-	}
-	if draft != nil {
-		draft.SessionID = sessionID
-		if err := p.store.SaveEpisode(ctx, *draft, refs); err != nil {
-			return fmt.Errorf("processor: save episode: %w", err)
-		}
-		res.Episode = draft
-	}
-	// Cost accounting (ADR-026 mapping): tokens were spent on this prompt +
-	// response whether or not later flushes succeed, so record the batch
-	// once extraction itself succeeded.
-	if p.ledger != nil {
-		p.ledger.RecordBatch(
-			governance.EstimateTokensFromChars(len(prompt)),
-			governance.EstimateTokensFromChars(len(resp)),
-		)
-	}
-	return nil
-}
-
-// promoteKeys runs the plan §2.7 promotion check over one flush's distinct
-// proposed keys: a key observed in >= PromotionThreshold distinct sessions
-// is flipped SESSION → PROJECT via PromoteKey (which NULLs session_id).
-// Best-effort by design — extraction is already durable, so count/promote
-// errors are skipped and the next flush (or the store-side archival job)
-// retries. Promotion is skipped entirely when no projectID is wired.
-// Promoted keys land sorted on res.Promoted for determinism.
-func (p *Processor) promoteKeys(ctx context.Context, res *ProcessResult) {
-	if p.store == nil || p.projectID == "" || len(res.Proposed) == 0 {
-		return
-	}
-	seen := map[string]bool{}
-	for _, pm := range res.Proposed {
-		key := pm.Key
-		if key == "" || seen[key] {
-			continue
-		}
-		seen[key] = true
-		n, err := p.store.CountKeySessions(ctx, p.projectID, key)
-		if err != nil || n < PromotionThreshold {
-			continue
-		}
-		if _, err := p.store.PromoteKey(ctx, p.projectID, key); err != nil {
-			continue
-		}
-		res.Promoted = append(res.Promoted, key)
-	}
-	sort.Strings(res.Promoted)
-}
-
-// SweepConfirms runs the §2.8 due-sweeper: PROPOSED rows whose
-// created_at + ConfirmAfter tier <= now flip to CONFIRMED via the store.
-// It burns no LLM tokens, so halted processors still sweep. It is a no-op
-// without designation or without a store.
-func (p *Processor) SweepConfirms(ctx context.Context) (int64, error) {
-	if !p.designated || p.store == nil {
-		return 0, nil
-	}
-	return p.store.ConfirmDue(ctx, p.clock())
-}
-
-// CheckIdle flushes sessions that completed (SESSION_TRANSCRIPT_COMPLETE)
-// or sat idle longer than idleAfter, plus a token-free confirm sweep
-// (SweepConfirms) that runs even under a governance halt. It returns the
-// number of sessions flushed; a session whose flush fails is retained and
-// reported via the returned error (first failure; remaining sessions are
-// still attempted). Under a halt no session flushes: the count is 0, every
-// buffer is retained, and the halt error is returned.
-func (p *Processor) CheckIdle(ctx context.Context) (int, error) {
-	// Token-free work first: confirm sweep never burns budget.
-	_, _ = p.SweepConfirms(ctx) // best-effort; the next sweep retries
-	if halted, reason := p.halted(); halted {
-		return 0, fmt.Errorf("%w: %s", ErrHalted, reason)
-	}
-	now := p.clock()
-	var due []string
-	p.mu.Lock()
-	for id, evs := range p.pending {
-		if len(evs) == 0 {
-			continue
-		}
-		if p.complete[id] {
-			due = append(due, id)
-			continue
-		}
-		if last, ok := p.lastActive[id]; ok && now.Sub(last) >= p.idleAfter {
-			due = append(due, id)
-		}
-	}
-	// A completed session with no buffered turns (e.g. SQLite-liveness only)
-	// still deserves a flush attempt — it is a no-op returning zero result.
-	for id := range p.complete {
-		found := false
-		for _, d := range due {
-			if d == id {
-				found = true
+		var commitMsg string
+		for j := verifyIdx + 1; j < len(evs); j++ {
+			if evs[j].Type == ToolEventGitCommitted {
+				commitMsg = toolStr(evs[j].Payload, "message")
 				break
 			}
 		}
-		if !found {
-			due = append(due, id)
+		title := triggerCmd
+		if title == "" {
+			title = "Recurring failure fixed"
 		}
-	}
-	sort.Strings(due)
-	p.mu.Unlock()
-
-	flushed := 0
-	var firstErr error
-	for _, id := range due {
-		if _, err := p.FlushSession(ctx, id); err != nil && firstErr == nil {
-			firstErr = err
-			continue
+		if triggerErr != "" {
+			title = triggerCmd + ": " + triggerErr
 		}
-		flushed++
+		ep := &Episode{
+			Type:          "bug_fix",
+			Title:         title,
+			Trigger:       strings.TrimSpace(triggerCmd + "\n" + triggerErr),
+			Investigation: "Read: " + strings.Join(reads, ", "),
+			Resolution:    "Fixed: " + strings.Join(fixes, ", ") + commitSuffix(commitMsg),
+			Verification:  "Re-ran green: " + verification,
+			FilesInvolved: append([]string(nil), fixes...),
+			Status:        "OPEN",
+		}
+		if triggerErr != "" {
+			ep.ErrorPatterns = []string{triggerErr}
+		}
+		if commitMsg != "" {
+			ep.Status = "RESOLVED"
+		}
+		return ep
 	}
-	return flushed, firstErr
+	return nil
 }
 
-// Start runs the background loop until ctx is done: every sweep interval it
-// flushes completed/idle sessions. It returns immediately on non-designated
-// instances — only the project owner's daemon burns LLM calls. Blocks;
-// returns nil on clean context cancellation.
-func (p *Processor) Start(ctx context.Context) error {
-	if !p.designated {
-		return nil
+func commitSuffix(msg string) string {
+	if strings.TrimSpace(msg) == "" {
+		return ""
 	}
-	sweep := p.sweep
-	if sweep <= 0 {
-		sweep = ProcessorSweepInterval
-	}
-	t := time.NewTicker(sweep)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-t.C:
-			_, _ = p.CheckIdle(ctx) // errors surface on the next sweep
+	return " (commit: " + strings.TrimSpace(msg) + ")"
+}
+
+// ---------------------------------------------------------------------------
+// Provider: local-device LLM (issue #10 — zero server-side LLM cost)
+// ---------------------------------------------------------------------------
+
+// Provider extracts memory proposals from events. Implementations MUST run on
+// the user's device (the designated daemon); the server never sees prompts or
+// keys. HeuristicProvider is the stdlib stub; a network-backed provider can
+// replace it later behind this same interface.
+type Provider interface {
+	// Extract turns one event batch into proposals. ctx carries cancellation;
+	// project names the project for the §2.6 prompt header.
+	Extract(ctx context.Context, project string, events []Event, existing []MemoryRecord) ([]Proposal, error)
+}
+
+// HeuristicProvider is the offline stub: sentence-split conversation content,
+// classify level/scope per §2.6, score confidence, mark explicit statements.
+// Deterministic and key-free — used when no LLM key is configured and in tests.
+type HeuristicProvider struct{}
+
+// Extract implements Provider.
+func (HeuristicProvider) Extract(_ context.Context, _ string, events []Event, _ []MemoryRecord) ([]Proposal, error) {
+	var out []Proposal
+	for _, ev := range events {
+		for _, text := range eventTexts(ev) {
+			for _, sent := range splitSentences(text) {
+				if len(strings.TrimSpace(sent)) < 20 {
+					continue // plan §1.1: content must be ≥ 20 chars
+				}
+				if len(sent) > 2000 {
+					sent = sent[:2000]
+				}
+				explicit := IsExplicitStatement(sent)
+				conf := 0.7
+				if explicit {
+					conf = 0.95
+				} else if strings.Contains(strings.ToLower(sent), "because") {
+					conf = 0.8 // reasoned statement ⇒ higher confidence
+				}
+				p := Proposal{
+					Key:        KeyFromContent(sent),
+					Content:    strings.TrimSpace(sent),
+					Level:      ClassifyLevel(sent),
+					Scope:      ClassifyScope(sent),
+					Confidence: conf,
+					Source:     "processor:heuristic",
+					Explicit:   explicit,
+				}
+				p.ConfirmAfter = ConfirmationDelay(p)
+				out = append(out, p)
+			}
 		}
 	}
+	return out, nil
+}
+
+// eventTexts pulls candidate texts from conversation-style Events.
+func eventTexts(ev Event) []string {
+	var texts []string
+	if ev.Type == EventConversationTurn {
+		if s, ok := ev.Payload["content"].(string); ok && s != "" {
+			texts = append(texts, s)
+		}
+		return texts
+	}
+	if ev.Type == EventSessionComplete {
+		if turns, ok := ev.Payload["turns"].([]any); ok {
+			for _, t := range turns {
+				if m, ok := t.(map[string]any); ok {
+					if s, ok := m["content"].(string); ok && s != "" {
+						texts = append(texts, s)
+					}
+				}
+			}
+		}
+		if s, ok := ev.Payload["detail"].(string); ok && s != "" &&
+			!strings.Contains(s, "sqlite/vscdb") {
+			texts = append(texts, s)
+		}
+		return texts
+	}
+	return nil
+}
+
+// splitSentences splits on sentence terminators and newlines.
+func splitSentences(text string) []string {
+	return strings.FieldsFunc(text, func(r rune) bool {
+		return r == '.' || r == '!' || r == '?' || r == '\n'
+	})
+}
+
+// KeyFromContent derives a machine key ("testing/framework" style) from the
+// first few significant words of a sentence.
+func KeyFromContent(text string) string {
+	var words []string
+	for _, t := range tokenize(text) {
+		if len(t) < 3 || len(words) >= 4 {
+			continue
+		}
+		words = append(words, t)
+	}
+	if len(words) == 0 {
+		return "misc/note"
+	}
+	if len(words) == 1 {
+		return "misc/" + words[0]
+	}
+	return words[0] + "/" + strings.Join(words[1:], "-")
+}
+
+// ProviderKeyFromEnv reports which (if any) user-configured LLM key is
+// present. Keys live ONLY on the local device (env vars / local config) and
+// are never shipped to the server — that is the whole point of the designated
+// local processor (plan Locked Decisions: "user supplies own API keys; data
+// stays local"). A network-backed Provider would consult this to pick its
+// backend; the heuristic stub ignores it.
+func ProviderKeyFromEnv() (provider string, hasKey bool) {
+	if v := strings.TrimSpace(os.Getenv("ANTHROPIC_API_KEY")); v != "" {
+		return "anthropic", true
+	}
+	if v := strings.TrimSpace(os.Getenv("OPENAI_API_KEY")); v != "" {
+		return "openai", true
+	}
+	if v := strings.TrimSpace(os.Getenv("OLLAMA_HOST")); v != "" {
+		return "ollama", true
+	}
+	return "", false
+}
+
+// BuildExtractionPrompt renders the §2.6 classification prompt for a batch.
+// Used by a future network-backed Provider; kept here (not in the provider)
+// so prompt wording stays versioned with the heuristics it must agree with.
+func BuildExtractionPrompt(project string, existing []MemoryRecord, batch []Event) string {
+	var sb strings.Builder
+	sb.WriteString("Given these events from project \"" + project + "\", extract memories.\n\n")
+	sb.WriteString("Classify each memory's level:\n")
+	sb.WriteString("- ORGANIZATION: universal policy across all projects (e.g., \"all APIs use JWT\")\n")
+	sb.WriteString("- PROJECT: team decision or codebase fact (e.g., \"we use pytest\")\n")
+	sb.WriteString("- PERSONAL: individual preference (e.g., \"Alice prefers verbose errors\")\n")
+	sb.WriteString("  → Look for \"I prefer\", \"I like\", \"I always\"\n")
+	sb.WriteString("- SESSION: temporary, task-specific (e.g., \"don't touch payments/ right now\")\n")
+	sb.WriteString("  → Look for \"for now\", \"right now\", \"during this\", \"in this task\"\n\n")
+	sb.WriteString("Classify each memory's scope:\n")
+	sb.WriteString("- fact: objective truth about the codebase\n")
+	sb.WriteString("- preference: subjective choice\n")
+	sb.WriteString("- decision: deliberate team choice with reasoning\n")
+	sb.WriteString("- constraint: hard rule that must not be violated\n")
+	sb.WriteString("- pattern: recurring code/architecture pattern\n")
+	sb.WriteString("- episode_summary: condensed bug/incident takeaway\n\n")
+	sb.WriteString("Default to SESSION level if unsure (safer — can be promoted later).\n\n")
+	sb.WriteString("Existing confirmed memories (do not duplicate):\n")
+	if len(existing) == 0 {
+		sb.WriteString("(none)\n")
+	}
+	for _, m := range existing {
+		sb.WriteString("- [" + string(m.Level) + "/" + string(m.Scope) + "] " + m.Content + "\n")
+	}
+	sb.WriteString("\nNew events to process:\n")
+	for _, ev := range batch {
+		sb.WriteString("- " + string(ev.Type) + ": ")
+		if s, ok := ev.Payload["content"].(string); ok {
+			sb.WriteString(s)
+		} else {
+			sb.WriteString("(structured tool event)")
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// ---------------------------------------------------------------------------
+// Processor: background batching on the designated device
+// ---------------------------------------------------------------------------
+
+const (
+	// DefaultBatchSize caps proposals extracted per batch.
+	DefaultBatchSize = 20
+	// DefaultBudget caps proposal content chars per batch (~1000 tokens, the
+	// per-agent budget scale from plan §1.6).
+	DefaultBudget = 4000
+	// IdleFlushAfter matches the harvester: 5min of silence (or a
+	// SESSION_TRANSCRIPT_COMPLETE) triggers the deep-analysis pass.
+	IdleFlushAfter = 5 * time.Minute
+)
+
+// Processor consumes event batches on the designated daemon and proposes
+// structured memories. Construct with NewProcessor; run ProcessEvents from a
+// background goroutine fed by the harvester/interceptor channels.
+type Processor struct {
+	Store      MemoryStore
+	Budget     int // max content chars accepted per batch
+	BatchSize  int // max proposals emitted per batch
+	Designated bool
+	Provider   Provider
+}
+
+// NewProcessor builds a Processor. budget <= 0 selects DefaultBudget,
+// batchSize <= 0 selects DefaultBatchSize, provider == nil selects the
+// offline HeuristicProvider. designated must mirror
+// workspaces.is_designated_processor: only the project owner's daemon sets it.
+func NewProcessor(store MemoryStore, budget, batchSize int, designated bool, provider Provider) *Processor {
+	if budget <= 0 {
+		budget = DefaultBudget
+	}
+	if batchSize <= 0 {
+		batchSize = DefaultBatchSize
+	}
+	if provider == nil {
+		provider = HeuristicProvider{}
+	}
+	return &Processor{
+		Store:      store,
+		Budget:     budget,
+		BatchSize:  batchSize,
+		Designated: designated,
+		Provider:   provider,
+	}
+}
+
+// ShouldRun reports whether this daemon may process: designated device only.
+// Non-designated daemons consume memories; they never propose (plan Locked
+// Decisions: designated processor eliminates multi-device divergence).
+func (p *Processor) ShouldRun() bool { return p.Designated }
+
+// ShouldFlush reports whether a batch is due: true on
+// SESSION_TRANSCRIPT_COMPLETE, or when now-lastActive >= IdleFlushAfter.
+func ShouldFlush(ev Event, lastActive, now time.Time) bool {
+	if ev.Type == EventSessionComplete {
+		return true
+	}
+	if lastActive.IsZero() {
+		return false
+	}
+	return now.Sub(lastActive) >= IdleFlushAfter
+}
+
+// ProcessEvents extracts proposals from conversation events (Layer 2/3/4),
+// dedups against the store, enforces budget/batch caps, stamps confirmation
+// delays, and saves survivors. Non-designated daemons return nil without
+// doing anything. ctx carries cancellation for future network providers.
+func (p *Processor) ProcessEvents(ctx context.Context, project string, events []Event) ([]Proposal, error) {
+	if !p.ShouldRun() {
+		return nil, nil
+	}
+	if len(events) == 0 {
+		return nil, nil
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	proposals, err := p.Provider.Extract(ctx, project, events, p.Store.Existing())
+	if err != nil {
+		return nil, err
+	}
+	proposals = Deduplicate(proposals, p.Store.Existing())
+	proposals = applyCaps(proposals, p.Budget, p.BatchSize)
+	now := time.Now().UTC()
+	for i := range proposals {
+		proposals[i].ConfirmAfter = ConfirmationDelay(proposals[i])
+		proposals[i].ProposedAt = now
+		if p.Store != nil {
+			if err := p.Store.Save(proposals[i]); err != nil {
+				return proposals[:i], err
+			}
+		}
+	}
+	return proposals, nil
+}
+
+// applyCaps enforces the per-batch proposal count and content-char budget
+// (keeps first-N; mirrors the Context Builder's bounded-budget philosophy).
+func applyCaps(proposals []Proposal, budget, batchSize int) []Proposal {
+	if batchSize > 0 && len(proposals) > batchSize {
+		proposals = proposals[:batchSize]
+	}
+	if budget <= 0 {
+		return proposals
+	}
+	out := proposals[:0]
+	used := 0
+	for _, pr := range proposals {
+		if used+len(pr.Content) > budget {
+			break
+		}
+		used += len(pr.Content)
+		out = append(out, pr)
+	}
+	return out
 }

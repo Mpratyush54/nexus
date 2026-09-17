@@ -1,0 +1,20 @@
+# workspace-daemon — user-machine image (template)
+# Build context: repo root. Target entrypoint: ./cmd/daemon (per
+# implementation-plan.md target structure; lands with Phase 1.3 daemon work).
+# The daemon is normally a local Go binary; this image exists for
+# Docker-based dev/test and parity with the server toolchain.
+
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# Builds once cmd/daemon/main.go lands; fails fast until then (intentional).
+RUN CGO_ENABLED=0 go build -trimpath -o /out/workspace-daemon ./cmd/daemon
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/workspace-daemon /workspace-daemon
+USER nonroot:nonroot
+EXPOSE 18789
+ENV DAEMON_PORT=18789
+ENTRYPOINT ["/workspace-daemon"]
