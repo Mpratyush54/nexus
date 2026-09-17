@@ -3,106 +3,143 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Central Memory — Dashboard</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <title>Central Memory — Multiplayer Live Feed</title>
+  <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <h1>Central Memory</h1>
-      <span id="conn-dot" class="dot offline" title="WebSocket status"></span>
-      <span id="conn-label">disconnected</span>
+    <div>
+      <h1>Central Memory <span class="muted">/ live dashboard</span></h1>
+      <p class="subtitle">Phase 3 &mdash; sessions + real-time (nexus issue #14). Static SPA, no build step.</p>
     </div>
-    <form id="login-form" class="login" autocomplete="off">
-      <input id="login-user" type="text" placeholder="username" aria-label="username" />
-      <input id="login-pass" type="password" placeholder="password" aria-label="password" />
-      <button type="submit">Login</button>
-      <span id="login-state" class="muted"></span>
-    </form>
+    <div class="conn">
+      <span id="wsDot" class="dot dot-off" title="WebSocket state"></span>
+      <span id="wsLabel">disconnected</span>
+      <span id="latency" class="muted"></span>
+    </div>
   </header>
 
-  <section class="toolbar">
-    <label>Project ID
-      <input id="project-id" type="text" placeholder="proj-…" aria-label="project id" />
-    </label>
-    <label>Session ID
-      <input id="session-id" type="text" placeholder="sess-… (optional)" aria-label="session id" />
-    </label>
-    <button id="connect-btn" type="button">Connect live</button>
-    <button id="health-btn" type="button" title="GET /healthz">Health</button>
-    <span id="toolbar-msg" class="muted" role="status"></span>
-  </section>
-
-  <main class="grid">
-    <section class="card" id="feed-card">
-      <h2>Live activity <span id="feed-count" class="pill">0</span></h2>
-      <p class="hint">WebSocket feed — new events prepend, no page refresh.</p>
-      <ul id="feed" class="feed" aria-live="polite"></ul>
-    </section>
-
-    <section class="card" id="sessions-card">
-      <h2>Sessions &amp; participants</h2>
-      <p class="hint">Active workspaces via <code>GET /workspaces/{id}/active</code> + live presence from WS.</p>
-      <button id="refresh-workspaces" type="button">Refresh workspaces</button>
-      <h3>Presence (live)</h3>
-      <ul id="presence" class="roster"></ul>
-      <h3>Active workspaces</h3>
-      <ul id="workspaces" class="roster"></ul>
-    </section>
-
-    <section class="card" id="memory-card">
-      <h2>Memory Explorer</h2>
-      <form id="memory-filter" class="filters" autocomplete="off">
-        <input id="mem-q" type="search" placeholder="search key / content…" aria-label="memory search" />
-        <select id="mem-level" aria-label="level filter">
-          <option value="">All levels</option>
-          <option value="organization">Organization</option>
-          <option value="project">Project</option>
-          <option value="personal">Personal</option>
-          <option value="session">Session</option>
-        </select>
-        <select id="mem-status" aria-label="status filter">
-          <option value="">All statuses</option>
-          <option value="PROPOSED">Proposed</option>
-          <option value="CONFIRMED">Confirmed</option>
-          <option value="REJECTED">Rejected</option>
-          <option value="SUPERSEDED">Superseded</option>
-        </select>
-        <button type="submit">Search</button>
-      </form>
-      <p class="hint">Level filters server-side (<code>?level=</code>); status filters client-side — <code>GET /memory/search</code> has no status param.</p>
-      <ul id="memories" class="items"></ul>
-    </section>
-
-    <section class="card" id="episode-card">
-      <h2>Episode Inspector</h2>
-      <form id="episode-filter" class="filters" autocomplete="off">
-        <input id="ep-q" type="search" placeholder="search trigger / root cause…" aria-label="episode search" />
-        <input id="ep-error" type="text" placeholder="error pattern…" aria-label="error pattern" />
-        <input id="ep-file" type="text" placeholder="file involved…" aria-label="file involved" />
-        <select id="ep-status" aria-label="episode status filter">
-          <option value="">Any status</option>
-          <option value="OPEN">Open</option>
-          <option value="INVESTIGATING">Investigating</option>
-          <option value="RESOLVED">Resolved</option>
-          <option value="WONT_FIX">Won't fix</option>
-        </select>
-        <button type="submit">Search</button>
-      </form>
-      <div class="ep-split">
-        <ul id="episodes" class="items"></ul>
-        <article id="episode-detail" class="detail">
-          <p class="muted">Select an episode to see trigger → root-cause → fix.</p>
-        </article>
+  <main>
+    <!-- Connection / auth -->
+    <section class="card" aria-label="Connection">
+      <h2>1 &middot; Connection</h2>
+      <div class="grid2">
+        <label>API base <input id="apiBase" type="text" value="http://localhost:8080" spellcheck="false" /></label>
+        <label>WS URL <input id="wsUrl" type="text" value="ws://localhost:8080/ws" spellcheck="false" /></label>
+        <label>Username <input id="username" type="text" autocomplete="username" placeholder="alice" /></label>
+        <label>Password <input id="password" type="password" autocomplete="current-password" placeholder="••••••" /></label>
       </div>
+      <div class="row">
+        <button id="loginBtn" type="button">Login (POST /auth/login)</button>
+        <button id="wsBtn" type="button">Connect WS</button>
+        <button id="wsDisconnectBtn" type="button" class="ghost">Disconnect</button>
+        <span id="authState" class="muted">no token</span>
+      </div>
+      <p class="hint">Token is kept in memory + <code>localStorage</code> and sent as
+        <code>Authorization: Bearer &lt;token&gt;</code> on every REST call.
+        WS has no auth header by design &mdash; the <code>subscribe</code> frame carries
+        <code>project_id</code>/<code>session_id</code> (plan &sect;3.2).</p>
+    </section>
+
+    <!-- Project / session picker -->
+    <section class="card" aria-label="Project and session picker">
+      <h2>2 &middot; Project / session picker</h2>
+      <div class="grid2">
+        <label>Canonical URL <input id="canonicalUrl" type="text" placeholder="github.com/Mpratyush54/nexus" spellcheck="false" /></label>
+        <label>Root commit <input id="rootCommit" type="text" placeholder="(optional) git rev-list --max-parents=0 HEAD" spellcheck="false" /></label>
+        <label>Folder name <input id="folderName" type="text" placeholder="nexus" spellcheck="false" /></label>
+        <label>Project ID (resolved or paste) <input id="projectId" type="text" placeholder="proj_…" spellcheck="false" /></label>
+        <label>Session ID (opaque, Phase 3) <input id="sessionId" type="text" placeholder="sess_… (optional)" spellcheck="false" /></label>
+        <label>Display name <input id="agentName" type="text" placeholder="how you appear in presence (e.g. alice/web)" spellcheck="false" /></label>
+      </div>
+      <div class="row">
+        <button id="resolveBtn" type="button">Resolve project</button>
+        <button id="subscribeBtn" type="button">Subscribe (WS)</button>
+        <button id="activeWsBtn" type="button" class="ghost">Check active workspace</button>
+        <span id="projectState" class="muted"></span>
+      </div>
+    </section>
+
+    <!-- Presence -->
+    <section class="card" aria-label="Presence">
+      <h2>3 &middot; Presence <span id="presenceCount" class="muted"></span></h2>
+      <div class="row">
+        <button id="typingBtn" type="button" class="ghost">Send “typing”</button>
+        <button id="idleBtn" type="button" class="ghost">Send “idle”</button>
+        <span class="muted">Presence arrives as <code>{"type":"presence",…}</code> frames; stale entries (&gt;90s) are marked offline (server OfflineThreshold).</span>
+      </div>
+      <ul id="presenceList" class="presence"></ul>
+    </section>
+
+    <!-- Live event feed -->
+    <section class="card" aria-label="Live event feed">
+      <h2>4 &middot; Live event feed <span id="feedCount" class="muted"></span></h2>
+      <div class="row">
+        <label class="inline">Filter <input id="feedFilter" type="text" placeholder="e.g. FILE_MODIFIED, CONVERSATION_TURN" spellcheck="false" /></label>
+        <button id="clearFeedBtn" type="button" class="ghost">Clear</button>
+        <span class="muted">Server &rarr; client <code>{"type":"event","event":{…}}</code>. Appends only &mdash; never a full-page refresh.</span>
+      </div>
+      <ol id="feed" class="feed" aria-live="polite"></ol>
+    </section>
+
+    <!-- Memory explorer -->
+    <section class="card" aria-label="Memory explorer">
+      <h2>5 &middot; Memory explorer</h2>
+      <div class="row">
+        <label class="inline">Level
+          <select id="memLevel">
+            <option value="">all</option>
+            <option value="organization">organization</option>
+            <option value="project">project</option>
+            <option value="personal">personal</option>
+            <option value="session">session</option>
+          </select>
+        </label>
+        <label class="inline">Status
+          <select id="memStatus">
+            <option value="">all</option>
+            <option value="PROPOSED" selected>PROPOSED</option>
+            <option value="CONFIRMED">CONFIRMED</option>
+            <option value="REJECTED">REJECTED</option>
+            <option value="SUPERSEDED">SUPERSEDED</option>
+          </select>
+        </label>
+        <button id="memRefreshBtn" type="button">Refresh (GET /memory/search)</button>
+      </div>
+      <ul id="memoryList" class="cards"></ul>
+    </section>
+
+    <!-- Episode inspector -->
+    <section class="card" aria-label="Episode inspector">
+      <h2>6 &middot; Episode inspector</h2>
+      <div class="row">
+        <button id="epRefreshBtn" type="button">Refresh (GET /episodes/search)</button>
+        <span class="muted">Live <code>episode_update</code> frames prepend/update cards automatically.</span>
+      </div>
+      <div id="episodeList" class="cards"></div>
+    </section>
+
+    <!-- Search -->
+    <section class="card" aria-label="Search">
+      <h2>7 &middot; Search</h2>
+      <div class="row">
+        <label class="inline grow">Query <input id="searchBox" type="search" placeholder="error text, file path, or keyword…" /></label>
+        <button id="searchBtn" type="button">Search memory + episodes</button>
+      </div>
+      <p class="hint">Hits <code>GET /memory/search?project_id&amp;q=…</code> and
+        <code>GET /episodes/search?project_id&amp;q=…</code> in parallel.</p>
+      <h3>Memory results <span id="memSearchCount" class="muted"></span></h3>
+      <ul id="memSearchResults" class="cards"></ul>
+      <h3>Episode results <span id="epSearchCount" class="muted"></span></h3>
+      <div id="epSearchResults" class="cards"></div>
     </section>
   </main>
 
-  <footer class="foot muted">
-    Static SPA — no build step. REST: <code>/auth/login /memory/search /episodes/search /workspaces/{id}/active</code>.
-    WS: <code>/ws</code> with plan §3.2 message shapes (see app.js).
+  <footer class="muted">
+    Static SPA &mdash; <code>index.html</code> + <code>app.js</code> + <code>style.css</code>.
+    No npm, no bundler. See <code>web/README.md</code> for how to serve.
   </footer>
 
-  <script src="/app.js"></script>
+  <script src="./app.js" defer></script>
 </body>
 </html>

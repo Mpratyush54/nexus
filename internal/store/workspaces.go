@@ -1,299 +1,105 @@
-// Workspace registration and heartbeats (issue #2, plan §§1.2–1.3).
-//
-// The daemon registers on startup and POSTs a heartbeat every 30s; the
-// server marks a workspace offline after 90s of silence (OfflineAfter).
-// Expiry is evaluated in both places from the same constant: the pure
-// predicates IsOnlineAt/IsStaleAt for app-side gating and cache filtering,
-// and interval SQL in ListActive/MarkStaleOffline for authoritative queries.
-// All predicates take an explicit now so tests use a fixed clock.
 package store
+
+// workspaces.go — Postgres workspace registration + heartbeat (issue #2).
+//
+// Heartbeat contract (mirrors MemStore + plan §1.3): every heartbeat sets
+// last_seen=now() and is_online=true; a workspace is "active" while
+// last_seen is within OfflineThreshold (90s).
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 )
 
-// OfflineAfter is the heartbeat silence budget: a workspace whose last_seen
-// is older than now-OfflineAfter is offline. Mirrors the plan ("server marks
-// offline after 90s silence") with heartbeats every 30s, i.e. three missed
-// beats tolerate one slow interval plus jitter.
-const OfflineAfter = 90 * time.Second
+const workspaceColumns = `id, project_id, user_id, machine_id, path,
+	branch, commit_sha, is_dirty, is_online, is_designated_processor,
+	last_seen, daemon_url, created_at`
 
-// OfflineAfterSeconds renders the threshold for make_interval SQL so queries
-// share this single source of truth instead of a second literal.
-func OfflineAfterSeconds() float64 {
-	return OfflineAfter.Seconds()
-}
-
-// IsOnlineAt reports whether a workspace seen at lastSeen is online at now:
-// online while silence has not exceeded OfflineAfter (the exact 90s boundary
-// still counts as online; "after 90s" means strictly greater).
-func IsOnlineAt(lastSeen, now time.Time) bool {
-	return !now.After(lastSeen.Add(OfflineAfter))
-}
-
-// IsStaleAt is the negation of IsOnlineAt: silence exceeded OfflineAfter.
-func IsStaleAt(lastSeen, now time.Time) bool {
-	return !IsOnlineAt(lastSeen, now)
-}
-
-// IsOnlineAtPtr is the nil-safe variant: a workspace never seen (NULL
-// last_seen) is offline.
-func IsOnlineAtPtr(lastSeen *time.Time, now time.Time) bool {
-	if lastSeen == nil {
-		return false
-	}
-	return IsOnlineAt(*lastSeen, now)
-}
-
-// ExpiryAt returns the instant after which a lastSeen timestamp is stale.
-func ExpiryAt(lastSeen time.Time) time.Time {
-	return lastSeen.Add(OfflineAfter)
-}
-
-// Workspace mirrors a workspaces row (plan §1.1). Empty Branch/CommitSHA/
-// DaemonURL mean SQL NULL; LastSeen is nil until the first heartbeat
-// (Register always sets it, so nil only appears on legacy rows).
-type Workspace struct {
-	ID                    string
-	ProjectID             string
-	UserID                string
-	MachineID             string
-	Path                  string
-	Branch                string
-	CommitSHA             string
-	IsDirty               bool
-	IsOnline              bool
-	IsDesignatedProcessor bool
-	LastSeen              *time.Time
-	DaemonURL             string
-	CreatedAt             time.Time
-}
-
-// WorkspaceParams carries registration identity for Register.
-type WorkspaceParams struct {
-	ProjectID string
-	UserID    string
-	MachineID string // hostname or hardware UUID; required
-	Path      string // absolute local path; required
-	Branch    string
-	CommitSHA string
-	IsDirty   bool
-	DaemonURL string // ws://localhost:PORT
-}
-
-// HeartbeatParams carries one daemon heartbeat (plan §1.3: every 30s).
-type HeartbeatParams struct {
-	Branch    string
-	CommitSHA string
-	IsDirty   bool
-}
-
-// workspaceColumns selects workspaces with NULLs coalesced (except last_seen,
-// which stays nullable so "never seen" is representable).
-const workspaceColumns = `id::TEXT AS id, ` +
-	`project_id::TEXT AS project_id, ` +
-	`user_id::TEXT AS user_id, ` +
-	`machine_id, ` +
-	`path, ` +
-	`COALESCE(branch, '') AS branch, ` +
-	`COALESCE(commit_sha, '') AS commit_sha, ` +
-	`COALESCE(is_dirty, false) AS is_dirty, ` +
-	`COALESCE(is_online, false) AS is_online, ` +
-	`COALESCE(is_designated_processor, false) AS is_designated_processor, ` +
-	`last_seen, ` +
-	`COALESCE(daemon_url, '') AS daemon_url, ` +
-	`created_at`
-
-// scanWorkspace scans a full workspaceColumns row.
 func scanWorkspace(row pgx.Row) (*Workspace, error) {
-	var w Workspace
-	if err := row.Scan(
-		&w.ID, &w.ProjectID, &w.UserID, &w.MachineID, &w.Path,
-		&w.Branch, &w.CommitSHA, &w.IsDirty, &w.IsOnline,
-		&w.IsDesignatedProcessor, &w.LastSeen, &w.DaemonURL, &w.CreatedAt,
-	); err != nil {
+	var ws Workspace
+	var projectID, userID string
+	var branch, commitSHA, daemonURL *string
+	var lastSeen *time.Time
+	if err := row.Scan(&ws.ID, &projectID, &userID, &ws.MachineID, &ws.Path,
+		&branch, &commitSHA, &ws.IsDirty, &ws.IsOnline, &ws.IsDesignatedProcessor,
+		&lastSeen, &daemonURL, &ws.CreatedAt); err != nil {
 		return nil, err
 	}
-	return &w, nil
+	ws.ProjectID = projectID
+	ws.UserID = userID
+	if branch != nil {
+		ws.Branch = *branch
+	}
+	if commitSHA != nil {
+		ws.CommitSHA = *commitSHA
+	}
+	if daemonURL != nil {
+		ws.DaemonURL = *daemonURL
+	}
+	if lastSeen != nil {
+		ws.LastSeen = *lastSeen
+	}
+	return &ws, nil
 }
 
-// WorkspaceStore is workspace registration, heartbeat, and presence.
-type WorkspaceStore struct {
-	db DBTX
-}
-
-// NewWorkspaceStore wires a WorkspaceStore to any DBTX.
-func NewWorkspaceStore(db DBTX) *WorkspaceStore {
-	return &WorkspaceStore{db: db}
-}
-
-// Register upserts a workspace on its natural key (machine_id, path):
-// first registration inserts (online, last_seen = now()); restarts update
-// the mutable columns and flip the row back online.
-func (s *WorkspaceStore) Register(ctx context.Context, params WorkspaceParams) (*Workspace, error) {
-	if strings.TrimSpace(params.ProjectID) == "" {
-		return nil, errors.New("store: workspace project id is required")
-	}
-	if strings.TrimSpace(params.UserID) == "" {
-		return nil, errors.New("store: workspace user id is required")
-	}
-	if strings.TrimSpace(params.MachineID) == "" {
-		return nil, errors.New("store: workspace machine id is required")
-	}
-	if strings.TrimSpace(params.Path) == "" {
-		return nil, errors.New("store: workspace path is required")
-	}
-	w, err := scanWorkspace(s.db.QueryRow(ctx,
+// RegisterWorkspace upserts on (machine_id, path): daemons re-register on
+// every startup, so a plain INSERT would collide with the UNIQUE constraint.
+func (s *PostgresStore) RegisterWorkspace(ctx context.Context, ws *Workspace) error {
+	row := s.pool.QueryRow(ctx,
 		`INSERT INTO workspaces
-		 (project_id, user_id, machine_id, path, branch, commit_sha, is_dirty, daemon_url, last_seen, is_online)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), true)
+			(project_id, user_id, machine_id, path, branch, commit_sha,
+			 is_dirty, is_online, is_designated_processor, last_seen, daemon_url)
+		 VALUES ($1::uuid, $2::uuid, $3, $4, NULLIF($5,''), NULLIF($6,''),
+		         $7, true, $8, now(), NULLIF($9,''))
 		 ON CONFLICT (machine_id, path) DO UPDATE SET
-		   project_id = EXCLUDED.project_id,
-		   user_id = EXCLUDED.user_id,
-		   branch = EXCLUDED.branch,
-		   commit_sha = EXCLUDED.commit_sha,
-		   is_dirty = EXCLUDED.is_dirty,
-		   daemon_url = EXCLUDED.daemon_url,
-		   last_seen = now(),
-		   is_online = true
-		 RETURNING `+workspaceColumns,
-		params.ProjectID, params.UserID, params.MachineID, params.Path,
-		nullText(strings.TrimSpace(params.Branch)),
-		nullText(strings.TrimSpace(params.CommitSHA)),
-		params.IsDirty,
-		nullText(strings.TrimSpace(params.DaemonURL))))
-	if err != nil {
-		return nil, fmt.Errorf("store: register workspace: %w", err)
+			project_id = EXCLUDED.project_id,
+			user_id = EXCLUDED.user_id,
+			branch = EXCLUDED.branch,
+			commit_sha = EXCLUDED.commit_sha,
+			is_dirty = EXCLUDED.is_dirty,
+			is_online = true,
+			is_designated_processor = EXCLUDED.is_designated_processor,
+			last_seen = now(),
+			daemon_url = EXCLUDED.daemon_url
+		 RETURNING id, last_seen, created_at`,
+		ws.ProjectID, ws.UserID, ws.MachineID, ws.Path, ws.Branch, ws.CommitSHA,
+		ws.IsDirty, ws.IsDesignatedProcessor, ws.DaemonURL)
+	if err := row.Scan(&ws.ID, &ws.LastSeen, &ws.CreatedAt); err != nil {
+		return err
 	}
-	return w, nil
+	ws.IsOnline = true
+	return nil
 }
 
-// Heartbeat records one daemon pulse: last_seen = now(), fresh git state,
-// and back online (a flapping daemon re-appears without re-registering).
-func (s *WorkspaceStore) Heartbeat(ctx context.Context, id string, hb HeartbeatParams) (*Workspace, error) {
-	w, err := scanWorkspace(s.db.QueryRow(ctx,
-		`UPDATE workspaces
-		 SET last_seen = now(), branch = $2, commit_sha = $3, is_dirty = $4, is_online = true
-		 WHERE id = $1
-		 RETURNING `+workspaceColumns,
-		id,
-		nullText(strings.TrimSpace(hb.Branch)),
-		nullText(strings.TrimSpace(hb.CommitSHA)),
-		hb.IsDirty))
+// Heartbeat refreshes liveness + git state. Unknown id -> ErrNotFound.
+func (s *PostgresStore) Heartbeat(ctx context.Context, workspaceID string, branch, commitSHA string, isDirty bool) error {
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE workspaces SET branch = NULLIF($2,''),
+			commit_sha = NULLIF($3,''), is_dirty = $4,
+			is_online = true, last_seen = now()
+		 WHERE id = $1::uuid`,
+		workspaceID, branch, commitSHA, isDirty)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: workspace %s: %w", id, ErrNotFound)
-		}
-		return nil, fmt.Errorf("store: workspace heartbeat: %w", err)
+		return err
 	}
-	return w, nil
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
-// GetByID fetches one workspace or a wrapped ErrNotFound.
-func (s *WorkspaceStore) GetByID(ctx context.Context, id string) (*Workspace, error) {
-	w, err := scanWorkspace(s.db.QueryRow(ctx,
-		`SELECT `+workspaceColumns+` FROM workspaces WHERE id = $1`, id))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: workspace %s: %w", id, ErrNotFound)
-		}
-		return nil, fmt.Errorf("store: get workspace: %w", err)
-	}
-	return w, nil
-}
-
-// ListActive returns the online workspaces of a project: is_online flag set
-// AND last_seen within OfflineAfter. Both conditions are required so a missed
-// sweeper run (MarkStaleOffline) cannot resurrect stale rows — the timestamp
-// predicate is authoritative.
-func (s *WorkspaceStore) ListActive(ctx context.Context, projectID string) ([]Workspace, error) {
-	rows, err := s.db.Query(ctx,
+// GetActiveWorkspace returns the most recently seen online workspace for a
+// project, or ErrNotFound when none beat the OfflineThreshold.
+func (s *PostgresStore) GetActiveWorkspace(ctx context.Context, projectID string) (*Workspace, error) {
+	ws, err := scanWorkspace(s.pool.QueryRow(ctx,
 		`SELECT `+workspaceColumns+` FROM workspaces
-		 WHERE project_id = $1
-		   AND is_online
-		   AND last_seen > now() - make_interval(secs => $2)
-		 ORDER BY last_seen DESC`,
-		projectID, OfflineAfterSeconds())
-	if err != nil {
-		return nil, fmt.Errorf("store: list active workspaces: %w", err)
+		  WHERE project_id = $1::uuid AND is_online AND last_seen > $2
+		  ORDER BY last_seen DESC LIMIT 1`,
+		projectID, time.Now().UTC().Add(-OfflineThreshold)))
+	if err == pgx.ErrNoRows {
+		return nil, ErrNotFound
 	}
-	defer rows.Close()
-	var out []Workspace
-	for rows.Next() {
-		var w Workspace
-		if err := rows.Scan(
-			&w.ID, &w.ProjectID, &w.UserID, &w.MachineID, &w.Path,
-			&w.Branch, &w.CommitSHA, &w.IsDirty, &w.IsOnline,
-			&w.IsDesignatedProcessor, &w.LastSeen, &w.DaemonURL, &w.CreatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("store: list active workspaces scan: %w", err)
-		}
-		out = append(out, w)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("store: list active workspaces rows: %w", err)
-	}
-	return out, nil
-}
-
-// MarkStaleOffline flips every workspace silent past OfflineAfter (or never
-// seen) to offline and returns the affected row count. Strict `<` matches
-// IsStaleAt exactly: silence == 90s is still online on both sides.
-func (s *WorkspaceStore) MarkStaleOffline(ctx context.Context) (int64, error) {
-	tag, err := s.db.Exec(ctx,
-		`UPDATE workspaces
-		 SET is_online = false
-		 WHERE is_online
-		   AND (last_seen IS NULL OR last_seen < now() - make_interval(secs => $1))`,
-		OfflineAfterSeconds())
-	if err != nil {
-		return 0, fmt.Errorf("store: mark stale workspaces offline: %w", err)
-	}
-	return tag.RowsAffected(), nil
-}
-
-// SetDesignatedProcessor assigns or revokes the Memory Processor role
-// (plan: the project owner's daemon processes; failover is a follow-up).
-func (s *WorkspaceStore) SetDesignatedProcessor(ctx context.Context, id string, designated bool) error {
-	tag, err := s.db.Exec(ctx,
-		`UPDATE workspaces SET is_designated_processor = $2 WHERE id = $1`,
-		id, designated)
-	if err != nil {
-		return fmt.Errorf("store: set designated processor: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("store: workspace %s: %w", id, ErrNotFound)
-	}
-	return nil
-}
-
-// Delete removes a workspace registration.
-func (s *WorkspaceStore) Delete(ctx context.Context, id string) error {
-	tag, err := s.db.Exec(ctx, `DELETE FROM workspaces WHERE id = $1`, id)
-	if err != nil {
-		return fmt.Errorf("store: delete workspace: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("store: workspace %s: %w", id, ErrNotFound)
-	}
-	return nil
-}
-
-// FilterOnline is the app-side counterpart of ListActive: it keeps workspaces
-// whose LastSeen is within OfflineAfter of now (nil LastSeen is dropped), so
-// cached lists can be filtered without a query. Deterministic and pure.
-func FilterOnline(workspaces []Workspace, now time.Time) []Workspace {
-	out := workspaces[:0:0]
-	for _, w := range workspaces {
-		if IsOnlineAtPtr(w.LastSeen, now) {
-			out = append(out, w)
-		}
-	}
-	return out
+	return ws, err
 }

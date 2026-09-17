@@ -1,96 +1,78 @@
-// Steer emitter bridge: wires internal/steer Emitter to persistence +
-// live fan-out (issue #42; wiring map from ADR-022 §"Wiring map" step 2).
+// Steer emitter bridge: wires steering transitions to persistence +
+// live fan-out (issue #42).
 //
-// The steer package deliberately does NOT import this package (ownership:
-// steer owns only internal/steer). This file is the server side of the
-// Emitter seam: SteerEmitter implements steer.Emitter by appending the
-// steering event to the event store and fanning the stored row out as a
-// generic {"type":"event"} frame via the existing Hub.PublishEvent — no
-// protocol change needed server-side (steering events ride the generic
-// event frame, same precedent as #13's action envelopes).
+// The steering package deliberately does NOT import this package. This file
+// is the server side: SteerEmitter appends the steering event to the event
+// store and fans the stored row out as a generic event frame via the
+// existing Hub.PublishEvent — no protocol change needed server-side
+// (steering events ride the generic event frame, same precedent as the WS
+// bridge in wsbridge.go).
 //
-// Delivery contract (mirrors the daemon interceptor Emit): best-effort and
-// never panics. A nil receiver, nil Store, or nil Hub is a valid degraded
-// sink (persist-only, fan-out-only, or silent). Store errors fall back to
-// publishing the unenriched envelope so live watchers still see the signal
-// even when persistence is down; a panicking Store/Hub is isolated via
-// recover so a slow/broken sink can never break the steering transition it
-// observes (same isolation the steer Controller already gives its Emitter).
+// Delivery contract: best-effort and never panics. A nil receiver, empty
+// project, nil Store, or nil Hub is a valid degraded sink. Store errors
+// fall back to publishing the unenriched envelope so live watchers still
+// see the signal even when persistence is down.
 package server
 
 import (
 	"context"
 	"strings"
 
-	"central-memory/internal/steer"
 	"central-memory/internal/store"
 )
 
-// Compile-time seam check: SteerEmitter is usable as a steer Emitter.
-var _ steer.Emitter = (*SteerEmitter)(nil)
-
-// SteerEventStore is the narrow persistence seam SteerEmitter needs.
-// *store.EventStore satisfies it method-for-method, so production wires it
-// with no adapter; tests substitute a fake.
-type SteerEventStore interface {
-	AppendEvent(ctx context.Context, params store.AppendEventParams) (*store.Event, error)
-}
-
 // SteerEmitter persists steering events and fans them out live. ProjectID
 // scopes every emission (steering is per-project); the session rides in the
-// payload's session_id (the steer Controller always sets it).
+// payload's session_id (callers always set it).
 type SteerEmitter struct {
-	Store     SteerEventStore
+	Store     store.Store
 	Hub       *Hub
 	ProjectID string
 }
 
 // NewSteerEmitter builds a SteerEmitter over store + hub for one project.
 // Either seam may be nil (persist-only, fan-out-only, or silent sink).
-func NewSteerEmitter(eventStore SteerEventStore, hub *Hub, projectID string) *SteerEmitter {
-	return &SteerEmitter{Store: eventStore, Hub: hub, ProjectID: strings.TrimSpace(projectID)}
+func NewSteerEmitter(st store.Store, hub *Hub, projectID string) *SteerEmitter {
+	return &SteerEmitter{Store: st, Hub: hub, ProjectID: strings.TrimSpace(projectID)}
 }
 
 // Emit persists eventType/payload and publishes the result. It never returns
-// an error and never panics: failures are swallowed by design (see package
-// doc). A copy of payload is stored so the caller's map is never mutated.
+// an error and never panics: failures are swallowed by design. A copy of
+// payload is stored so the caller's map is never mutated.
 func (e *SteerEmitter) Emit(eventType string, payload map[string]any) {
 	if e == nil {
 		return
 	}
-	// Panic isolation mirrors the daemon interceptor Emit contract.
-	defer func() { _ = recover() }()
-
 	eventType = strings.TrimSpace(eventType)
-	if eventType == "" || strings.TrimSpace(e.ProjectID) == "" {
+	if eventType == "" || e.ProjectID == "" {
 		return
 	}
-	sessionID := ""
-	if payload != nil {
-		if s, ok := payload["session_id"].(string); ok {
-			sessionID = strings.TrimSpace(s)
-		}
-	}
-	stored := map[string]any{}
+	cp := make(map[string]any, len(payload)+1)
 	for k, v := range payload {
-		stored[k] = v
+		cp[k] = v
 	}
-	stored["event_type"] = eventType
+	sessionID, _ := cp["session_id"].(string)
 
-	var event any = stored
 	if e.Store != nil {
-		if appended, err := e.Store.AppendEvent(context.Background(), store.AppendEventParams{
-			ProjectID: e.ProjectID,
-			SessionID: sessionID,
-			EventType: eventType,
-			Payload:   stored,
-		}); err == nil && appended != nil {
-			event = appended
-		}
-		// On append error event stays the envelope fallback (live
-		// continuity beats strict consistency for steering signals).
+		func() {
+			defer func() { _ = recover() }()
+			_ = appendSteerEvent(e.Store, e.ProjectID, sessionID, eventType, cp)
+		}()
 	}
 	if e.Hub != nil {
-		_, _ = e.Hub.PublishEvent(e.ProjectID, sessionID, event)
+		func() {
+			defer func() { _ = recover() }()
+			e.Hub.PublishEvent(e.ProjectID, sessionID, eventType, cp, "")
+		}()
 	}
+}
+
+// appendSteerEvent persists one steering event row.
+func appendSteerEvent(st store.Store, projectID, sessionID, eventType string, payload map[string]any) error {
+	return st.AppendEvent(context.Background(), &store.Event{
+		ProjectID: projectID,
+		SessionID: sessionID,
+		EventType: eventType,
+		Payload:   payload,
+	})
 }

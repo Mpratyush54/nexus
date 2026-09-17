@@ -1,287 +1,473 @@
 package daemon
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"os"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 )
 
-// eventRecorder is a test EventSink that records every emission.
-type eventRecorder struct {
-	mu     sync.Mutex
-	events []recordedEvent
-}
-
-type recordedEvent struct {
-	typ     string
-	payload map[string]any
-}
-
-func (r *eventRecorder) sink() EventSink {
-	return func(t string, p map[string]any) {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		r.events = append(r.events, recordedEvent{typ: t, payload: p})
+func TestTruncateShortUntouched(t *testing.T) {
+	if got := Truncate("hello", 200); got != "hello" {
+		t.Fatalf("short string modified: %q", got)
 	}
 }
 
-func (r *eventRecorder) count(typ string) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	n := 0
-	for _, e := range r.events {
-		if e.typ == typ {
-			n++
+func TestTruncateCapsWithMarker(t *testing.T) {
+	long := strings.Repeat("a", MaxOutputBytes+100)
+	got := Truncate(long, MaxOutputBytes)
+	if !strings.Contains(got, "[truncated]") {
+		t.Fatalf("expected truncation marker, got len %d", len(got))
+	}
+	if len(got) > MaxOutputBytes+len("\n[truncated]")+1 {
+		t.Fatalf("over cap: len %d", len(got))
+	}
+}
+
+func TestTruncateRuneBoundary(t *testing.T) {
+	// "é" is 2 bytes in UTF-8; cutting mid-rune must not produce invalid output.
+	s := strings.Repeat("é", 100) // 200 bytes
+	got := Truncate(s, 199)
+	for i := range got {
+		_ = i
+	}
+	// Must be valid: re-encoding round trip through []rune must not contain U+FFFD.
+	for _, r := range got {
+		if r == '\uFFFD' {
+			t.Fatalf("truncation split a rune: %q", got)
 		}
 	}
-	return n
 }
 
-func (r *eventRecorder) last(typ string) map[string]any {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i := len(r.events) - 1; i >= 0; i-- {
-		if r.events[i].typ == typ {
-			return r.events[i].payload
-		}
+func TestFileReadPreviewCapped200(t *testing.T) {
+	in := NewInterceptor(8, nil)
+	defer in.Close()
+	preview := strings.Repeat("x", 500)
+	ev := in.LogFileRead("a.txt", 500, preview)
+	p, _ := ev.Payload["preview"].(string)
+	if len(p) > MaxPreviewBytes+len("\n[truncated]")+1 {
+		t.Fatalf("preview over cap: len %d", len(p))
 	}
-	return nil
+	if ev.Type != ToolEventFileRead {
+		t.Fatalf("wrong type: %s", ev.Type)
+	}
+	<-in.Events() // drain
 }
 
-func TestInterceptFileReadEvent(t *testing.T) {
-	rec := &eventRecorder{}
-	in := NewInterceptor(rec.sink())
-	in.OnFileRead("src/main.go", 1234, strings.Repeat("x", 300))
-
-	p := rec.last(EventFileRead)
-	if p == nil {
-		t.Fatal("no FILE_READ emitted")
+func TestCommandOutputCapped4KB(t *testing.T) {
+	in := NewInterceptor(8, nil)
+	defer in.Close()
+	big := strings.Repeat("o", MaxOutputBytes*2)
+	ev := in.LogCommand("go", []string{"test", "./..."}, 1, big)
+	out, _ := ev.Payload["output"].(string)
+	if len(out) > MaxOutputBytes+len("\n[truncated]")+1 {
+		t.Fatalf("output over 4KB cap: len %d", len(out))
 	}
-	if p["path"] != "src/main.go" {
-		t.Errorf("path = %v", p["path"])
+	if ev.Payload["output_truncated"] != true {
+		t.Fatalf("expected output_truncated=true")
 	}
-	if p["size"] != int64(1234) {
-		t.Errorf("size = %v", p["size"])
+	if ev.Type != ToolEventCommandExecuted {
+		t.Fatalf("wrong type: %s", ev.Type)
 	}
-	head, _ := p["head"].(string)
-	if len([]rune(head)) != MaxReadHeadChars {
-		t.Errorf("head = %d runes, want %d", len([]rune(head)), MaxReadHeadChars)
-	}
-}
-
-func TestInterceptFileModifiedDiff(t *testing.T) {
-	rec := &eventRecorder{}
-	in := NewInterceptor(rec.sink())
-
-	oldC := []byte("line1\nline2\nline3\n")
-	newC := []byte("line1\nline2 changed\nline3\nline4\n")
-	in.OnFileWrite("notes.txt", oldC, newC)
-
-	p := rec.last(EventFileModified)
-	if p == nil {
-		t.Fatal("no FILE_MODIFIED emitted")
-	}
-	if p["path"] != "notes.txt" {
-		t.Errorf("path = %v", p["path"])
-	}
-	if p["size"] != int64(len(newC)) || p["old_size"] != int64(len(oldC)) {
-		t.Errorf("sizes = %v/%v", p["size"], p["old_size"])
-	}
-	diff, _ := p["diff"].(string)
-	if !strings.Contains(diff, "- line2\n") || !strings.Contains(diff, "+ line2 changed\n") {
-		t.Errorf("diff missing -/+ lines:\n%s", diff)
-	}
-
-	// Identical content: the write is still recorded, with an empty diff.
-	in.OnFileWrite("same.txt", oldC, oldC)
-	p2 := rec.last(EventFileModified)
-	if p2 == nil || p2["path"] != "same.txt" {
-		t.Fatal("identical write not recorded")
-	}
-	if d, _ := p2["diff"].(string); d != "" {
-		t.Errorf("identical write diff = %q, want empty", d)
+	select {
+	case <-in.Events():
+	case <-time.After(time.Second):
+		t.Fatal("event not queued")
 	}
 }
 
-func TestInterceptCommandCap4KB(t *testing.T) {
-	rec := &eventRecorder{}
-	in := NewInterceptor(rec.sink())
-
-	bigOut := []byte(strings.Repeat("o", MaxEventOutputBytes+100))
-	bigErr := []byte(strings.Repeat("e", MaxEventOutputBytes+1))
-	in.OnCommand("go test ./...", 1, bigOut, bigErr)
-
-	p := rec.last(EventCommandExecuted)
-	if p == nil {
-		t.Fatal("no COMMAND_EXECUTED emitted")
+func TestFileModifiedDiffCap(t *testing.T) {
+	in := NewInterceptor(8, nil)
+	defer in.Close()
+	before := "line1\n" + strings.Repeat("old\n", 3000)
+	after := "line1\n" + strings.Repeat("new content line that is long\n", 3000)
+	ev := in.LogFileModified("big.txt", before, after, int64(len(after)))
+	diff, _ := ev.Payload["diff"].(string)
+	if len(diff) > MaxDiffBytes+len("\n[truncated]")+1 {
+		t.Fatalf("diff over cap: len %d", len(diff))
 	}
-	if p["cmdline"] != "go test ./..." {
-		t.Errorf("cmdline = %v", p["cmdline"])
+	if _, ok := ev.Payload["diff_truncated"]; !ok {
+		t.Fatalf("expected diff_truncated key")
 	}
-	if p["exit_code"] != 1 {
-		t.Errorf("exit_code = %v", p["exit_code"])
+	if ev.Type != ToolEventFileModified {
+		t.Fatalf("wrong type: %s", ev.Type)
 	}
-	if out, _ := p["stdout"].(string); len(out) > MaxEventOutputBytes+len("\n... [truncated]") {
-		t.Errorf("stdout not capped: %d bytes", len(out))
-	}
-	if p["stdout_truncated"] != true || p["stderr_truncated"] != true {
-		t.Errorf("truncated flags = %v/%v, want true/true", p["stdout_truncated"], p["stderr_truncated"])
-	}
-
-	// Small output passes through unflagged.
-	in.OnCommand("git status", 0, []byte("ok"), nil)
-	p2 := rec.last(EventCommandExecuted)
-	if p2["stdout"] != "ok" || p2["stdout_truncated"] != false || p2["stderr_truncated"] != false {
-		t.Errorf("small output mangled: %v", p2)
-	}
+	<-in.Events()
 }
 
-func TestInterceptGitCommitted(t *testing.T) {
-	rec := &eventRecorder{}
-	in := NewInterceptor(rec.sink())
-	in.OnGitCommit("abc123", "fix: auth timeout", "2 files changed, 10 insertions(+)")
-
-	p := rec.last(EventGitCommitted)
-	if p == nil {
-		t.Fatal("no GIT_COMMITTED emitted")
+func TestExplicitDiffCapped(t *testing.T) {
+	in := NewInterceptor(8, nil)
+	defer in.Close()
+	huge := strings.Repeat("d", MaxDiffBytes+500)
+	ev := in.LogFileModifiedDiff("x.go", huge, 99)
+	if got := ev.Payload["diff"].(string); len(got) > MaxDiffBytes+len("\n[truncated]")+1 {
+		t.Fatalf("explicit diff over cap: %d", len(got))
 	}
-	if p["hash"] != "abc123" || p["message"] != "fix: auth timeout" {
-		t.Errorf("payload = %v", p)
-	}
-	if _, ok := p["stat"]; !ok {
-		t.Error("stat missing")
-	}
+	<-in.Events()
 }
 
-func TestInterceptGitDiffViewed(t *testing.T) {
-	rec := &eventRecorder{}
-	in := NewInterceptor(rec.sink())
-	in.OnGitDiff("HEAD~1", "1 file changed")
-
-	p := rec.last(EventGitDiffViewed)
-	if p == nil {
-		t.Fatal("no GIT_DIFF_VIEWED emitted")
-	}
-	if p["ref"] != "HEAD~1" {
-		t.Errorf("ref = %v", p["ref"])
-	}
-}
-
-func TestInterceptJoinCmdline(t *testing.T) {
+func TestLogActionToolEventTypes(t *testing.T) {
+	in := NewInterceptor(32, nil)
+	defer in.Close()
 	cases := []struct {
-		cmd, want string
-		args      []string
+		action string
+		want   ToolEventType
 	}{
-		{"git", "git status --porcelain", []string{"status", "--porcelain"}},
-		{"go", `go test "./my pkg"`, []string{"test", "./my pkg"}},
-		{"pytest", `pytest -k "foo bar"`, []string{"-k", "foo bar"}},
-		{"cmd", `cmd ""`, []string{""}},
+		{"file_read", ToolEventFileRead},
+		{"file_write", ToolEventFileModified},
+		{"file_modified", ToolEventFileModified},
+		{"command_run", ToolEventCommandExecuted},
+		{"git_diff", ToolEventGitDiffViewed},
+		{"git_commit", ToolEventGitCommitted},
 	}
 	for _, c := range cases {
-		if got := JoinCmdline(c.cmd, c.args); got != c.want {
-			t.Errorf("JoinCmdline(%q,%q) = %q, want %q", c.cmd, c.args, got, c.want)
+		ev := in.LogAction(c.action, map[string]any{})
+		if ev.Type != c.want {
+			t.Errorf("action %s: got %s want %s", c.action, ev.Type, c.want)
+		}
+		<-in.Events()
+	}
+}
+
+func TestGitCommittedPayload(t *testing.T) {
+	in := NewInterceptor(8, nil)
+	defer in.Close()
+	msg := strings.Repeat("m", MaxMessageBytes+10)
+	ev := in.LogGitCommitted("abc123", msg, "3 files changed")
+	if ev.Type != ToolEventGitCommitted {
+		t.Fatalf("wrong type: %s", ev.Type)
+	}
+	if got := ev.Payload["message"].(string); !strings.Contains(got, "[truncated]") {
+		t.Fatalf("commit message not capped")
+	}
+	<-in.Events()
+}
+
+func TestLogActionNonBlockingWhenFull(t *testing.T) {
+	in := NewInterceptor(1, nil) // tiny buffer
+	defer in.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 1000; i++ {
+			in.LogAction("file_read", map[string]any{"path": "p"})
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("LogAction blocked on full queue — must be non-blocking")
+	}
+	if in.Dropped() == 0 {
+		t.Fatal("expected some drops with buffer 1 and 1000 rapid logs")
+	}
+}
+
+func TestBuildDiffMarkers(t *testing.T) {
+	d := BuildDiff("a\nb\nc\n", "a\nB\nc\n", MaxDiffBytes)
+	if !strings.Contains(d, "- b") || !strings.Contains(d, "+ B") {
+		t.Fatalf("missing diff markers: %q", d)
+	}
+}
+
+func TestBuildDiffEqualEmpty(t *testing.T) {
+	if d := BuildDiff("same", "same", MaxDiffBytes); d != "" {
+		t.Fatalf("equal inputs should diff empty, got %q", d)
+	}
+}
+
+func TestChanEmitterDropsInsteadOfBlocking(t *testing.T) {
+	c := NewChanEmitter(1)
+	c.Emit(ToolEvent{Type: ToolEventFileRead})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 500; i++ {
+			c.Emit(ToolEvent{Type: ToolEventFileRead})
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ChanEmitter.Emit blocked — must be non-blocking")
+	}
+}
+
+func TestInterceptRedactSecrets(t *testing.T) {
+	secrets := []string{
+		"token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234 here",
+		"key AKIAIOSFODNN7EXAMPLE leaked",
+		"glpat-abc123XYZ_-def in text",
+		"sk-ant-abc123XYZ-456 exposed",
+		`api_key = "supersecretvalue1234567890"`,
+	}
+	for _, s := range secrets {
+		out, hit := RedactSecrets(s)
+		if !hit {
+			t.Errorf("RedactSecrets(%q): hit=false", s)
+			continue
+		}
+		if strings.Contains(out, s) {
+			t.Errorf("RedactSecrets(%q): raw secret survives: %q", s, out)
+		}
+		if !strings.Contains(out, RedactedPlaceholder) {
+			t.Errorf("RedactSecrets(%q): missing placeholder: %q", s, out)
 		}
 	}
-}
-
-func TestInterceptCapBytesUTF8(t *testing.T) {
-	// Multi-byte runes must never be split: cap inside "é" (2 bytes).
-	s := "ab" + strings.Repeat("é", 10)
-	capped, trunc := CapBytes([]byte(s), 5)
-	if !trunc {
-		t.Error("expected truncation")
-	}
-	if string(capped) != "abé" {
-		t.Errorf("capped = %q, want %q", capped, "abé")
-	}
-	if _, trunc := CapBytes([]byte("abc"), 3); trunc {
-		t.Error("exact-fit flagged truncated")
-	}
-	if _, trunc := CapBytes([]byte("abc"), 0); !trunc {
-		t.Error("zero limit not flagged truncated")
+	clean := "just a normal log line with no credentials"
+	if out, hit := RedactSecrets(clean); hit || out != clean {
+		t.Errorf("clean string mangled: %q hit=%v", out, hit)
 	}
 }
 
-func TestInterceptHeadChars(t *testing.T) {
-	if got := HeadChars("héllo", 3); got != "hél" {
-		t.Errorf("HeadChars = %q", got)
+func TestInterceptPayloadsRedactDontDrop(t *testing.T) {
+	const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ1234"
+	in := NewInterceptor(8, nil)
+	defer in.Close()
+
+	ev := in.LogFileRead("notes.txt", 100, "prefix "+secret+" suffix")
+	head, _ := ev.Payload["preview"].(string)
+	if strings.Contains(head, secret) {
+		t.Errorf("FILE_READ preview leaks secret: %q", head)
 	}
-	if got := HeadChars("short", 100); got != "short" {
-		t.Errorf("HeadChars short = %q", got)
+	if !strings.Contains(head, RedactedPlaceholder) {
+		t.Errorf("FILE_READ preview missing placeholder: %q", head)
+	}
+
+	ev = in.LogFileModified("notes.txt", "line1\n", "line1\nkey="+secret+"\n", 100)
+	diff, _ := ev.Payload["diff"].(string)
+	if strings.Contains(diff, secret) {
+		t.Errorf("FILE_MODIFIED diff leaks secret:\n%s", diff)
+	}
+	if !strings.Contains(diff, RedactedPlaceholder) {
+		t.Errorf("FILE_MODIFIED diff missing placeholder:\n%s", diff)
+	}
+
+	ev = in.LogCommand("deploy", nil, 0, "ok "+secret)
+	out, _ := ev.Payload["output"].(string)
+	if strings.Contains(out, secret) {
+		t.Errorf("COMMAND_EXECUTED output leaks secret: %q", out)
+	}
+	if !strings.Contains(out, RedactedPlaceholder) {
+		t.Errorf("COMMAND_EXECUTED output missing placeholder: %q", out)
+	}
+
+	ev = in.LogGitCommitted("abc123", "rotate "+secret, "1 file changed")
+	msg, _ := ev.Payload["message"].(string)
+	if strings.Contains(msg, secret) {
+		t.Errorf("GIT_COMMITTED message leaks secret: %q", msg)
+	}
+	if ev.Payload["commit"] != "abc123" {
+		t.Errorf("commit sha mangled by redaction: %v", ev.Payload["commit"])
+	}
+
+	ev = in.LogGitDiff("", "@@ line with "+secret, "stat with "+secret)
+	stat, _ := ev.Payload["stats"].(string)
+	if strings.Contains(stat, secret) {
+		t.Errorf("GIT_DIFF_VIEWED stats leaks secret: %q", stat)
 	}
 }
 
-func TestInterceptDiffLines(t *testing.T) {
-	// Identical.
-	if d := DiffLines("a\nb\n", "a\nb\n"); d != "" {
-		t.Errorf("identical diff = %q", d)
+func TestInterceptDiffStat(t *testing.T) {
+	if got := DiffStat(""); got != "(empty diff)" {
+		t.Errorf("DiffStat(empty) = %q", got)
 	}
-	// Pure addition from empty (new instruction file).
-	d := DiffLines("", "rule one\nrule two\n")
-	if !strings.Contains(d, "+ rule one\n") || !strings.Contains(d, "+ rule two\n") {
-		t.Errorf("addition diff:\n%s", d)
-	}
-	// Deletion keeps "-" lines; context lines are space-prefixed.
-	d = DiffLines("keep\n drop\n", "keep\n")
-	if !strings.Contains(d, "  keep\n") || !strings.Contains(d, "-  drop\n") {
-		t.Errorf("deletion diff:\n%s", d)
-	}
-	// CRLF normalizes: same logical content, no diff.
-	if d := DiffLines("a\r\nb\r\n", "a\nb\n"); d != "" {
-		t.Errorf("CRLF diff = %q", d)
-	}
-	// Oversized input degrades to a summary, not an O(m*n) table.
-	big := strings.Repeat("x\n", MaxDiffInputLines+1)
-	if d := DiffLines(big, big+"y\n"); !strings.Contains(d, "diff omitted") {
-		t.Errorf("oversize diff = %q", d)
-	}
-	// Rendered output is capped.
-	many := ""
-	for i := 0; i < 2000; i++ {
-		many += strings.Repeat("z", 40) + "\n"
-	}
-	if d := DiffLines("", many); !strings.Contains(d, "diff truncated") {
-		t.Error("large render not truncated")
+	diff := "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-one\n+two\n+three\n"
+	stat := DiffStat(diff)
+	if !strings.Contains(stat, "2 added") || !strings.Contains(stat, "1 removed") {
+		t.Errorf("DiffStat = %q, want 2 added / 1 removed", stat)
 	}
 }
 
-func TestSinkNilSafe(t *testing.T) {
-	// Nil sink: silent no-op.
-	in := NewInterceptor(nil)
-	in.OnFileRead("a", 1, "x")
-	in.OnFileWrite("a", nil, []byte("x"))
-	in.OnCommand("c", 0, nil, nil)
-	in.OnGitCommit("h", "m", "s")
-	in.OnGitDiff("", "s")
+func TestHandlerEmitsFileReadAndWrite(t *testing.T) {
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
 
-	// Nil interceptor: also safe (daemon core may hold an unset pointer).
-	var nilIn *Interceptor
-	nilIn.OnFileRead("a", 1, "x")
-	nilIn.Emit(EventFileRead, nil)
+	post := func(target, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer test-token-123")
+		w := httptest.NewRecorder()
+		d.Handler().ServeHTTP(w, r)
+		return w
+	}
+
+	if w := post("/file/write", `{"path":"notes.txt","content":"hello interceptor\n"}`); w.Code != http.StatusOK {
+		t.Fatalf("write: got %d", w.Code)
+	}
+	ev := nextEvent(t, d)
+	if ev.Type != ToolEventFileModified {
+		t.Fatalf("type = %s, want FILE_MODIFIED", ev.Type)
+	}
+	if ev.Payload["path"] != "notes.txt" {
+		t.Errorf("path = %v", ev.Payload["path"])
+	}
+
+	if w := post("/file/read", `{"path":"notes.txt"}`); w.Code != http.StatusOK {
+		t.Fatalf("read: got %d", w.Code)
+	}
+	ev = nextEvent(t, d)
+	if ev.Type != ToolEventFileRead {
+		t.Fatalf("type = %s, want FILE_READ", ev.Type)
+	}
+	if ev.Payload["path"] != "notes.txt" {
+		t.Errorf("path = %v", ev.Payload["path"])
+	}
+	head, _ := ev.Payload["preview"].(string)
+	if !strings.Contains(head, "hello interceptor") {
+		t.Errorf("preview = %q", head)
+	}
 }
 
-func TestSinkPanicIsolated(t *testing.T) {
-	in := NewInterceptor(func(string, map[string]any) { panic("sink boom") })
-	func() {
-		defer func() {
-			if recover() != nil {
-				t.Fatal("sink panic propagated to caller")
-			}
-		}()
-		in.OnFileWrite("a", []byte("old"), []byte("new"))
-	}()
+func TestHandlerEmitsCommandAndGitDiff(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not on PATH")
+	}
+	dir := initGitRepo(t)
+	if err := os.WriteFile(dir+"/a.txt", []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDaemon(dir, "test-token-123")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "/git/diff", nil)
+	r.Header.Set("Authorization", "Bearer test-token-123")
+	rd := httptest.NewRecorder()
+	d.Handler().ServeHTTP(rd, r)
+	if rd.Code != http.StatusOK {
+		t.Fatalf("diff: got %d", rd.Code)
+	}
+	ev := nextEvent(t, d)
+	if ev.Type != ToolEventGitDiffViewed {
+		t.Fatalf("type = %s, want GIT_DIFF_VIEWED", ev.Type)
+	}
+	if ev.Payload["ref"] != "" {
+		t.Errorf("ref = %v", ev.Payload["ref"])
+	}
+
+	cr := httptest.NewRequest(http.MethodPost, "/command/run", strings.NewReader(`{"cmd":"git","args":["version"]}`))
+	cr.Header.Set("Authorization", "Bearer test-token-123")
+	rc := httptest.NewRecorder()
+	d.Handler().ServeHTTP(rc, cr)
+	if rc.Code != http.StatusOK {
+		t.Fatalf("command: got %d", rc.Code)
+	}
+	ev = nextEvent(t, d)
+	if ev.Type != ToolEventCommandExecuted {
+		t.Fatalf("type = %s, want COMMAND_EXECUTED", ev.Type)
+	}
+	if ev.Payload["command"] != "git" {
+		t.Errorf("command = %v", ev.Payload["command"])
+	}
 }
 
-func TestHashSHA256KnownVector(t *testing.T) {
-	// NIST vector: SHA256("abc").
-	const want = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-	if got := HashString("abc"); got != want {
-		t.Errorf("HashString(abc) = %s, want %s", got, want)
+func TestCheckGitCommitEmitsOnHeadChange(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not on PATH")
 	}
-	if HashBytes([]byte("abc")) != want {
-		t.Error("HashBytes disagrees with HashString")
+	dir := initGitRepo(t)
+	d, err := NewDaemon(dir, "test-token-123")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
 	}
-	if HashString("abc") == HashString("abd") {
-		t.Error("hash collision on distinct inputs")
+
+	d.checkGitCommit() // HEAD seeded in NewDaemon: no change → no event
+	select {
+	case ev := <-d.Interceptor.Events():
+		t.Fatalf("seeded HEAD emitted %v, want nothing", ev.Type)
+	case <-time.After(100 * time.Millisecond):
 	}
+
+	if err := os.WriteFile(dir+"/b.txt", []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RunCommand(dir, []string{"git", "add", "."}); err != nil {
+		t.Fatalf("git add: %v", err)
+	}
+	if _, err := RunCommand(dir, []string{"git", "commit", "-m", "second"}); err != nil {
+		t.Fatalf("git commit: %v", err)
+	}
+	d.checkGitCommit()
+	ev := nextEvent(t, d)
+	if ev.Type != ToolEventGitCommitted {
+		t.Fatalf("type = %s, want GIT_COMMITTED", ev.Type)
+	}
+	_, want, _, _, _ := GitStatus(dir)
+	if ev.Payload["commit"] != strings.TrimSpace(want) {
+		t.Errorf("commit = %v, want %v", ev.Payload["commit"], want)
+	}
+
+	d.checkGitCommit() // idempotent: no second event
+	select {
+	case ev := <-d.Interceptor.Events():
+		t.Fatalf("second checkGitCommit emitted %v, want nothing", ev.Type)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSetEventSinkWiresEmission(t *testing.T) {
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	// Nil downstream: events stay queued.
+	d.Interceptor.LogFileRead("x", 1, "y")
+	select {
+	case <-d.Interceptor.Events():
+	case <-time.After(2 * time.Second):
+		t.Fatal("queued event not readable via Events()")
+	}
+	// Attach a downstream sink: emission still works, must not panic.
+	d.SetEventSink(NewChanEmitter(8))
+	d.Interceptor.LogFileRead("x", 1, "y")
+	d.SetEventSink(nil) // back to no-sink, must not panic
+	d.Interceptor.LogFileRead("x", 1, "y")
+	var nilD *Daemon
+	nilD.SetEventSink(nil) // nil-receiver safe
+	nilD.checkGitCommit()
+}
+
+// nextEvent reads one queued tool event (nil-downstream mode) or fails.
+func nextEvent(t *testing.T, d *Daemon) ToolEvent {
+	t.Helper()
+	select {
+	case ev := <-d.Interceptor.Events():
+		return ev
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for tool event")
+		return ToolEvent{}
+	}
+}
+
+// gitAvailable reports whether git is on PATH.
+func gitAvailable() bool {
+	_, err := RunCommand(os.TempDir(), []string{"git", "version"})
+	return err == nil
+}
+
+// initGitRepo creates a temp git repo with one commit and returns its path.
+func initGitRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		if _, err := RunCommand(dir, append([]string{"git"}, args...)); err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+	}
+	run("init")
+	run("config", "user.email", "test@example.com")
+	run("config", "user.name", "test")
+	if err := os.WriteFile(dir+"/a.txt", []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", ".")
+	run("commit", "-m", "first")
+	return dir
 }
