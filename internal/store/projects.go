@@ -1,0 +1,108 @@
+package store
+
+// projects.go — Postgres project CRUD + canonical resolver (issue #2).
+//
+// Resolution priority (mirrors MemStore.ResolveProject and the plan §1.2):
+// canonical_url (normalized) → root_commit → folder_name → create.
+
+import (
+	"context"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+)
+
+const projectColumns = `id, canonical_url, root_commit, folder_name,
+	display_name, created_by, created_at`
+
+func scanProject(row pgx.Row) (*Project, error) {
+	var p Project
+	var canonicalURL, rootCommit, displayName, createdBy *string
+	if err := row.Scan(&p.ID, &canonicalURL, &rootCommit, &p.FolderName,
+		&displayName, &createdBy, &p.CreatedAt); err != nil {
+		return nil, err
+	}
+	if canonicalURL != nil {
+		p.CanonicalURL = *canonicalURL
+	}
+	if rootCommit != nil {
+		p.RootCommit = *rootCommit
+	}
+	if displayName != nil {
+		p.DisplayName = *displayName
+	}
+	if createdBy != nil {
+		p.CreatedBy = *createdBy
+	}
+	return &p, nil
+}
+
+// ResolveProject returns the canonical project for an identity triple,
+// creating it when nothing matches. Stores the normalized URL so
+// `git@host:x/y.git` and `https://host/x/y` converge on one row.
+func (s *PostgresStore) ResolveProject(ctx context.Context, canonicalURL, rootCommit, folderName string) (*Project, error) {
+	normURL := NormalizeGitURL(canonicalURL)
+
+	if normURL != "" {
+		p, err := scanProject(s.pool.QueryRow(ctx,
+			`SELECT `+projectColumns+` FROM projects WHERE canonical_url = $1`, normURL))
+		if err == nil {
+			return p, nil
+		}
+		if err != pgx.ErrNoRows {
+			return nil, err
+		}
+	}
+	if rootCommit != "" {
+		p, err := scanProject(s.pool.QueryRow(ctx,
+			`SELECT `+projectColumns+` FROM projects WHERE root_commit = $1`, rootCommit))
+		if err == nil {
+			return p, nil
+		}
+		if err != pgx.ErrNoRows {
+			return nil, err
+		}
+	}
+	// Folder fallback is ambiguous by nature; first-registered wins.
+	p, err := scanProject(s.pool.QueryRow(ctx,
+		`SELECT `+projectColumns+` FROM projects WHERE folder_name = $1 ORDER BY created_at ASC LIMIT 1`, folderName))
+	if err == nil {
+		return p, nil
+	}
+	if err != pgx.ErrNoRows {
+		return nil, err
+	}
+
+	storedURL := canonicalURL
+	if normURL != "" {
+		storedURL = normURL
+	}
+	row := s.pool.QueryRow(ctx,
+		`INSERT INTO projects (canonical_url, root_commit, folder_name, display_name)
+		 VALUES (NULLIF($1,''), NULLIF($2,''), $3, $3)
+		 RETURNING id, created_at`,
+		storedURL, rootCommit, folderName)
+	var id string
+	var createdAt time.Time
+	if err := row.Scan(&id, &createdAt); err != nil {
+		return nil, err
+	}
+	return &Project{
+		ID:           id,
+		CanonicalURL: storedURL,
+		RootCommit:   rootCommit,
+		FolderName:   folderName,
+		DisplayName:  folderName,
+		CreatedAt:    createdAt,
+	}, nil
+}
+
+// GetProject fetches one project by id.
+func (s *PostgresStore) GetProject(ctx context.Context, id string) (*Project, error) {
+	p, err := scanProject(s.pool.QueryRow(ctx,
+		`SELECT `+projectColumns+` FROM projects WHERE id = $1::uuid`, id))
+	if err == pgx.ErrNoRows {
+		return nil, ErrNotFound
+	}
+	return p, err
+}
