@@ -260,6 +260,14 @@ func (s *WorkspaceStore) MarkStaleOffline(ctx context.Context) (int64, error) {
 
 // SetDesignatedProcessor assigns or revokes the Memory Processor role
 // (plan: the project owner's daemon processes; failover is a follow-up).
+//
+// NOTE (issue #36): this stays a bare per-row flip for explicit admin
+// assignment. Uniqueness is now enforced by the database — migration
+// 008_processor_election adds partial unique index
+// uq_workspaces_designated_processor_online (one designated+online workspace
+// per project) — so a conflicting second designation fails here instead of
+// silently forking extraction. Prefer ElectDesignatedProcessor for automatic
+// failover.
 func (s *WorkspaceStore) SetDesignatedProcessor(ctx context.Context, id string, designated bool) error {
 	tag, err := s.db.Exec(ctx,
 		`UPDATE workspaces SET is_designated_processor = $2 WHERE id = $1`,
@@ -271,6 +279,82 @@ func (s *WorkspaceStore) SetDesignatedProcessor(ctx context.Context, id string, 
 		return fmt.Errorf("store: workspace %s: %w", id, ErrNotFound)
 	}
 	return nil
+}
+
+// ElectDesignatedProcessor elects the project's Memory Processor (issue #36):
+// the online workspace with the most-recent heartbeat (last_seen DESC, id
+// tie-break so concurrent electors converge on the same winner) becomes the
+// single designated processor and every other flag in the project is cleared.
+//
+// It is a transactional compare-and-set in two ordered steps, each one atomic
+// statement sharing the OfflineAfter source of truth:
+//  1. Revoke every designated flag in the project.
+//  2. Designate the freshest online workspace (is_online AND last_seen within
+//     OfflineAfter, the same authoritative predicate as ListActive).
+//
+// Step order matters for the 008 partial unique index
+// (uq_workspaces_designated_processor_online): revoke-before-grant can never
+// transiently hold two designated+online rows, while grant-before-revoke
+// could. Concurrent electors pick the same deterministic winner, making the
+// second election an idempotent no-op; a divergent winner fails on the index
+// and the caller retries the election.
+// With no online workspace the grant matches nothing and the election reports
+// ErrNotFound (the revoke still stands — a project with nobody online must
+// not keep a corpse designatee).
+func (s *WorkspaceStore) ElectDesignatedProcessor(ctx context.Context, projectID string) (*Workspace, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return nil, errors.New("store: elect designated processor requires a project id")
+	}
+	if _, err := s.db.Exec(ctx,
+		`UPDATE workspaces
+		 SET is_designated_processor = false
+		 WHERE project_id = $1 AND is_designated_processor`,
+		projectID); err != nil {
+		return nil, fmt.Errorf("store: elect designated processor revoke: %w", err)
+	}
+	w, err := scanWorkspace(s.db.QueryRow(ctx,
+		`UPDATE workspaces
+		 SET is_designated_processor = true
+		 WHERE id = (
+		   SELECT id FROM workspaces
+		   WHERE project_id = $1
+		     AND is_online
+		     AND last_seen > now() - make_interval(secs => $2)
+		   ORDER BY last_seen DESC, id
+		   LIMIT 1
+		 )
+		 RETURNING `+workspaceColumns,
+		projectID, OfflineAfterSeconds()))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: elect designated processor for project %s: %w", projectID, ErrNotFound)
+		}
+		return nil, fmt.Errorf("store: elect designated processor: %w", err)
+	}
+	return w, nil
+}
+
+// ReassignStaleDesignated revokes the Memory Processor role (and the online
+// flag) from every designated workspace silent past OfflineAfter or never
+// seen (issue #36: a dead owner must not keep the flag while extraction
+// silently stops). It returns the swept row count, like MarkStaleOffline,
+// and shares its exact boundary semantics: strict `<` plus NULL last_seen, so
+// silence of exactly 90s still counts as online on both the Go (IsStaleAt)
+// and SQL sides. Electing a successor is a separate step — call
+// ElectDesignatedProcessor for the affected projects afterwards; the swept
+// rows are offline and therefore outside the 008 partial unique index, so the
+// successor grant never conflicts with them.
+func (s *WorkspaceStore) ReassignStaleDesignated(ctx context.Context) (int64, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE workspaces
+		 SET is_online = false, is_designated_processor = false
+		 WHERE is_designated_processor
+		   AND (last_seen IS NULL OR last_seen < now() - make_interval(secs => $1))`,
+		OfflineAfterSeconds())
+	if err != nil {
+		return 0, fmt.Errorf("store: reassign stale designated: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
 
 // Delete removes a workspace registration.
