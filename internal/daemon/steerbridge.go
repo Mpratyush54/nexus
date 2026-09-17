@@ -27,6 +27,7 @@ import (
 
 	"central-memory/internal/steering"
 )
+
 // Compile-time seam check: SteerBridge is usable as a steering DaemonBridge.
 var _ steering.DaemonBridge = (*SteerBridge)(nil)
 
