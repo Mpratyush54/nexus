@@ -251,6 +251,7 @@ func claudeDirSuffix(nativePath string) (string, string) {
 	}
 	return "", ""
 }
+
 // every known leaf the same way Claude does (":", "\", "/" -> "-") and
 // matching case-insensitively. Handles nested repos and literal dashes
 // because the match is against real leaves, not string surgery.
@@ -282,6 +283,7 @@ func claudeDirProject(nativePath string) string {
 	}
 	return ""
 }
+
 // workspace hash dir to its folder (Antigravity / VS Code family).
 func workspaceProject(p string) string {
 	dir := filepath.Dir(p)
@@ -346,7 +348,7 @@ func CopyFiltered(roots []string, destRoot string, maxBytes int64, projectFilter
 			rel, _ := filepath.Rel(r, p)
 			dst := filepath.Join(destRoot, safeName(r, ri), rel)
 			if st, serr := os.Stat(dst); serr == nil && st.Size() == info.Size() && !st.ModTime().Before(info.ModTime()) {
-			copied = append(copied, Artifact{NativePath: p, RawPath: dst, Project: ProjectOf(p, home), Was: ProjectWas(p, home)})
+				copied = append(copied, Artifact{NativePath: p, RawPath: dst, Project: ProjectOf(p, home), Was: ProjectWas(p, home)})
 				return nil
 			}
 			if err := copyFile(p, dst); err != nil {

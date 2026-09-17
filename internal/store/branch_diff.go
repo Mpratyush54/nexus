@@ -218,9 +218,9 @@ type MergeConflict struct {
 // overwrites. Skipped lists converged keys (same content, no action).
 // All slices are sorted by Key and non-nil.
 type MergeResult struct {
-	ToPropose []MemoryView  // source-only keys, Status=PROPOSED, for insert on target
+	ToPropose []MemoryView    // source-only keys, Status=PROPOSED, for insert on target
 	Conflicts []MergeConflict // same key, different value — human review
-	Skipped   []string      // same key, same value — already converged
+	Skipped   []string        // same key, same value — already converged
 }
 
 // Merge computes a two-way, never-overwrite merge of source into target
