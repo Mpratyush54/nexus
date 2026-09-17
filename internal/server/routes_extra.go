@@ -62,6 +62,7 @@ func (s *Server) registerExtraRoutes() {
 	// Confirmation flow (plan §2.8).
 	s.Mux.HandleFunc("POST /memory/{id}/confirm", s.requireAuth(s.handleMemoryConfirm))
 	s.Mux.HandleFunc("POST /memory/{id}/reject", s.requireAuth(s.handleMemoryReject))
+	s.Mux.HandleFunc("POST /memory/{id}/promote", s.requireAuth(s.handleMemoryPromote))
 
 	// Episodes.
 	s.Mux.HandleFunc("POST /episodes/{id}/resolve", s.requireAuth(s.handleEpisodeResolve))

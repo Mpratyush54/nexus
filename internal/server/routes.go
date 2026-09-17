@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -215,6 +216,35 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		limit = n
+	}
+	// Vector path (issue #37): a caller-supplied ?embedding= vector routes
+	// through pgvector cosine search when the configured store supports it
+	// (PostgresStore.SearchMemoryVector). Text-only stores answer 400, never
+	// silent text results. When both are present, embedding wins and ?q= is
+	// ignored.
+	if rawEmb := strings.TrimSpace(q.Get("embedding")); rawEmb != "" {
+		vec, err := parseEmbeddingParam(rawEmb)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid embedding: "+err.Error())
+			return
+		}
+		vs, ok := s.Store.(interface {
+			SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
+		})
+		if !ok {
+			writeError(w, http.StatusBadRequest, "vector search not supported by configured store")
+			return
+		}
+		items, err := vs.SearchMemoryVector(r.Context(), projectID, vec, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "vector search failed: "+err.Error())
+			return
+		}
+		if items == nil {
+			items = []*store.MemoryItem{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+		return
 	}
 	items, err := s.Store.SearchMemory(r.Context(), projectID, q.Get("q"), tags, limit)
 	if err != nil {

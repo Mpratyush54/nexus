@@ -69,14 +69,16 @@ const (
 // content — content stays in memory_items tagged with branch_id (Postgres)
 // or in the MemStore overlay bucket (in-memory).
 type MemoryBranch struct {
-	ID              string    `json:"id"`
-	ProjectID       string    `json:"project_id"`
-	Name            string    `json:"name"`
-	OwnerID         string    `json:"owner_id,omitempty"`
-	ParentBranchID  string    `json:"parent_branch_id,omitempty"`
-	ForkedAtEventID int64     `json:"forked_at_event_id,omitempty"`
-	Visibility      string    `json:"visibility"` // private | shared
-	CreatedAt       time.Time `json:"created_at"`
+	ID              string     `json:"id"`
+	ProjectID       string     `json:"project_id"`
+	Name            string     `json:"name"`
+	OwnerID         string     `json:"owner_id,omitempty"`
+	ParentBranchID  string     `json:"parent_branch_id,omitempty"`
+	ForkedAtEventID int64      `json:"forked_at_event_id,omitempty"`
+	Visibility      string     `json:"visibility"` // private | shared
+	CreatedAt       time.Time  `json:"created_at"`
+	ArchivedAt      *time.Time `json:"archived_at,omitempty"`      // nil = active (migration 007)
+	PotentiallyStale bool      `json:"potentially_stale,omitempty"` // persisted DetectStale signal (migration 007)
 }
 
 // BranchStore is the branching surface. Both MemStore (tests/local dev) and
@@ -389,7 +391,8 @@ func (s *MemStore) ResolveRead(_ context.Context, branchID, key string) (*Memory
 // ---------------------------------------------------------------------------
 
 const branchColumns = `id, project_id, name, owner_id, parent_branch_id,
-	forked_at_event_id, visibility, created_at`
+	forked_at_event_id, visibility, created_at, archived_at,
+	COALESCE(potentially_stale, false) AS potentially_stale`
 
 func scanBranch(row pgx.Row) (*MemoryBranch, error) {
 	var b MemoryBranch
@@ -397,7 +400,8 @@ func scanBranch(row pgx.Row) (*MemoryBranch, error) {
 	var ownerID, parentID *string
 	var forkEventID *int64
 	if err := row.Scan(&b.ID, &projectID, &b.Name, &ownerID, &parentID,
-		&forkEventID, &b.Visibility, &b.CreatedAt); err != nil {
+		&forkEventID, &b.Visibility, &b.CreatedAt, &b.ArchivedAt,
+		&b.PotentiallyStale); err != nil {
 		return nil, err
 	}
 	b.ProjectID = projectID
