@@ -1,378 +1,445 @@
-// Package daemon implements the local workspace daemon core for Phase 1.
+// Workspace daemon core: HTTP server, registration, heartbeat.
 //
-// The daemon serves a small authenticated HTTP API sandboxed to a single
-// workspace root: file read/write, git status/diff, and allowlisted test
-// commands. On startup it generates a bearer token, registers with the
-// central server, and heartbeats every 30 seconds.
+// Endpoints (all require Authorization: Bearer <daemon token>):
 //
-// File layout (directory owned by issue #3; other agents own the rest):
-//
-//	daemon.go    — HTTP server, token auth, register + 30s heartbeat loop
-//	fileops.go   — POST /file/read + /file/write (sandboxed, 1MB read cap)
-//	gitops.go    — GET /git/status, GET /git/diff
-//	commands.go  — POST /command/run (allowlisted, 60s timeout)
-//
-// interceptor.go, watcher.go, harvester.go and processor.go are owned by
-// other issues and MUST NOT be touched here.
+//	POST /register     daemon identity (machine, path, fingerprint, git state)
+//	POST /heartbeat    liveness + branch/commit/dirty (also accepts GET)
+//	POST /file/read    {path} -> {path, size, content}
+//	POST /file/write   {path, content} -> {ok, bytes}
+//	GET  /git/status   -> {branch, commit, dirty, porcelain}
+//	GET  /git/diff     ?ref= (or POST {ref}) -> {ref, diff}
+//	GET  /git/log      ?n= -> {log}
+//	POST /command/run  {cmd, args} (or {argv}) -> CommandResult
 package daemon
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 )
 
-// HeartbeatInterval is the daemon → server heartbeat period from the plan
-// (§1.3: "Every 30s. Updates last_seen, branch, commit_sha, is_dirty").
+// HeartbeatInterval is the daemon -> server heartbeat period (30s).
 const HeartbeatInterval = 30 * time.Second
 
-// TokenDirName and TokenFileName locate the bearer token on disk:
-// <workspaceRoot>/.central-memory/daemon.token (file mode 0600).
-const (
-	TokenDirName  = ".central-memory"
-	TokenFileName = "daemon.token"
-)
+// maxBodyBytes bounds JSON request bodies (2MB: 1MB file + envelope).
+const maxBodyBytes = 2 << 20
 
-// Daemon is the workspace daemon core: an HTTP server sandboxed to Root,
-// authenticated by Token, optionally reporting to ServerURL.
+// Daemon is a sandboxed workspace agent bound to a single root directory.
 type Daemon struct {
-	// Root is the canonical absolute workspace root. All file access is
-	// confined beneath it (see ResolveInSandbox in fileops.go).
+	// Root is the absolute workspace root all operations are sandboxed to.
 	Root string
-	// ServerURL is the central server base URL (e.g. https://api.example.com).
-	// Empty means local-only mode: register/heartbeat are no-ops.
-	ServerURL string
-	// Addr is the listen address (e.g. "127.0.0.1:0" for tests).
-	Addr string
-	// MachineID identifies this host in register/heartbeat payloads.
-	MachineID string
-	// Token is the bearer token required on all API routes.
+	// Token is the bearer token required by every endpoint.
 	Token string
+	// ServerURL is the central server base URL (optional; used by
+	// Register/StartHeartbeat when set).
+	ServerURL string
+	// MachineID identifies this machine (os.Hostname, "unknown" fallback).
+	MachineID string
 
-	mux    *http.ServeMux
-	srv    *http.Server
-	client *http.Client
-
-	mu     sync.Mutex
-	stopCh chan struct{}
-	wg     sync.WaitGroup
+	mux *http.ServeMux
+	srv *http.Server
 }
 
-// TokenDir returns <root>/.central-memory.
-func TokenDir(root string) string {
-	return filepath.Join(root, TokenDirName)
-}
-
-// TokenPath returns <root>/.central-memory/daemon.token.
-func TokenPath(root string) string {
-	return filepath.Join(TokenDir(root), TokenFileName)
-}
-
-// GenerateToken returns a hex-encoded 32-byte crypto/rand token (64 chars).
-func GenerateToken() (string, error) {
-	var b [32]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", fmt.Errorf("daemon: generate token: %w", err)
-	}
-	return hex.EncodeToString(b[:]), nil
-}
-
-// LoadOrCreateToken loads the bearer token for root, generating and storing
-// a fresh one (file mode 0600) when absent or blank.
-func LoadOrCreateToken(root string) (string, error) {
-	path := TokenPath(root)
-	if data, err := os.ReadFile(path); err == nil {
-		if tok := strings.TrimSpace(string(data)); tok != "" {
-			return tok, nil
-		}
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("daemon: read token file: %w", err)
-	}
-	tok, err := GenerateToken()
-	if err != nil {
-		return "", err
-	}
-	if err := os.MkdirAll(TokenDir(root), 0o755); err != nil {
-		return "", fmt.Errorf("daemon: create token dir: %w", err)
-	}
-	// 0600: the token is a credential; group/other must not read it.
-	if err := os.WriteFile(path, []byte(tok+"\n"), 0o600); err != nil {
-		return "", fmt.Errorf("daemon: write token file: %w", err)
-	}
-	return tok, nil
-}
-
-// CanonicalRoot resolves root to an absolute, cleaned path.
-func CanonicalRoot(root string) (string, error) {
+// NewDaemon builds a daemon bound to root, authenticated by token.
+// It fails when root is blank/missing or token is blank.
+func NewDaemon(root, token string) (*Daemon, error) {
 	if strings.TrimSpace(root) == "" {
-		return "", fmt.Errorf("daemon: empty workspace root")
+		return nil, errors.New("daemon: empty root")
+	}
+	if strings.TrimSpace(token) == "" {
+		return nil, errors.New("daemon: empty token")
 	}
 	abs, err := filepath.Abs(root)
 	if err != nil {
-		return "", fmt.Errorf("daemon: resolve workspace root: %w", err)
-	}
-	return filepath.Clean(abs), nil
-}
-
-// New builds a Daemon for root. It ensures the bearer token exists on disk
-// and mounts all routes; it does not start listening (see Serve/Start).
-func New(root, serverURL, addr string) (*Daemon, error) {
-	canon, err := CanonicalRoot(root)
-	if err != nil {
 		return nil, err
 	}
-	info, err := os.Stat(canon)
+	abs = filepath.Clean(abs)
+	st, err := os.Stat(abs)
 	if err != nil {
-		return nil, fmt.Errorf("daemon: workspace root: %w", err)
+		return nil, fmt.Errorf("daemon: root: %w", err)
 	}
-	if !info.IsDir() {
-		return nil, fmt.Errorf("daemon: workspace root %q is not a directory", canon)
+	if !st.IsDir() {
+		return nil, errors.New("daemon: root is not a directory")
 	}
-	tok, err := LoadOrCreateToken(canon)
-	if err != nil {
-		return nil, err
+	// Canonicalize (8.3 short names, junctions) so sandbox comparisons
+	// in SecureJoin are canonical-vs-canonical.
+	if resolved, evalErr := filepath.EvalSymlinks(abs); evalErr == nil {
+		abs = filepath.Clean(resolved)
 	}
-	host, err := os.Hostname()
-	if err != nil || strings.TrimSpace(host) == "" {
-		host = "unknown"
+	machine, err := os.Hostname()
+	if err != nil || machine == "" {
+		machine = "unknown"
 	}
-	d := &Daemon{
-		Root:      canon,
-		ServerURL: strings.TrimRight(strings.TrimSpace(serverURL), "/"),
-		Addr:      addr,
-		MachineID: host,
-		Token:     tok,
-		client:    &http.Client{Timeout: 15 * time.Second},
-		stopCh:    make(chan struct{}),
-	}
+	d := &Daemon{Root: abs, Token: token, MachineID: machine}
 	d.mux = http.NewServeMux()
-	d.mount()
-	d.srv = &http.Server{
-		Addr:              addr,
-		Handler:           d.mux,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	d.mux.HandleFunc("/register", d.requireAuth(d.handleRegister))
+	d.mux.HandleFunc("/heartbeat", d.requireAuth(d.handleHeartbeat))
+	d.mux.HandleFunc("/file/read", d.requireAuth(d.handleFileRead))
+	d.mux.HandleFunc("/file/write", d.requireAuth(d.handleFileWrite))
+	d.mux.HandleFunc("/git/status", d.requireAuth(d.handleGitStatus))
+	d.mux.HandleFunc("/git/diff", d.requireAuth(d.handleGitDiff))
+	d.mux.HandleFunc("/git/log", d.requireAuth(d.handleGitLog))
+	d.mux.HandleFunc("/command/run", d.requireAuth(d.handleCommandRun))
 	return d, nil
 }
 
-// mount registers routes. /healthz is intentionally unauthenticated so
-// process managers and liveness probes work without the secret; every other
-// route requires Authorization: Bearer <token> and returns 401 otherwise.
-func (d *Daemon) mount() {
-	d.mux.HandleFunc("/healthz", d.handleHealth)
-	d.mux.Handle("/file/read", d.requireAuth(http.HandlerFunc(d.handleFileRead)))
-	d.mux.Handle("/file/write", d.requireAuth(http.HandlerFunc(d.handleFileWrite)))
-	d.mux.Handle("/git/status", d.requireAuth(http.HandlerFunc(d.handleGitStatus)))
-	d.mux.Handle("/git/diff", d.requireAuth(http.HandlerFunc(d.handleGitDiff)))
-	d.mux.Handle("/command/run", d.requireAuth(http.HandlerFunc(d.handleCommandRun)))
-}
-
-// Handler exposes the daemon mux (useful for httptest in unit tests).
+// Handler returns the daemon HTTP handler (for tests and embedding).
 func (d *Daemon) Handler() http.Handler { return d.mux }
 
-// CheckAuth reports whether r carries the daemon bearer token.
-func (d *Daemon) CheckAuth(r *http.Request) bool {
-	const prefix = "Bearer "
-	got := r.Header.Get("Authorization")
-	if !strings.HasPrefix(got, prefix) {
-		return false
-	}
-	candidate := strings.TrimSpace(strings.TrimPrefix(got, prefix))
-	if candidate == "" || d.Token == "" {
-		return false
-	}
-	// Constant-time compare to avoid leaking token bytes via timing.
-	return subtle.ConstantTimeCompare([]byte(candidate), []byte(d.Token)) == 1
+// Start serves the daemon on addr (e.g. "127.0.0.1:0" is rejected — pass an
+// explicit port). It blocks until the server stops.
+func (d *Daemon) Start(addr string) error {
+	d.srv = &http.Server{Addr: addr, Handler: d.mux}
+	return d.srv.ListenAndServe()
 }
 
-// requireAuth is the Bearer-check middleware: 401 on failure.
-func (d *Daemon) requireAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !d.CheckAuth(r) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+// Close gracefully stops a started daemon.
+func (d *Daemon) Close() error {
+	if d.srv == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return d.srv.Shutdown(ctx)
 }
 
-func (d *Daemon) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method not allowed"})
+// ---------------------------------------------------------------------------
+// JSON helpers
+// ---------------------------------------------------------------------------
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeErr(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+
+func decodeBody(w http.ResponseWriter, r *http.Request, v any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil && !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return false
+	}
+	return true
+}
+
+// ---------------------------------------------------------------------------
+// Registration + heartbeat (local status surface + central-server client)
+// ---------------------------------------------------------------------------
+
+// registrationPayload is the daemon identity snapshot.
+type registrationPayload struct {
+	MachineID  string `json:"machine_id"`
+	Path       string `json:"path"`
+	Origin     string `json:"origin,omitempty"`
+	RootCommit string `json:"root_commit,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	Commit     string `json:"commit,omitempty"`
+	DaemonURL  string `json:"daemon_url,omitempty"`
+}
+
+func (d *Daemon) registration() registrationPayload {
+	origin, rootCommit := FingerprintOf(d.Root)
+	branch, commit, _, _, _ := GitStatus(d.Root)
+	return registrationPayload{
+		MachineID:  d.MachineID,
+		Path:       d.Root,
+		Origin:     origin,
+		RootCommit: rootCommit,
+		Branch:     branch,
+		Commit:     commit,
+	}
+}
+
+func (d *Daemon) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeJSON(w, http.StatusOK, d.registration())
 }
 
-// Serve runs the daemon on ln until ctx is cancelled.
-func (d *Daemon) Serve(ctx context.Context, ln net.Listener) error {
-	go func() {
-		<-ctx.Done()
-		shCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = d.srv.Shutdown(shCtx)
-	}()
-	err := d.srv.Serve(ln)
-	if err == http.ErrServerClosed {
-		return nil
-	}
-	return err
-}
-
-// Start listens on d.Addr (":0" allowed) and serves until ctx is cancelled.
-// It returns the bound address for logging/registration.
-func (d *Daemon) Start(ctx context.Context) (string, error) {
-	ln, err := net.Listen("tcp", d.Addr)
-	if err != nil {
-		return "", fmt.Errorf("daemon: listen: %w", err)
-	}
-	d.mu.Lock()
-	d.srv.Addr = ln.Addr().String()
-	d.mu.Unlock()
-	go func() { _ = d.Serve(ctx, ln) }()
-	return ln.Addr().String(), nil
-}
-
-// RegisterRequest is the daemon → server registration payload (§1.3:
-// project_id, machine_id, path, branch, commit, daemon_url).
-type RegisterRequest struct {
+// heartbeatPayload mirrors the workspaces heartbeat row.
+type heartbeatPayload struct {
 	MachineID string `json:"machine_id"`
 	Path      string `json:"path"`
 	Branch    string `json:"branch,omitempty"`
-	Commit    string `json:"commit,omitempty"`
-	IsDirty   bool   `json:"is_dirty,omitempty"`
-	DaemonURL string `json:"daemon_url,omitempty"`
+	CommitSHA string `json:"commit_sha,omitempty"`
+	IsDirty   bool   `json:"is_dirty"`
+	IsOnline  bool   `json:"is_online"`
+	Time      string `json:"time"`
 }
 
-// HeartbeatRequest refreshes liveness and git state (§1.3: last_seen,
-// branch, commit_sha, is_dirty; server marks offline after 90s silence).
-type HeartbeatRequest struct {
-	MachineID string `json:"machine_id"`
-	Path      string `json:"path"`
-	Branch    string `json:"branch,omitempty"`
-	Commit    string `json:"commit,omitempty"`
-	IsDirty   bool   `json:"is_dirty,omitempty"`
-}
-
-// Register POSTs the workspace to <server>/workspaces/register. It is a
-// no-op in local-only mode (empty ServerURL) so `go test` and offline use
-// never dial the network.
-func (d *Daemon) Register(ctx context.Context) error {
-	if d.ServerURL == "" {
-		return nil
-	}
-	branch, _ := GitBranch(d.Root)
-	commit, _ := GitCommit(d.Root)
-	dirty, _ := GitDirty(d.Root)
-	body, _ := json.Marshal(RegisterRequest{
+func (d *Daemon) heartbeat() heartbeatPayload {
+	branch, commit, dirty, _, _ := GitStatus(d.Root)
+	return heartbeatPayload{
 		MachineID: d.MachineID,
 		Path:      d.Root,
 		Branch:    branch,
-		Commit:    commit,
+		CommitSHA: commit,
 		IsDirty:   dirty,
-		DaemonURL: "http://" + d.Addr,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.ServerURL+"/workspaces/register", bytes.NewReader(body))
+		IsOnline:  true,
+		Time:      time.Now().UTC().Format(time.RFC3339),
+	}
+}
+
+func (d *Daemon) handleHeartbeat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, d.heartbeat())
+}
+
+// Register POSTs daemon identity to <serverURL>/workspaces/register.
+func (d *Daemon) Register(ctx context.Context, serverURL string) error {
+	body, _ := json.Marshal(d.registration())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		strings.TrimSuffix(serverURL, "/")+"/workspaces/register", bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("daemon: register request: %w", err)
+		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := d.client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("daemon: register post: %w", err)
+		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+	if resp.StatusCode >= 300 {
 		return fmt.Errorf("daemon: register: server status %s", resp.Status)
 	}
 	return nil
 }
 
-// HeartbeatOnce POSTs a single heartbeat to <server>/workspaces/heartbeat.
-// No-op when ServerURL is empty.
-func (d *Daemon) HeartbeatOnce(ctx context.Context) error {
-	if d.ServerURL == "" {
-		return nil
+// StartHeartbeat POSTs heartbeat snapshots every interval until ctx ends.
+func (d *Daemon) StartHeartbeat(ctx context.Context, serverURL string, interval time.Duration) {
+	if interval <= 0 {
+		interval = HeartbeatInterval
 	}
-	branch, _ := GitBranch(d.Root)
-	commit, _ := GitCommit(d.Root)
-	dirty, _ := GitDirty(d.Root)
-	body, _ := json.Marshal(HeartbeatRequest{
-		MachineID: d.MachineID,
-		Path:      d.Root,
-		Branch:    branch,
-		Commit:    commit,
-		IsDirty:   dirty,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.ServerURL+"/workspaces/heartbeat", bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("daemon: heartbeat request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := d.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("daemon: heartbeat post: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("daemon: heartbeat: server status %s", resp.Status)
-	}
-	return nil
-}
-
-// StartHeartbeatLoop ticks every HeartbeatInterval (30s) until ctx is done,
-// calling HeartbeatOnce. The first beat fires immediately so the server
-// learns about the daemon without waiting a full interval.
-func (d *Daemon) StartHeartbeatLoop(ctx context.Context) {
-	d.wg.Add(1)
-	go func() {
-		defer d.wg.Done()
-		_ = d.HeartbeatOnce(ctx)
-		t := time.NewTicker(HeartbeatInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-d.stopCh:
-				return
-			case <-t.C:
-				_ = d.HeartbeatOnce(ctx)
-			}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	url := strings.TrimSuffix(serverURL, "/") + "/workspaces/heartbeat"
+	post := func() {
+		body, _ := json.Marshal(d.heartbeat())
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+		if err != nil {
+			return
 		}
-	}()
-}
-
-// StopHeartbeat signals the heartbeat goroutine to exit (ctx cancellation
-// also stops it); Wait blocks until background goroutines finish.
-func (d *Daemon) StopHeartbeat() {
-	select {
-	case <-d.stopCh:
-	default:
-		close(d.stopCh)
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return
+		}
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		resp.Body.Close()
+	}
+	post()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			post()
+		}
 	}
 }
 
-// Wait blocks until heartbeat goroutines exit.
-func (d *Daemon) Wait() { d.wg.Wait() }
+// ---------------------------------------------------------------------------
+// File handlers
+// ---------------------------------------------------------------------------
 
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
+type fileReadReq struct {
+	Path string `json:"path"`
 }
 
-func writeError(w http.ResponseWriter, code int, msg string) {
-	writeJSON(w, code, map[string]string{"error": msg})
+func (d *Daemon) handleFileRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req fileReadReq
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		writeErr(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	data, err := ReadFile(d.Root, req.Path)
+	if err != nil {
+		writeFileErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":    req.Path,
+		"size":    len(data),
+		"content": string(data),
+	})
+}
+
+type fileWriteReq struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+func (d *Daemon) handleFileWrite(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req fileWriteReq
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.Path) == "" {
+		writeErr(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if err := WriteFile(d.Root, req.Path, []byte(req.Content)); err != nil {
+		writeFileErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": len(req.Content)})
+}
+
+// writeFileErr maps sandbox errors to HTTP statuses: traversal/secret -> 403,
+// too large -> 413, missing -> 404, dirs -> 400, else 500.
+func writeFileErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrTraversal):
+		writeErr(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, ErrSecretBlocked):
+		writeErr(w, http.StatusForbidden, err.Error())
+	case errors.Is(err, ErrTooLarge):
+		writeErr(w, http.StatusRequestEntityTooLarge, err.Error())
+	case errors.Is(err, ErrNotFile):
+		writeErr(w, http.StatusBadRequest, err.Error())
+	case os.IsNotExist(err):
+		writeErr(w, http.StatusNotFound, "not found")
+	default:
+		writeErr(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Git handlers
+// ---------------------------------------------------------------------------
+
+func (d *Daemon) handleGitStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	branch, commit, dirty, porcelain, err := GitStatus(d.Root)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"branch": branch, "commit": commit, "is_dirty": dirty, "porcelain": porcelain,
+	})
+}
+
+func (d *Daemon) handleGitDiff(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	ref := r.URL.Query().Get("ref")
+	if r.Method == http.MethodPost {
+		var req struct {
+			Ref string `json:"ref"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Ref != "" {
+			ref = req.Ref
+		}
+	}
+	diff, err := GitDiff(d.Root, ref)
+	if err != nil {
+		var bref *BadRefError
+		if errors.As(err, &bref) {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ref": ref, "diff": diff})
+}
+
+func (d *Daemon) handleGitLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	n := 20
+	if raw := r.URL.Query().Get("n"); raw != "" {
+		var parsed int
+		if _, err := fmt.Sscanf(raw, "%d", &parsed); err == nil {
+			n = parsed
+		}
+	}
+	out, err := GitLog(d.Root, n)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"log": out})
+}
+
+// ---------------------------------------------------------------------------
+// Command handler
+// ---------------------------------------------------------------------------
+
+func (d *Daemon) handleCommandRun(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Cmd  string   `json:"cmd"`
+		Args []string `json:"args"`
+		Argv []string `json:"argv"`
+	}
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	argv := req.Argv
+	if len(argv) == 0 {
+		if strings.TrimSpace(req.Cmd) == "" {
+			writeErr(w, http.StatusBadRequest, "cmd is required")
+			return
+		}
+		argv = append([]string{req.Cmd}, req.Args...)
+	}
+	if !IsAllowed(argv) {
+		writeErr(w, http.StatusBadRequest, ErrNotAllowed.Error())
+		return
+	}
+	res, err := RunCommand(d.Root, argv)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeErr(w, http.StatusRequestTimeout, "command timed out")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }

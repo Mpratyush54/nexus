@@ -1,0 +1,23 @@
+# central-server — production image (template)
+# Build context: repo root. Target entrypoint: ./cmd/server (per
+# implementation-plan.md target structure; lands with Phase 1.8+).
+# No terraform apply — image build only.
+
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# Builds once cmd/server/main.go lands; fails fast until then (intentional).
+RUN CGO_ENABLED=0 go build -trimpath -o /out/central-server ./cmd/server
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/central-server /central-server
+COPY --from=build /src/migrations /migrations
+COPY deploy/migrate.sh /migrate.sh
+USER nonroot:nonroot
+EXPOSE 8080
+ENV PORT=8080
+# migrate.sh runs first (runs migrations on boot), then execs the server.
+ENTRYPOINT ["/migrate.sh"]
+CMD ["/central-server"]
