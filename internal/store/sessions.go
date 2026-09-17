@@ -500,3 +500,35 @@ func (s *SessionStore) CountKeySessionsDB(ctx context.Context, projectID, key st
 	}
 	return n, nil
 }
+
+// ---------------------------------------------------------------------------
+// Issue #35 append-only: processor promotion seam (plan §2.7)
+// ---------------------------------------------------------------------------
+//
+// These methods complete the daemon.ProcessorStore surface on SessionStore
+// with stdlib-only signatures identical to the daemon side, so the processor
+// can count and promote without importing this package. No existing code
+// above is modified.
+
+// CountKeySessions is the issue #35 seam alias of CountKeySessionsDB: the
+// name the daemon ProcessorStore declares. Behavior is identical.
+func (s *SessionStore) CountKeySessions(ctx context.Context, projectID, key string) (int, error) {
+	return s.CountKeySessionsDB(ctx, projectID, key)
+}
+
+// PromoteKey flips every session-scoped row under key to project scope
+// (session_id → NULL, level → 'project'; SQL shared with MemoryStore via
+// BuildPromoteKeySQL) and returns the touched row count.
+func (s *SessionStore) PromoteKey(ctx context.Context, projectID, key string) (int64, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return 0, errors.New("store: promote requires a project id")
+	}
+	if strings.TrimSpace(key) == "" {
+		return 0, errors.New("store: promote requires a key")
+	}
+	tag, err := s.db.Exec(ctx, BuildPromoteKeySQL(), projectID, key)
+	if err != nil {
+		return 0, fmt.Errorf("store: promote key: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}

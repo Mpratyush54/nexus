@@ -23,10 +23,16 @@
 //   - No new SDK deps (plan §1.9 + issue constraint): LLM access is the
 //     LLMClient interface plus a stub and an Ollama HTTP implementation over
 //     net/http. OpenAI/Anthropic callers implement the same one-method
-//     interface with the user's key; no vendor SDK is imported.
+//     interface with the user's key; no vendor SDK is imported. The only
+//     non-stdlib import is the local internal/governance package (itself
+//     stdlib-only) for budget gating and token accounting.
 //   - Persistence is delegated: ProcessorStore is the seam the store layer
-//     (issue #2, internal/store) implements. The processor never imports
-//     internal/store and never touches SQL.
+//     (issue #2, internal/store) implements — ListConfirmed / SaveProposed /
+//     SaveEpisode plus the issue-#35 additions ConfirmDue (auto-confirm
+//     sweep), CountKeySessions and PromoteKey (plan §2.7 promotion). The
+//     processor never imports internal/store and never touches SQL; method
+//     signatures on both sides use stdlib-only types so the store structs
+//     satisfy the new methods structurally.
 //   - Pure/testable core: prompt building, response parsing, level/scope
 //     normalization, cosine math, confirm-timer rules and episode detection
 //     are pure functions. The live ticker loop is a thin shell around them,
@@ -37,6 +43,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -45,6 +52,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"central-memory/internal/governance"
 )
 
 // Tuning constants (plan §§2.3, 2.6–2.8).
@@ -691,9 +700,13 @@ func (f LLMFunc) Complete(ctx context.Context, prompt string) (string, error) {
 
 // StubLLMClient returns a canned response (tests, offline runs). Every call
 // records its prompt so tests can assert on classification input.
+// EmbedVec/EmbedErr script the optional Embedder path: a nil EmbedVec with
+// nil EmbedErr reports "no embedding" so the token fallback engages.
 type StubLLMClient struct {
 	Response string
 	Err      error
+	EmbedVec []float32
+	EmbedErr error
 
 	mu      sync.Mutex
 	Prompts []string
@@ -708,6 +721,32 @@ func (s *StubLLMClient) Complete(_ context.Context, prompt string) (string, erro
 	s.Calls++
 	return s.Response, s.Err
 }
+
+// Embed implements Embedder.
+func (s *StubLLMClient) Embed(_ context.Context, _ string) ([]float32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.EmbedErr != nil {
+		return nil, s.EmbedErr
+	}
+	return append([]float32(nil), s.EmbedVec...), nil
+}
+
+// Embedder is the optional embedding seam: LLM clients that can embed
+// (Ollama, hosted providers over the user's key) implement
+// Embed(ctx, text) and the processor threads the vector into dedup.
+// Clients without it simply do not implement the interface and the
+// token-cosine fallback in IsNearDuplicate engages — absence is normal,
+// never an error.
+type Embedder interface {
+	Embed(ctx context.Context, text string) ([]float32, error)
+}
+
+// Compile-time proofs that the bundled clients thread embeddings.
+var (
+	_ Embedder = (*StubLLMClient)(nil)
+	_ Embedder = (*OllamaClient)(nil)
+)
 
 // OllamaClient runs extraction against a local Ollama server
 // (POST {BaseURL}/api/generate, {"stream": false}) over plain net/http —
@@ -766,26 +805,90 @@ func (c *OllamaClient) Complete(ctx context.Context, prompt string) (string, err
 	return out.Response, nil
 }
 
+// Embed implements Embedder via POST {BaseURL}/api/embeddings
+// ({"model", "prompt"} → {"embedding"}) over plain net/http — no SDK. An
+// empty embedding with nil error reports "absent" so the caller falls back
+// to token cosine; transport and non-2xx failures are real errors.
+func (c *OllamaClient) Embed(ctx context.Context, text string) ([]float32, error) {
+	base := strings.TrimRight(strings.TrimSpace(c.BaseURL), "/")
+	if base == "" {
+		return nil, fmt.Errorf("processor: ollama: empty base URL")
+	}
+	if c.Model == "" {
+		return nil, fmt.Errorf("processor: ollama: empty model")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"model":  c.Model,
+		"prompt": text,
+	})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("processor: ollama: build embed request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("processor: ollama: post embed: %w", err)
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	if err != nil {
+		return nil, fmt.Errorf("processor: ollama: read embed response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("processor: ollama: embed server status %s", resp.Status)
+	}
+	var out struct {
+		Embedding []float32 `json:"embedding"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return nil, fmt.Errorf("processor: ollama: decode embed response: %w", err)
+	}
+	return out.Embedding, nil
+}
+
 // ---------------------------------------------------------------------------
 // Store seam (persistence delegated to the store layer)
 // ---------------------------------------------------------------------------
 
 // ProposedMemory is one deduped candidate ready for persistence with its
-// §2.8 auto-confirm delay attached.
+// §2.8 auto-confirm delay attached. Embedding carries the candidate vector
+// when the LLM client implements Embedder; it is nil under the token
+// fallback and the store persists NULL for later backfill.
 type ProposedMemory struct {
 	ExtractedMemory
 	ConfirmAfter time.Duration
+	Embedding    []float32
 }
 
+// PromotionThreshold mirrors store.PromotionThreshold (plan §2.7: same key
+// in 3+ sessions proposes SESSION → PROJECT promotion) without importing
+// internal/store — same decoupling as the Level constants.
+const PromotionThreshold = 3
+
+// ErrHalted marks a flush skipped by the governance budget ceiling. It
+// wraps the tripped-axis reason; the event buffer is always retained so the
+// next sweep retries after the ceiling lifts.
+var ErrHalted = errors.New("processor: extraction halted by budget ceiling")
+
 // ProcessorStore is the persistence seam. The store layer (internal/store,
-// issue #2) implements it: ListConfirmed serves CONFIRMED items for the
-// prompt + dedup, SaveProposed inserts a PROPOSED row with its confirm
-// timer, SaveEpisode inserts the episode row + episode_events links +
-// embedding. The processor never touches SQL.
+// issue #2 plus the issue-#35 memory_transitions.go / sessions.go seam)
+// implements it: ListConfirmed serves CONFIRMED items for the prompt +
+// dedup, SaveProposed inserts a PROPOSED row with its confirm timer,
+// SaveEpisode inserts the episode row + episode_events links + embedding,
+// ConfirmDue flips due PROPOSED rows to CONFIRMED (the §2.8 due-sweeper),
+// CountKeySessions reports the plan §2.7 promotion signal per key, and
+// PromoteKey NULLs session_id (SESSION → PROJECT). The processor never
+// touches SQL. ConfirmDue / CountKeySessions / PromoteKey use stdlib-only
+// signatures identical to the store side so the store structs satisfy them
+// structurally.
 type ProcessorStore interface {
 	ListConfirmed(ctx context.Context) ([]ConfirmedMemory, error)
 	SaveProposed(ctx context.Context, m ProposedMemory) error
 	SaveEpisode(ctx context.Context, e EpisodeDraft, refs []EpisodeEventRef) error
+	ConfirmDue(ctx context.Context, now time.Time) (int64, error)
+	CountKeySessions(ctx context.Context, projectID, key string) (int, error)
+	PromoteKey(ctx context.Context, projectID, key string) (int64, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -799,20 +902,29 @@ type ProcessResult struct {
 	SkippedDuplicates int
 	SkippedInvalid    int
 	Episode           *EpisodeDraft
+	Promoted          []string // keys flipped SESSION → PROJECT this flush
 }
 
 // Processor buffers per-session events and flushes them through the LLM.
 // It runs only when designated (plan: "Designated processor (project
 // owner's daemon) for v1"); a non-designated instance buffers nothing and
 // its Start returns immediately.
+//
+// projectID is the store identity used by the promotion check (CountKey /
+// PromoteKey); project (the name) renders into the extraction prompt. A
+// nil budget or nil ledger disables gating/accounting respectively — both
+// must be set for ceiling enforcement.
 type Processor struct {
 	project    string
+	projectID  string
 	designated bool
 	llm        LLMClient
 	store      ProcessorStore
 	clock      Clock
 	idleAfter  time.Duration
 	sweep      time.Duration
+	budget     *governance.Budget
+	ledger     *governance.Ledger
 
 	mu         sync.Mutex
 	pending    map[string][]ProcessorEvent
@@ -836,6 +948,27 @@ func WithProcessorIdleAfter(d time.Duration) ProcessorOption {
 // WithProcessorSweepInterval overrides the background sweep period (tests).
 func WithProcessorSweepInterval(d time.Duration) ProcessorOption {
 	return func(p *Processor) { p.sweep = d }
+}
+
+// WithProcessorProjectID sets the store project identity used by the
+// post-flush promotion check. Empty (default) disables promotion —
+// extraction still persists, only the count/promote calls are skipped.
+func WithProcessorProjectID(id string) ProcessorOption {
+	return func(p *Processor) { p.projectID = id }
+}
+
+// WithProcessorBudget sets the governance ceiling consulted before every
+// flush. Nil (default) means unlimited. Enforcement additionally requires
+// a ledger (WithProcessorLedger); without usage history there is nothing
+// to halt on.
+func WithProcessorBudget(b *governance.Budget) ProcessorOption {
+	return func(p *Processor) { p.budget = b }
+}
+
+// WithProcessorLedger sets the governance ledger recording per-flush token
+// usage. Nil (default) disables accounting.
+func WithProcessorLedger(l *governance.Ledger) ProcessorOption {
+	return func(p *Processor) { p.ledger = l }
 }
 
 // NewProcessor builds a processor for projectName. llm and store may be nil
@@ -927,13 +1060,45 @@ func (p *Processor) PendingSessions() []string {
 	return out
 }
 
+// halted evaluates the governance ceiling (Budget.Halted over the ledger
+// snapshot at the processor clock). It reports false when no budget or no
+// ledger is wired — gating needs both a ceiling and a usage history.
+func (p *Processor) halted() (bool, string) {
+	if p.budget == nil || p.ledger == nil {
+		return false, ""
+	}
+	return p.budget.Halted(p.ledger.Snapshot(p.clock()))
+}
+
+// embedFor threads the optional Embedder seam: clients implementing
+// Embed(ctx, text) supply the candidate vector for embedding-cosine dedup.
+// A missing implementation, an error, or an empty vector all yield nil so
+// IsNearDuplicate falls back to token cosine — embedding absence is a
+// normal path, never a flush failure.
+func (p *Processor) embedFor(ctx context.Context, text string) []float32 {
+	e, ok := p.llm.(Embedder)
+	if !ok || e == nil {
+		return nil
+	}
+	vec, err := e.Embed(ctx, text)
+	if err != nil || len(vec) == 0 {
+		return nil
+	}
+	return vec
+}
+
 // FlushSession extracts, dedups and persists one session batch. The buffer
 // is cleared only on success — an LLM or store error retains the events for
-// the next sweep. Non-designated instances and empty batches return a zero
-// result without touching the LLM or store.
+// the next sweep. A governance halt (Budget.Halted) skips the flush before
+// touching the buffer, so halted sessions are retained with identical
+// semantics to failures. Non-designated instances and empty batches return
+// a zero result without touching the LLM or store.
 func (p *Processor) FlushSession(ctx context.Context, sessionID string) (ProcessResult, error) {
 	if !p.designated {
 		return ProcessResult{SessionID: sessionID}, nil
+	}
+	if halted, reason := p.halted(); halted {
+		return ProcessResult{SessionID: sessionID}, fmt.Errorf("%w: %s", ErrHalted, reason)
 	}
 	p.mu.Lock()
 	batch := p.pending[sessionID]
@@ -963,6 +1128,9 @@ func (p *Processor) FlushSession(ctx context.Context, sessionID string) (Process
 		p.mu.Unlock()
 		return ProcessResult{SessionID: sessionID}, err
 	}
+	// Post-flush promotion check (plan §2.7): best-effort — extraction is
+	// already durable, so promotion errors never fail the flush.
+	p.promoteKeys(ctx, &res)
 	p.mu.Lock()
 	delete(p.lastActive, sessionID)
 	p.mu.Unlock()
@@ -993,11 +1161,12 @@ func (p *Processor) processBatch(ctx context.Context, sessionID string, batch []
 			res.SkippedInvalid++
 			continue
 		}
-		if IsNearDuplicate(m.Content, nil, confirmed) {
+		emb := p.embedFor(ctx, m.Content)
+		if IsNearDuplicate(m.Content, emb, confirmed) {
 			res.SkippedDuplicates++
 			continue
 		}
-		pm := ProposedMemory{ExtractedMemory: m, ConfirmAfter: ConfirmAfterFor(m)}
+		pm := ProposedMemory{ExtractedMemory: m, ConfirmAfter: ConfirmAfterFor(m), Embedding: emb}
 		if err := p.store.SaveProposed(ctx, pm); err != nil {
 			return fmt.Errorf("processor: save proposed: %w", err)
 		}
@@ -1010,14 +1179,72 @@ func (p *Processor) processBatch(ctx context.Context, sessionID string, batch []
 		}
 		res.Episode = draft
 	}
+	// Cost accounting (ADR-026 mapping): tokens were spent on this prompt +
+	// response whether or not later flushes succeed, so record the batch
+	// once extraction itself succeeded.
+	if p.ledger != nil {
+		p.ledger.RecordBatch(
+			governance.EstimateTokensFromChars(len(prompt)),
+			governance.EstimateTokensFromChars(len(resp)),
+		)
+	}
 	return nil
 }
 
+// promoteKeys runs the plan §2.7 promotion check over one flush's distinct
+// proposed keys: a key observed in >= PromotionThreshold distinct sessions
+// is flipped SESSION → PROJECT via PromoteKey (which NULLs session_id).
+// Best-effort by design — extraction is already durable, so count/promote
+// errors are skipped and the next flush (or the store-side archival job)
+// retries. Promotion is skipped entirely when no projectID is wired.
+// Promoted keys land sorted on res.Promoted for determinism.
+func (p *Processor) promoteKeys(ctx context.Context, res *ProcessResult) {
+	if p.store == nil || p.projectID == "" || len(res.Proposed) == 0 {
+		return
+	}
+	seen := map[string]bool{}
+	for _, pm := range res.Proposed {
+		key := pm.Key
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		n, err := p.store.CountKeySessions(ctx, p.projectID, key)
+		if err != nil || n < PromotionThreshold {
+			continue
+		}
+		if _, err := p.store.PromoteKey(ctx, p.projectID, key); err != nil {
+			continue
+		}
+		res.Promoted = append(res.Promoted, key)
+	}
+	sort.Strings(res.Promoted)
+}
+
+// SweepConfirms runs the §2.8 due-sweeper: PROPOSED rows whose
+// created_at + ConfirmAfter tier <= now flip to CONFIRMED via the store.
+// It burns no LLM tokens, so halted processors still sweep. It is a no-op
+// without designation or without a store.
+func (p *Processor) SweepConfirms(ctx context.Context) (int64, error) {
+	if !p.designated || p.store == nil {
+		return 0, nil
+	}
+	return p.store.ConfirmDue(ctx, p.clock())
+}
+
 // CheckIdle flushes sessions that completed (SESSION_TRANSCRIPT_COMPLETE)
-// or sat idle longer than idleAfter. It returns the number of sessions
-// flushed; a session whose flush fails is retained and reported via the
-// returned error (first failure; remaining sessions are still attempted).
+// or sat idle longer than idleAfter, plus a token-free confirm sweep
+// (SweepConfirms) that runs even under a governance halt. It returns the
+// number of sessions flushed; a session whose flush fails is retained and
+// reported via the returned error (first failure; remaining sessions are
+// still attempted). Under a halt no session flushes: the count is 0, every
+// buffer is retained, and the halt error is returned.
 func (p *Processor) CheckIdle(ctx context.Context) (int, error) {
+	// Token-free work first: confirm sweep never burns budget.
+	_, _ = p.SweepConfirms(ctx) // best-effort; the next sweep retries
+	if halted, reason := p.halted(); halted {
+		return 0, fmt.Errorf("%w: %s", ErrHalted, reason)
+	}
 	now := p.clock()
 	var due []string
 	p.mu.Lock()

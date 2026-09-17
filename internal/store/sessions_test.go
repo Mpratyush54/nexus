@@ -449,3 +449,56 @@ func TestSessionCountKeySessionsDB(t *testing.T) {
 		t.Error("count 3 must cross the promotion threshold")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Issue #35 append-only: processor promotion seam (plan §2.7)
+// ---------------------------------------------------------------------------
+
+func TestSessionCountKeySessionsAlias(t *testing.T) {
+	fake := &sessionFakeDB{rowQueue: []sessionFakeRow{{values: []any{3}}}}
+	n, err := store.NewSessionStore(fake).CountKeySessions(context.Background(), "p1", "testing/framework")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 3 {
+		t.Errorf("alias count = %d, want 3", n)
+	}
+	if !strings.Contains(fake.queries[0], "COUNT(DISTINCT session_id)") {
+		t.Errorf("alias must run the distinct-sessions counter:\n%s", fake.queries[0])
+	}
+}
+
+func TestSessionPromoteKeyNullsSessionID(t *testing.T) {
+	fake := &sessionFakeDB{}
+	n, err := store.NewSessionStore(fake).PromoteKey(context.Background(), "p1", "testing/framework")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Errorf("scripted exec touches 0 rows, got %d", n)
+	}
+	if fake.execs != 1 {
+		t.Fatalf("promote must issue one UPDATE (execs=%d)", fake.execs)
+	}
+}
+
+func TestSessionPromoteKeySQLShape(t *testing.T) {
+	if sql := store.BuildPromoteKeySQL(); !strings.Contains(sql, "session_id = NULL") ||
+		!strings.Contains(sql, "level = 'project'") ||
+		!strings.Contains(sql, "session_id IS NOT NULL") {
+		t.Errorf("promote SQL must NULL session_id and flip level:\n%s", sql)
+	}
+}
+
+func TestSessionPromoteKeyValidationBlocksDB(t *testing.T) {
+	fake := &sessionFakeDB{}
+	if _, err := store.NewSessionStore(fake).PromoteKey(context.Background(), "p1", "  "); err == nil {
+		t.Error("empty key must fail before any SQL")
+	}
+	if _, err := store.NewSessionStore(fake).PromoteKey(context.Background(), "", "k"); err == nil {
+		t.Error("empty project must fail before any SQL")
+	}
+	if fake.execs != 0 {
+		t.Errorf("invalid promote must issue no statements (execs=%d)", fake.execs)
+	}
+}
