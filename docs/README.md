@@ -1,20 +1,16 @@
-# Nexus Decision Log
+# Decision Log Index
 
-Every critical decision taken by any agent (human or subagent) MUST be logged here.
-No code merges without a corresponding ADR entry explaining **why**.
+Every critical decision must be logged in `docs/decisions/` with WHY.
+Format: `YYYY-MM-DD-<slug>.md` with sections: Context, Decision, Alternatives, Why, Consequences.
 
-## Structure
+## Active waves (2026-09-17)
 
-- `docs/decisions/ADR-<issue>-<slug>.md` — Architecture Decision Records. One per critical decision.
-  Template: `docs/decisions/_TEMPLATE.md`
-- `docs/issues/ISSUE-<n>.md` — Per-issue progress log: status, assignee (subagent id), decisions, verification.
-- `docs/ORCHESTRATION.md` — This run's wave plan: which subagents ran in parallel, dependency rationale.
+| Wave | Issues | Owner subagents | Status |
+|------|--------|-----------------|--------|
+| 1 Foundation | #1 schema, #2 store, #9 events | foundation-agent | launched |
+| 2 Daemon | #3 daemon core, #4 interceptor+watcher, #5 harvester, #10 processor | daemon-agents x3 | launched |
+| 3 Retrieval | #6 context, #7 mcp, #8 server, #11 episodes, #12 sessions, #13 ws | retrieval-agents x3 | launched |
+| 4 Product | #14 dashboard, #15 agents, #16 materializer, #21 CLI, #25 migration | product-agents | queued |
+| 5 Advanced | #17 branches, #18 diff/merge, #19 security, #20 AWS, #22 steering, #23 handoff, #24 platform, #26 cost | advanced-agents | queued |
 
-## ADR Template Fields
-
-`Context | Options considered | Decision | Why (rationale) | Consequences | Alternatives rejected`
-
-## Rule
-
-Subagents: append your ADR(s) BEFORE finishing. Reference them in your final summary.
-Orchestrator verifies `go build ./...` + `go vet` where applicable.
+Rule: each subagent MUST append a file under `docs/decisions/` before finishing.

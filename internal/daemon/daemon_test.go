@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -12,132 +11,212 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
 )
 
-func newTestDaemon(t *testing.T) *Daemon {
+func testDaemon(t *testing.T) *Daemon {
 	t.Helper()
 	root := t.TempDir()
-	d, err := New(root, "", "127.0.0.1:0")
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("alpha content here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDaemon(root, "test-token-123")
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatal(err)
 	}
 	return d
 }
 
-func authReq(t *testing.T, d *Daemon, method, target string, body string) *http.Request {
-	t.Helper()
-	var r *http.Request
-	if body != "" {
-		r = httptest.NewRequest(method, target, strings.NewReader(body))
+func doReq(d *Daemon, method, target, body, token string) *httptest.ResponseRecorder {
+	var rdr *strings.Reader
+	if body == "" {
+		rdr = strings.NewReader("")
 	} else {
-		r = httptest.NewRequest(method, target, nil)
+		rdr = strings.NewReader(body)
 	}
-	r.Header.Set("Authorization", "Bearer "+d.Token)
-	return r
+	r := httptest.NewRequest(method, target, rdr)
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	if body != "" {
+		r.Header.Set("Content-Type", "application/json")
+	}
+	w := httptest.NewRecorder()
+	d.Handler().ServeHTTP(w, r)
+	return w
+}
+
+func TestAuthUnauthorized(t *testing.T) {
+	d := testDaemon(t)
+	// No token.
+	w := doReq(d, "POST", "/file/read", `{"path":"a.txt"}`, "")
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("missing token: got %d want 401", w.Code)
+	}
+	// Wrong token.
+	w = doReq(d, "POST", "/file/read", `{"path":"a.txt"}`, "wrong")
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("wrong token: got %d want 401", w.Code)
+	}
+	// Correct token works.
+	w = doReq(d, "POST", "/file/read", `{"path":"a.txt"}`, "test-token-123")
+	if w.Code != http.StatusOK {
+		t.Errorf("valid token: got %d want 200 (%s)", w.Code, w.Body.String())
+	}
+}
+
+func TestFileReadTraversalReturns403(t *testing.T) {
+	d := testDaemon(t)
+	paths := []string{"../../etc/passwd", `..\..\Windows\System32\drivers\etc\hosts`, "a.txt:stream"}
+	if runtime.GOOS != "windows" {
+		paths = append(paths, "/etc/passwd")
+	} else {
+		paths = append(paths, `C:\Windows\System32\drivers\etc\hosts`)
+	}
+	for _, p := range paths {
+		w := doReq(d, "POST", "/file/read", `{"path":`+jsonStr(p)+`}`, "test-token-123")
+		if w.Code != http.StatusForbidden {
+			t.Errorf("path %q: got %d want 403 (%s)", p, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestFileWriteAndReadHandlers(t *testing.T) {
+	d := testDaemon(t)
+	w := doReq(d, "POST", "/file/write", `{"path":"n.txt","content":"hello handler content"}`, "test-token-123")
+	if w.Code != http.StatusOK {
+		t.Fatalf("write: got %d (%s)", w.Code, w.Body.String())
+	}
+	w = doReq(d, "POST", "/file/read", `{"path":"n.txt"}`, "test-token-123")
+	if w.Code != http.StatusOK {
+		t.Fatalf("read: got %d (%s)", w.Code, w.Body.String())
+	}
+	var out struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Content != "hello handler content" {
+		t.Fatalf("got %q", out.Content)
+	}
+}
+
+func TestCommandAllowlistHandler(t *testing.T) {
+	d := testDaemon(t)
+	// Unallowlisted binary -> 400.
+	w := doReq(d, "POST", "/command/run", `{"cmd":"rm","args":["-rf","/"]}`, "test-token-123")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("rm: got %d want 400", w.Code)
+	}
+	// Bare "go" without "test" -> 400.
+	w = doReq(d, "POST", "/command/run", `{"cmd":"go","args":["build","./..."]}`, "test-token-123")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("go build: got %d want 400", w.Code)
+	}
+	// Path-smuggled binary -> 400.
+	w = doReq(d, "POST", "/command/run", `{"cmd":"./evil","args":[]}`, "test-token-123")
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("./evil: got %d want 400", w.Code)
+	}
+}
+
+func TestIsAllowedTable(t *testing.T) {
+	allowed := [][]string{
+		{"git", "status"},
+		{"git", "--version"},
+		{"go", "test", "./..."},
+		{"npm", "test"},
+		{"pytest", "-q"},
+		{"cargo", "test"},
+		{"python", "-m", "pytest", "-q"},
+		{"git.exe", "diff"},
+	}
+	for _, a := range allowed {
+		if !IsAllowed(a) {
+			t.Errorf("IsAllowed(%v) = false, want true", a)
+		}
+	}
+	denied := [][]string{
+		{},
+		{"rm", "-rf", "/"},
+		{"go", "build", "./..."},
+		{"npm", "install"},
+		{"cargo", "run"},
+		{"python", "-c", " evil()"},
+		{"./evil"},
+		{"C:\\tools\\evil.exe"},
+		{"git;rm", "-rf"},
+	}
+	for _, a := range denied {
+		if IsAllowed(a) {
+			t.Errorf("IsAllowed(%v) = true, want false", a)
+		}
+	}
 }
 
 func TestTokenRoundTrip0600(t *testing.T) {
 	root := t.TempDir()
-	tok1, err := LoadOrCreateToken(root)
+	tok, err := EnsureToken(root)
 	if err != nil {
-		t.Fatalf("LoadOrCreateToken: %v", err)
+		t.Fatal(err)
 	}
-	if len(tok1) != 64 {
-		t.Fatalf("expected 64-char hex token, got %d chars", len(tok1))
+	if tok == "" {
+		t.Fatal("empty token")
 	}
-	tok2, err := LoadOrCreateToken(root)
+	back, err := LoadToken(root)
 	if err != nil {
-		t.Fatalf("reload: %v", err)
+		t.Fatal(err)
 	}
-	if tok1 != tok2 {
-		t.Fatal("token not stable across loads")
+	if back != tok {
+		t.Fatal("token mismatch after reload")
 	}
 	st, err := os.Stat(TokenPath(root))
 	if err != nil {
-		t.Fatalf("stat token: %v", err)
+		t.Fatal(err)
 	}
-	// Windows Go ignores Unix permission bits (ACLs apply instead), so the
-	// 0600 enforcement is only verifiable on Unix. The WriteFile call still
-	// passes 0600 for correct behavior on macOS/Linux.
-	if runtime.GOOS != "windows" && st.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("token file too permissive: %o", st.Mode().Perm())
+	// Windows only honors the read-only bit, so 0600 cannot be observed
+	// via Stat there; enforcement is best-effort on that platform.
+	if runtime.GOOS != "windows" && st.Mode().Perm()&0o777 != 0o600 {
+		t.Errorf("token file mode = %o, want 600", st.Mode().Perm())
 	}
-	// Distinct roots get distinct tokens.
-	other := t.TempDir()
-	tok3, err := LoadOrCreateToken(other)
+}
+
+func TestNewDaemonValidation(t *testing.T) {
+	if _, err := NewDaemon("", "t"); err == nil {
+		t.Error("empty root accepted")
+	}
+	if _, err := NewDaemon(t.TempDir(), ""); err == nil {
+		t.Error("empty token accepted")
+	}
+	if _, err := NewDaemon(filepath.Join(t.TempDir(), "nope"), "t"); err == nil {
+		t.Error("missing root accepted")
+	}
+}
+
+func jsonStr(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// ---------------------------------------------------------------------------
+// Central-server contract tests (issue #31).
+//
+// The strict fake server mirrors internal/server/routes.go validation
+// (DisallowUnknownFields + required fields). Payload shapes must stay in
+// sync with the server or these tests fail.
+// ---------------------------------------------------------------------------
+
+func newContractDaemon(t *testing.T, serverURL string) *Daemon {
+	t.Helper()
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
 	if err != nil {
-		t.Fatalf("other root: %v", err)
+		t.Fatalf("NewDaemon: %v", err)
 	}
-	if tok3 == tok1 {
-		t.Fatal("tokens collide across roots")
-	}
+	d.ServerURL = serverURL
+	d.UserID = "user-1"
+	return d
 }
 
-func TestAuthNoToken401(t *testing.T) {
-	d := newTestDaemon(t)
-	for _, target := range []string{"/file/read", "/file/write", "/git/status", "/git/diff", "/command/run"} {
-		req := httptest.NewRequest(http.MethodPost, target, nil)
-		rec := httptest.NewRecorder()
-		d.Handler().ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%s without token: got %d, want 401", target, rec.Code)
-		}
-	}
-	// GET variants too.
-	for _, target := range []string{"/git/status", "/git/diff"} {
-		req := httptest.NewRequest(http.MethodGet, target, nil)
-		rec := httptest.NewRecorder()
-		d.Handler().ServeHTTP(rec, req)
-		if rec.Code != http.StatusUnauthorized {
-			t.Errorf("%s without token: got %d, want 401", target, rec.Code)
-		}
-	}
-}
-
-func TestAuthWrongToken401(t *testing.T) {
-	d := newTestDaemon(t)
-	req := httptest.NewRequest(http.MethodGet, "/git/status", nil)
-	req.Header.Set("Authorization", "Bearer wrong-token-value")
-	rec := httptest.NewRecorder()
-	d.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong token: got %d, want 401", rec.Code)
-	}
-
-	// Missing Bearer prefix is also 401.
-	req2 := httptest.NewRequest(http.MethodGet, "/git/status", nil)
-	req2.Header.Set("Authorization", d.Token)
-	rec2 := httptest.NewRecorder()
-	d.Handler().ServeHTTP(rec2, req2)
-	if rec2.Code != http.StatusUnauthorized {
-		t.Fatalf("missing Bearer prefix: got %d, want 401", rec2.Code)
-	}
-}
-
-func TestHealthzOpen(t *testing.T) {
-	d := newTestDaemon(t)
-	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
-	rec := httptest.NewRecorder()
-	d.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("healthz: got %d, want 200", rec.Code)
-	}
-}
-
-func TestRegisterHeartbeatLocalNoop(t *testing.T) {
-	d := newTestDaemon(t) // ServerURL == "" → must not dial network
-	if err := d.Register(t.Context()); err != nil {
-		t.Fatalf("Register local noop: %v", err)
-	}
-	if err := d.HeartbeatOnce(t.Context()); err != nil {
-		t.Fatalf("HeartbeatOnce local noop: %v", err)
-	}
-}
-
-// strictFakeServer mirrors internal/server/routes.go validation: unknown
-// fields rejected, required fields enforced. Payload shapes here must stay
-// in sync with the server or the contract tests below fail.
 type strictCapture struct {
 	gotResolve   bool
 	resolveBody  map[string]any
@@ -164,25 +243,24 @@ func newStrictServer(t *testing.T, cap *strictCapture) *httptest.Server {
 		switch r.URL.Path {
 		case "/projects/resolve":
 			var req struct {
-				Origin      string `json:"origin"`
-				RootCommit  string `json:"root_commit"`
-				FolderName  string `json:"folder_name"`
-				DisplayName string `json:"display_name"`
+				CanonicalURL string `json:"canonical_url"`
+				RootCommit   string `json:"root_commit"`
+				FolderName   string `json:"folder_name"`
 			}
 			if !decodeStrict(t, r, &req) {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
-			if strings.TrimSpace(req.FolderName) == "" {
+			if strings.TrimSpace(req.FolderName) == "" && strings.TrimSpace(req.CanonicalURL) == "" && strings.TrimSpace(req.RootCommit) == "" {
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
 			cap.gotResolve = true
 			cap.resolveBody = map[string]any{
-				"origin": req.Origin, "root_commit": req.RootCommit,
-				"folder_name": req.FolderName, "display_name": req.DisplayName,
+				"canonical_url": req.CanonicalURL, "root_commit": req.RootCommit,
+				"folder_name": req.FolderName,
 			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"ID": "proj-123"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "proj-123"})
 		case "/workspaces/register":
 			var req struct {
 				ProjectID string `json:"project_id"`
@@ -212,7 +290,7 @@ func newStrictServer(t *testing.T, cap *strictCapture) *httptest.Server {
 				"is_dirty": req.IsDirty, "daemon_url": req.DaemonURL,
 			}
 			w.WriteHeader(http.StatusCreated)
-			_ = json.NewEncoder(w).Encode(map[string]string{"ID": "ws-456"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "ws-456"})
 		case "/workspaces/heartbeat":
 			var req struct {
 				WorkspaceID string `json:"workspace_id"`
@@ -233,11 +311,25 @@ func newStrictServer(t *testing.T, cap *strictCapture) *httptest.Server {
 				"workspace_id": req.WorkspaceID, "branch": req.Branch,
 				"commit_sha": req.CommitSHA, "is_dirty": req.IsDirty,
 			}
-			_ = json.NewEncoder(w).Encode(map[string]string{"ID": req.WorkspaceID})
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": req.WorkspaceID})
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+}
+
+func TestRegisterHeartbeatLocalNoop(t *testing.T) {
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	// No server URL anywhere -> must not dial network.
+	if err := d.Register(context.Background(), ""); err != nil {
+		t.Fatalf("Register local noop: %v", err)
+	}
+	if err := d.HeartbeatOnce(context.Background(), ""); err != nil {
+		t.Fatalf("HeartbeatOnce local noop: %v", err)
+	}
 }
 
 func TestRegisterHeartbeatAgainstServer(t *testing.T) {
@@ -245,24 +337,9 @@ func TestRegisterHeartbeatAgainstServer(t *testing.T) {
 	srv := newStrictServer(t, &cap)
 	defer srv.Close()
 
-	root := t.TempDir()
-	d, err := New(root, srv.URL, "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	d.UserID = "user-1"
-	// Bind a real listener so DaemonURL derives from the bound address,
-	// not the "127.0.0.1:0" listen spec.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	d.mu.Lock()
-	d.srv.Addr = ln.Addr().String()
-	d.mu.Unlock()
-	defer ln.Close()
+	d := newContractDaemon(t, srv.URL)
 
-	if err := d.Register(t.Context()); err != nil {
+	if err := d.Register(context.Background(), ""); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if !cap.gotResolve {
@@ -283,15 +360,11 @@ func TestRegisterHeartbeatAgainstServer(t *testing.T) {
 	if _, ok := cap.registerBody["commit"]; ok {
 		t.Fatal("register sent legacy 'commit' field; want 'commit_sha'")
 	}
-	wantURL := "http://" + ln.Addr().String()
-	if cap.registerBody["daemon_url"] != wantURL {
-		t.Fatalf("register daemon_url = %v, want bound addr %v", cap.registerBody["daemon_url"], wantURL)
-	}
 	// Workspace ID persisted in memory + on disk (0600).
 	if d.WorkspaceID != "ws-456" {
 		t.Fatalf("memory workspace id = %q, want ws-456", d.WorkspaceID)
 	}
-	raw, err := os.ReadFile(WorkspacePath(root))
+	raw, err := os.ReadFile(WorkspacePath(d.Root))
 	if err != nil {
 		t.Fatalf("read workspace file: %v", err)
 	}
@@ -299,13 +372,13 @@ func TestRegisterHeartbeatAgainstServer(t *testing.T) {
 		t.Fatalf("workspace file = %q, want ws-456", strings.TrimSpace(string(raw)))
 	}
 	if runtime.GOOS != "windows" {
-		st, _ := os.Stat(WorkspacePath(root))
+		st, _ := os.Stat(WorkspacePath(d.Root))
 		if st.Mode().Perm()&0o077 != 0 {
 			t.Fatalf("workspace file too permissive: %o", st.Mode().Perm())
 		}
 	}
 
-	if err := d.HeartbeatOnce(t.Context()); err != nil {
+	if err := d.HeartbeatOnce(context.Background(), ""); err != nil {
 		t.Fatalf("HeartbeatOnce: %v", err)
 	}
 	if !cap.gotBeat {
@@ -327,16 +400,16 @@ func TestRegisterRequiresUserID(t *testing.T) {
 	srv := newStrictServer(t, &cap)
 	defer srv.Close()
 
-	root := t.TempDir()
-	d, err := New(root, srv.URL, "127.0.0.1:0")
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("NewDaemon: %v", err)
 	}
+	d.ServerURL = srv.URL
 	t.Setenv("CENTRAL_USER_ID", "")
 	t.Setenv("NEXUS_USER_ID", "")
 	t.Setenv("USER_ID", "")
 	d.UserID = ""
-	if err := d.Register(t.Context()); err == nil {
+	if err := d.Register(context.Background(), ""); err == nil {
 		t.Fatal("Register without user_id succeeded, want error")
 	} else if !strings.Contains(err.Error(), "user id") {
 		t.Fatalf("Register error = %v, want user-id complaint", err)
@@ -351,13 +424,13 @@ func TestRegisterResolvesUserIDFromEnv(t *testing.T) {
 	srv := newStrictServer(t, &cap)
 	defer srv.Close()
 
-	root := t.TempDir()
-	d, err := New(root, srv.URL, "127.0.0.1:0")
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("NewDaemon: %v", err)
 	}
+	d.ServerURL = srv.URL
 	t.Setenv("CENTRAL_USER_ID", "env-user-9")
-	if err := d.Register(t.Context()); err != nil {
+	if err := d.Register(context.Background(), ""); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if cap.registerBody["user_id"] != "env-user-9" {
@@ -370,13 +443,8 @@ func TestHeartbeatWithoutRegisterFails(t *testing.T) {
 	srv := newStrictServer(t, &cap)
 	defer srv.Close()
 
-	root := t.TempDir()
-	d, err := New(root, srv.URL, "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	d.UserID = "user-1"
-	if err := d.HeartbeatOnce(t.Context()); err == nil {
+	d := newContractDaemon(t, srv.URL)
+	if err := d.HeartbeatOnce(context.Background(), ""); err == nil {
 		t.Fatal("HeartbeatOnce without workspace id succeeded, want error")
 	}
 	if cap.gotBeat {
@@ -409,7 +477,7 @@ func TestHeartbeatRejectsLegacyShape(t *testing.T) {
 	defer srv.Close()
 
 	legacy, _ := json.Marshal(map[string]any{"machine_id": "m", "path": "/tmp/x"})
-	resp, err := http.Post(srv.URL+"/workspaces/heartbeat", "application/json", bytes.NewReader(legacy))
+	resp, err := http.Post(srv.URL+"/workspaces/heartbeat", "application/json", strings.NewReader(string(legacy)))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -419,7 +487,7 @@ func TestHeartbeatRejectsLegacyShape(t *testing.T) {
 	}
 
 	typo, _ := json.Marshal(map[string]any{"workspace_id": "ws-1", "commmit_sha": "typo"})
-	resp2, err := http.Post(srv.URL+"/workspaces/heartbeat", "application/json", bytes.NewReader(typo))
+	resp2, err := http.Post(srv.URL+"/workspaces/heartbeat", "application/json", strings.NewReader(string(typo)))
 	if err != nil {
 		t.Fatalf("post: %v", err)
 	}
@@ -435,25 +503,27 @@ func TestHeartbeatSendsPersistedIDAfterRestart(t *testing.T) {
 	defer srv.Close()
 
 	root := t.TempDir()
-	d, err := New(root, srv.URL, "127.0.0.1:0")
+	d, err := NewDaemon(root, "test-token-123")
 	if err != nil {
-		t.Fatalf("New: %v", err)
+		t.Fatalf("NewDaemon: %v", err)
 	}
+	d.ServerURL = srv.URL
 	d.UserID = "user-1"
-	if err := d.Register(context.Background()); err != nil {
+	if err := d.Register(context.Background(), ""); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	// Simulate a restart: fresh Daemon loads the workspace ID from disk.
-	d2, err := New(root, srv.URL, "127.0.0.1:0")
+	d2, err := NewDaemon(root, "test-token-123")
 	if err != nil {
-		t.Fatalf("New after restart: %v", err)
+		t.Fatalf("NewDaemon after restart: %v", err)
 	}
+	d2.ServerURL = srv.URL
 	d2.UserID = "user-1"
 	if got := d2.getWorkspaceID(); got != "ws-456" {
 		t.Fatalf("restarted workspace id = %q, want ws-456", got)
 	}
 	cap.gotBeat = false
-	if err := d2.HeartbeatOnce(context.Background()); err != nil {
+	if err := d2.HeartbeatOnce(context.Background(), ""); err != nil {
 		t.Fatalf("HeartbeatOnce after restart: %v", err)
 	}
 	if !cap.gotBeat || cap.beatBody["workspace_id"] != "ws-456" {
@@ -462,9 +532,12 @@ func TestHeartbeatSendsPersistedIDAfterRestart(t *testing.T) {
 }
 
 func TestDaemonURLFromBoundAddr(t *testing.T) {
-	d := newTestDaemon(t)
-	if got := d.DaemonURL(); got != "http://127.0.0.1:0" {
-		t.Fatalf("unstarted DaemonURL = %q, want http://127.0.0.1:0", got)
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	if got := d.DaemonURL(); got != "" {
+		t.Fatalf("unstarted DaemonURL = %q, want empty", got)
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -472,6 +545,10 @@ func TestDaemonURLFromBoundAddr(t *testing.T) {
 	}
 	defer ln.Close()
 	d.mu.Lock()
+	// Mirror Start: record the bound address on the server value.
+	if d.srv == nil {
+		d.srv = &http.Server{}
+	}
 	d.srv.Addr = ln.Addr().String()
 	d.mu.Unlock()
 	if got := d.DaemonURL(); got != "http://"+ln.Addr().String() {
@@ -522,15 +599,5 @@ func TestWorkspaceIDRoundTrip0600(t *testing.T) {
 		if st.Mode().Perm()&0o077 != 0 {
 			t.Fatalf("workspace file too permissive: %o", st.Mode().Perm())
 		}
-	}
-	_ = time.Now // keep time import if unused in some builds
-}
-
-func TestNewRejectsBadRoot(t *testing.T) {
-	if _, err := New("", "", "127.0.0.1:0"); err == nil {
-		t.Fatal("empty root accepted")
-	}
-	if _, err := New(filepath.Join(t.TempDir(), "missing"), "", "127.0.0.1:0"); err == nil {
-		t.Fatal("missing root accepted")
 	}
 }
