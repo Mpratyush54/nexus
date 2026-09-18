@@ -53,6 +53,9 @@ type Server struct {
 	// burst 5 per source IP. Lazily initialized like the gates above.
 	login *rateGate
 
+	// mcpAgentRates enforces per-agent calls/minute (issue #166).
+	mcpAgentRates *agentMinuteLimiter
+
 	// Users resolves login usernames to password hashes (issue #133).
 	// Nil means authentication is unconfigured and /auth/login fails
 	// closed with 503. Wire NewUserLookup(store.NewUserStore(db)) in

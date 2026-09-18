@@ -144,6 +144,9 @@ func publishBridgedEvent(hub eventPublisher, ev *store.Event) error {
 	if ev.EpisodeID != "" {
 		payload["episode_id"] = ev.EpisodeID
 	}
+	if ev.AgentID != "" {
+		payload["agent_id"] = ev.AgentID
+	}
 	hub.PublishEvent(ev.ProjectID, ev.SessionID, ev.EventType, payload, ev.UserID)
 	return nil
 }

@@ -74,6 +74,9 @@ func (s *Server) registerExtraRoutes() {
 	s.Mux.HandleFunc("DELETE /memory/{id}/share/{userId}", s.requireAuth(s.handleMemoryUnshare))
 	s.Mux.HandleFunc("POST /memory/{id}/copy", s.requireAuth(s.handleMemoryCopy))
 
+	// Phase 6 agent permissions + MCP tool-call logging (issue #166).
+	s.registerAgentRoutes()
+
 	// Episodes.
 	s.Mux.HandleFunc("POST /episodes/{id}/resolve", s.requireAuth(s.handleEpisodeResolve))
 }
