@@ -315,7 +315,9 @@ func (s *MemStore) GetActiveWorkspace(ctx context.Context, projectID string) (*W
 	threshold := time.Now().UTC().Add(-OfflineThreshold)
 
 	for _, ws := range s.workspaces {
-		if ws.ProjectID == projectID && ws.IsOnline && ws.LastSeen.After(threshold) {
+		// Inclusive 90s boundary (issue #131): exact silence == 90s is
+		// still online, matching IsOnlineAt/IsStaleAt/MarkStaleOffline.
+		if ws.ProjectID == projectID && ws.IsOnline && !ws.LastSeen.Before(threshold) {
 			if mostRecent == nil || ws.LastSeen.After(mostRecent.LastSeen) {
 				mostRecent = ws
 			}

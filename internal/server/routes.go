@@ -348,6 +348,15 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	item.ID = "" // server assigns the ID
+	// Lifecycle + attribution are server-derived (issue #89): clients must
+	// not mint CONFIRMED rows or forge ownership. Status always starts
+	// PROPOSED; the confirmer/writer is the authenticated subject; personal
+	// rows are owned by the caller (ownerless personal rows leak globally).
+	item.Status = "PROPOSED"
+	item.ProposedBy = authSubject(r)
+	if strings.ToLower(strings.TrimSpace(item.Level)) == "personal" {
+		item.UserID = authSubject(r)
+	}
 	if err := s.Store.CreateMemoryItem(r.Context(), &item); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create memory item: "+err.Error())
 		return
@@ -449,6 +458,7 @@ func (s *Server) handleEpisodeCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ep.ID = "" // server assigns the ID
+	ep.CreatedBy = authSubject(r) // attribution is the authenticated user (issue #89)
 	if err := s.Store.CreateEpisode(r.Context(), &ep); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create episode: "+err.Error())
 		return

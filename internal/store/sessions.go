@@ -19,6 +19,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -408,7 +409,9 @@ func (s *MemStore) PromotionCandidates(ctx context.Context, projectID string, mi
 		if m.ProjectID != projectID {
 			continue
 		}
-		if m.Status == "REJECTED" {
+		if m.Status == "REJECTED" || m.Status == "SUPERSEDED" {
+			// Terminal rows never count toward promotion (issue #131):
+			// a superseded takeaway must not promote on repetition.
 			continue
 		}
 		if byKey[m.Key] == nil {
@@ -556,24 +559,38 @@ func (s *PostgresStore) ListProjectSessions(ctx context.Context, projectID strin
 }
 
 // EndSession marks a session inactive and closes active participations.
+// Both writes run in one transaction (issue #152): without it, a failure
+// between the statements leaves an ended session with active participants.
+// Re-ending is idempotent (already-ended → nil after the existence check).
 func (s *PostgresStore) EndSession(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE sessions SET is_active = false, ended_at = now()
-		  WHERE id = $1::uuid AND is_active`, id)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("store: end session begin: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		// Either missing or already ended; distinguish the two.
-		if _, gerr := s.GetSession(ctx, id); gerr != nil {
-			return gerr
+	defer func() { _ = tx.Rollback(ctx) }()
+	var affected int64
+	if err := tx.QueryRow(ctx,
+		`UPDATE sessions SET is_active = false, ended_at = now()
+		  WHERE id = $1::uuid AND is_active
+		  RETURNING 1`).Scan(&affected); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Either missing or already ended; distinguish the two.
+			if _, gerr := s.GetSession(ctx, id); gerr != nil {
+				return gerr
+			}
+			return nil
 		}
-		return nil
+		return fmt.Errorf("store: end session: %w", err)
 	}
-	_, err = s.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`UPDATE session_participants SET left_at = now()
-		  WHERE session_id = $1::uuid AND left_at IS NULL`, id)
-	return err
+		  WHERE session_id = $1::uuid AND left_at IS NULL`, id); err != nil {
+		return fmt.Errorf("store: end session participants: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: end session commit: %w", err)
+	}
+	return nil
 }
 
 // JoinSession adds a user/agent to an active session (re-join reuses the row).
@@ -744,7 +761,7 @@ func (s *PostgresStore) PromotionCandidates(ctx context.Context, projectID strin
 		`SELECT "key", COUNT(DISTINCT session_id), array_agg(id::text)
 		  FROM memory_items
 		  WHERE project_id = $1::uuid AND level = 'session'
-		    AND session_id IS NOT NULL AND status <> 'REJECTED'
+		    AND session_id IS NOT NULL AND status IN ('PROPOSED','CONFIRMED')
 		  GROUP BY "key"
 		  HAVING COUNT(DISTINCT session_id) >= $2`,
 		projectID, minSessions)

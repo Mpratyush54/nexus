@@ -144,14 +144,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // WorkspaceIsOnline reports whether ws counts as online at time now.
 // A workspace is online only if the store flagged it online AND its last
-// heartbeat is within OfflineThreshold. The store's GetActiveWorkspace applies
-// the same 90s rule; this helper lets handlers defend in depth and is unit
-// tested directly.
+// heartbeat is within OfflineThreshold (inclusive: exact 90s silence is
+// still online, matching store.IsOnlineAt — issue #131). The store's
+// GetActiveWorkspace applies the same 90s rule; this helper lets handlers
+// defend in depth and is unit tested directly.
 func WorkspaceIsOnline(ws *store.Workspace, now time.Time) bool {
 	if ws == nil || !ws.IsOnline {
 		return false
 	}
-	return now.UTC().Sub(ws.LastSeen.UTC()) < OfflineThreshold
+	return now.UTC().Sub(ws.LastSeen.UTC()) <= OfflineThreshold
 }
 
 // --- JSON envelope helpers ---

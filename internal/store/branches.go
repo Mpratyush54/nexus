@@ -206,10 +206,28 @@ func memBranchChain(b *memBranchBucket, id string) ([]*MemoryBranch, error) {
 	return chain, nil
 }
 
+// TombstoneContent marks SUPERSEDED merge-deletion rows (issue #134):
+// tombstones carry no content by design, but memory_items.content has a
+// 20–2000 CHECK, so an empty string would 500 on Postgres. The marker
+// satisfies the constraint and is never rendered (SUPERSEDED rows read
+// as not-found in every read path).
+const TombstoneContent = "(superseded tombstone: content removed by merge — see merge result)"
+
 // visibleStatus reports whether a memory row participates in branch reads,
 // mirroring SearchMemory's CONFIRMED/PROPOSED visibility.
 func visibleStatus(status string) bool {
 	return status == "CONFIRMED" || status == "PROPOSED"
+}
+
+// cloneMemoryBranch deep-copies a branch row. Read paths return clones
+// (issue #131): handing out internal pointers lets callers mutate store
+// state (and race the bucket lock) without going through a method.
+func cloneMemoryBranch(br *MemoryBranch) *MemoryBranch {
+	if br == nil {
+		return nil
+	}
+	cp := *br
+	return &cp
 }
 
 // EnsureMainBranch returns the project's shared "main", creating it lazily.
@@ -233,7 +251,7 @@ func (s *MemStore) EnsureMainBranch(_ context.Context, projectID string) (*Memor
 		CreatedAt:  time.Now().UTC(),
 	}
 	b.branches[main.ID] = main
-	return main, nil
+	return cloneMemoryBranch(main), nil
 }
 
 // CreateBranch creates a top-level branch forked from main.
@@ -285,10 +303,10 @@ func (s *MemStore) ForkBranch(_ context.Context, parentID, name, ownerID, visibi
 		CreatedAt:       time.Now().UTC(),
 	}
 	b.branches[child.ID] = child
-	return child, nil
+	return cloneMemoryBranch(child), nil
 }
 
-// GetBranch fetches one branch by id.
+// GetBranch fetches one branch by id (clone; see cloneMemoryBranch).
 func (s *MemStore) GetBranch(_ context.Context, id string) (*MemoryBranch, error) {
 	b := branchBucket(s)
 	b.mu.RLock()
@@ -297,10 +315,10 @@ func (s *MemStore) GetBranch(_ context.Context, id string) (*MemoryBranch, error
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return br, nil
+	return cloneMemoryBranch(br), nil
 }
 
-// ListBranches lists a project's branches, oldest first.
+// ListBranches lists a project's branches, oldest first (clones).
 func (s *MemStore) ListBranches(_ context.Context, projectID string) ([]*MemoryBranch, error) {
 	b := branchBucket(s)
 	b.mu.RLock()
@@ -308,7 +326,7 @@ func (s *MemStore) ListBranches(_ context.Context, projectID string) ([]*MemoryB
 	var out []*MemoryBranch
 	for _, br := range b.branches {
 		if br.ProjectID == projectID {
-			out = append(out, br)
+			out = append(out, cloneMemoryBranch(br))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
@@ -318,19 +336,18 @@ func (s *MemStore) ListBranches(_ context.Context, projectID string) ([]*MemoryB
 // WriteToBranch inserts item into the branch overlay only. Main-line
 // memories (s.memories) and parent overlays are never touched, so write
 // isolation holds by construction.
+//
+// Validation mirrors CreateMemoryItem (issue #131): overlay rows must be
+// representable in Postgres (content 20–2000, level/scope sets, confidence
+// 0–1, 1536-dim embeddings, known statuses incl. SUPERSEDED tombstones).
+// The caller's struct is defaulted in place, but the store keeps a clone —
+// later caller mutation cannot corrupt or race the overlay.
 func (s *MemStore) WriteToBranch(_ context.Context, branchID string, item *MemoryItem) error {
 	if item == nil {
 		return fmt.Errorf("memory item is required")
 	}
 	if strings.TrimSpace(item.Key) == "" {
 		return fmt.Errorf("memory key is required")
-	}
-	b := branchBucket(s)
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	br, ok := b.branches[branchID]
-	if !ok {
-		return ErrNotFound
 	}
 	if item.ID == "" {
 		item.ID = newID("mem")
@@ -344,6 +361,36 @@ func (s *MemStore) WriteToBranch(_ context.Context, branchID string, item *Memor
 	if item.Level == "" {
 		item.Level = "project"
 	}
+	if item.Scope == "" {
+		item.Scope = "fact"
+	}
+	if err := ValidateMemoryContent(item.Content); err != nil {
+		return err
+	}
+	if err := ValidateMemoryLevel(item.Level); err != nil {
+		return err
+	}
+	if err := ValidateMemoryScope(item.Scope); err != nil {
+		return err
+	}
+	if err := ValidateMemoryConfidence(float64(item.Confidence)); err != nil {
+		return err
+	}
+	if err := ValidateEmbeddingDim(item.Embedding); err != nil {
+		return err
+	}
+	switch item.Status {
+	case StatusProposed, StatusConfirmed, StatusRejected, StatusSuperseded:
+	default:
+		return fmt.Errorf("store: invalid status %q", item.Status)
+	}
+	b := branchBucket(s)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	br, ok := b.branches[branchID]
+	if !ok {
+		return ErrNotFound
+	}
 	item.ProjectID = br.ProjectID // a branch write always belongs to its project
 	item.CreatedAt = time.Now().UTC()
 	item.UpdatedAt = item.CreatedAt
@@ -352,7 +399,14 @@ func (s *MemStore) WriteToBranch(_ context.Context, branchID string, item *Memor
 		ov = make(map[string]*MemoryItem)
 		b.overlays[branchID] = ov
 	}
-	ov[item.Key] = item
+	cp := *item
+	if cp.Tags != nil {
+		cp.Tags = append([]string(nil), cp.Tags...)
+	}
+	if cp.Embedding != nil {
+		cp.Embedding = append([]float32(nil), cp.Embedding...)
+	}
+	ov[item.Key] = &cp
 	return nil
 }
 
@@ -360,6 +414,12 @@ func (s *MemStore) WriteToBranch(_ context.Context, branchID string, item *Memor
 // latest write on each branch level shadows ancestors; when no level has
 // the key, main-line MemStore memories (project-scoped + org-level,
 // CONFIRMED/PROPOSED, latest first) are the final fallback.
+//
+// Overlay hits honor visibleStatus (issue #131): a SUPERSEDED/REJECTED
+// tombstone on the branch hides the key instead of leaking it — the walk
+// continues down the chain rather than returning the terminal row.
+// Personal/session/ephemeral main-line rows never enter branch reads.
+// Returned items are clones (see cloneMemoryBranch rationale).
 func (s *MemStore) ResolveRead(_ context.Context, branchID, key string) (*MemoryItem, error) {
 	b := branchBucket(s)
 	b.mu.RLock()
@@ -370,8 +430,17 @@ func (s *MemStore) ResolveRead(_ context.Context, branchID, key string) (*Memory
 	}
 	for _, br := range chain {
 		if m, ok := b.overlays[br.ID][key]; ok {
+			// A terminal overlay row (SUPERSEDED tombstone, REJECTED)
+			// hides the key outright (issue #131): it must NOT fall
+			// through to the parent/main version, or merge deletions
+			// would silently reappear via inheritance.
+			if !visibleStatus(m.Status) {
+				b.mu.RUnlock()
+				return nil, ErrNotFound
+			}
+			cp := cloneMemoryItem(m)
 			b.mu.RUnlock()
-			return m, nil
+			return cp, nil
 		}
 	}
 	var projectID string
@@ -387,7 +456,13 @@ func (s *MemStore) ResolveRead(_ context.Context, branchID, key string) (*Memory
 		if m.Key != key || !visibleStatus(m.Status) {
 			continue
 		}
-		if m.ProjectID != "" && m.ProjectID != projectID {
+		if !memoryVisibleToProject(m, projectID) {
+			continue
+		}
+		// Branch reads serve shared tiers only (issue #131): personal,
+		// session, and ephemeral rows are session/user-scoped, not branch
+		// content, even when the project matches.
+		if m.Level != LevelProject && m.Level != LevelOrganization {
 			continue
 		}
 		if best == nil || m.UpdatedAt.After(best.UpdatedAt) {
@@ -397,13 +472,14 @@ func (s *MemStore) ResolveRead(_ context.Context, branchID, key string) (*Memory
 	if best == nil {
 		return nil, ErrNotFound
 	}
-	return best, nil
+	return cloneMemoryItem(best), nil
 }
 
 // ListBranchItems returns the branch overlay's latest write per key
 // (CONFIRMED/PROPOSED only, sorted by key). Main-line memories and parent
 // overlays are NOT included — this enumerates what was written ON the
-// branch, which is exactly the snapshot diff/merge compare.
+// branch, which is exactly the snapshot diff/merge compare. Items are
+// clones (issue #131).
 func (s *MemStore) ListBranchItems(_ context.Context, branchID string) ([]*MemoryItem, error) {
 	b := branchBucket(s)
 	b.mu.RLock()
@@ -417,7 +493,7 @@ func (s *MemStore) ListBranchItems(_ context.Context, branchID string) ([]*Memor
 		if !visibleStatus(m.Status) {
 			continue
 		}
-		out = append(out, m)
+		out = append(out, cloneMemoryItem(m))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out, nil
@@ -689,13 +765,17 @@ func (s *PostgresStore) ResolveRead(ctx context.Context, branchID, key string) (
 		return nil, err
 	}
 	for _, br := range chain {
-		var itemID string
+		var itemID, itemStatus string
 		err := s.pool.QueryRow(ctx,
-			`SELECT id FROM memory_items
+			`SELECT id, status FROM memory_items
 			  WHERE branch_id = $1::uuid AND "key" = $2
-			    AND status IN ('CONFIRMED','PROPOSED')
-			  ORDER BY updated_at DESC LIMIT 1`, br.ID, key).Scan(&itemID)
+			  ORDER BY updated_at DESC LIMIT 1`, br.ID, key).Scan(&itemID, &itemStatus)
 		if err == nil {
+			// Terminal overlay rows hide the key (issue #131): a merge
+			// tombstone must not fall through to the parent version.
+			if itemStatus != "CONFIRMED" && itemStatus != "PROPOSED" {
+				return nil, ErrNotFound
+			}
 			return s.GetMemoryItem(ctx, itemID)
 		}
 		if err != pgx.ErrNoRows {
@@ -706,7 +786,8 @@ func (s *PostgresStore) ResolveRead(ctx context.Context, branchID, key string) (
 	err = s.pool.QueryRow(ctx,
 		`SELECT id FROM memory_items
 		  WHERE branch_id IS NULL AND "key" = $1
-		    AND (project_id = $2::uuid OR project_id IS NULL)
+		    AND (project_id = $2::uuid OR (project_id IS NULL AND level = 'organization'))
+		    AND level IN ('project','organization')
 		    AND status IN ('CONFIRMED','PROPOSED')
 		  ORDER BY updated_at DESC LIMIT 1`, key, chain[0].ProjectID).Scan(&itemID)
 	if err == pgx.ErrNoRows {

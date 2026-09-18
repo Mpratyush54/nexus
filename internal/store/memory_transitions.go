@@ -228,10 +228,14 @@ func BuildSaveProposedSQL(in ProposedInput) (string, []any) {
 
 // BuildListProposedSQL renders the sweep's candidate select: every PROPOSED
 // row with the fields ConfirmDue needs (id, source tier tag, created_at as
-// the proposal instant).
+// the proposal instant). Bounded (issue #131): an unbounded select loads
+// the whole proposal backlog into memory and can exceed Postgres parameter
+// limits on the follow-up UPDATE ... = ANY($1). Oldest first so the most
+// overdue confirm; leftovers ride the next sweep tick.
 func BuildListProposedSQL() string {
 	return `SELECT id::TEXT AS id, COALESCE(source, '') AS source, created_at ` +
-		`FROM memory_items WHERE status = 'PROPOSED'`
+		`FROM memory_items WHERE status = 'PROPOSED' ` +
+		`ORDER BY created_at ASC LIMIT 500`
 }
 
 // BuildConfirmIDsSQL renders the sweep's confirm write: PROPOSED → CONFIRMED

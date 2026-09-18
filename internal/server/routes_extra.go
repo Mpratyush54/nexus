@@ -473,12 +473,13 @@ func (s *Server) applyMergeResult(ctx context.Context, targetID string, result b
 			errs = append(errs, fmt.Errorf("write %s: %w", m.Key, err))
 		}
 	}
-	// Deletions propagate as SUPERSEDED tombstones with empty content so
-	// the key disappears from branch snapshots (terminal overlay rows read
-	// as not-found) without losing history.
+	// Deletions propagate as SUPERSEDED tombstones so the key disappears
+	// from branch snapshots (terminal overlay rows read as not-found)
+	// without losing history. The marker content satisfies the 20–2000
+	// content CHECK (issue #134); tombstones are never rendered.
 	for _, key := range result.Deleted {
 		if err := bs.WriteToBranch(ctx, targetID, &store.MemoryItem{
-			Key: key, Content: "", Status: store.StatusSuperseded,
+			Key: key, Content: store.TombstoneContent, Status: store.StatusSuperseded,
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("tombstone %s: %w", key, err))
 		}

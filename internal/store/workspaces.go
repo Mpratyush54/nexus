@@ -102,7 +102,7 @@ func (s *PostgresStore) Heartbeat(ctx context.Context, workspaceID string, branc
 func (s *PostgresStore) GetActiveWorkspace(ctx context.Context, projectID string) (*Workspace, error) {
 	ws, err := scanWorkspace(s.pool.QueryRow(ctx,
 		`SELECT `+workspaceColumns+` FROM workspaces
-		  WHERE project_id = $1::uuid AND is_online AND last_seen > $2
+		  WHERE project_id = $1::uuid AND is_online AND last_seen >= $2
 		  ORDER BY last_seen DESC LIMIT 1`,
 		projectID, time.Now().UTC().Add(-OfflineThreshold)))
 	if err == pgx.ErrNoRows {
