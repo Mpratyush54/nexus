@@ -1,7 +1,9 @@
 # ISSUE-30 — Ephemeral Memory Level (5th Tier)
 
 - **Status:** Done (code gains the tier; plan untouched per assignee call)
-- **Scope:** `migrations/009_ephemeral_level.*`, `internal/store`
+- **Scope:** `migrations/009_memory_ephemeral.*` (canonical; the
+  branch-local `009_ephemeral_level.*` was dropped at merge since master
+  already shipped an equivalent idempotent 009), `internal/store`
   (`memory_constants.go`, `memory_transitions.go`, `models.go` comment),
   `internal/mcp/tools.go`, `internal/migrate/vault.go` (comment),
   `internal/daemon/processor.go` (taxonomy), `internal/context/builder.go`,

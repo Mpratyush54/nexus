@@ -1,4 +1,4 @@
-package security
+package security_test
 
 import (
 	"os"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"central-memory/internal/daemon"
+	"central-memory/internal/security"
 )
 
 // TestValidateRejectsAllAdversarial requires ValidatePath to reject 100% of
@@ -19,7 +20,7 @@ import (
 // runtime sandbox — which resolves the link target through the kernel — can
 // judge them. Symlink safety is proven by TestDaemonSandboxHoldsAdversarial.
 func TestValidateRejectsAllAdversarial(t *testing.T) {
-	cases := AdversarialCases()
+	cases := security.AdversarialCases()
 	if len(cases) == 0 {
 		t.Fatal("empty adversarial corpus")
 	}
@@ -29,8 +30,8 @@ func TestValidateRejectsAllAdversarial(t *testing.T) {
 		if c.Category == "symlink" {
 			continue
 		}
-		if err := ValidatePath(c.Path); err == nil {
-			t.Errorf("ValidatePath(%q) [%s/%s] allowed, want rejection",
+		if err := security.ValidatePath(c.Path); err == nil {
+			t.Errorf("security.ValidatePath(%q) [%s/%s] allowed, want rejection",
 				c.Path, c.Category, c.Name)
 		}
 	}
@@ -60,8 +61,8 @@ func TestValidateAllowsBenign(t *testing.T) {
 		".cursorrules",
 		".github/copilot-instructions.md",
 	} {
-		if err := ValidatePath(ok); err != nil {
-			t.Errorf("ValidatePath(%q) rejected benign path: %v", ok, err)
+		if err := security.ValidatePath(ok); err != nil {
+			t.Errorf("security.ValidatePath(%q) rejected benign path: %v", ok, err)
 		}
 	}
 }
@@ -110,7 +111,7 @@ func TestDaemonSandboxHoldsAdversarial(t *testing.T) {
 
 	passed := 0
 	skipped := 0
-	for _, c := range AdversarialCases() {
+	for _, c := range security.AdversarialCases() {
 		if c.Category == "symlink" && !symlinkOK && !dirLinked {
 			skipped++
 			continue
@@ -139,10 +140,10 @@ func TestDaemonSandboxHoldsAdversarial(t *testing.T) {
 		}
 		passed++
 	}
-	t.Logf("sandbox held %d/%d adversarial cases (%d skipped: no symlink privilege)", passed, len(AdversarialCases()), skipped)
-	if passed+skipped != len(AdversarialCases()) {
+	t.Logf("sandbox held %d/%d adversarial cases (%d skipped: no symlink privilege)", passed, len(security.AdversarialCases()), skipped)
+	if passed+skipped != len(security.AdversarialCases()) {
 		t.Fatalf("not all adversarial cases accounted for: passed=%d skipped=%d total=%d",
-			passed, skipped, len(AdversarialCases()))
+			passed, skipped, len(security.AdversarialCases()))
 	}
 }
 
@@ -158,10 +159,10 @@ func TestSecretEnforceFailClosed(t *testing.T) {
 		`config api-key: "abcdefghij1234567890XYZ"`,
 	}
 	for _, s := range secrets {
-		if err := EnforceSecretString(s); err == nil {
+		if err := security.EnforceSecretString(s); err == nil {
 			t.Errorf("EnforceSecret allowed secret %q, want ErrSecretBlocked", s)
 		}
-		if !ContainsSecret([]byte(s)) {
+		if !security.ContainsSecret([]byte(s)) {
 			t.Errorf("ContainsSecret missed %q", s)
 		}
 	}
@@ -172,7 +173,7 @@ func TestSecretEnforceFailClosed(t *testing.T) {
 		"",
 	}
 	for _, s := range benign {
-		if err := EnforceSecretString(s); err != nil {
+		if err := security.EnforceSecretString(s); err != nil {
 			t.Errorf("EnforceSecret blocked benign %q: %v", s, err)
 		}
 	}
@@ -184,7 +185,7 @@ func TestSecretEnforceFailClosed(t *testing.T) {
 func TestSecretMatchesDaemonSemantics(t *testing.T) {
 	root := t.TempDir()
 	leak := "my api_key = 'abcdefghij1234567890XYZ'"
-	if err := EnforceSecretString(leak); err == nil {
+	if err := security.EnforceSecretString(leak); err == nil {
 		t.Fatal("wrapper allowed secret the daemon must block")
 	}
 	if err := daemon.WriteFile(root, "leak.txt", []byte(leak)); err == nil {
@@ -206,39 +207,39 @@ func TestVisibilityEnforce(t *testing.T) {
 		name   string
 		viewer string
 		owner  string
-		vis    Visibility
+		vis    security.Visibility
 		wantOK bool
 	}{
-		{"owner reads private", "alice", "alice", VisibilityPrivate, true},
-		{"owner reads shared", "alice", "alice", VisibilityShared, true},
-		{"stranger blocked on private", "bob", "alice", VisibilityPrivate, false},
-		{"member reads shared", "bob", "alice", VisibilityShared, true},
-		{"anonymous denied shared", "", "alice", VisibilityShared, false},
-		{"anonymous denied private", "", "alice", VisibilityPrivate, false},
-		{"unknown visibility fails closed", "bob", "alice", Visibility("confidential"), false},
-		{"empty visibility fails closed", "bob", "alice", Visibility(""), false},
-		{"owner wins on unknown visibility", "alice", "alice", Visibility("bogus"), true},
+		{"owner reads private", "alice", "alice", security.VisibilityPrivate, true},
+		{"owner reads shared", "alice", "alice", security.VisibilityShared, true},
+		{"stranger blocked on private", "bob", "alice", security.VisibilityPrivate, false},
+		{"member reads shared", "bob", "alice", security.VisibilityShared, true},
+		{"anonymous denied shared", "", "alice", security.VisibilityShared, false},
+		{"anonymous denied private", "", "alice", security.VisibilityPrivate, false},
+		{"unknown visibility fails closed", "bob", "alice", security.Visibility("confidential"), false},
+		{"empty visibility fails closed", "bob", "alice", security.Visibility(""), false},
+		{"owner wins on unknown visibility", "alice", "alice", security.Visibility("bogus"), true},
 	}
 	for _, c := range cases {
-		if got := CanAccess(c.viewer, c.owner, c.vis); got != c.wantOK {
+		if got := security.CanAccess(c.viewer, c.owner, c.vis); got != c.wantOK {
 			t.Errorf("%s: CanAccess=%v want %v", c.name, got, c.wantOK)
 		}
-		if err := EnforceBranchAccess(c.viewer, c.owner, c.vis); (err == nil) != c.wantOK {
-			t.Errorf("%s: EnforceBranchAccess err=%v wantOK=%v", c.name, err, c.wantOK)
+		if err := security.EnforceBranchAccess(c.viewer, c.owner, c.vis); (err == nil) != c.wantOK {
+			t.Errorf("%s: security.EnforceBranchAccess err=%v wantOK=%v", c.name, err, c.wantOK)
 		}
 	}
-	if NormalizeVisibility(VisibilityShared) != VisibilityShared {
-		t.Error("NormalizeVisibility mangled shared")
+	if security.NormalizeVisibility(security.VisibilityShared) != security.VisibilityShared {
+		t.Error("security.NormalizeVisibility mangled shared")
 	}
-	if NormalizeVisibility(Visibility("weird")) != VisibilityPrivate {
-		t.Error("NormalizeVisibility did not fail closed to private")
+	if security.NormalizeVisibility(security.Visibility("weird")) != security.VisibilityPrivate {
+		t.Error("security.NormalizeVisibility did not fail closed to private")
 	}
 }
 
 // TestRateLimiterPresets enforces the plan §6.4 caps: 100/s events, 50/s
 // fileops (burst-sized buckets exhausted deterministically, no sleeps).
 func TestRateLimiterPresets(t *testing.T) {
-	ev := NewEventLimiter()
+	ev := security.NewEventLimiter()
 	for i := 0; i < 100; i++ {
 		if !ev.Allow() {
 			t.Fatalf("event limiter denied within burst at %d", i)
@@ -248,7 +249,7 @@ func TestRateLimiterPresets(t *testing.T) {
 		t.Error("event limiter allowed 101st immediate event, want rate-limited")
 	}
 
-	fo := NewFileOpsLimiter()
+	fo := security.NewFileOpsLimiter()
 	for i := 0; i < 50; i++ {
 		if !fo.Allow() {
 			t.Fatalf("fileops limiter denied within burst at %d", i)
@@ -262,7 +263,7 @@ func TestRateLimiterPresets(t *testing.T) {
 // TestRateLimiterRefill proves the bucket is a refilling token bucket, not a
 // one-shot counter: after ~200ms at 20/s, ~4 tokens are back.
 func TestRateLimiterRefill(t *testing.T) {
-	l := NewLimiter(20, 20)
+	l := security.NewLimiter(20, 20)
 	for i := 0; i < 20; i++ {
 		if !l.Allow() {
 			t.Fatalf("denied within burst at %d", i)
@@ -285,7 +286,7 @@ func TestRateLimiterRefill(t *testing.T) {
 
 // TestRateLimiterConcurrent exercises the mutex under -race.
 func TestRateLimiterConcurrent(t *testing.T) {
-	l := NewLimiter(1000, 1000)
+	l := security.NewLimiter(1000, 1000)
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
 		wg.Add(1)
@@ -304,7 +305,7 @@ func TestRateLimiterConcurrent(t *testing.T) {
 
 // TestRateLimiterRejectsNonPositiveN fails closed on caller bugs.
 func TestRateLimiterRejectsNonPositiveN(t *testing.T) {
-	l := NewLimiter(100, 100)
+	l := security.NewLimiter(100, 100)
 	if l.AllowN(0) || l.AllowN(-1) {
 		t.Error("AllowN(<=0) admitted, want rejection")
 	}

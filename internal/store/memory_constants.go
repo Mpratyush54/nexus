@@ -19,11 +19,9 @@ const (
 	LevelProject      = "project"
 	LevelPersonal     = "personal"
 	LevelSession      = "session"
-	// LevelEphemeral is the shortest lifetime tier (issue #30, migration
-	// 009): working memory that must never outlive its session. It wins
-	// every override contest (see context.LevelRank) and is never emitted
-	// by heuristic classification — producers assign it explicitly.
-	LevelEphemeral = "ephemeral"
+	// LevelEphemeral lives in validation.go (canonical 5th-tier const);
+	// it wins every override contest (see context.LevelRank) and is never
+	// emitted by heuristic classification — producers assign it explicitly.
 )
 
 // FormatEmbedding renders a vector for an embedding parameter. It wraps

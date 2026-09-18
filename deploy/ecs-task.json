@@ -1,12 +1,12 @@
 {
-  "_comment": "SAMPLE ecs-task.json — Fargate task definition template for central-server. Fill in ACCOUNT/REGION/secret ARNs before registering. Templates/notes only — do not apply blindly.",
+  "_comment": "SAMPLE ecs-task.json — Fargate task definition template for central-server. Regenerated per #112 (shell-capable alpine base, /readyz healthcheck, DATABASE_URL + JWT_SECRET contract, MIGRATIONS_DIR /migrations). Fill in ACCOUNT/REGION/secret ARNs before registering. Templates/notes only — do not apply blindly. The taskRoleArn below matches the task role created in infra/terraform/ecs.tf (least-privilege; S3 cold-writer is deferred per #128, so it grants no S3 access yet).",
   "family": "central-server",
   "networkMode": "awsvpc",
   "requiresCompatibilities": ["FARGATE"],
   "cpu": "512",
   "memory": "1024",
   "executionRoleArn": "arn:aws:iam::ACCOUNT:role/ecsTaskExecutionRole",
-  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/central-server-task-role",
+  "taskRoleArn": "arn:aws:iam::ACCOUNT:role/central-memory-task",
   "containerDefinitions": [
     {
       "name": "central-server",
@@ -15,6 +15,7 @@
       "portMappings": [{ "containerPort": 8080, "protocol": "tcp" }],
       "environment": [
         { "name": "PORT", "value": "8080" },
+        { "name": "DB_SSLMODE", "value": "require" },
         { "name": "MIGRATIONS_DIR", "value": "/migrations" }
       ],
       "secrets": [
@@ -23,7 +24,7 @@
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/database-url:database_url::"
         },
         {
-          "name": "CENTRAL_MEMORY_JWT_KEY",
+          "name": "JWT_SECRET",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/jwt-key:jwt_key::"
         }
       ],
@@ -36,11 +37,11 @@
         }
       },
       "healthCheck": {
-        "command": ["CMD-SHELL", "wget -q -O - http://localhost:8080/healthz || exit 1"],
+        "command": ["CMD-SHELL", "wget -qO- http://localhost:8080/readyz | grep -q '\"ok\":true' || exit 1"],
         "interval": 30,
         "timeout": 5,
         "retries": 3,
-        "startPeriod": 60
+        "startPeriod": 120
       }
     }
   ]

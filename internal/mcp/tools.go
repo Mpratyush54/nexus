@@ -35,6 +35,9 @@ type MemoryItem struct {
 	Confidence     float32
 	Status         string // PROPOSED | CONFIRMED | REJECTED | SUPERSEDED
 	Source         string
+	// Embedding carries the write-time vector (issue #76, 1536-dim,
+	// L2-normalized) for the store adapter to persist to pgvector.
+	Embedding []float32
 }
 
 // Episode is the MCP layer's view of an episode row (subset, see above).
@@ -247,11 +250,20 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 	if err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "search failed: " + err.Error()}
 	}
+	// Dedup same-key collisions (most-specific level wins, mirroring
+	// context.ResolveOverrides) before the level filter, so one key never
+	// consumes budget twice.
+	items = dedupeByKey(items)
 	items = filterByLevel(items, a.Level)
 
-	contextXML := buildContextXML(s.cfg.ProjectName, s.cfg.Branch, items)
+	// Decay clock (plan §1.7, issue #119): serving an item counts as use.
+	// Best-effort and never fatal — stores without the method are skipped.
+	recordUse(ctx, s.store, items)
+
+	budget := s.tokenBudget()
+	contextXML := buildContextXMLBudgeted(s.cfg.ProjectName, s.cfg.Branch, items, budget)
 	tokens := estimateTokens(contextXML)
-	remaining := s.tokenBudget() - len([]rune(contextXML))
+	remaining := budget - len([]rune(contextXML))
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -260,9 +272,72 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 		"context":          contextXML,
 		"token_count":      tokens,
 		"budget_remaining": remaining,
-		"items_included":   len(items),
+		"items_included":   countXMLItems(contextXML),
 		"reflection_hint":  ReflectionHint,
 	}, nil
+}
+
+// recordUse bumps use_count/last_used_at on served rows so the confidence
+// decay clock (plan §1.7) resets on real retrieval. It asserts the seam
+// optionally: narrow stores (fakes, stubs) simply skip it.
+func recordUse(ctx context.Context, st Store, items []*MemoryItem) {
+	ru, ok := st.(interface {
+		RecordMemoryUse(context.Context, string) error
+	})
+	if !ok {
+		return
+	}
+	for _, it := range items {
+		if it == nil || it.ID == "" {
+			continue
+		}
+		_ = ru.RecordMemoryUse(ctx, it.ID)
+	}
+}
+
+// mcpLevelRank mirrors context.LevelRank for DTOs: session wins over
+// personal over project over organization; unknown levels never shadow.
+func mcpLevelRank(level string) int {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "session":
+		return 3
+	case "personal":
+		return 2
+	case "project":
+		return 1
+	case "organization", "org":
+		return 0
+	default:
+		return -1
+	}
+}
+
+// dedupeByKey collapses same-key collisions keeping the most-specific level
+// (ties: higher confidence, then first seen). Output order follows first-seen
+// winning keys for determinism.
+func dedupeByKey(items []*MemoryItem) []*MemoryItem {
+	best := make(map[string]*MemoryItem, len(items))
+	order := make([]string, 0, len(items))
+	for _, it := range items {
+		if it == nil {
+			continue
+		}
+		cur, ok := best[it.Key]
+		if !ok {
+			best[it.Key] = it
+			order = append(order, it.Key)
+			continue
+		}
+		rNew, rCur := mcpLevelRank(it.Level), mcpLevelRank(cur.Level)
+		if rNew > rCur || (rNew == rCur && it.Confidence > cur.Confidence) {
+			best[it.Key] = it
+		}
+	}
+	out := make([]*MemoryItem, 0, len(order))
+	for _, k := range order {
+		out = append(out, best[k])
+	}
+	return out
 }
 
 func filterByLevel(items []*MemoryItem, level string) []*MemoryItem {
@@ -299,6 +374,15 @@ func xmlEscape(s string) string {
 // This is the local fallback for the future internal/context builder: keep
 // the output shape identical so the swap is drop-in.
 func buildContextXML(project, branch string, items []*MemoryItem) string {
+	return buildContextXMLBudgeted(project, branch, items, 0)
+}
+
+// buildContextXMLBudgeted renders the same block capped to budget chars
+// (issue #41: the effective agent budget). budget <= 0 means unlimited.
+// Units that would overflow are dropped (trailing sections first to go, like
+// the context builder's greedy fill); output always stays a well-formed
+// project_memory block.
+func buildContextXMLBudgeted(project, branch string, items []*MemoryItem, budget int) string {
 	groups := map[string][]*MemoryItem{}
 	for _, it := range items {
 		lvl := strings.ToLower(it.Level)
@@ -307,27 +391,68 @@ func buildContextXML(project, branch string, items []*MemoryItem) string {
 		}
 		groups[lvl] = append(groups[lvl], it)
 	}
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("<project_memory project=%q branch=%q>\n",
-		xmlEscape(project), xmlEscape(branch)))
+	header := fmt.Sprintf("<project_memory project=%q branch=%q>\n",
+		xmlEscape(project), xmlEscape(branch))
+	footer := "</project_memory>"
+	type section struct {
+		open  string
+		close string
+		units []string
+	}
+	var sections []section
 	for _, lvl := range []string{"organization", "project", "personal", "session", "ephemeral"} {
 		mems := groups[lvl]
 		if len(mems) == 0 {
 			continue
 		}
-		b.WriteString("<" + lvl + ">\n")
+		units := make([]string, 0, len(mems))
 		for _, it := range mems {
 			scope := it.Scope
 			if scope == "" {
 				scope = "fact"
 			}
-			fmt.Fprintf(&b, "  <item key=%q confidence=\"%.2f\" scope=%q>\n    %s\n  </item>\n",
-				xmlEscape(it.Key), it.Confidence, xmlEscape(scope), xmlEscape(it.Content))
+			units = append(units, fmt.Sprintf("  <item key=%q confidence=\"%.2f\" scope=%q>\n    %s\n  </item>\n",
+				xmlEscape(it.Key), it.Confidence, xmlEscape(scope), xmlEscape(it.Content)))
 		}
-		b.WriteString("</" + lvl + ">\n")
+		sections = append(sections, section{
+			open: "<" + lvl + ">\n", close: "</" + lvl + ">\n", units: units,
+		})
 	}
-	b.WriteString("</project_memory>")
-	return b.String()
+	fits := func(bodyLen, add int) bool {
+		if budget <= 0 {
+			return true
+		}
+		return len(header)+bodyLen+add+len(footer) <= budget
+	}
+	var body strings.Builder
+	for _, s := range sections {
+		var sb strings.Builder
+		kept := 0
+		for _, u := range s.units {
+			add := len(u)
+			if kept == 0 {
+				add += len(s.open) + len(s.close)
+			}
+			if !fits(body.Len()+sb.Len(), add) {
+				continue
+			}
+			if kept == 0 {
+				sb.WriteString(s.open)
+			}
+			sb.WriteString(u)
+			kept++
+		}
+		if kept > 0 {
+			sb.WriteString(s.close)
+			body.WriteString(sb.String())
+		}
+	}
+	return header + body.String() + footer
+}
+
+// countXMLItems counts rendered <item> units in a context block.
+func countXMLItems(block string) int {
+	return strings.Count(block, "<item ")
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +521,7 @@ func (s *Server) handleMemoryWrite(ctx context.Context, raw json.RawMessage) (an
 		Confidence:     1.0,
 		Status:         "PROPOSED",
 		Source:         "agent:mcp",
+		Embedding:      s.embedForWrite(strings.TrimSpace(a.Key), a.Content),
 	}
 	if err := s.store.CreateMemoryItem(ctx, item); err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "write failed: " + err.Error()}
@@ -616,51 +742,17 @@ type fileWriteArgs struct {
 	Content string `json:"content"`
 }
 
-// resolvePath jails p inside root: cleans, joins, and rejects escapes.
-// Secret-pattern checks live in the daemon fileops layer (internal/scan);
-// this layer enforces containment + size only.
-func resolvePath(root, p string) (string, error) {
-	if strings.TrimSpace(p) == "" {
-		return "", fmt.Errorf("missing required field: path")
-	}
-	base := root
-	if base == "" {
-		var err error
-		base, err = os.Getwd()
-		if err != nil {
-			return "", err
-		}
-	}
-	baseAbs, err := filepath.Abs(base)
-	if err != nil {
-		return "", err
-	}
-	target := p
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(baseAbs, target)
-	}
-	targetAbs, err := filepath.Abs(filepath.Clean(target))
-	if err != nil {
-		return "", err
-	}
-	rel, err := filepath.Rel(baseAbs, targetAbs)
-	if err != nil {
-		return "", fmt.Errorf("path rejected: %s", p)
-	}
-	if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("path escapes workspace root: %s", p)
-	}
-	return targetAbs, nil
-}
-
 func (s *Server) handleFileRead(raw json.RawMessage) (any, *RPCError) {
 	var a filePathArgs
 	if rpcErr := decodeArgs(raw, &a); rpcErr != nil {
 		return nil, rpcErr
 	}
-	abs, err := resolvePath(s.cfg.WorkspacePath, a.Path)
+	abs, err := secureJoin(s.cfg.WorkspacePath, a.Path)
 	if err != nil {
 		return nil, invalidParams("%s", err.Error())
+	}
+	if containsSecret(a.Path, nil) {
+		return nil, invalidParams("file %q matches secret pattern", a.Path)
 	}
 	st, err := os.Stat(abs)
 	if err != nil {
@@ -673,6 +765,10 @@ func (s *Server) handleFileRead(raw json.RawMessage) (any, *RPCError) {
 	if err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "read failed: " + err.Error()}
 	}
+	if containsSecret(a.Path, data) {
+		return nil, invalidParams("file %q matches secret pattern", a.Path)
+	}
+	s.logFileAccess("read", a.Path, len(data))
 	return map[string]any{"path": a.Path, "size": len(data), "content": string(data)}, nil
 }
 
@@ -681,9 +777,12 @@ func (s *Server) handleFileWrite(raw json.RawMessage) (any, *RPCError) {
 	if rpcErr := decodeArgs(raw, &a); rpcErr != nil {
 		return nil, rpcErr
 	}
-	abs, err := resolvePath(s.cfg.WorkspacePath, a.Path)
+	abs, err := secureJoin(s.cfg.WorkspacePath, a.Path)
 	if err != nil {
 		return nil, invalidParams("%s", err.Error())
+	}
+	if containsSecret(a.Path, []byte(a.Content)) {
+		return nil, invalidParams("file %q matches secret pattern", a.Path)
 	}
 	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "write failed: " + err.Error()}
@@ -691,5 +790,6 @@ func (s *Server) handleFileWrite(raw json.RawMessage) (any, *RPCError) {
 	if err := os.WriteFile(abs, []byte(a.Content), 0o644); err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "write failed: " + err.Error()}
 	}
+	s.logFileAccess("write", a.Path, len(a.Content))
 	return map[string]any{"path": a.Path, "bytes_written": len(a.Content)}, nil
 }

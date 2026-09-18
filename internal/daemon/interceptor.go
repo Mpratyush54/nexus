@@ -31,11 +31,19 @@ const RedactedPlaceholder = "[REDACTED]"
 
 // RedactSecrets replaces every internal/scan NeverPattern match in s with
 // RedactedPlaceholder (pure). It reports whether anything was redacted.
-// A no-match input is returned unchanged.
+// A no-match input is returned unchanged. The daemon-local extra corpus
+// (issue #118, see fileops.go) is applied as well so previews/diffs never
+// leak sk-/xox/private-key/github_pat_/Bearer/JWT material.
 func RedactSecrets(s string) (string, bool) {
 	redacted := false
 	out := s
 	for _, re := range scan.NeverPatterns {
+		if re.MatchString(out) {
+			out = re.ReplaceAllString(out, RedactedPlaceholder)
+			redacted = true
+		}
+	}
+	for _, re := range extraSecretPatterns {
 		if re.MatchString(out) {
 			out = re.ReplaceAllString(out, RedactedPlaceholder)
 			redacted = true
@@ -240,6 +248,16 @@ func (in *Interceptor) Close() {
 // Events exposes the internal queue for consumers when no downstream sink is
 // wired (tests, daemon skeleton wiring).
 func (in *Interceptor) Events() <-chan ToolEvent { return in.queue }
+
+// Emit implements ToolEventEmitter by enqueuing non-blocking (issue #115:
+// lets the Watcher feed instruction-file events into the Layer-1 queue so
+// they reach the runtime sink). Nil-safe; drops + counts when full.
+func (in *Interceptor) Emit(ev ToolEvent) {
+	if in == nil {
+		return
+	}
+	in.emitTry(ev)
+}
 
 // Dropped reports events shed because the queue was full.
 func (in *Interceptor) Dropped() int64 { return in.dropped.Load() }

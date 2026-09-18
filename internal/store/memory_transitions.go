@@ -64,7 +64,8 @@ func ValidateMemoryContent(content string) error {
 	return nil
 }
 
-// ValidateMemoryLevel mirrors the level CHECK (001, widened by 009).
+// ValidateMemoryLevel mirrors the level CHECK (migrations/001 plus the
+// ephemeral 5th tier from migration 009, issue #30).
 func ValidateMemoryLevel(level string) error {
 	switch level {
 	case LevelOrganization, LevelProject, LevelPersonal, LevelSession, LevelEphemeral:

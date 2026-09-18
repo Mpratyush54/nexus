@@ -139,6 +139,17 @@ const (
 	StateFinished       = "finished"        // run unregistered/completed
 )
 
+// Boundedness contracts (nexus issue #113): the manager is a long-lived
+// process singleton, so every per-run and global growth vector is capped.
+const (
+	// MaxRunHistory caps retained outbound events per run (oldest dropped).
+	MaxRunHistory = 128
+	// MaxPromptQueue caps pending (un-ingested) prompts per run.
+	MaxPromptQueue = 16
+	// MaxRuns caps tracked runs; Register evicts finished runs first.
+	MaxRuns = 1024
+)
+
 var (
 	// ErrNoRun is returned when the runID is unknown.
 	ErrNoRun = errors.New("steering: unknown run")
@@ -150,6 +161,12 @@ var (
 	ErrInvalidState = errors.New("steering: invalid state for transition")
 	// ErrEmptyPrompt is returned when a steer prompt is blank.
 	ErrEmptyPrompt = errors.New("steering: prompt must not be empty")
+	// ErrQueueFull is returned when a run's pending prompt queue is at
+	// MaxPromptQueue: the steerer must wait for ingestion, not pile on.
+	ErrQueueFull = errors.New("steering: prompt queue full")
+	// ErrTooManyRuns is returned when the manager is at MaxRuns with no
+	// finished run to evict.
+	ErrTooManyRuns = errors.New("steering: too many tracked runs")
 	// ErrPaused is returned by Gate while the run is paused: the agent must
 	// not execute tool calls until Resume.
 	ErrPaused = errors.New("steering: agent paused")
@@ -163,12 +180,15 @@ type SteerPrompt struct {
 
 // run is the per-agent-run state. All fields are guarded by the manager mu;
 // done is closed on interrupt and replaced on resume, so ASAP tool loops can
-// select on a stable channel without racing the mutex.
+// select on a stable channel without racing the mutex. queue is a FIFO with
+// a head offset: pops advance the head (O(1)) and compact when the dead
+// prefix grows, instead of reallocating the backing array per pop.
 type run struct {
 	id      string
 	state   string
 	owner   string // steerer holding the single-steerer lock (" " when free)
 	queue   []SteerPrompt
+	qhead   int
 	ctx     context.Context
 	cancel  context.CancelFunc
 	done    chan struct{}
@@ -176,8 +196,43 @@ type run struct {
 	history []Event // outbound events in order (fan out via WS hub)
 }
 
+// queueDepth is the pending (un-ingested) prompt count. Caller holds m.mu.
+func (r *run) queueDepth() int {
+	if r.qhead >= len(r.queue) {
+		return 0
+	}
+	return len(r.queue) - r.qhead
+}
+
+// pushPrompt appends one prompt. Caller holds m.mu and has checked the cap.
+func (r *run) pushPrompt(p SteerPrompt) {
+	r.queue = append(r.queue, p)
+}
+
+// popPrompt removes the oldest prompt (FIFO, O(1)). Caller holds m.mu.
+func (r *run) popPrompt() (SteerPrompt, bool) {
+	if r.qhead >= len(r.queue) {
+		r.queue = nil
+		r.qhead = 0
+		return SteerPrompt{}, false
+	}
+	next := r.queue[r.qhead]
+	r.qhead++
+	if r.qhead >= len(r.queue) {
+		r.queue = nil
+		r.qhead = 0
+	} else if r.qhead > 64 && r.qhead*2 > len(r.queue) {
+		r.queue = append([]SteerPrompt(nil), r.queue[r.qhead:]...)
+		r.qhead = 0
+	}
+	return next, true
+}
+
 func (r *run) emit(t string, payload map[string]any) {
 	r.history = append(r.history, Event{EventType: t, Payload: payload})
+	if len(r.history) > MaxRunHistory {
+		r.history = append([]Event(nil), r.history[len(r.history)-MaxRunHistory:]...)
+	}
 }
 
 // InterruptManager coordinates steering across runs. The zero value is not
@@ -195,7 +250,8 @@ func NewInterruptManager() *InterruptManager {
 }
 
 // Register starts tracking runID. Re-registering a live run is an error;
-// re-registering after Unregister re-arms fresh state.
+// re-registering after Unregister re-arms fresh state. At MaxRuns, finished
+// runs are evicted first; a full live set fails with ErrTooManyRuns.
 func (m *InterruptManager) Register(runID string, bridge DaemonBridge) error {
 	if strings.TrimSpace(runID) == "" {
 		return errors.New("steering: run_id is required")
@@ -205,8 +261,20 @@ func (m *InterruptManager) Register(runID string, bridge DaemonBridge) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.runs == nil {
+		m.runs = make(map[string]*run)
+	}
 	if r, ok := m.runs[runID]; ok && r.state != StateFinished {
 		return fmt.Errorf("steering: run %q already registered", runID)
+	} else if !ok && len(m.runs) >= MaxRuns {
+		for id, r := range m.runs {
+			if r.state == StateFinished {
+				delete(m.runs, id)
+			}
+		}
+		if len(m.runs) >= MaxRuns {
+			return ErrTooManyRuns
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	m.runs[runID] = &run{id: runID, state: StateRunning, ctx: ctx, cancel: cancel,
@@ -227,6 +295,7 @@ func (m *InterruptManager) Unregister(runID string) error {
 	r.state = StateFinished
 	r.owner = ""
 	r.queue = nil
+	r.qhead = 0
 	// Avoid closing done twice if RequestInterrupt already closed it.
 	select {
 	case <-r.done:
@@ -242,24 +311,48 @@ func (m *InterruptManager) Unregister(runID string) error {
 // AGENT_INTERRUPT_REQUESTED. Only one steerer may hold a run: a second
 // steerer gets ErrSteerConflict; interrupting a non-running run gets
 // ErrInvalidState.
+//
+// The bridge Signal runs WITHOUT holding the manager lock (issue #113): a
+// slow or re-entrant bridge must never wedge the subsystem. The run is
+// re-validated under the lock after the signal (same pointer, still
+// running) so an interleaved Unregister/re-Register cannot cause a
+// double-close or a mutation on a recycled run.
 func (m *InterruptManager) RequestInterrupt(runID, steererID, reason string) error {
 	if strings.TrimSpace(steererID) == "" {
 		return errors.New("steering: steerer_id is required")
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	r, ok := m.runs[runID]
 	if !ok {
+		m.mu.Unlock()
 		return ErrNoRun
+	}
+	if r.state != StateRunning {
+		conflict := r.owner != "" && r.owner != steererID
+		m.mu.Unlock()
+		if conflict {
+			return ErrSteerConflict
+		}
+		return ErrInvalidState
+	}
+	bridge := r.bridge
+	m.mu.Unlock()
+
+	if err := bridge.Signal(runID); err != nil {
+		return fmt.Errorf("steering: daemon signal: %w", err)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	cur, ok := m.runs[runID]
+	if !ok || cur != r {
+		return ErrNoRun // recycled while signaling: never touch the new run
 	}
 	if r.state != StateRunning {
 		if r.owner != "" && r.owner != steererID {
 			return ErrSteerConflict
 		}
 		return ErrInvalidState
-	}
-	if err := r.bridge.Signal(runID); err != nil {
-		return fmt.Errorf("steering: daemon signal: %w", err)
 	}
 	r.state = StatePauseRequested
 	r.owner = steererID
@@ -292,7 +385,8 @@ func (m *InterruptManager) AcknowledgePaused(runID string) error {
 // Steer injects a high-priority correction prompt. Valid only while paused
 // (or pause_requested, for zero-latency steering that lands before the ack),
 // and only from the lock owner — anyone else gets ErrSteerConflict. Prompts
-// queue FIFO and are consumed via TakeNextPrompt before the next tool call.
+// queue FIFO (capped at MaxPromptQueue: overflow yields ErrQueueFull) and
+// are consumed via TakeNextPrompt before the next tool call.
 func (m *InterruptManager) Steer(runID, steererID, prompt string) error {
 	if strings.TrimSpace(prompt) == "" {
 		return ErrEmptyPrompt
@@ -309,10 +403,13 @@ func (m *InterruptManager) Steer(runID, steererID, prompt string) error {
 	if r.owner != steererID {
 		return ErrSteerConflict
 	}
-	r.queue = append(r.queue, SteerPrompt{SteererID: steererID, Prompt: prompt})
+	if r.queueDepth() >= MaxPromptQueue {
+		return ErrQueueFull
+	}
+	r.pushPrompt(SteerPrompt{SteererID: steererID, Prompt: prompt})
 	r.emit(EventSteerPrompt, map[string]any{
 		PayloadRunID: runID, PayloadSteerer: steererID,
-		PayloadPrompt: prompt, PayloadQueueLen: len(r.queue),
+		PayloadPrompt: prompt, PayloadQueueLen: r.queueDepth(),
 	})
 	return nil
 }
@@ -363,20 +460,18 @@ func (m *InterruptManager) Gate(runID string) error {
 	return nil
 }
 
-// TakeNextPrompt pops the oldest queued steering prompt (FIFO). The agent
-// must call this before every tool call: a returned prompt (ok==true) is
-// prepended to the model context as a high-priority system instruction,
-// ahead of whatever the next tool call would have been.
+// TakeNextPrompt pops the oldest queued steering prompt (FIFO, O(1) via the
+// head offset). The agent must call this before every tool call: a returned
+// prompt (ok==true) is prepended to the model context as a high-priority
+// system instruction, ahead of whatever the next tool call would have been.
 func (m *InterruptManager) TakeNextPrompt(runID string) (SteerPrompt, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, ok := m.runs[runID]
-	if !ok || len(r.queue) == 0 {
+	if !ok {
 		return SteerPrompt{}, false
 	}
-	next := r.queue[0]
-	r.queue = append([]SteerPrompt(nil), r.queue[1:]...)
-	return next, true
+	return r.popPrompt()
 }
 
 // Done returns the run's cancel channel: closed when RequestInterrupt fires,
@@ -417,7 +512,7 @@ func (m *InterruptManager) QueueDepth(runID string) int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if r, ok := m.runs[runID]; ok {
-		return len(r.queue)
+		return r.queueDepth()
 	}
 	return 0
 }

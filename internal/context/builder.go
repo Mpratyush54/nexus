@@ -35,6 +35,23 @@ import (
 // DefaultBudget is the default context size cap in characters (~1000 tokens).
 const DefaultBudget = 4000
 
+// AgentBudget resolves the builder budget for a named agent (issue #41):
+// the agent registry's seed budget when agentName is known (claude 10k,
+// copilot 8k, cursor/windsurf 6k), otherwise fallback (<= 0 selects
+// DefaultBudget). Pass the result as ContextInput.Budget so per-agent caps
+// flow into AssembleXML instead of the static default.
+func AgentBudget(agentName string, fallback int) int {
+	if strings.TrimSpace(agentName) != "" {
+		if a, err := store.NewAgentRegistry().GetAgent(agentName); err == nil && a.ContextBudget > 0 {
+			return a.ContextBudget
+		}
+	}
+	if fallback <= 0 {
+		return DefaultBudget
+	}
+	return fallback
+}
+
 // LevelRank maps a memory level to its override precedence. Higher wins.
 // Unknown levels rank below organization so they never shadow real data.
 func LevelRank(level string) int {

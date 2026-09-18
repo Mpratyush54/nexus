@@ -74,7 +74,7 @@ type Episode struct {
 	ProjectID     string    `json:"project_id"`
 	SessionID     string    `json:"session_id,omitempty"`
 	Title         string    `json:"title"`
-	EpisodeType   string    `json:"episode_type"` // bug_fix | feature | refactor | incident | investigation
+	EpisodeType   string    `json:"episode_type"` // bug_fix | feature | refactor | incident | investigation | onboarding
 	Trigger       string    `json:"trigger,omitempty"`
 	Investigation string    `json:"investigation,omitempty"`
 	RootCause     string    `json:"root_cause,omitempty"`

@@ -34,13 +34,14 @@ const (
 const RecencyDecayDays = 90.0
 
 // CosineSimilarity returns the cosine similarity of a and b in [-1, 1].
-// Vectors of unequal length are compared over their shared prefix (min
-// length); empty or zero-magnitude vectors score 0.
+// Vectors of unequal length score 0 (issue #105): pgvector rejects
+// dimension mismatches, and prefix-matching silently minted bogus positives.
+// Empty or zero-magnitude vectors also score 0.
 func CosineSimilarity(a, b []float32) float64 {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
+	if len(a) != len(b) {
+		return 0
 	}
+	n := len(a)
 	if n == 0 {
 		return 0
 	}

@@ -1,17 +1,18 @@
 /* Central Memory — Multiplayer Live Feed dashboard (Phase 3, nexus issue #14).
  *
  * Static SPA, vanilla JS, zero dependencies. Speaks:
- *   REST: existing internal/server/routes.go
+ *   REST: internal/server/routes.go + routes_extra.go
  *     POST /auth/login
  *     POST /projects/resolve
  *     GET  /workspaces/{projectId}/active
  *     GET  /memory/search?project_id&q&tags&limit      -> {items,count}
  *     GET  /episodes/search?project_id&q&error_pattern&limit -> {items,count}
  *     POST /memory/{id}/confirm | POST /memory/{id}/reject | POST /memory/{id}/promote
- *        (confirmation-flow endpoints from plan §2.8 — NOT yet on the server;
- *         calls are best-effort and fall back to optimistic local state.)
- *   WS: implementation-plan.md §3.2 (internal/server/ws.go does not exist yet —
- *       this client implements the planned shape so the future hub just works):
+ *        (confirmation-flow endpoints live in routes_extra.go/promote.go;
+ *         calls still fall back to optimistic local state on error.)
+ *   WS: internal/server/ws.go (stdlib hub). Auth: ?token= query (browsers
+ *     cannot set headers on WebSocket) or Authorization header; the client
+ *     appends ?token= automatically when a token exists.
  *     C->S: {"type":"subscribe","project_id":"...","session_id":"..."}
  *           {"type":"action","event_type":"MESSAGE_SENT","payload":{...}}
  *           {"type":"presence","status":"typing"}
@@ -19,6 +20,13 @@
  *           {"type":"presence","user_id":"...","status":"online|typing|idle|offline"}
  *           {"type":"memory_update","item":{...},"action":"proposed|confirmed|rejected"}
  *           {"type":"episode_update","episode":{...},"action":"opened|updated|resolved"}
+ *           {"type":"subscribed","project_id":"...","session_id":"..."} (ack)
+ *           {"type":"error","message":"..."} (e.g. bad subscribe, expired token)
+ *
+ * Deploy defaults (issue #130): same-origin API/WS derived from
+ * window.location (https -> wss), editable overrides persisted to
+ * localStorage. Behind ALB/HTTPS, ws:// would be mixed-content-blocked, so
+ * the default is never hardcoded ws://.
  *
  * If the WS endpoint is absent (404 / refused), the dashboard stays usable over
  * REST and retries the socket with backoff.
@@ -57,6 +65,23 @@ function esc(s) {
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 function apiBase() { return els.apiBase.value.trim().replace(/\/+$/, ''); }
+// Same-origin defaults (issue #130): http->http/ws, https->https/wss, WS on
+// path /ws. Manual overrides in the inputs (persisted) always win.
+function defaultApiBase() {
+  try {
+    return window.location.origin && window.location.origin !== 'null'
+      ? window.location.origin
+      : 'http://localhost:8080';
+  } catch { return 'http://localhost:8080'; }
+}
+function defaultWsUrl() {
+  try {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = window.location.host || 'localhost:8080';
+    if (!window.location.host) return 'ws://localhost:8080/ws';
+    return proto + '//' + host + '/ws';
+  } catch { return 'ws://localhost:8080/ws'; }
+}
 function authHeaders() {
   const h = { 'Content-Type': 'application/json' };
   if (state.token) h.Authorization = 'Bearer ' + state.token;
@@ -71,10 +96,23 @@ async function rest(path, opts) {
   let body = null;
   try { body = text ? JSON.parse(text) : null; } catch { body = { _raw: text }; }
   if (!res.ok) {
+    if (res.status === 401) onUnauthorized();
     const msg = (body && body.error && body.error.message) || ('HTTP ' + res.status);
     throw new Error(msg);
   }
   return body;
+}
+
+// 401 -> re-login flow (issue #130): expired tokens surfaced as bare HTTP
+// 401 before. Drop the dead token and tell the user to log in again.
+// NOTE: the token lives in localStorage (XSS-readable by design for a
+// static SPA with no httpOnly-cookie backend); treat the dashboard host as
+// trusted and prefer short TTLs server-side.
+function onUnauthorized() {
+  state.token = '';
+  store.save('token', '');
+  els.authState.textContent = 'session expired (401) — login again';
+  disconnectWs();
 }
 
 // ---------- connection / auth ----------
@@ -137,8 +175,14 @@ function connectWs() {
 
 function openWs() {
   if (!state.wsWanted) return;
-  const url = els.wsUrl.value.trim();
+  let url = els.wsUrl.value.trim();
   if (!url) return;
+  // WS auth (issue #130): browsers cannot set headers on WebSocket, so the
+  // server accepts ?token= (ws.go serveWS). Append the REST token unless the
+  // URL already carries one.
+  if (state.token && !/[?&]token=/.test(url)) {
+    url += (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(state.token);
+  }
   try { if (state.ws) state.ws.close(); } catch {}
   setWsState('connecting…', 'dot-idle');
   let ws;
@@ -206,6 +250,14 @@ function routeWs(msg) {
     case 'presence': onPresenceMsg(msg); break;
     case 'memory_update': onMemoryUpdate(msg); break;
     case 'episode_update': onEpisodeUpdate(msg); break;
+    case 'subscribed':
+      els.projectState.textContent = 'subscribed to ' + (msg.project_id || '?') +
+        (msg.session_id ? ' / ' + msg.session_id : '') + ' ✓';
+      break;
+    case 'error':
+      onEvent({ event_type: 'WS_ERROR', payload: { message: msg.message || 'unknown' }, created_at: new Date().toISOString() });
+      if (/expired|unauthorized|invalid bearer|401/i.test(msg.message || '')) onUnauthorized();
+      break;
     default: onEvent({ event_type: 'UNKNOWN_FRAME', payload: msg, created_at: new Date().toISOString() });
   }
 }
@@ -312,9 +364,9 @@ function memoryCard(item) {
   return li;
 }
 
-// Best-effort confirmation flow (plan §2.8). The server has no
-// PATCH /memory/:id route yet, so 404/405 falls back to optimistic UI
-// and a WS "action" hint for the future hub.
+// Best-effort confirmation flow (plan §2.8). The server implements
+// POST /memory/:id/confirm|reject|promote (routes_extra.go + promote.go);
+// failures still fall back to optimistic UI + a WS "action" hint.
 async function memoryAction(item, act, node) {
   const map = { confirm: 'confirm', reject: 'reject', promote: 'promote' };
   const endpoint = '/memory/' + encodeURIComponent(item.id) + '/' + map[act];
@@ -322,7 +374,7 @@ async function memoryAction(item, act, node) {
     await rest(endpoint, { method: 'POST', headers: authHeaders(), body: JSON.stringify({}) });
   } catch (e) {
     const hint = node.querySelector('.muted');
-    if (hint) hint.textContent = 'server has no ' + endpoint + ' yet (' + e.message + ') — optimistic only';
+    if (hint) hint.textContent = endpoint + ' failed (' + e.message + ') — optimistic only';
   }
   if (act === 'confirm') item.status = 'CONFIRMED';
   if (act === 'reject') item.status = 'REJECTED';
@@ -436,8 +488,12 @@ async function runSearch() {
 
 // ---------- wiring ----------
 function init() {
-  els.apiBase.value = store.load('apiBase', els.apiBase.value);
-  els.wsUrl.value = store.load('wsUrl', els.wsUrl.value);
+  // Same-origin defaults unless the user stored an override (#130). Empty
+  // inputs (fresh clone served from any host) derive from window.location.
+  const storedApi = store.load('apiBase', '');
+  const storedWs = store.load('wsUrl', '');
+  els.apiBase.value = storedApi || els.apiBase.value.trim() || defaultApiBase();
+  els.wsUrl.value = storedWs || els.wsUrl.value.trim() || defaultWsUrl();
   els.projectId.value = state.projectId;
   els.sessionId.value = state.sessionId;
   els.agentName.value = store.load('agentName', '');
