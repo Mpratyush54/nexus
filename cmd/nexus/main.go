@@ -201,8 +201,8 @@ Commands:
   doctor                          probe server, daemon, and git
   migrate [--vault PATH] [--dry-run]   import legacy vault (see also: mem mcp local-mode)
 
-Global flags (env fallbacks: NEXUS_SERVER, NEXUS_TOKEN, NEXUS_DAEMON, NEXUS_PROJECT):
-  --server URL   central server base URL (default http://localhost:8080)
+Global flags (env fallbacks: NEXUS_SERVER / CENTRAL_SERVER_URL, NEXUS_TOKEN, NEXUS_DAEMON, NEXUS_PROJECT):
+  --server URL   central server base URL (default: env → ~/.config/central-memory/config.json → compile-time)
   --token TOK    bearer token (NEXUS_TOKEN / CENTRAL_MEMORY_TOKEN)
   --daemon URL   workspace daemon base URL (default http://localhost:7171)
   -p, --project  default project ID

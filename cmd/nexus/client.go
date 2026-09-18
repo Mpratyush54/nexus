@@ -13,10 +13,13 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+
+	"central-memory/internal/config"
 )
 
 // Config carries the CLI's connection settings. Values come from global
-// flags with environment-variable fallbacks (see defaultConfig).
+// flags with environment-variable / config-file / compile-default
+// fallbacks (see defaultConfig; Phase 9 issue #169).
 type Config struct {
 	ServerURL   string
 	Token       string
@@ -26,12 +29,18 @@ type Config struct {
 	JSON        bool
 }
 
-// defaultConfig resolves connection settings from the environment.
-// Ports are placeholders until the daemon/server entrypoints lock them;
-// every value is overridable via global flags.
+// defaultServerURL is the compile-time ServerURL fallback (Phase 9).
+// Override at build time:
+//
+//	go build -ldflags "-X main.defaultServerURL=https://api-nexus.pratyushes.dev" ./cmd/nexus
+var defaultServerURL = "https://api-nexus.pratyushes.dev"
+
+// defaultConfig resolves connection settings from the environment, local
+// config file, and compile-time default (tiers 2–4). Tier 1 is the
+// -server global flag applied in parseGlobalArgs.
 func defaultConfig() Config {
 	return Config{
-		ServerURL:   firstNonEmpty(os.Getenv("NEXUS_SERVER"), os.Getenv("CENTRAL_MEMORY_SERVER"), "http://localhost:8080"),
+		ServerURL:   config.ResolveServerURL(defaultServerURL),
 		Token:       firstNonEmpty(os.Getenv("NEXUS_TOKEN"), os.Getenv("CENTRAL_MEMORY_TOKEN"), ""),
 		DaemonURL:   firstNonEmpty(os.Getenv("NEXUS_DAEMON"), "http://localhost:7171"),
 		DaemonToken: os.Getenv("NEXUS_DAEMON_TOKEN"),
