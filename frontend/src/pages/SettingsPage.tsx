@@ -11,6 +11,8 @@ import {
   useUsage,
 } from '@/hooks/useAuthMutations'
 import { authApi } from '@/api/auth'
+import { notificationsApi } from '@/api/notifications'
+import { subscribeWebPush } from '@/lib/pwa'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 
@@ -27,6 +29,10 @@ export function SettingsPage() {
   const [minted, setMinted] = useState<string | null>(null)
   const [currentPassword, setCurrentPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
+  const [pushBusy, setPushBusy] = useState(false)
+  const [pushStatus, setPushStatus] = useState<string>(
+    typeof Notification !== 'undefined' ? Notification.permission : 'unsupported',
+  )
 
   const onSaveEmail = (e: FormEvent) => {
     e.preventDefault()
@@ -81,6 +87,37 @@ export function SettingsPage() {
           tone: 'danger',
         }),
     })
+  }
+
+  const onEnablePush = async () => {
+    setPushBusy(true)
+    try {
+      const { public_key } = await notificationsApi.vapidPublicKey()
+      const sub = await subscribeWebPush(public_key)
+      if (!sub) {
+        setPushStatus(Notification.permission)
+        push({ title: 'Push not enabled', detail: 'Permission denied or unsupported', tone: 'danger' })
+        return
+      }
+      const json = sub.toJSON()
+      await notificationsApi.subscribe({
+        endpoint: json.endpoint!,
+        keys: {
+          p256dh: json.keys?.p256dh ?? '',
+          auth: json.keys?.auth ?? '',
+        },
+      })
+      setPushStatus('granted')
+      push({ title: 'Push notifications on', tone: 'teal' })
+    } catch (err) {
+      push({
+        title: 'Push setup failed',
+        detail: err instanceof ApiError ? err.message : err instanceof Error ? err.message : 'Unknown error',
+        tone: 'danger',
+      })
+    } finally {
+      setPushBusy(false)
+    }
   }
 
   return (
@@ -150,6 +187,20 @@ export function SettingsPage() {
             Update password
           </Button>
         </form>
+      </GlassPanel>
+
+      <GlassPanel className="space-y-3 p-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <h2 className="text-sm font-medium text-fg">Notifications</h2>
+          <StatusPill tone={pushStatus === 'granted' ? 'teal' : 'neutral'}>{pushStatus}</StatusPill>
+        </div>
+        <p className="text-sm text-fg-dim">
+          Enable browser push for handoffs, reviews, and mentions. Delivery needs a real{' '}
+          <span className="font-mono text-xs">VAPID_PUBLIC_KEY</span> on the server.
+        </p>
+        <Button type="button" size="sm" disabled={pushBusy} onClick={() => void onEnablePush()}>
+          {pushBusy ? 'Enabling…' : 'Enable web push'}
+        </Button>
       </GlassPanel>
 
       <GlassPanel className="space-y-4 p-5">
