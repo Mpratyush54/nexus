@@ -26,6 +26,8 @@ const maxFileBytes = 1 << 20
 type MemoryItem struct {
 	ID             string
 	ProjectID      string
+	UserID         string
+	SessionID      string
 	Key            string
 	Content        string
 	ContextSnippet string
@@ -116,10 +118,11 @@ func ListTools() []Tool {
 		},
 		{
 			Name:        "memory_write",
-			Description: "Record a fact, decision, preference, constraint, or pattern as a PROPOSED memory. Content must be natural language, 20-2000 chars.",
+			Description: "Record a fact, decision, preference, constraint, or pattern as a PROPOSED memory. Content must be natural language, 20-2000 chars. level=personal requires user_id; level=session requires session_id.",
 			InputSchema: schema([]string{"key", "content"}, map[string]any{
 				"key": str, "content": str, "scope": str, "level": str,
 				"tags": strArr, "context_snippet": str, "project_id": str,
+				"user_id": str, "session_id": str,
 			}),
 		},
 		{
@@ -477,6 +480,8 @@ type memoryWriteArgs struct {
 	Tags           []string `json:"tags"`
 	ContextSnippet string   `json:"context_snippet"`
 	ProjectID      string   `json:"project_id"`
+	UserID         string   `json:"user_id"`
+	SessionID      string   `json:"session_id"`
 }
 
 func (s *Server) handleMemoryWrite(ctx context.Context, raw json.RawMessage) (any, *RPCError) {
@@ -509,13 +514,22 @@ func (s *Server) handleMemoryWrite(ctx context.Context, raw json.RawMessage) (an
 	if projectID == "" {
 		projectID = s.cfg.ProjectID
 	}
+	normLevel := strings.ToLower(level)
+	if normLevel == "personal" && strings.TrimSpace(a.UserID) == "" {
+		return nil, invalidParams("level \"personal\" requires user_id")
+	}
+	if normLevel == "session" && strings.TrimSpace(a.SessionID) == "" {
+		return nil, invalidParams("level \"session\" requires session_id")
+	}
 
 	item := &MemoryItem{
 		ProjectID:      projectID,
+		UserID:         strings.TrimSpace(a.UserID),
+		SessionID:      strings.TrimSpace(a.SessionID),
 		Key:            strings.TrimSpace(a.Key),
 		Content:        a.Content,
 		ContextSnippet: a.ContextSnippet,
-		Level:          strings.ToLower(level),
+		Level:          normLevel,
 		Scope:          strings.ToLower(scope),
 		Tags:           a.Tags,
 		Confidence:     1.0,
