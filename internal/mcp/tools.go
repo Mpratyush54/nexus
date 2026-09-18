@@ -256,9 +256,29 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 		limit = 50
 	}
 
-	items, err := s.store.SearchMemory(ctx, projectID, a.Query, a.Tags, limit)
-	if err != nil {
-		return nil, &RPCError{Code: ErrInternal, Message: "search failed: " + err.Error()}
+	var items []*MemoryItem
+	var err error
+	// Prefer vector search when the store exposes it (issue #165): embed the
+	// query via the configured provider (HashEmbed fallback) and rank by
+	// cosine similarity. Keyword SearchMemory is the fallback when the store
+	// has no vector path, the vector call fails, or no rows rank above zero.
+	usedVector := false
+	if vs, ok := s.store.(interface {
+		SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error)
+	}); ok {
+		vec := s.embedQuery(ctx, a.Query)
+		if len(vec) == EmbedDims {
+			if vitems, verr := vs.SearchMemoryVector(ctx, projectID, vec, limit); verr == nil && len(vitems) > 0 {
+				items = vitems
+				usedVector = true
+			}
+		}
+	}
+	if !usedVector {
+		items, err = s.store.SearchMemory(ctx, projectID, a.Query, a.Tags, limit)
+		if err != nil {
+			return nil, &RPCError{Code: ErrInternal, Message: "search failed: " + err.Error()}
+		}
 	}
 	// Filter before dedupe (issue #135): dedupe keeps the most-specific
 	// level per key, so deduping first would drop a key entirely when the

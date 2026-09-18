@@ -5,7 +5,8 @@
 // projects, CachedLeaves for status); mcp serves the MCP tool surface over
 // stdio via (mcp.Server).ServeStdio with local wiring (in-memory stores,
 // DaemonWorkspaceProvider/DaemonFileProxy rooted at the current directory,
-// default HashEmbed until LLM embeddings land via Config.Embed).
+// default HashEmbed via CENTRAL_EMBEDDING_* / Config.Embedder; openai and
+// ollama providers fall back to HashEmbed on failure).
 //
 // Root main.go is deliberately NOT edited — package-main funcs there are
 // unexportable, so this entrypoint calls the same internal funcs rather than
@@ -22,6 +23,7 @@ import (
 	"syscall"
 
 	"central-memory/internal/config"
+	memctx "central-memory/internal/context"
 	"central-memory/internal/mcp"
 	"central-memory/internal/project"
 	"central-memory/internal/store"
@@ -65,6 +67,19 @@ func memoryDTO(item *store.MemoryItem) *mcp.MemoryItem {
 
 func (s mcpStore) SearchMemory(ctx context.Context, projectID, query string, tags []string, limit int) ([]*mcp.MemoryItem, error) {
 	items, err := s.mem.SearchMemory(ctx, projectID, query, tags, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*mcp.MemoryItem, 0, len(items))
+	for _, item := range items {
+		out = append(out, memoryDTO(item))
+	}
+	return out, nil
+}
+
+// SearchMemoryVector enables MCP memory_search vector ranking (issue #165).
+func (s mcpStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*mcp.MemoryItem, error) {
+	items, err := s.mem.SearchMemoryVector(ctx, projectID, queryVec, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -239,6 +254,7 @@ func cmdMCP() error {
 	}
 	srv := mcp.NewServer(mcpStore{mem}, mcp.Config{
 		ProjectID: p.ID, ProjectName: name, WorkspacePath: root,
+		Embedder: memctx.EmbedderFromEnv(),
 	})
 	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("mem mcp: %w", err)
