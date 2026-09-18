@@ -233,7 +233,7 @@ func (s *Server) handleWorkspaceRegister(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "machine_id and path are required")
 		return
 	}
-	ws.ID = "" // server assigns the ID; client must not set it
+	ws.ID = ""                 // server assigns the ID; client must not set it
 	ws.UserID = authSubject(r) // attribution is the authenticated user (issue #141)
 	// Server-managed fields are never accepted from JSON (issue #149):
 	// designation only flows from the election path; liveness/timestamps
@@ -460,7 +460,7 @@ func (s *Server) handleEpisodeCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "quota exceeded: "+reason)
 		return
 	}
-	ep.ID = "" // server assigns the ID
+	ep.ID = ""                    // server assigns the ID
 	ep.CreatedBy = authSubject(r) // attribution is the authenticated user (issue #89)
 	if err := s.Store.CreateEpisode(r.Context(), &ep); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create episode: "+err.Error())

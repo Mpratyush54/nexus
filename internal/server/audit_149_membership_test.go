@@ -86,8 +86,8 @@ func TestRegisterStripsDesignation(t *testing.T) {
 		t.Fatalf("register = %d", rec.Code)
 	}
 	var ws struct {
-		IsDesignatedProcessor bool `json:"is_designated_processor"`
-		IsOnline              bool `json:"is_online"`
+		IsDesignatedProcessor bool   `json:"is_designated_processor"`
+		IsOnline              bool   `json:"is_online"`
 		ID                    string `json:"id"`
 	}
 	decodeBody(t, rec, &ws)
