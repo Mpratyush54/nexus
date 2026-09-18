@@ -90,16 +90,18 @@ type Store interface {
 
 // MemStore is a thread-safe in-memory Store implementation, ideal for unit testing and local development.
 type MemStore struct {
-	mu         sync.RWMutex
-	projects   map[string]*Project
-	workspaces map[string]*Workspace
-	members    map[string]map[string]bool // projectID -> granted userIDs (issue #149)
-	memories   map[string]*MemoryItem
-	episodes   map[string]*Episode
-	events     []*Event
-	eventSeq   int64
-	subs       map[int64]*memSubscription
-	subSeq     int64
+	mu          sync.RWMutex
+	projects    map[string]*Project
+	workspaces  map[string]*Workspace
+	members     map[string]map[string]bool         // projectID -> granted userIDs (issue #149)
+	memberRoles map[string]map[string]string       // projectID -> userID -> role name (issue #163)
+	roles       map[string]map[string]*ProjectRole // projectID -> roleID -> custom role (issue #163)
+	memories    map[string]*MemoryItem
+	episodes    map[string]*Episode
+	events      []*Event
+	eventSeq    int64
+	subs        map[int64]*memSubscription
+	subSeq      int64
 }
 
 // memSubscription is one in-process event subscriber.
@@ -114,13 +116,15 @@ var _ Store = (*MemStore)(nil)
 // NewMemStore returns an initialized in-memory store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		projects:   make(map[string]*Project),
-		workspaces: make(map[string]*Workspace),
-		members:    make(map[string]map[string]bool),
-		memories:   make(map[string]*MemoryItem),
-		episodes:   make(map[string]*Episode),
-		events:     make([]*Event, 0),
-		subs:       make(map[int64]*memSubscription),
+		projects:    make(map[string]*Project),
+		workspaces:  make(map[string]*Workspace),
+		members:     make(map[string]map[string]bool),
+		memberRoles: make(map[string]map[string]string),
+		roles:       make(map[string]map[string]*ProjectRole),
+		memories:    make(map[string]*MemoryItem),
+		episodes:    make(map[string]*Episode),
+		events:      make([]*Event, 0),
+		subs:        make(map[int64]*memSubscription),
 	}
 }
 
