@@ -10,6 +10,10 @@
 // is set, and starts the background extraction Runtime (Harvester Layer 2 +
 // Watcher Layer 3 + Memory Processor designated-gated, issues #99/#115)
 // plus the push-file Materializer (issue #81, daemon-backed I/O).
+//
+// Phase 9 (issue #169): also serves the browser CORS proxy on
+// 127.0.0.1:7272 and resolves -server via the 4-tier cascade
+// (flag → CENTRAL_SERVER_URL/NEXUS_SERVER → config file → defaultServerURL).
 package main
 
 import (
@@ -19,6 +23,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,9 +31,16 @@ import (
 	"strings"
 	"syscall"
 
+	"central-memory/internal/config"
 	"central-memory/internal/daemon"
 	"central-memory/internal/materializer"
 )
+
+// defaultServerURL is the compile-time ServerURL fallback (Phase 9).
+// Override at build time:
+//
+//	go build -ldflags "-X main.defaultServerURL=https://api-nexus.pratyushes.dev" ./cmd/daemon
+var defaultServerURL = "https://api-nexus.pratyushes.dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -72,9 +84,11 @@ func run(args []string) error {
 	root := fs.String("root", ".", "workspace root directory")
 	bind := fs.String("bind", defaultBind(), "bind address (127.0.0.1 local, 0.0.0.0 in containers)")
 	port := fs.Int("port", defaultPort(), "listen port")
-	serverURL := fs.String("server", os.Getenv("CENTRAL_SERVER_URL"), "central server base URL (empty = local-only mode, no register/heartbeat)")
+	// Tier 1 is the -server flag; its default is tiers 2–4 (env → config → compile).
+	serverURL := fs.String("server", config.ResolveServerURL(defaultServerURL), "central server base URL (empty = local-only mode, no register/heartbeat)")
 	serverToken := fs.String("server-token", os.Getenv("CENTRAL_SERVER_TOKEN"), "JWT bearer token for central-server calls (issue #155; required when the server has auth enabled)")
 	project := fs.String("project", strings.TrimSpace(os.Getenv("CENTRAL_PROJECT")), "project name for extraction (default: workspace folder base)")
+	proxyAddr := fs.String("proxy", daemon.DefaultProxyAddr, "browser CORS proxy listen address (empty disables)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -98,7 +112,7 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	d.ServerURL = *serverURL
+	d.ServerURL = strings.TrimSpace(*serverURL)
 	d.ServerToken = strings.TrimSpace(*serverToken)
 
 	// Background extraction pipeline (issue #115): Harvester + Watcher +
@@ -139,6 +153,22 @@ func run(args []string) error {
 		serveErr <- d.Start(addr)
 	}()
 
+	var proxy *daemon.CORSProxy
+	proxyErr := make(chan error, 1)
+	if pa := strings.TrimSpace(*proxyAddr); pa != "" {
+		proxy = daemon.NewCORSProxy(d)
+		proxy.Addr = pa
+		go func() {
+			err := proxy.Start()
+			if err != nil && !errors.Is(err, http.ErrServerClosed) {
+				proxyErr <- err
+				return
+			}
+			proxyErr <- nil
+		}()
+		log.Printf("daemon: CORS proxy listening on %s (read-only /local/*)", pa)
+	}
+
 	if d.ServerURL != "" {
 		if err := d.Register(ctx, d.ServerURL); err != nil {
 			log.Printf("daemon: initial register failed: %v", err)
@@ -157,15 +187,29 @@ func run(args []string) error {
 	case <-ctx.Done():
 		log.Print("daemon: shutdown signal received, draining")
 	case err := <-serveErr:
-		if err != nil && !errors.Is(err, context.Canceled) {
+		if proxy != nil {
+			_ = proxy.Close()
+		}
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
 			return err
 		}
 		return nil
+	case err := <-proxyErr:
+		_ = d.Close()
+		if err != nil {
+			return fmt.Errorf("daemon: CORS proxy: %w", err)
+		}
+		return nil
+	}
+	if proxy != nil {
+		if err := proxy.Close(); err != nil {
+			log.Printf("daemon: CORS proxy close: %v", err)
+		}
 	}
 	if err := d.Close(); err != nil {
 		return err
 	}
-	if err := <-serveErr; err != nil && !errors.Is(err, context.Canceled) {
+	if err := <-serveErr; err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
 	return nil
