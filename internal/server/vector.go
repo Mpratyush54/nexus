@@ -18,6 +18,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"central-memory/internal/store"
 )
 
 // parseEmbeddingParam parses the optional ?embedding= query parameter: a
@@ -61,6 +63,11 @@ func parseEmbeddingParam(raw string) ([]float32, error) {
 	}
 	if len(vec) == 0 {
 		return nil, errors.New("empty embedding vector")
+	}
+	// Application-level dimension gate (issue #105): the schema is
+	// vector(1536), so anything else would only crash the SQL query.
+	if err := store.ValidateEmbeddingDim(vec); err != nil {
+		return nil, err
 	}
 	return vec, nil
 }

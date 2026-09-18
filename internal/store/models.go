@@ -51,7 +51,7 @@ type MemoryItem struct {
 	Key            string    `json:"key"`
 	Content        string    `json:"content"`
 	ContextSnippet string    `json:"context_snippet,omitempty"`
-	Level          string    `json:"level"` // organization | project | personal | session
+	Level          string    `json:"level"` // organization | project | personal | session | ephemeral
 	Scope          string    `json:"scope"` // fact | preference | decision | constraint | pattern | episode_summary
 	Embedding      []float32 `json:"embedding,omitempty"`
 	Tags           []string  `json:"tags,omitempty"`
@@ -74,7 +74,7 @@ type Episode struct {
 	ProjectID     string    `json:"project_id"`
 	SessionID     string    `json:"session_id,omitempty"`
 	Title         string    `json:"title"`
-	EpisodeType   string    `json:"episode_type"` // bug_fix | feature | refactor | incident | investigation
+	EpisodeType   string    `json:"episode_type"` // bug_fix | feature | refactor | incident | investigation | onboarding
 	Trigger       string    `json:"trigger,omitempty"`
 	Investigation string    `json:"investigation,omitempty"`
 	RootCause     string    `json:"root_cause,omitempty"`

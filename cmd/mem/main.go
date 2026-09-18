@@ -32,6 +32,15 @@ type mcpStore struct {
 
 var _ mcp.Store = mcpStore{}
 
+// memoryDTO maps a store row to the MCP view. Field fidelity (Issue #116):
+// mcp.MemoryItem intentionally carries only the MCP tool surface (ID,
+// ProjectID, Key, Content, ContextSnippet, Level, Scope, Tags, Confidence,
+// Status, Source). Store-only fields — UserID, SessionID, OrgID, Embedding,
+// SourceEventID, ProposedBy, ConfirmedBy, SupersededBy, UseCount,
+// LastUsedAt, CreatedAt, UpdatedAt — remain on the store row where decay /
+// relevance (plan §1.7) is served; they are documented here, not silently
+// dropped. Do NOT widen mcp.MemoryItem here (internal/mcp is read-only);
+// carry those fields through the store row instead.
 func memoryDTO(item *store.MemoryItem) *mcp.MemoryItem {
 	return &mcp.MemoryItem{
 		ID: item.ID, ProjectID: item.ProjectID, Key: item.Key, Content: item.Content,
@@ -61,10 +70,36 @@ func (s mcpStore) CreateMemoryItem(ctx context.Context, item *mcp.MemoryItem) er
 	if err := s.mem.CreateMemoryItem(ctx, row); err != nil {
 		return err
 	}
-	*item = *memoryDTO(row)
+	// Write back only store-minted fields (Issue #116 struct-clobber fix):
+	// ID plus server defaults. Caller-supplied Key/Content/Tags/etc are
+	// preserved verbatim — never overwritten from the row.
+	copyMintedMemoryFields(item, row)
 	return nil
 }
 
+// copyMintedMemoryFields copies only fields the store may mint or default
+// (ID, Confidence/Status/Level defaults) back onto the caller's item.
+func copyMintedMemoryFields(item *mcp.MemoryItem, row *store.MemoryItem) {
+	if row.ID != "" {
+		item.ID = row.ID
+	}
+	if row.Status != "" {
+		item.Status = row.Status
+	}
+	if item.Confidence == 0 && row.Confidence != 0 {
+		item.Confidence = row.Confidence
+	}
+	if item.Level == "" && row.Level != "" {
+		item.Level = row.Level
+	}
+}
+
+// episodeDTO maps a store episode to the MCP view. Field fidelity (Issue
+// #116): mcp.Episode carries the tool surface only; store-only fields —
+// Investigation, SessionID, Embedding, OpenedAt, ResolvedAt, CreatedBy,
+// ResolvedBy — stay on the store row. Investigation notes are preserved in
+// the store and served via direct store reads; the MCP episode_report /
+// episode_search surface does not expose them (internal/mcp is read-only).
 func episodeDTO(ep *store.Episode) *mcp.Episode {
 	return &mcp.Episode{
 		ID: ep.ID, ProjectID: ep.ProjectID, Title: ep.Title, EpisodeType: ep.EpisodeType,
@@ -96,7 +131,13 @@ func (s mcpStore) CreateEpisode(ctx context.Context, ep *mcp.Episode) error {
 	if err := s.mem.CreateEpisode(ctx, row); err != nil {
 		return err
 	}
-	*ep = *episodeDTO(row)
+	// Write back only store-minted fields (Issue #116 struct-clobber fix).
+	if row.ID != "" {
+		ep.ID = row.ID
+	}
+	if row.Status != "" {
+		ep.Status = row.Status
+	}
 	return nil
 }
 
@@ -143,41 +184,29 @@ func main() {
 func usage() {
 	fmt.Println(`mem — central memory CLI client (cmd entrypoint, issue #39)
 
-  mem status                       show system status
-  mem projects                     list detected projects
-  mem mcp                          serve MCP tools over stdio (for agents)`)
+  mem status                       show system status (shared with root mem; server health: nexus status)
+  mem projects                     list detected projects (shared with root mem; see also: nexus memory search)
+  mem mcp                          serve MCP tools over stdio (for agents)
+
+See also: root mem (mem daemon) and nexus (nexus status|memory|migrate) — projects/status share internal/project helpers.`)
 }
 
-// cmdProjects mirrors the root CLI: project.Leaves + project.Fingerprint.
+// cmdProjects unifies with the root CLI via internal/project helpers (Issue #84).
 func cmdProjects() error {
-	for _, leaf := range project.Leaves() {
-		origin, root := project.Fingerprint(leaf)
-		id := leaf
-		if origin != "" {
-			id += "  [" + origin + "]"
-		} else if root != "" && len(root) >= 12 {
-			id += "  [root " + root[:12] + "]"
-		}
-		fmt.Println(id)
-	}
-	return nil
+	return project.PrintProjects(os.Stdout)
 }
 
-// cmdStatus mirrors the root CLI: project.CachedLeaves health summary.
+// cmdStatus unifies with the root CLI via internal/project helpers (Issue #84).
 func cmdStatus() error {
-	fmt.Println("mem status — multiplayer central memory")
-	fmt.Println()
-	leaves := project.CachedLeaves()
-	fmt.Printf("projects detected: %d\n", len(leaves))
-	fmt.Println("daemon: not yet implemented")
-	fmt.Println("server: not yet implemented")
-	return nil
+	return project.PrintStatus(os.Stdout)
 }
 
 // cmdMCP serves the 8 plan §1.4 tools on stdin/stdout until EOF or SIGINT/
 // SIGTERM. Local wiring only: in-memory memory/episode stores (writes land
 // as PROPOSED, nothing persists), live git state + sandboxed files via the
-// daemon helpers for the current directory.
+// daemon helpers for the current directory. Project resolution uses the full
+// identity triple (Issue #116): Fingerprint(origin, root) of the workspace
+// root plus the folder name fallback — never folder-name only.
 func cmdMCP() error {
 	root, err := filepath.Abs(".")
 	if err != nil {
@@ -187,8 +216,9 @@ func cmdMCP() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	origin, rootCommit := project.Fingerprint(root)
 	mem := store.NewMemStore()
-	p, err := mem.ResolveProject(ctx, "", "", name)
+	p, err := mem.ResolveProject(ctx, origin, rootCommit, name)
 	if err != nil {
 		return fmt.Errorf("mem mcp: resolve project: %w", err)
 	}

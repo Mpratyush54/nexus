@@ -3,17 +3,18 @@
 //
 // Resolution order (lower overrides higher on key collision):
 //
-//	SESSION > PERSONAL > PROJECT > ORGANIZATION
+//	EPHEMERAL > SESSION > PERSONAL > PROJECT > ORGANIZATION
 //
 // Sections are filled in priority order under a character budget
 // (default 4000 chars, ~1000 tokens):
 //
 //  1. Active task (always included)
-//  2. Session memories
-//  3. Relevant episodes
-//  4. Personal memories
-//  5. Project memories
-//  6. Organization memories
+//  2. Ephemeral memories (working memory, never outlives its session)
+//  3. Session memories
+//  4. Relevant episodes
+//  5. Personal memories
+//  6. Project memories
+//  7. Organization memories
 //
 // Lower-priority items that do not fit are dropped; the XML stays
 // well-formed. Retrieval counts are returned alongside the XML so the
@@ -34,10 +35,29 @@ import (
 // DefaultBudget is the default context size cap in characters (~1000 tokens).
 const DefaultBudget = 4000
 
+// AgentBudget resolves the builder budget for a named agent (issue #41):
+// the agent registry's seed budget when agentName is known (claude 10k,
+// copilot 8k, cursor/windsurf 6k), otherwise fallback (<= 0 selects
+// DefaultBudget). Pass the result as ContextInput.Budget so per-agent caps
+// flow into AssembleXML instead of the static default.
+func AgentBudget(agentName string, fallback int) int {
+	if strings.TrimSpace(agentName) != "" {
+		if a, err := store.NewAgentRegistry().GetAgent(agentName); err == nil && a.ContextBudget > 0 {
+			return a.ContextBudget
+		}
+	}
+	if fallback <= 0 {
+		return DefaultBudget
+	}
+	return fallback
+}
+
 // LevelRank maps a memory level to its override precedence. Higher wins.
 // Unknown levels rank below organization so they never shadow real data.
 func LevelRank(level string) int {
 	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "ephemeral":
+		return 4
 	case "session":
 		return 3
 	case "personal":
@@ -52,7 +72,7 @@ func LevelRank(level string) int {
 }
 
 // ResolveOverrides collapses key collisions so the lowest (most specific)
-// level wins: SESSION > PERSONAL > PROJECT > ORGANIZATION. Level ties
+// level wins: EPHEMERAL > SESSION > PERSONAL > PROJECT > ORGANIZATION. Level ties
 // break toward higher base confidence; full ties keep the first item seen.
 // Output order follows first-seen winning keys for determinism.
 func ResolveOverrides(items []*store.MemoryItem) []*store.MemoryItem {
@@ -84,17 +104,18 @@ func ResolveOverrides(items []*store.MemoryItem) []*store.MemoryItem {
 // should already be relevance-ordered (e.g. HybridSearch output);
 // same-key collisions across slices resolve with lower levels winning.
 type ContextInput struct {
-	ProjectName   string
-	Branch        string
-	Updated       time.Time
-	Task          *store.Task
-	SessionTitle  string
-	PersonalUser  string
-	SessionItems  []*store.MemoryItem
-	Episodes      []*store.Episode
-	PersonalItems []*store.MemoryItem
-	ProjectItems  []*store.MemoryItem
-	OrgItems      []*store.MemoryItem
+	ProjectName    string
+	Branch         string
+	Updated        time.Time
+	Task           *store.Task
+	SessionTitle   string
+	PersonalUser   string
+	EphemeralItems []*store.MemoryItem
+	SessionItems   []*store.MemoryItem
+	Episodes       []*store.Episode
+	PersonalItems  []*store.MemoryItem
+	ProjectItems   []*store.MemoryItem
+	OrgItems       []*store.MemoryItem
 	// Budget caps the XML in characters; <= 0 selects DefaultBudget.
 	Budget int
 	// Now anchors confidence decay and date rendering; zero means UTC now.
@@ -240,8 +261,9 @@ func AssembleXML(in ContextInput) AssembledContext {
 	// Global override resolution: an item shadowed by a lower level must
 	// not reappear in its own section.
 	shadowed := make(map[string]string) // key -> winning level
-	for _, item := range append(append(append(append(
+	for _, item := range append(append(append(append(append(
 		[]*store.MemoryItem{},
+		in.EphemeralItems...),
 		in.SessionItems...), in.PersonalItems...), in.ProjectItems...), in.OrgItems...) {
 		if item == nil {
 			continue
@@ -264,6 +286,7 @@ func AssembleXML(in ContextInput) AssembledContext {
 		return out
 	}
 	session := visible(in.SessionItems, "session")
+	ephemeral := visible(in.EphemeralItems, "ephemeral")
 	personal := visible(in.PersonalItems, "personal")
 	project := visible(in.ProjectItems, "project")
 	org := visible(in.OrgItems, "organization")
@@ -309,6 +332,11 @@ func AssembleXML(in ContextInput) AssembledContext {
 			units = append(units, renderEpisode(ep))
 		}
 		return units
+	}
+	if len(ephemeral) > 0 {
+		sections = append(sections, section{
+			open: `<ephemeral>`, close: `</ephemeral>`, units: mkItems(ephemeral),
+		})
 	}
 	if len(session) > 0 {
 		title := in.SessionTitle

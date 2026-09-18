@@ -45,16 +45,33 @@ func NewAuthenticator(key []byte) *Authenticator {
 	return &Authenticator{key: key}
 }
 
-// NewAuthenticatorFromEnv builds an Authenticator from CENTRAL_MEMORY_JWT_KEY,
-// falling back to an insecure dev key. The fallback is deliberate for local
-// development and unit tests; production must set the env var (backed by
-// AWS Secrets Manager when RDS Aurora is wired in).
+// devFallbackKey is the insecure local-only default. It is used only when
+// ALLOW_DEV_JWT=1 explicitly opts into dev mode (issue #85). Production
+// fails closed with an empty key: Generate refuses to mint and Validate
+// rejects everything.
+const devFallbackKey = "dev-only-insecure-key-replace-via-env"
+
+// NewAuthenticatorFromEnv builds an Authenticator standardizing on
+// JWT_SECRET (canonical) with CENTRAL_MEMORY_JWT_KEY as a legacy fallback
+// (issue #85). When neither is set the authenticator fails closed unless
+// ALLOW_DEV_JWT=1 explicitly enables the insecure dev default.
 func NewAuthenticatorFromEnv() *Authenticator {
-	key := os.Getenv("CENTRAL_MEMORY_JWT_KEY")
-	if key == "" {
-		key = "dev-only-insecure-key-replace-via-env"
+	if key := os.Getenv("JWT_SECRET"); key != "" {
+		return NewAuthenticator([]byte(key))
 	}
-	return NewAuthenticator([]byte(key))
+	if key := os.Getenv("CENTRAL_MEMORY_JWT_KEY"); key != "" {
+		return NewAuthenticator([]byte(key))
+	}
+	if os.Getenv("ALLOW_DEV_JWT") == "1" {
+		return NewAuthenticator([]byte(devFallbackKey))
+	}
+	return NewAuthenticator(nil)
+}
+
+// IsConfigured reports whether the authenticator can mint/validate tokens
+// (non-empty key). Unconfigured authenticators fail closed.
+func (a *Authenticator) IsConfigured() bool {
+	return a != nil && len(a.key) > 0
 }
 
 var b64 = base64.RawURLEncoding

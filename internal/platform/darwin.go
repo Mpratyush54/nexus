@@ -74,28 +74,19 @@ func (s darwinService) Uninstall() error {
 	if err != nil {
 		return err
 	}
-	// Idempotent: no plist means already uninstalled. Otherwise a bootout
-	// failure must surface — silently dropping it leaves the daemon running
-	// while reporting success.
-	if _, serr := os.Stat(path); serr != nil {
-		if os.IsNotExist(serr) {
-			return nil
+	// Issue #111: propagate bootout failures (a stuck job must not be
+	// reported as removed). "No such process / not found" means already
+	// unloaded and is not a failure.
+	if out, err := exec.Command("launchctl", "bootout", "gui/"+uid(), path).CombinedOutput(); err != nil {
+		lower := strings.ToLower(string(out))
+		if !(strings.Contains(lower, "no such process") || strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") || strings.Contains(lower, "could not find")) {
+			return fmt.Errorf("platform: launchctl bootout: %w: %s", err, strings.TrimSpace(string(out)))
 		}
-		return fmt.Errorf("platform: stat launchd plist: %w", serr)
 	}
-	bootOut, bootErr := exec.Command("launchctl", "bootout", "gui/"+uid(), path).CombinedOutput()
-	removeErr := error(nil)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		removeErr = fmt.Errorf("platform: remove launchd plist: %w", err)
+		return fmt.Errorf("platform: remove launchd plist: %w", err)
 	}
-	switch {
-	case bootErr != nil && removeErr != nil:
-		return fmt.Errorf("platform: launchctl bootout: %w: %s; %v", bootErr, strings.TrimSpace(string(bootOut)), removeErr)
-	case bootErr != nil:
-		return fmt.Errorf("platform: launchctl bootout: %w: %s", bootErr, strings.TrimSpace(string(bootOut)))
-	default:
-		return removeErr
-	}
+	return nil
 }
 
 func (s darwinService) Status() (ServiceStatus, error) {

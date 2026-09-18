@@ -75,18 +75,14 @@ func (s linuxService) Uninstall() error {
 	if err != nil {
 		return err
 	}
-	// Idempotent: a machine that never installed the unit is already
-	// uninstalled. Any other state must surface systemctl failures instead
-	// of reporting success while the unit stays enabled.
-	if _, serr := os.Stat(path); serr != nil {
-		if os.IsNotExist(serr) {
-			return nil
+	// Issue #111: propagate systemctl failures instead of reporting success.
+	// A missing unit file is not fatal, but a failed disable/reload is.
+	if out, err := exec.Command("systemctl", "--user", "disable", "--now", s.effectiveUnit()).CombinedOutput(); err != nil {
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) && strings.Contains(strings.ToLower(string(out)), "no such file") {
+			// Already uninstalled: unit gone and systemctl confirms it.
+		} else {
+			return fmt.Errorf("platform: systemctl disable: %w: %s", err, strings.TrimSpace(string(out)))
 		}
-		return fmt.Errorf("platform: stat systemd unit: %w", serr)
-	}
-	disableOut, disableErr := exec.Command("systemctl", "--user", "disable", "--now", s.effectiveUnit()).CombinedOutput()
-	if disableErr != nil {
-		return fmt.Errorf("platform: systemctl disable: %w: %s", disableErr, strings.TrimSpace(string(disableOut)))
 	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("platform: remove systemd unit: %w", err)
@@ -109,15 +105,8 @@ func (s linuxService) Status() (ServiceStatus, error) {
 		return StatusUnknown, fmt.Errorf("platform: stat systemd unit: %w", err)
 	}
 	out, err := exec.Command("systemctl", "--user", "is-active", s.effectiveUnit()).CombinedOutput()
-	state := strings.TrimSpace(strings.ToLower(string(out)))
-	switch {
-	case state == "active" && err == nil:
+	if strings.TrimSpace(strings.ToLower(string(out))) == "active" && err == nil {
 		return StatusRunning, nil
-	case state == "" || state == "unknown":
-		// systemctl could not determine the state (e.g. no user bus):
-		// report unknown rather than a false stopped.
-		return StatusUnknown, nil
-	default:
-		return StatusStopped, nil
 	}
+	return StatusStopped, nil
 }

@@ -8,6 +8,8 @@ package store
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -62,10 +64,29 @@ func scanEpisode(row pgx.Row) (*Episode, error) {
 	return &ep, nil
 }
 
-// CreateEpisode opens a new episode arc.
+// CreateEpisode opens a new episode arc. The episode type is validated
+// against the episode_type CHECK set (issue #119) and the status defaults
+// to OPEN (a caller-supplied status must still be a known state).
 func (s *PostgresStore) CreateEpisode(ctx context.Context, ep *Episode) error {
-	if ep.Status == "" {
+	if strings.TrimSpace(ep.Title) == "" {
+		return fmt.Errorf("store: episode title is required")
+	}
+	if strings.TrimSpace(ep.EpisodeType) == "" {
+		return fmt.Errorf("store: episode_type is required (want bug_fix|feature|refactor|incident|investigation|onboarding)")
+	}
+	if err := ValidateEpisodeType(ep.EpisodeType); err != nil {
+		return err
+	}
+	if err := ValidateEmbeddingDim(ep.Embedding); err != nil {
+		return err
+	}
+	if strings.TrimSpace(ep.Status) == "" {
 		ep.Status = "OPEN"
+	} else {
+		ep.Status = strings.ToUpper(strings.TrimSpace(ep.Status))
+		if err := ValidateEpisodeStatus(ep.Status); err != nil {
+			return err
+		}
 	}
 	if len(ep.Tags) == 0 {
 		ep.Tags = []string{}
@@ -104,18 +125,25 @@ func (s *PostgresStore) GetEpisode(ctx context.Context, id string) (*Episode, er
 	return ep, err
 }
 
-// ResolveEpisode closes the arc with resolution + verification notes.
+// ResolveEpisode closes the arc with resolution + verification notes
+// (issue #103). The write is conditional on the arc still being open
+// (OPEN or INVESTIGATING): RESOLVED/WONT_FIX are terminal and re-resolution
+// fails instead of overwriting. Zero touched rows distinguish unknown ids
+// (ErrNotFound) from terminal-state conflicts (ErrConflict).
 func (s *PostgresStore) ResolveEpisode(ctx context.Context, id, resolution, verification, resolvedBy string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE episodes SET status = 'RESOLVED',
 			resolution = NULLIF($2,''), verification = NULLIF($3,''),
 			resolved_by = $4::uuid, resolved_at = now()
-		 WHERE id = $1::uuid`, id, resolution, verification, nullText(resolvedBy))
+		 WHERE id = $1::uuid AND status IN ('OPEN','INVESTIGATING')`, id, resolution, verification, nullText(resolvedBy))
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		if _, gerr := s.GetEpisode(ctx, id); gerr != nil {
+			return gerr
+		}
+		return fmt.Errorf("store: episode %s is not open (only OPEN/INVESTIGATING resolve): %w", id, ErrConflict)
 	}
 	return nil
 }
@@ -137,7 +165,7 @@ func (s *PostgresStore) SearchEpisodes(ctx context.Context, projectID, errorPatt
 		                          OR COALESCE(trigger,'') ILIKE '%'||$3||'%'
 		                          OR COALESCE(root_cause,'') ILIKE '%'||$3||'%'
 		                          OR COALESCE(resolution,'') ILIKE '%'||$3||'%'))
-		  ORDER BY opened_at DESC
+		  ORDER BY opened_at DESC, id DESC
 		  LIMIT $4`,
 		projectID, errorPattern, query, limit)
 	if err != nil {

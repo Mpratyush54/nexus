@@ -218,3 +218,126 @@ func TestBranchMaxDepth(t *testing.T) {
 		t.Fatal("fork past max depth succeeded, want error")
 	}
 }
+
+func TestListBranchItemsCopyRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	pid := testProject(t, s)
+
+	main, err := s.EnsureMainBranch(ctx, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := s.ForkBranch(ctx, main.ID, "enum-src", "u", "private", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh child enumerates empty (fork copies zero rows).
+	got, err := s.ListBranchItems(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("fresh child items = %d, want 0", len(got))
+	}
+	// Unknown branch -> ErrNotFound.
+	if _, err := s.ListBranchItems(ctx, "br_does_not_exist"); err != ErrNotFound {
+		t.Fatalf("ListBranchItems unknown err = %v, want ErrNotFound", err)
+	}
+
+	// Two visible rows + one REJECTED row (invisible to branch reads).
+	if err := s.WriteToBranch(ctx, child.ID, &MemoryItem{Key: "a", Content: "alpha content here", Status: "CONFIRMED"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteToBranch(ctx, child.ID, &MemoryItem{Key: "b", Content: "beta content here!!", Status: "PROPOSED"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.WriteToBranch(ctx, child.ID, &MemoryItem{Key: "junk", Content: "rejected content!!", Status: "REJECTED"}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.ListBranchItems(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Key != "a" || got[1].Key != "b" {
+		t.Fatalf("ListBranchItems = %v, want sorted [a b]", got)
+	}
+
+	// Copy onto a sibling: latest-per-key rows land as fresh PROPOSED rows.
+	sib, err := s.ForkBranch(ctx, main.ID, "enum-dst", "u", "private", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.CopyItemsToBranch(ctx, child.ID, sib.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("copied = %d, want 2", n)
+	}
+	dst, err := s.ListBranchItems(ctx, sib.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dst) != 2 {
+		t.Fatalf("dst items = %d, want 2", len(dst))
+	}
+	for _, m := range dst {
+		if m.Status != "PROPOSED" {
+			t.Fatalf("dst item %q status = %q, want PROPOSED", m.Key, m.Status)
+		}
+		if m.ID == "" {
+			t.Fatalf("dst item %q has empty id, want fresh row", m.Key)
+		}
+	}
+	// Source rows keep their own ids/statuses (copy, not move).
+	src, _ := s.ListBranchItems(ctx, child.ID)
+	byKey := map[string]*MemoryItem{}
+	for _, m := range src {
+		byKey[m.Key] = m
+	}
+	if byKey["a"].Status != "CONFIRMED" {
+		t.Fatalf("source item a status = %q, want CONFIRMED (untouched)", byKey["a"].Status)
+	}
+	for _, m := range dst {
+		if m.ID == byKey[m.Key].ID {
+			t.Fatalf("dst item %q reuses source id %q, want fresh row", m.Key, m.ID)
+		}
+	}
+
+	// Unknown endpoints -> ErrNotFound, nothing copied.
+	if _, err := s.CopyItemsToBranch(ctx, "br_does_not_exist", sib.ID); err != ErrNotFound {
+		t.Fatalf("copy from unknown err = %v, want ErrNotFound", err)
+	}
+	if _, err := s.CopyItemsToBranch(ctx, child.ID, "br_does_not_exist"); err != ErrNotFound {
+		t.Fatalf("copy to unknown err = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSetWorkspaceBranchMemStore(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	pid := testProject(t, s)
+
+	ws := &Workspace{ProjectID: pid, UserID: "u", MachineID: "m1", Path: "/tmp/ws1"}
+	if err := s.RegisterWorkspace(ctx, ws); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetWorkspaceBranch(ctx, ws.ID, "feat-x"); err != nil {
+		t.Fatal(err)
+	}
+	active, err := s.GetActiveWorkspace(ctx, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Branch != "feat-x" {
+		t.Fatalf("workspace branch = %q, want feat-x", active.Branch)
+	}
+	if err := s.SetWorkspaceBranch(ctx, "ws_does_not_exist", "feat-x"); err != ErrNotFound {
+		t.Fatalf("unknown workspace err = %v, want ErrNotFound", err)
+	}
+	if err := s.SetWorkspaceBranch(ctx, ws.ID, "  "); err == nil {
+		t.Fatal("blank branch succeeded, want input error")
+	}
+}

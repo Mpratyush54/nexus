@@ -22,6 +22,11 @@ output "jwt_secret_arn" {
   sensitive   = true
 }
 
+output "task_role_arn" {
+  description = "ECS task role ARN (matches deploy/ecs-task.json taskRoleArn; least-privilege, no S3 until the cold-writer lands)."
+  value       = aws_iam_role.task.arn
+}
+
 output "alb_dns_name" {
   description = "Public ALB DNS name fronting the server service."
   value       = aws_lb.server.dns_name

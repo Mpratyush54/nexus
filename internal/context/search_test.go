@@ -24,9 +24,10 @@ func TestCosineSimilarity(t *testing.T) {
 	if got := CosineSimilarity([]float32{0, 0}, []float32{1, 2}); got != 0 {
 		t.Fatalf("zero vector = %v, want 0", got)
 	}
-	// Unequal lengths compare over the shared prefix.
-	if got := CosineSimilarity([]float32{1, 0}, []float32{1, 0, 0}); math.Abs(got-1) > 1e-6 {
-		t.Fatalf("prefix comparison = %v, want 1", got)
+	// Unequal lengths score strict 0 (issue #105: pgvector rejects
+	// dimension mismatches; prefix-matching minted bogus positives).
+	if got := CosineSimilarity([]float32{1, 0}, []float32{1, 0, 0}); got != 0 {
+		t.Fatalf("dim mismatch = %v, want 0", got)
 	}
 }
 

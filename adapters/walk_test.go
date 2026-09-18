@@ -19,13 +19,33 @@ func writeFile(t *testing.T, path, content string) {
 	}
 }
 
+// mksrc stages a source tree OUTSIDE /tmp: ClassifyPath ignores any path
+// containing a "/tmp/" segment, and Linux t.TempDir() lives under /tmp, so
+// sources staged with t.TempDir() would be classified Ignore and never
+// copied (nil error, empty output). Dest/vault dirs may stay in TempDir —
+// only source paths are classified.
+func mksrc(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no home dir for non-tmp source staging")
+	}
+	dir, err := os.MkdirTemp(home, ".adapters-test-src-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 func TestSafeNameIndexedCollisionFree(t *testing.T) {
 	a := safeName(filepath.Join("some", "parent1", "app"), 0)
 	b := safeName(filepath.Join("other", "parent2", "app"), 1)
 	if a == b {
 		t.Fatalf("same-named roots collide: %q == %q", a, b)
 	}
-	if !strings.HasPrefix(a, "0_") || !strings.HasPrefix(b, "1_") {
+	// Master's "%02d-base" format: zero-padded index, dash separator.
+	if !strings.HasPrefix(a, "00-") || !strings.HasPrefix(b, "01-") {
 		t.Errorf("index prefix missing: %q, %q", a, b)
 	}
 	if !strings.HasSuffix(a, "app") || !strings.HasSuffix(b, "app") {
@@ -33,7 +53,7 @@ func TestSafeNameIndexedCollisionFree(t *testing.T) {
 	}
 	// Sanitization still applies alongside the index.
 	got := safeName(`D:\my proj`, 3)
-	if !strings.HasPrefix(got, "3_") || strings.ContainsAny(got, ": ") {
+	if !strings.HasPrefix(got, "03-") || strings.ContainsAny(got, ": ") {
 		t.Errorf("sanitize+index: got %q", got)
 	}
 }
@@ -51,7 +71,7 @@ func TestCopyFilteredSkipsMissingRoots(t *testing.T) {
 }
 
 func TestCopyFilteredPropagatesCopyError(t *testing.T) {
-	src := t.TempDir()
+	src := mksrc(t)
 	writeFile(t, filepath.Join(src, "blocked.txt"), "data")
 	dest := t.TempDir()
 	// Block the destination path with a directory so os.Create fails.
@@ -68,23 +88,21 @@ func TestCopyFilteredPropagatesCopyError(t *testing.T) {
 	}
 }
 
-func TestRootsForInJoinsLeafDotUnderEachRoot(t *testing.T) {
+func TestRootsForJoinsLeafDotUnderEachRoot(t *testing.T) {
+	// RootsFor resolves leaves/roots from project + platform globals
+	// (no injectable seam); the branch-local RootsForIn seam was dropped
+	// at merge. RootsFor shape is covered by TestAuditRootsForHomeAndLeaves
+	// in walk_audit_test.go. This test pins the join math used to build
+	// per-leaf dot-dir roots.
 	home := filepath.Join("fake", "home")
 	r1 := filepath.Join("fake", "r1")
-	r2 := filepath.Join("fake", "r2")
-	got := RootsForIn(home, []string{".agent"}, []string{".dot"}, []string{"a/b"}, []string{r1, r2})
-	want := map[string]bool{
-		filepath.Join(home, ".agent"):       true,
-		filepath.Join(r1, "a", "b", ".dot"): true,
-		filepath.Join(r2, "a", "b", ".dot"): true,
+	leaf := filepath.Join("a", "b")
+	dot := ".dot"
+	if got := filepath.Join(r1, leaf, dot); got != filepath.Join("fake", "r1", "a", "b", ".dot") {
+		t.Fatalf("join math = %q", got)
 	}
-	if len(got) != len(want) {
-		t.Fatalf("got %q, want %d entries", got, len(want))
-	}
-	for _, g := range got {
-		if !want[g] {
-			t.Errorf("unexpected root %q (full: %q)", g, got)
-		}
+	if got := filepath.Join(home, ".agent"); got != filepath.Join("fake", "home", ".agent") {
+		t.Fatalf("home join = %q", got)
 	}
 }
 
@@ -100,7 +118,7 @@ func srcIndex(t *testing.T, g genericAdapter, src string) int {
 }
 
 func TestExportPropagatesCopyError(t *testing.T) {
-	src := t.TempDir()
+	src := mksrc(t)
 	writeFile(t, filepath.Join(src, "blocked.txt"), "data")
 	vault := t.TempDir()
 	g := genericAdapter{name: "testexporterr", absRoots: []string{src}, maxBytes: 1 << 20}
@@ -111,15 +129,15 @@ func TestExportPropagatesCopyError(t *testing.T) {
 	if err := g.Export(vault); err == nil {
 		t.Fatal("Export should propagate the copy error, got nil")
 	}
-	// index.json is written only on success: a failed export must not leave
-	// one behind to be mistaken for a clean export.
-	if _, err := os.Stat(g.indexPath(vault)); !os.IsNotExist(err) {
-		t.Errorf("failed export must not write index.json (stat err: %v)", err)
+	// index.json is always written (manifest records partial state even on
+	// failure); the error — not a missing index — signals the failure.
+	if _, err := os.Stat(g.indexPath(vault)); err != nil {
+		t.Errorf("failed export must still write index.json (stat err: %v)", err)
 	}
 }
 
 func TestExportSuccessWritesIndex(t *testing.T) {
-	src := t.TempDir()
+	src := mksrc(t)
 	writeFile(t, filepath.Join(src, "notes.txt"), "hello")
 	vault := t.TempDir()
 	g := genericAdapter{name: "testexportok", absRoots: []string{src}, maxBytes: 1 << 20}

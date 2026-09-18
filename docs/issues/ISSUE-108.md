@@ -13,10 +13,10 @@
 
 | File | Change |
 |---|---|
-| `adapters/walk.go` | `CopyFiltered`: walk callback returns `werr`; `copyFile`/`filepath.Rel` failures abort the walk wrapped with the path; missing roots are skipped (agent dirs that were never created), other stat failures returned. `safeName` now returns `"<i>_<sanitized-base>"` (index prefix + existing `:`/space sanitization, extended to separators). Fresh-copy path also records `Was` (was resume-only). New `RootsForIn` seam (explicit leaves/roots; #111). |
-| `adapters/registry.go` | `Export` returns the `CopyFiltered` error (wrapped with adapter name) and the agent-dir `MkdirAll` error; `index.json` is written only on success. `Normalize` now propagates `sessions.jsonl` encode and `transcript.md` write errors. `Restore`/`leafDirOf` resolved via platform roots (#111). |
-| `adapters/base.go` | Comment only: `D:\X -> D:\X` → `<project root>\<project>` wording. |
-| `adapters/walk_test.go` (NEW) | `TestSafeNameIndexedCollisionFree`, `TestCopyFilteredSkipsMissingRoots`, `TestCopyFilteredPropagatesCopyError`, `TestRootsForInJoinsLeafDotUnderEachRoot`, `TestExportPropagatesCopyError` (incl. "no index.json on failure"), `TestExportSuccessWritesIndex`. Temp dirs only. |
+| `adapters/walk.go` | `CopyFiltered`: walk/mkdir/copy failures aggregated via `errors.Join` (missing roots skipped); `safeName` returns `"%02d-<sanitized-base>"` (zero-padded index prefix + `:`/space sanitization). Fresh-copy path also records `Was`. |
+| `adapters/registry.go` | `Export` returns the `CopyFiltered` error; `index.json` is ALWAYS written (manifest records partial state even on failure — the returned error, not a missing index, signals failure). |
+| `adapters/base.go` | Vault-shim framing (Issue #117): Export/Restore/Normalize retained as legacy shim. |
+| `adapters/walk_test.go` (NEW) | `TestSafeNameIndexedCollisionFree`, `TestCopyFilteredSkipsMissingRoots`, `TestCopyFilteredPropagatesCopyError`, `TestRootsForJoinsLeafDotUnderEachRoot` (join math; the `RootsForIn` seam was dropped at merge — roots resolve via project/platform globals), `TestExportPropagatesCopyError` (error + index-still-written), `TestExportSuccessWritesIndex`. Sources staged outside `/tmp` (`mksrc` under `$HOME`): `ClassifyPath` ignores any `/tmp/`-segment path and Linux `t.TempDir()` lives under `/tmp`, so TempDir-staged sources are silently skipped. |
 
 ## Verification
 
@@ -27,3 +27,14 @@
 
 - `Discover` still swallows per-path walk errors (`_ = filepath.Walk`); same treatment as `CopyFiltered` if discovery must be strict (missing roots are the common case there too).
 - `json.MarshalIndent` errors in `Export`/`writeManifest` still discarded — practically infallible for these shapes, but could be propagated for completeness.
+
+## Merge note (2026-09-18, PR #123 resolution)
+
+- At merge time `origin/master` had independently closed #108/#111 with a
+  superset implementation (`errors.Join` aggregation, `%02d-` safeName,
+  `platform.ProjectRoots`, `rootRelativeLeaf`, legacy `D:\` candidates,
+  Issue #117 vault-shim framing). All 8 conflicted files took master's
+  side; the branch's `RootsForIn`/`RootRel` seam approach was dropped.
+- Kept from this PR: `walk_test.go` (fixed for merged behavior — see the
+  `/tmp` note above — plus the `safeName` format and always-write-index
+  updates) and the issue/ADR docs (updated to merged reality).

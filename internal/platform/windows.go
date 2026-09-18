@@ -38,10 +38,9 @@ func (windowsService) Install(executable string, args []string) error {
 func (windowsService) Uninstall() error {
 	out, err := exec.Command("schtasks", "/Delete", "/TN", schtasksTaskName, "/F").CombinedOutput()
 	if err != nil {
-		// Locale-independent: a missing task is already-uninstalled, not a
-		// failure. Existence comes from the query exit code, never from
-		// grepping localized error text.
-		if !schtasksTaskExists(schtasksTaskName) {
+		// Deleting a missing task is already-uninstalled, not a failure.
+		// schtasks localizes messages (Issue #111): match multilingually.
+		if schtasksMissing(string(out)) {
 			return nil
 		}
 		return fmt.Errorf("platform: schtasks delete: %w: %s", err, strings.TrimSpace(string(out)))
@@ -49,25 +48,11 @@ func (windowsService) Uninstall() error {
 	return nil
 }
 
-// schtasksTaskExists probes task existence via the schtasks exit code only,
-// so it works on any Windows display language.
-func schtasksTaskExists(name string) bool {
-	return exec.Command("schtasks", "/Query", "/TN", name).Run() == nil
-}
-
 func (windowsService) Status() (ServiceStatus, error) {
 	out, err := exec.Command("schtasks", "/Query", "/TN", schtasksTaskName, "/FO", "LIST").CombinedOutput()
-	if err != nil {
-		// Locale-independent existence check: the task query exit code says
-		// missing-vs-error without parsing localized text. A bare query
-		// probes scheduler reachability — if even that fails, the state is
-		// unknown (e.g. access denied), not "not installed".
-		if probeErr := exec.Command("schtasks", "/Query").Run(); probeErr != nil {
-			return StatusUnknown, fmt.Errorf("platform: schtasks query: %w: %s", err, strings.TrimSpace(string(out)))
-		}
-		return StatusNotInstalled, nil
-	}
-	return schtasksStateFromList(string(out)), nil
+	// Locale-independent parsing (Issue #111): never match raw English
+	// substrings here; parseSchtasksStatus handles all locales.
+	return parseSchtasksStatus(string(out), err)
 }
 
 // windowsAppDataDir resolves %APPDATA%-adjacent config base without
