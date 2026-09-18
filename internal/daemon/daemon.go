@@ -83,6 +83,12 @@ type Daemon struct {
 	// HEAD-change detector (see checkGitCommit). Guarded by mu. Issue #32.
 	lastHEAD string
 
+	// ProxyURL is the browser CORS bridge base URL (may be loopback).
+	// Set when the CORS proxy starts; sent on heartbeats so the PWA can
+	// discover the bridge via the central server instead of hardcoding
+	// :7272. Guarded by mu.
+	ProxyURL string
+
 	mux *http.ServeMux
 	srv *http.Server
 
@@ -551,6 +557,8 @@ type heartbeatRequest struct {
 	Branch      string `json:"branch,omitempty"`
 	CommitSHA   string `json:"commit_sha,omitempty"`
 	IsDirty     bool   `json:"is_dirty,omitempty"`
+	ProxyURL    string `json:"proxy_url,omitempty"`
+	GitLog      string `json:"git_log,omitempty"`
 }
 
 // resolveRequest mirrors projectResolveRequest: only canonical_url,
@@ -668,10 +676,24 @@ func (d *Daemon) Register(ctx context.Context, serverURL string) error {
 	return d.setWorkspaceID(out.ID)
 }
 
-// HeartbeatOnce POSTs a single {workspace_id, branch, commit_sha, is_dirty}
-// heartbeat to <serverURL>/workspaces/heartbeat. It errors when the
-// workspace ID is unknown (Register first) and is a no-op without a server
-// URL.
+// SetProxyURL records the browser CORS bridge URL for heartbeat relay.
+func (d *Daemon) SetProxyURL(raw string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.ProxyURL = strings.TrimSpace(raw)
+}
+
+// GetProxyURL returns the browser CORS bridge URL ("" when unset).
+func (d *Daemon) GetProxyURL() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return strings.TrimSpace(d.ProxyURL)
+}
+
+// HeartbeatOnce POSTs a single {workspace_id, branch, commit_sha, is_dirty,
+// proxy_url?, git_log?} heartbeat to <serverURL>/workspaces/heartbeat. It
+// errors when the workspace ID is unknown (Register first) and is a no-op
+// without a server URL.
 func (d *Daemon) HeartbeatOnce(ctx context.Context, serverURL string) error {
 	base := strings.TrimSpace(serverURL)
 	if base == "" {
@@ -685,11 +707,21 @@ func (d *Daemon) HeartbeatOnce(ctx context.Context, serverURL string) error {
 		return fmt.Errorf("daemon: heartbeat without workspace id (register first)")
 	}
 	branch, commit, dirty, _, _ := GitStatus(d.Root)
+	gitLog := ""
+	if out, err := GitLog(d.Root, 12); err == nil {
+		gitLog = out
+		const maxGitLog = 8 << 10
+		if len(gitLog) > maxGitLog {
+			gitLog = gitLog[:maxGitLog] + "\n...[truncated]..."
+		}
+	}
 	return d.postJSON(ctx, base, "/workspaces/heartbeat", heartbeatRequest{
 		WorkspaceID: wsID,
 		Branch:      branch,
 		CommitSHA:   commit,
 		IsDirty:     dirty,
+		ProxyURL:    d.GetProxyURL(),
+		GitLog:      gitLog,
 	}, nil)
 }
 

@@ -88,7 +88,7 @@ func run(args []string) error {
 	serverURL := fs.String("server", config.ResolveServerURL(defaultServerURL), "central server base URL (empty = local-only mode, no register/heartbeat)")
 	serverToken := fs.String("server-token", os.Getenv("CENTRAL_SERVER_TOKEN"), "JWT bearer token for central-server calls (issue #155; required when the server has auth enabled)")
 	project := fs.String("project", strings.TrimSpace(os.Getenv("CENTRAL_PROJECT")), "project name for extraction (default: workspace folder base)")
-	proxyAddr := fs.String("proxy", daemon.DefaultProxyAddr, "browser CORS proxy listen address (empty disables)")
+	proxyAddr := fs.String("proxy", daemon.ResolveProxyAddr(), "browser CORS proxy listen address (empty disables; env DAEMON_PROXY)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}

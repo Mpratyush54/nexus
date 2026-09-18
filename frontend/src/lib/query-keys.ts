@@ -34,5 +34,7 @@ export const queryKeys = {
     workspace: ['daemon', 'workspace'] as const,
     gitStatus: ['daemon', 'gitStatus'] as const,
     gitLog: ['daemon', 'gitLog'] as const,
+    local: (projectId: string) => ['daemon', 'local', projectId] as const,
+    bridge: (proxyUrl: string) => ['daemon', 'bridge', proxyUrl] as const,
   },
 }

@@ -1,43 +1,28 @@
 import { useQuery } from '@tanstack/react-query'
 import { daemonApi } from '@/api/daemon'
 import { queryKeys } from '@/lib/query-keys'
+import { useAuth } from '@/providers/AuthProvider'
 
-export function useDaemonHealth() {
+/** Local workspace panel — data comes from the central server channel. */
+export function useLocalWorkspaceView() {
+  const { projectId, isAuthenticated } = useAuth()
   return useQuery({
-    queryKey: queryKeys.daemon.health,
-    queryFn: ({ signal }) => daemonApi.healthz(signal),
-    refetchInterval: 12_000,
+    queryKey: queryKeys.daemon.local(projectId ?? ''),
+    enabled: isAuthenticated && Boolean(projectId),
+    queryFn: () => daemonApi.localView(projectId!),
+    refetchInterval: 15_000,
+    retry: false,
+  })
+}
+
+/** Optional same-machine bridge reachability (advertised proxy_url only). */
+export function useBridgeReachable(proxyUrl: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.daemon.bridge(proxyUrl ?? ''),
+    enabled: Boolean(proxyUrl),
+    queryFn: ({ signal }) => daemonApi.probeBridge(proxyUrl!, signal),
+    refetchInterval: 20_000,
     retry: false,
     staleTime: 5_000,
-  })
-}
-
-export function useLocalWorkspace(enabled: boolean) {
-  return useQuery({
-    queryKey: queryKeys.daemon.workspace,
-    enabled,
-    queryFn: () => daemonApi.workspace(),
-    refetchInterval: 15_000,
-    retry: false,
-  })
-}
-
-export function useLocalGitStatus(enabled: boolean) {
-  return useQuery({
-    queryKey: queryKeys.daemon.gitStatus,
-    enabled,
-    queryFn: () => daemonApi.gitStatus(),
-    refetchInterval: 15_000,
-    retry: false,
-  })
-}
-
-export function useLocalGitLog(enabled: boolean) {
-  return useQuery({
-    queryKey: queryKeys.daemon.gitLog,
-    enabled,
-    queryFn: () => daemonApi.gitLog(),
-    refetchInterval: 30_000,
-    retry: false,
   })
 }

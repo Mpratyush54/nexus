@@ -8,6 +8,7 @@ package daemon
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,7 +18,17 @@ import (
 )
 
 // DefaultProxyAddr is the localhost CORS bridge listen address.
+// Override with DAEMON_PROXY env (host:port). Empty disables the proxy.
 const DefaultProxyAddr = "127.0.0.1:7272"
+
+// ResolveProxyAddr returns the proxy listen address: DAEMON_PROXY env wins,
+// else DefaultProxyAddr. Explicit empty env disables the proxy.
+func ResolveProxyAddr() string {
+	if v, ok := os.LookupEnv("DAEMON_PROXY"); ok {
+		return strings.TrimSpace(v)
+	}
+	return DefaultProxyAddr
+}
 
 // CORSProxy is a read-only HTTP front for browser clients. It is bound to
 // loopback only and never forwards /file/write or /command/run.
@@ -31,9 +42,9 @@ type CORSProxy struct {
 	srv *http.Server
 }
 
-// NewCORSProxy builds a proxy bound to d. Addr defaults to DefaultProxyAddr.
+// NewCORSProxy builds a proxy bound to d. Addr defaults to ResolveProxyAddr().
 func NewCORSProxy(d *Daemon) *CORSProxy {
-	return &CORSProxy{Daemon: d, Addr: DefaultProxyAddr}
+	return &CORSProxy{Daemon: d, Addr: ResolveProxyAddr()}
 }
 
 // Handler returns the CORS-wrapped allowlist mux (for tests and embedding).
@@ -67,18 +78,27 @@ func (p *CORSProxy) Handler() http.Handler {
 	return withProxyCORS(mux)
 }
 
-// Start serves the CORS proxy on Addr (default 127.0.0.1:7272). It blocks
-// until the server stops.
+// Start serves the CORS proxy on Addr. It blocks until the server stops.
+// On listen, the bound URL is recorded on Daemon.ProxyURL for heartbeat relay.
 func (p *CORSProxy) Start() error {
 	addr := strings.TrimSpace(p.Addr)
 	if addr == "" {
 		addr = DefaultProxyAddr
 	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	bound := ln.Addr().String()
 	p.mu.Lock()
-	p.srv = &http.Server{Addr: addr, Handler: p.Handler()}
+	p.Addr = bound
+	p.srv = &http.Server{Addr: bound, Handler: p.Handler()}
 	srv := p.srv
 	p.mu.Unlock()
-	return srv.ListenAndServe()
+	if p.Daemon != nil {
+		p.Daemon.SetProxyURL("http://" + bound)
+	}
+	return srv.Serve(ln)
 }
 
 // Close gracefully stops a started proxy.

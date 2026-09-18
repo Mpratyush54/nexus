@@ -1,69 +1,82 @@
-const DAEMON_BASE = 'http://127.0.0.1:7272'
+import { apiRequest } from '@/lib/api-client'
 
-export type LocalWorkspace = {
-  project?: string
+export type LocalWorkspaceView = {
+  online: boolean
+  project_id: string
+  source?: string
+  stale?: boolean
+  workspace_id?: string
   path?: string
   branch?: string
-  commit?: string
+  commit_sha?: string
   is_dirty?: boolean
   machine_id?: string
-  workspace_id?: string
-}
-
-export type LocalGitStatus = {
-  branch?: string
-  commit?: string
-  is_dirty?: boolean
-  porcelain?: string
-}
-
-export type LocalGitLog = {
-  entries?: Array<{ hash?: string; subject?: string; author?: string; date?: string }>
-  log?: string
-  commits?: Array<{ hash?: string; message?: string }>
-}
-
-async function localFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${DAEMON_BASE}${path}`, {
-    ...init,
-    headers: {
-      Accept: 'application/json',
-      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
-      ...init?.headers,
-    },
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(text || `daemon ${res.status}`)
+  /** Same-machine browser bridge advertised by the daemon via heartbeat. */
+  proxy_url?: string
+  git_log?: string
+  bridge_updated_at?: string
+  workspace?: {
+    id?: string
+    path?: string
+    branch?: string
+    commit_sha?: string
+    is_dirty?: boolean
+    machine_id?: string
+    last_seen?: string
   }
-  return (await res.json()) as T
 }
 
+/**
+ * Local workspace state is relayed daemon → central server → PWA.
+ * Optional file reads use the advertised `proxy_url` when the browser can
+ * reach it — never a hardcoded :7272.
+ */
 export const daemonApi = {
-  base: DAEMON_BASE,
-  async healthz(signal?: AbortSignal): Promise<boolean> {
+  localView(projectId: string) {
+    return apiRequest<LocalWorkspaceView>(`/workspaces/${projectId}/local`)
+  },
+
+  async bridgeFetch<T>(
+    proxyUrl: string,
+    path: string,
+    init?: RequestInit,
+  ): Promise<T> {
+    const base = proxyUrl.replace(/\/$/, '')
+    const res = await fetch(`${base}${path}`, {
+      ...init,
+      signal: init?.signal ?? AbortSignal.timeout(4_000),
+      headers: {
+        Accept: 'application/json',
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...init?.headers,
+      },
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new Error(text || `bridge ${res.status}`)
+    }
+    return (await res.json()) as T
+  },
+
+  readFile(proxyUrl: string, path: string) {
+    return this.bridgeFetch<{ path: string; size: number; content: string }>(
+      proxyUrl,
+      '/local/file/read',
+      { method: 'POST', body: JSON.stringify({ path }) },
+    )
+  },
+
+  async probeBridge(proxyUrl: string, signal?: AbortSignal): Promise<boolean> {
     try {
-      const res = await fetch(`${DAEMON_BASE}/local/healthz`, { signal })
+      const base = proxyUrl.replace(/\/$/, '')
+      const res = await fetch(`${base}/local/healthz`, {
+        signal: signal ?? AbortSignal.timeout(2_000),
+      })
       if (!res.ok) return false
       const body = (await res.json()) as { ok?: boolean }
       return Boolean(body.ok)
     } catch {
       return false
     }
-  },
-  workspace() {
-    return localFetch<LocalWorkspace>('/local/workspace')
-  },
-  gitStatus() {
-    return localFetch<LocalGitStatus>('/local/git/status')
-  },
-  gitLog() {
-    return localFetch<LocalGitLog>('/local/git/log')
-  },
-  readFile(path: string) {
-    return localFetch<{ path: string; size: number; content: string }>('/local/file/read', {
-      method: 'POST',
-      body: JSON.stringify({ path }),
-    })
   },
 }
