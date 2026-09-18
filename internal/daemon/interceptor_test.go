@@ -473,6 +473,67 @@ func initGitRepo(t *testing.T) string {
 	return dir
 }
 
+// issue99Sink is a recording ToolEventEmitter: every forwarded event lands
+// on ch (buffered; only a handful of events are expected).
+type issue99Sink struct {
+	ch chan ToolEvent
+}
+
+func (s *issue99Sink) Emit(ev ToolEvent) { s.ch <- ev }
+
+// TestIssue99InterceptorHookupRegression (issue #99, STALE finding).
+// The interceptor field, NewDaemon/Start init, and LogFileRead/
+// LogFileModified/LogCommand hooks already exist (issue #32); this test
+// pins the hookup end-to-end so a future removal fails loudly: a Daemon
+// with a recording sink attached via SetEventSink must emit one event per
+// tool call when POST /file/write, /file/read and /command/run are driven
+// over the mux with auth. Interceptor must be non-nil after NewDaemon.
+// Fast and deterministic (plain TempDir, no git repo, no sleeps).
+func TestIssue99InterceptorHookupRegression(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not on PATH")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/hook.txt", []byte("seed content here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDaemon(root, "test-token-99")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	if d.Interceptor == nil {
+		t.Fatal("NewDaemon left Interceptor nil, want non-nil")
+	}
+	sink := &issue99Sink{ch: make(chan ToolEvent, 16)}
+	d.SetEventSink(sink)
+
+	doPost := func(target, body string) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer test-token-99")
+		w := httptest.NewRecorder()
+		d.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("POST %s: got %d (%s)", target, w.Code, w.Body.String())
+		}
+	}
+	doPost("/file/write", `{"path":"hook.txt","content":"hello hookup content"}`)
+	doPost("/file/read", `{"path":"hook.txt"}`)
+	doPost("/command/run", `{"cmd":"git","args":["version"]}`)
+
+	want := []ToolEventType{ToolEventFileModified, ToolEventFileRead, ToolEventCommandExecuted}
+	for i, wt := range want {
+		select {
+		case ev := <-sink.ch:
+			if ev.Type != wt {
+				t.Fatalf("event %d: type = %s, want %s", i, ev.Type, wt)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("event %d (%s): timed out waiting for sink emission", i, wt)
+		}
+	}
+}
+
 // gitShell runs a (possibly write-side) git command for test setup,
 // bypassing the read-only RunCommand allowlist.
 func gitShell(t *testing.T, dir string, args ...string) {

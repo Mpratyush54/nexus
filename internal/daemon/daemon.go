@@ -694,6 +694,25 @@ func heartbeatBackoff(failures int) time.Duration {
 	return backoff
 }
 
+// heartbeatDelay scales heartbeatBackoff to a custom base interval so tests
+// can inject small intervals without wall-clock sleeps (issue #106). A
+// non-positive base or HeartbeatInterval returns heartbeatBackoff exactly;
+// a smaller base doubles per failure from that base, capped at
+// maxHeartbeatBackoff.
+func heartbeatDelay(base time.Duration, failures int) time.Duration {
+	if base <= 0 || base == HeartbeatInterval {
+		return heartbeatBackoff(failures)
+	}
+	if failures <= 1 {
+		return base
+	}
+	d := base << (failures - 1)
+	if d <= 0 || d > maxHeartbeatBackoff {
+		return maxHeartbeatBackoff
+	}
+	return d
+}
+
 // isNotFoundHeartbeat reports whether err means the server has no such
 // workspace (404 or "register first"): the daemon must re-register.
 func isNotFoundHeartbeat(err error) bool {
@@ -705,20 +724,12 @@ func isNotFoundHeartbeat(err error) bool {
 		strings.Contains(s, "register first")
 }
 
-// clearWorkspaceID drops the cached workspace ID (memory only; the file is
-// left for diagnostics) so the next beat re-registers.
-func (d *Daemon) clearWorkspaceID() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.WorkspaceID = ""
-}
-
-// StartHeartbeat runs the resilient lifecycle state machine (issue #106):
-// UNREGISTERED -> REGISTERING -> HEARTBEATING -> RECONNECTING. The first
-// beat fires immediately; heartbeat failures back off exponentially
-// (heartbeatBackoff applied to the actual sleep, not just logged); a
-// missing workspace ID or a 404 heartbeat triggers re-Register until it
-// succeeds.
+// StartHeartbeat POSTs heartbeat snapshots until ctx ends, recovering via
+// Register when unregistered (issue #106): UNREGISTERED -> REGISTERING ->
+// HEARTBEATING -> RECONNECTING. The first beat fires immediately; heartbeat
+// failures back off exponentially (heartbeatBackoff applied to the actual
+// sleep, not just logged); a missing workspace ID or a 404 heartbeat
+// triggers re-Register until it succeeds.
 func (d *Daemon) StartHeartbeat(ctx context.Context, serverURL string, interval time.Duration) {
 	if interval <= 0 {
 		interval = HeartbeatInterval
@@ -751,9 +762,15 @@ func (d *Daemon) StartHeartbeat(ctx context.Context, serverURL string, interval 
 			failures++
 			log.Printf("daemon: heartbeat: %v (retry in %s)", err, heartbeatBackoff(failures))
 			if isNotFoundHeartbeat(err) {
-				// Server lost the workspace (restart/404): drop the ID so
-				// the next beat re-registers instead of 404-looping.
-				d.clearWorkspaceID()
+				// Server lost the workspace (restart/404): re-register
+				// immediately. Register persists the new ID (memory +
+				// file), so the next beat uses it — a memory-only clear
+				// would reload the stale file ID and 404-loop.
+				if rerr := d.Register(ctx, base); rerr != nil {
+					log.Printf("daemon: heartbeat: re-register: %v", rerr)
+				} else {
+					failures = 0
+				}
 			}
 		} else {
 			failures = 0
@@ -761,13 +778,11 @@ func (d *Daemon) StartHeartbeat(ctx context.Context, serverURL string, interval 
 	}
 	beat()
 	for {
-		// Apply actual backoff to the sleep (issue #106): the timer is
-		// interval normally, heartbeatBackoff(failures) while failing.
-		wait := interval
-		if failures > 0 {
-			wait = heartbeatBackoff(failures)
-		}
-		t := time.NewTimer(wait)
+		// Apply actual backoff to the sleep (issue #106): heartbeatDelay
+		// scales heartbeatBackoff to the live interval, so production
+		// (interval == HeartbeatInterval) backs off exactly like
+		// heartbeatBackoff while tests can inject small intervals.
+		t := time.NewTimer(heartbeatDelay(interval, failures))
 		select {
 		case <-ctx.Done():
 			t.Stop()
