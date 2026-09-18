@@ -16,6 +16,7 @@ package server
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -179,16 +180,30 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, env)
 }
 
-// decodeJSON decodes a JSON request body, disallowing trailing garbage.
+// maxBodyBytes bounds JSON request bodies (2MB, mirroring the daemon's
+// maxBodyBytes: file payloads + envelope fit; unbounded streams do not).
+const maxBodyBytes = 2 << 20
+
+// decodeJSON decodes a JSON request body into dst, disallowing unknown
+// fields and trailing garbage. Bodies larger than maxBodyBytes are rejected
+// (MaxBytesReader aborts the connection past the limit).
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if r.Body == nil {
 		writeError(w, http.StatusBadRequest, "request body is required")
 		return false
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return false
+	}
+	// Decode stops after the first value: {"a":1}{"b":2} would otherwise
+	// succeed while smuggling a second payload. Only whitespace/EOF may
+	// follow (issue #154).
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: trailing data after JSON value")
 		return false
 	}
 	return true

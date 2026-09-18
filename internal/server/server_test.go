@@ -406,3 +406,48 @@ func TestAuthStubRoundTripAndTamper(t *testing.T) {
 		t.Fatal("expected expired token to fail validation")
 	}
 }
+
+func TestDecodeJSONRejectsTrailingGarbage(t *testing.T) {
+	// Issue #154: Decode stops after the first value, so a smuggled second
+	// payload must fail even though the first value parses.
+	for _, raw := range []string{
+		`{"title":"x"}{"malicious":"payload"}`,
+		`{"title":"x"} GARBAGE`,
+	} {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(raw))
+		rec := httptest.NewRecorder()
+		var dst struct {
+			Title string `json:"title"`
+		}
+		if decodeJSON(rec, req, &dst) {
+			t.Errorf("raw %q: accepted, want 400 for trailing data", raw)
+		}
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("raw %q: status = %d, want 400", raw, rec.Code)
+		}
+	}
+	// Clean single value still passes.
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"title":"x"}`))
+	if !decodeJSON(httptest.NewRecorder(), req, &struct {
+		Title string `json:"title"`
+	}{}) {
+		t.Error("clean body rejected, want accept")
+	}
+}
+
+func TestDecodeJSONRejectsOversizedBody(t *testing.T) {
+	// Issue #154: unbounded bodies are a DoS vector; past maxBodyBytes the
+	// read must fail (MaxBytesReader), never OOM the decoder.
+	big := `{"title":"` + strings.Repeat("x", maxBodyBytes+1024) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(big))
+	rec := httptest.NewRecorder()
+	var dst struct {
+		Title string `json:"title"`
+	}
+	if decodeJSON(rec, req, &dst) {
+		t.Error("oversized body accepted, want 400")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", rec.Code)
+	}
+}
