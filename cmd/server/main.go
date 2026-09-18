@@ -14,6 +14,10 @@
 //	PORT (default 8080), MIGRATIONS_DIR (default /migrations)
 //	CENTRAL_MEMORY_LOCAL_DEV=1          local bypass for the /readyz sslmode=require
 //	                                    gate (compose sets this with sslmode=disable)
+//	CENTRAL_EMBEDDING_PROVIDER          openai | ollama | hash (default hash; issue #165)
+//	CENTRAL_EMBEDDING_API_KEY           OpenAI / custom API key
+//	CENTRAL_EMBEDDING_MODEL             default text-embedding-3-small
+//	CENTRAL_EMBEDDING_ENDPOINT          optional OpenAI base or Ollama embeddings URL
 //
 // Boot-migration bootstrap is deploy/migrate.sh (the container ENTRYPOINT),
 // not a Go bootstrap binary: it assembles the same DSN from the same env and
@@ -41,6 +45,7 @@ import (
 	"syscall"
 	"time"
 
+	memctx "central-memory/internal/context"
 	"central-memory/internal/server"
 	"central-memory/internal/store"
 )
@@ -336,6 +341,7 @@ func run() error {
 	}
 
 	srv := newServer(cfg.jwtSecret)
+	srv.Embedder = memctx.EmbedderFromEnv()
 	// Postgres wiring (issues #37, #150): with a DSN configured, boot the
 	// real store, apply pending migrations through the versioned Go runner
 	// (same ledger migrate.sh now shares), and enable password login via

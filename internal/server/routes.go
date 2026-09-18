@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	memctx "central-memory/internal/context"
 	"central-memory/internal/store"
 )
 
@@ -361,6 +362,10 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 	if strings.ToLower(strings.TrimSpace(item.Level)) == "personal" {
 		item.UserID = authSubject(r)
 	}
+	// Embed at write time when the client omitted a vector (issue #165).
+	if len(item.Embedding) != store.EmbeddingDim {
+		item.Embedding = s.embedText(r.Context(), memctx.EmbedTextForItem(item.Key, item.Content))
+	}
 	if err := s.Store.CreateMemoryItem(r.Context(), &item); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create memory item: "+err.Error())
 		return
@@ -412,6 +417,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "vector search failed: "+err.Error())
 			return
 		}
+		items = s.filterMemoriesByVisibility(r, items, authSubject(r))
 		recordMemoryUse(r.Context(), s.Store, items)
 		if items == nil {
 			items = []*store.MemoryItem{}
@@ -419,7 +425,29 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 		return
 	}
-	items, err := s.Store.SearchMemory(r.Context(), projectID, q.Get("q"), tags, limit)
+	// Text query → embed via configured provider, then vector search
+	// (issue #165). Falls back to keyword SearchMemory when the store has
+	// no vector path or vector ranking returns nothing.
+	query := q.Get("q")
+	viewerCtx := store.WithViewer(r.Context(), authSubject(r))
+	if strings.TrimSpace(query) != "" {
+		if vs, ok := s.Store.(interface {
+			SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
+		}); ok {
+			vec := s.embedText(r.Context(), query)
+			if len(vec) == memctx.EmbedDims {
+				if items, err := vs.SearchMemoryVector(r.Context(), projectID, vec, limit); err == nil && len(items) > 0 {
+					items = s.filterMemoriesByVisibility(r, items, authSubject(r))
+					if len(items) > 0 {
+						recordMemoryUse(r.Context(), s.Store, items)
+						writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+						return
+					}
+				}
+			}
+		}
+	}
+	items, err := s.Store.SearchMemory(viewerCtx, projectID, query, tags, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
 		return
