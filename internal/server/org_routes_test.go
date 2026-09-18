@@ -61,9 +61,9 @@ func TestOrgCreateListGet(t *testing.T) {
 		t.Fatalf("GET /orgs/{id}: %d %s", rec.Code, rec.Body.String())
 	}
 	var detail struct {
-		Organization *store.Organization       `json:"organization"`
+		Organization *store.Organization         `json:"organization"`
 		Members      []*store.OrganizationMember `json:"members"`
-		Projects     []*store.Project          `json:"projects"`
+		Projects     []*store.Project            `json:"projects"`
 	}
 	decodeBody(t, rec, &detail)
 	if detail.Organization == nil || detail.Organization.ID != created.ID {
