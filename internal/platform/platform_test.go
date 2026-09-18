@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,7 +124,7 @@ func TestRenderSystemdUnitContainsExecStart(t *testing.T) {
 	if !strings.Contains(unit, exe) {
 		t.Errorf("unit missing executable %q:\n%s", exe, unit)
 	}
-	for _, want := range []string{"WantedBy=default.target", "Restart=on-failure", "daemon", "--port"} {
+	for _, want := range []string{"WantedBy=default.target", "Restart=always", "StandardOutput=journal", "StandardError=journal", "daemon", "--port"} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit missing %q:\n%s", want, unit)
 		}
@@ -133,10 +134,44 @@ func TestRenderSystemdUnitContainsExecStart(t *testing.T) {
 func TestRenderLaunchdPlistContainsExecutable(t *testing.T) {
 	exe := filepath.Join("opt", "nexus", "nexus")
 	plist := RenderLaunchdPlist(LaunchdLabel, exe, []string{"daemon", "run"})
-	for _, want := range []string{LaunchdLabel, exe, "ProgramArguments", "RunAtLoad", "KeepAlive", "daemon"} {
+	for _, want := range []string{LaunchdLabel, exe, "ProgramArguments", "RunAtLoad", "KeepAlive", "ThrottleInterval", "StandardOutPath", "StandardErrorPath", "daemon"} {
 		if !strings.Contains(plist, want) {
 			t.Errorf("plist missing %q:\n%s", want, plist)
 		}
+	}
+}
+
+// TestParseSchtasksStatusMultilingual pins locale-independent status parsing
+// (Issue #111): missing-task output in several languages maps to
+// not-installed, running states map to running, other output maps to stopped.
+func TestParseSchtasksStatusMultilingual(t *testing.T) {
+	for _, out := range []string{
+		`ERROR: The specified task name "nexus-daemon" cannot be found`,
+		`FEHLER: Der Aufgabenname wurde nicht gefunden`,
+		`ERREUR : le nom de tâche est introuvable`,
+	} {
+		st, err := parseSchtasksStatus(out, fmt.Errorf("exit 1"))
+		if err != nil {
+			t.Errorf("missing output %q should not error, got %v", out, err)
+		}
+		if st != StatusNotInstalled {
+			t.Errorf("missing output %q = %q, want not-installed", out, st)
+		}
+	}
+	st, err := parseSchtasksStatus("Status:          Running", nil)
+	if err != nil || st != StatusRunning {
+		t.Errorf("running = (%q,%v), want (running,nil)", st, err)
+	}
+	st, err = parseSchtasksStatus("Status: Wird ausgeführt", nil)
+	if err != nil || st != StatusRunning {
+		t.Errorf("german running = (%q,%v), want (running,nil)", st, err)
+	}
+	st, err = parseSchtasksStatus("Status:          Ready", nil)
+	if err != nil || st != StatusStopped {
+		t.Errorf("ready = (%q,%v), want (stopped,nil)", st, err)
+	}
+	if _, err := parseSchtasksStatus("access denied", fmt.Errorf("exit 1")); err == nil {
+		t.Error("unexpected query failure should return error")
 	}
 }
 

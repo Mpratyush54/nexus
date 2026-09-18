@@ -213,7 +213,9 @@ func execCommandLine(executable string, args []string) string {
 // RenderSystemdUnit renders a systemd --user unit that starts the daemon on
 // login (WantedBy=default.target). Contains an ExecStart= line with the full
 // command. The caller writes it to
-// ~/.config/systemd/user/nexus-daemon.service.
+// ~/.config/systemd/user/nexus-daemon.service. Restart policy is always
+// (Issue #111 hardening: the daemon must come back even after a clean exit,
+// not just on failure); logs go to the journal so output is never lost.
 func RenderSystemdUnit(description, executable string, args []string) string {
 	if strings.TrimSpace(description) == "" {
 		description = "Nexus workspace daemon"
@@ -226,8 +228,10 @@ func RenderSystemdUnit(description, executable string, args []string) string {
 	b.WriteString("\n[Service]\n")
 	b.WriteString("Type=simple\n")
 	fmt.Fprintf(&b, "ExecStart=%s\n", execCommandLine(executable, args))
-	b.WriteString("Restart=on-failure\n")
+	b.WriteString("Restart=always\n")
 	b.WriteString("RestartSec=5s\n")
+	b.WriteString("StandardOutput=journal\n")
+	b.WriteString("StandardError=journal\n")
 	b.WriteString("\n[Install]\n")
 	b.WriteString("WantedBy=default.target\n")
 	return b.String()
@@ -236,11 +240,14 @@ func RenderSystemdUnit(description, executable string, args []string) string {
 // RenderLaunchdPlist renders a launchd plist that starts the daemon at login
 // (RunAtLoad + KeepAlive). ProgramArguments carries executable+args verbatim
 // as an array so no shell quoting is involved; the executable path is always
-// present in the output.
+// present in the output. ThrottleInterval rate-limits crash loops and
+// StandardOut/ErrorPath capture logs under ~/Library/Logs (Issue #111).
 func RenderLaunchdPlist(label, executable string, args []string) string {
 	if strings.TrimSpace(label) == "" {
 		label = LaunchdLabel
 	}
+	logOut := "~/Library/Logs/" + label + ".log"
+	logErr := "~/Library/Logs/" + label + ".err.log"
 	var b strings.Builder
 	b.WriteString("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")
 	b.WriteString("<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n")
@@ -254,6 +261,9 @@ func RenderLaunchdPlist(label, executable string, args []string) string {
 	b.WriteString("\t</array>\n")
 	b.WriteString("\t<key>RunAtLoad</key>\n\t<true/>\n")
 	b.WriteString("\t<key>KeepAlive</key>\n\t<true/>\n")
+	b.WriteString("\t<key>ThrottleInterval</key>\n\t<integer>5</integer>\n")
+	fmt.Fprintf(&b, "\t<key>StandardOutPath</key>\n\t<string>%s</string>\n", plistEscape(logOut))
+	fmt.Fprintf(&b, "\t<key>StandardErrorPath</key>\n\t<string>%s</string>\n", plistEscape(logErr))
 	b.WriteString("</dict>\n</plist>\n")
 	return b.String()
 }
@@ -269,16 +279,80 @@ func plistEscape(s string) string {
 
 // RenderSchtasksCreateArgs builds the `schtasks /Create` argv for an
 // ONLOGON task. Kept pure so the quoting is unit-testable on any GOOS; the
-// windows backend executes it.
+// windows backend executes it. /DELAY staggers startup past logon storms;
+// task output should be redirected by the daemon itself to the cache-dir log
+// (see DaemonLogFile) because schtasks has no native log-file switch.
 func RenderSchtasksCreateArgs(taskName, executable string, args []string) []string {
 	return []string{
 		"/Create",
 		"/TN", taskName,
 		"/TR", execCommandLine(executable, args),
 		"/SC", "ONLOGON",
+		"/DELAY", "0000:30",
 		"/RL", "HIGHEST",
 		"/F",
 	}
+}
+
+// DaemonLogFile returns the daemon log path under the cache dir
+// (<cache>/nexus/daemon.log, NEXUS_CACHE_DIR-aware). Backends that cannot
+// capture output natively (schtasks) should have the daemon log here.
+func DaemonLogFile() string {
+	if dir, err := CacheDir(); err == nil && strings.TrimSpace(dir) != "" {
+		return filepath.Join(dir, "daemon.log")
+	}
+	return filepath.Join("nexus", "daemon.log")
+}
+
+// schtasksMissing reports whether schtasks output means "task not found".
+// schtasks localizes its messages, so English plus common German/French/
+// Spanish/Portuguese/Italian/Dutch tokens are matched case-insensitively
+// (Issue #111). Generic "not found"/"not exist" cover phrasings like
+// "cannot be found" that contain neither "cannot find" verbatim.
+func schtasksMissing(output string) bool {
+	lower := strings.ToLower(output)
+	for _, token := range []string{
+		"cannot find", "cannot be found", "not found", "not exist",
+		"does not exist", "no se puede encontrar", "no existe",
+		"nicht gefunden", "existiert nicht", "introuvable", "n'existe pas",
+		"impossibile trovare", "non esiste", "não encontrado", "não existe",
+		"0x80070002",
+	} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseSchtasksStatus interprets `schtasks /Query /FO LIST` output without
+// depending on the OS display language (Issue #111). Missing-task output
+// maps to StatusNotInstalled (nil error); a running state in any supported
+// language maps to StatusRunning; any other present task maps to
+// StatusStopped; unexpected query failures map to StatusUnknown + error.
+func parseSchtasksStatus(output string, queryErr error) (ServiceStatus, error) {
+	text := output
+	lower := strings.ToLower(text)
+	if queryErr != nil {
+		if schtasksMissing(text) {
+			return StatusNotInstalled, nil
+		}
+		return StatusUnknown, fmt.Errorf("platform: schtasks query: %w: %s", queryErr, strings.TrimSpace(text))
+	}
+	if schtasksMissing(text) {
+		return StatusNotInstalled, nil
+	}
+	// Running states across locales: English Running, German Wird ausgeführt,
+	// French En cours, Spanish En ejecución, Italian In esecuzione.
+	for _, token := range []string{
+		"running", "wird ausgef", "en cours", "en ejecuci", "in esecuzione",
+		"em execu", "wordt uitgevoerd",
+	} {
+		if strings.Contains(lower, token) {
+			return StatusRunning, nil
+		}
+	}
+	return StatusStopped, nil
 }
 
 // ---------------------------------------------------------------------------

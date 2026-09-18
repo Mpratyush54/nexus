@@ -8,10 +8,17 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 
 	"central-memory/internal/store"
 )
+
+// vec1536Raw builds a valid 1536-dim ?embedding= value (issue #105: the
+// schema is vector(1536), so short fixtures are now 400s).
+func vec1536Raw() string {
+	return strings.Repeat("0.1,", store.EmbeddingDim-1) + "0.1"
+}
 
 func TestParseEmbeddingParam(t *testing.T) {
 	cases := []struct {
@@ -21,14 +28,14 @@ func TestParseEmbeddingParam(t *testing.T) {
 		wantErr bool
 	}{
 		{"absent", "", nil, false},
-		{"pgvector literal", "[0.1,0.2,0.3]", []float32{0.1, 0.2, 0.3}, false},
-		{"spaced literal", "[0.5, 0.25]", []float32{0.5, 0.25}, false},
-		{"bare csv", "1,0,-2.5", []float32{1, 0, -2.5}, false},
 		{"garbage", "abc", nil, true},
 		{"mixed garbage", "0.1,nope", nil, true},
 		{"nan rejected", "NaN", nil, true},
 		{"inf rejected", "Inf", nil, true},
 		{"empty brackets", "[]", nil, true},
+		// Wrong width is a 400 even when every component parses (issue #105).
+		{"short literal", "[0.1,0.2,0.3]", nil, true},
+		{"short csv", "1,0,-2.5", nil, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -72,24 +79,33 @@ func TestSearchMemoryHandlerVectorPath(t *testing.T) {
 	stub := &vectorStub{Store: store.NewMemStore(), items: []*store.MemoryItem{{ID: "m1", Key: "k"}}}
 	s := NewServer(stub)
 	tok := loginAs(t, s, "alice")
-	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id=p1&embedding=[0.1,0.2]", tok, nil)
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id=p1&embedding=["+vec1536Raw()+"]", tok, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("vector search status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	if stub.calls != 1 {
 		t.Fatalf("vector path must call SearchMemoryVector once (calls=%d)", stub.calls)
 	}
-	if len(stub.vec) != 2 || stub.vec[0] != 0.1 || stub.vec[1] != 0.2 {
-		t.Fatalf("vector forwarded = %v, want [0.1 0.2]", stub.vec)
+	if len(stub.vec) != store.EmbeddingDim {
+		t.Fatalf("vector forwarded dims = %d, want %d", len(stub.vec), store.EmbeddingDim)
 	}
 }
 
 func TestSearchMemoryHandlerVectorUnsupportedStore400(t *testing.T) {
 	s := newTestServer() // MemStore: text only
 	tok := loginAs(t, s, "alice")
-	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id=p1&embedding=[0.1,0.2]", tok, nil)
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id=p1&embedding=["+vec1536Raw()+"]", tok, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unsupported vector store status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSearchMemoryHandlerShortVector400(t *testing.T) {
+	s := newTestServer()
+	tok := loginAs(t, s, "alice")
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id=p1&embedding=[0.1,0.2]", tok, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("short vector status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
 }
 

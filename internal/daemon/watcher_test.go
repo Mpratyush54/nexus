@@ -311,3 +311,53 @@ func TestFileHashStoreRoundTrip(t *testing.T) {
 		t.Error("corrupt state file must fail to load")
 	}
 }
+
+// TestFileHashStoreNeverHalfWritten pins the issue-#109 atomic-write
+// guarantee: after a large burst of mutations (every one rewriting the
+// file), the state file must always parse — never truncated — and no temp
+// files may be left behind.
+func TestFileHashStoreNeverHalfWritten(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hashes.json")
+	s, err := NewFileHashStore(path)
+	if err != nil {
+		t.Fatalf("NewFileHashStore: %v", err)
+	}
+	const n = 500
+	for i := 0; i < n; i++ {
+		ws := "ws-large"
+		p := "file-" + strings.Repeat("x", 64) + "-" + string(rune('0'+i%10)) + "-" + strings.Repeat("y", 32) + ".md"
+		if err := s.SetHash(ws, p, HashString(p)); err != nil {
+			t.Fatalf("SetHash %d: %v", i, err)
+		}
+		if i == n/2 {
+			// Mid-burst reload: the file must already be fully parseable.
+			mid, err := NewFileHashStore(path)
+			if err != nil {
+				t.Fatalf("mid-burst reload: %v", err)
+			}
+			if _, ok := mid.GetHash(ws, p); !ok {
+				t.Fatalf("mid-burst reload missing just-written hash for %q", p)
+			}
+		}
+	}
+	// Final reload parses and every entry survived.
+	reloaded, err := NewFileHashStore(path)
+	if err != nil {
+		t.Fatalf("final reload: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		p := "file-" + strings.Repeat("x", 64) + "-" + string(rune('0'+i%10)) + "-" + strings.Repeat("y", 32) + ".md"
+		if h, ok := reloaded.GetHash("ws-large", p); !ok || h != HashString(p) {
+			t.Errorf("entry %q = %q,%v; want hash,true", p, h, ok)
+		}
+	}
+	// No temp-file debris: every save either renamed or cleaned up.
+	leftovers, err := filepath.Glob(filepath.Join(dir, ".hashes-*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(leftovers) != 0 {
+		t.Errorf("temp files left behind: %v", leftovers)
+	}
+}

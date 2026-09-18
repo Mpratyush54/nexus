@@ -65,15 +65,31 @@ func GitStatus(root string) (branch, commit string, dirty bool, porcelain string
 	return branch, commit, dirty, porcelain, nil
 }
 
-// GitDiff returns `git diff` or `git diff <ref>` output.
+// capGitOutput truncates uncapped git output at 1MB (issue #118: git
+// diff/log vs 1MB file cap parity).
+func capGitOutput(s string) string {
+	if len(s) > MaxFileBytes {
+		return s[:MaxFileBytes] + "\n...[truncated]..."
+	}
+	return s
+}
+
+// GitDiff returns `git diff` or `git diff <ref>` output, capped at 1MB.
 func GitDiff(root, ref string) (string, error) {
 	if !validRef(ref) {
 		return "", &BadRefError{Ref: ref}
 	}
+	var out string
+	var err error
 	if ref == "" {
-		return runGit(root, "diff")
+		out, err = runGit(root, "diff")
+	} else {
+		out, err = runGit(root, "diff", ref)
 	}
-	return runGit(root, "diff", ref)
+	if err != nil {
+		return capGitOutput(out), err
+	}
+	return capGitOutput(out), nil
 }
 
 // BadRefError is returned for unsafe git ref arguments.
@@ -81,7 +97,8 @@ type BadRefError struct{ Ref string }
 
 func (e *BadRefError) Error() string { return "daemon: invalid git ref: " + e.Ref }
 
-// GitLog returns the last n one-line log entries (clamped to 1..100).
+// GitLog returns the last n one-line log entries (clamped to 1..100),
+// capped at 1MB.
 func GitLog(root string, n int) (string, error) {
 	if n <= 0 {
 		n = 20
@@ -89,7 +106,11 @@ func GitLog(root string, n int) (string, error) {
 	if n > 100 {
 		n = 100
 	}
-	return runGit(root, "log", "--oneline", "-n", itoa(n))
+	out, err := runGit(root, "log", "--oneline", "-n", itoa(n))
+	if err != nil {
+		return capGitOutput(out), err
+	}
+	return capGitOutput(out), nil
 }
 
 // FingerprintOf reuses internal/project identity resolution.

@@ -2,23 +2,36 @@
 
 > Templates/notes only. No live secret creation.
 
-## Secrets (two, minimal)
+## Canonical env contract (single source of truth — issue #112)
 
-| Secret name                  | Key(s)         | Consumed as              | Used by        |
-|------------------------------|----------------|--------------------------|----------------|
-| `central-memory/database-url`| `database_url` | `DATABASE_URL` env       | server, migrate.sh |
-| `central-memory/jwt-key`     | `jwt_key`      | `CENTRAL_MEMORY_JWT_KEY` | server (`auth.go` stub → future `jwt/v5`) |
+| Secret name (TF) | Key(s) | Consumed as | Used by |
+|---|---|---|---|
+| `central-memory/db-app` | `username`,`password`,`host`,`port`,`dbname` | `DB_USER`…`DB_NAME` (+ `DB_SSLMODE=require` env) → DSN assembled identically by `migrate.sh` and `cmd/server` | server, migrate.sh |
+| `central-memory/db-app` | `database_url` (same credential, `?sslmode=require` prebuilt) | `DATABASE_URL` verbatim | server, migrate.sh, `ecs-task.json` sample |
+| `central-memory/jwt` | `signing_key` | **`JWT_SECRET`** (canonical; `CENTRAL_MEMORY_JWT_KEY` still accepted as legacy fallback) | server |
 
-## Create (manual, one-time — example)
+Rules:
+
+- `DATABASE_URL` wins when set; otherwise the discrete `DB_*` parts are
+  assembled into the identical DSN. Both describe the same credential
+  (`central_app`, never the master user — issue #127).
+- Prod DSNs always carry `sslmode=require` (matches `rds.force_ssl=1`).
+  `sslmode=disable` exists only for local compose with
+  `CENTRAL_MEMORY_LOCAL_DEV=1`; `migrate.sh` and `/readyz` refuse anything
+  else outside local-dev.
+- `MIGRATIONS_DIR=/migrations` everywhere (image, compose, ECS, `/readyz`).
+
+## Create (manual, one-time — Terraform owns this; example for operators)
 
 ```bash
+# The db-app secret (dedicated app user bootstrapped per deploy/rds-notes.md):
 aws secretsmanager create-secret \
-  --name central-memory/database-url \
-  --secret-string '{"database_url":"postgres://USER:PASS@CLUSTER-ENDPOINT:5432/central_memory?sslmode=require"}'
+  --name central-memory/db-app \
+  --secret-string '{"username":"central_app","password":"<generated>","host":"<cluster-endpoint>","port":5432,"dbname":"central_memory","database_url":"postgres://central_app:<generated>@<cluster-endpoint>:5432/central_memory?sslmode=require"}'
 
 aws secretsmanager create-secret \
-  --name central-memory/jwt-key \
-  --secret-string '{"jwt_key":"<32+ random bytes, base64>"}'
+  --name central-memory/jwt \
+  --secret-string '{"signing_key":"<32+ random bytes, base64>"}'
 ```
 
 Generate the JWT key locally, never commit it:
@@ -34,12 +47,13 @@ Generate the JWT key locally, never commit it:
 - `deploy/ecs-task.json` injects them via `containerDefinitions[].secrets`
   (`valueFrom` = `secret-arn:key:version-stage:version-id`); containers see
   plain env vars, secrets never land in the image or task JSON.
-- Rotation: rotate `database-url` in Secrets Manager, then force a new
+- Rotation: rotate `db-app` in Secrets Manager, then force a new
   deployment (`aws ecs update-service --force-new-deployment`). Stagger: Aurora
   credential rotation briefly invalidates old passwords — prefer a maintenance
   window until RDS-managed rotation is configured.
 
 ## Local dev
 
-- `DATABASE_URL` + `CENTRAL_MEMORY_JWT_KEY` as plain env vars (dev fallback in
-  `internal/server/auth.go`); production must always come from Secrets Manager.
+- Compose sets `DATABASE_URL` (dev, `sslmode=disable`) +
+  `CENTRAL_MEMORY_LOCAL_DEV=1` + `JWT_SECRET` as plain env vars. Production
+  must always come from Secrets Manager.

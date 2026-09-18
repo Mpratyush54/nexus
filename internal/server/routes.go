@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -31,6 +30,8 @@ func (s *Server) registerRoutes() {
 	// Issue #8: sessions, branches, confirmation flow, episode resolve.
 	// Handlers live in routes_extra.go to avoid clashing with Phase 1.8 work.
 	s.registerExtraRoutes()
+	s.registerSteerRoutes()
+	s.registerHandoffRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -182,6 +183,14 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "content must be 20-2000 characters")
 		return
 	}
+	if !s.eventAllowed("memory:" + strings.TrimSpace(item.ProjectID)) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
+	}
+	if ok, reason := s.quotaAllowed(len(item.Content)); !ok {
+		writeError(w, http.StatusTooManyRequests, "quota exceeded: "+reason)
+		return
+	}
 	item.ID = "" // server assigns the ID
 	if err := s.Store.CreateMemoryItem(r.Context(), &item); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create memory item: "+err.Error())
@@ -208,14 +217,9 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	limit := 20
-	if raw := q.Get("limit"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n <= 0 {
-			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
-			return
-		}
-		limit = n
+	limit := clampSearchLimit(q.Get("limit"), w)
+	if limit < 0 {
+		return
 	}
 	// Vector path (issue #37): a caller-supplied ?embedding= vector routes
 	// through pgvector cosine search when the configured store supports it
@@ -240,6 +244,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "vector search failed: "+err.Error())
 			return
 		}
+		recordMemoryUse(r.Context(), s.Store, items)
 		if items == nil {
 			items = []*store.MemoryItem{}
 		}
@@ -251,6 +256,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
 		return
 	}
+	recordMemoryUse(r.Context(), s.Store, items)
 	if items == nil {
 		items = []*store.MemoryItem{}
 	}
@@ -276,6 +282,14 @@ func (s *Server) handleEpisodeCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "episode_type is required")
 		return
 	}
+	if !s.eventAllowed("episodes:" + strings.TrimSpace(ep.ProjectID)) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+		return
+	}
+	if ok, reason := s.quotaAllowed(len(ep.Title) + len(ep.Trigger)); !ok {
+		writeError(w, http.StatusTooManyRequests, "quota exceeded: "+reason)
+		return
+	}
 	ep.ID = "" // server assigns the ID
 	if err := s.Store.CreateEpisode(r.Context(), &ep); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create episode: "+err.Error())
@@ -291,14 +305,9 @@ func (s *Server) handleEpisodeSearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "project_id query parameter is required")
 		return
 	}
-	limit := 20
-	if raw := q.Get("limit"); raw != "" {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n <= 0 {
-			writeError(w, http.StatusBadRequest, "limit must be a positive integer")
-			return
-		}
-		limit = n
+	limit := clampSearchLimit(q.Get("limit"), w)
+	if limit < 0 {
+		return
 	}
 	episodes, err := s.Store.SearchEpisodes(r.Context(), projectID, q.Get("error_pattern"), q.Get("q"), limit)
 	if err != nil {

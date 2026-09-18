@@ -75,11 +75,21 @@ func (s linuxService) Uninstall() error {
 	if err != nil {
 		return err
 	}
-	_ = exec.Command("systemctl", "--user", "disable", "--now", s.effectiveUnit()).Run()
+	// Issue #111: propagate systemctl failures instead of reporting success.
+	// A missing unit file is not fatal, but a failed disable/reload is.
+	if out, err := exec.Command("systemctl", "--user", "disable", "--now", s.effectiveUnit()).CombinedOutput(); err != nil {
+		if _, statErr := os.Stat(path); os.IsNotExist(statErr) && strings.Contains(strings.ToLower(string(out)), "no such file") {
+			// Already uninstalled: unit gone and systemctl confirms it.
+		} else {
+			return fmt.Errorf("platform: systemctl disable: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("platform: remove systemd unit: %w", err)
 	}
-	_ = exec.Command("systemctl", "--user", "daemon-reload").Run()
+	if out, err := exec.Command("systemctl", "--user", "daemon-reload").CombinedOutput(); err != nil {
+		return fmt.Errorf("platform: systemctl daemon-reload: %w: %s", err, strings.TrimSpace(string(out)))
+	}
 	return nil
 }
 

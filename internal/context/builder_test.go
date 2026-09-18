@@ -115,3 +115,55 @@ func TestAssembleXMLSessionOverridesProject(t *testing.T) {
 		t.Errorf("items_included = %d, want 1", got.ItemsIncluded)
 	}
 }
+
+func TestLevelRankEphemeralWins(t *testing.T) {
+	// Issue #30: ephemeral outranks every tier (shortest lifetime wins).
+	if LevelRank("ephemeral") <= LevelRank("session") {
+		t.Fatal("ephemeral must outrank session")
+	}
+	got := ResolveOverrides([]*store.MemoryItem{
+		mem("k", "session", "session value here for length"),
+		mem("k", "ephemeral", "ephemeral value here for length"),
+	})
+	if len(got) != 1 || got[0].Level != "ephemeral" {
+		t.Fatalf("winner = %+v, want the ephemeral item", got)
+	}
+}
+
+func TestAssembleXMLEphemeralSection(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	in := ContextInput{
+		ProjectName: "p", Branch: "main",
+		EphemeralItems: []*store.MemoryItem{mem("scratch/pad", "ephemeral", "Working scratch notes for the current session only here.")},
+		SessionItems:   []*store.MemoryItem{mem("other/pad", "session", "Older session-scoped scratch notes live here now.")},
+		Budget:         4000, Now: now,
+	}
+	got := AssembleXML(in)
+	if !strings.Contains(got.XML, "<ephemeral>") {
+		t.Error("ephemeral section missing from XML")
+	}
+	idx := func(s string) int { return strings.Index(got.XML, s) }
+	if !(idx("<ephemeral>") < idx("<session")) {
+		t.Error("ephemeral section must fill before session")
+	}
+}
+
+func TestAssembleXMLEphemeralShadowsSession(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	in := ContextInput{
+		ProjectName: "p", Branch: "main",
+		EphemeralItems: []*store.MemoryItem{mem("scratch/pad", "ephemeral", "Working scratch notes for the current session only here.")},
+		SessionItems:   []*store.MemoryItem{mem("scratch/pad", "session", "Older session-scoped scratch notes live here now.")},
+		Budget:         4000, Now: now,
+	}
+	got := AssembleXML(in)
+	if strings.Contains(got.XML, "Older session-scoped") {
+		t.Error("shadowed session memory leaked into XML")
+	}
+	if !strings.Contains(got.XML, "Working scratch notes") {
+		t.Error("winning ephemeral memory missing from XML")
+	}
+	if got.ItemsIncluded != 1 {
+		t.Errorf("items_included = %d, want 1", got.ItemsIncluded)
+	}
+}

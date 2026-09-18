@@ -1,18 +1,23 @@
-// Package project detects leaf projects on D:\. A top-level folder like
-// D:\gitlab-test can hold several real repos — the folder itself is not the
-// project, each repo underneath is. A directory is a leaf project when it
-// carries a repo marker (.git, package.json, go.mod, ...). A top-level dir
-// without markers but with marked children contributes each marked child as
-// "parent/child". Scan depth is capped at 2 to stay fast. OS-level dirs
-// ($RECYCLE.BIN, ...) are never projects.
+// Package project detects leaf projects under the configured project roots
+// (platform.ProjectRoots with a Windows-only D:\ default, Issue #111). A
+// top-level folder like <root>/gitlab-test can hold several real repos —
+// the folder itself is not the project, each repo underneath is. A
+// directory is a leaf project when it carries a repo marker (.git,
+// package.json, go.mod, ...). A top-level dir without markers but with
+// marked children contributes each marked child as "parent/child". Scan
+// depth is capped at 2 to stay fast. OS-level dirs ($RECYCLE.BIN, ...)
+// are never projects.
 package project
 
 import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+
+	"central-memory/internal/platform"
 )
 
 // Markers that make a directory a project root.
@@ -61,17 +66,82 @@ var skipDirs = map[string]bool{
 	"coverage": true, "testresults": true, ".idea": true, ".vscode": true,
 }
 
-// Leaves returns project IDs as paths relative to D:\ using forward
-// slashes ("gitlab-test/2/Campus-Navigator"). A directory with markers is a
-// leaf (descent stops — no fragmenting monorepos or node_modules); an
-// unmarked dir contributes marked descendants, or itself when nothing below
-// is marked. Depth is capped (D:\ = 0, max 4). OS-level dirs are excluded.
+// defaultWindowsRoot is the legacy Windows-only project container. It is
+// used exclusively as a Windows default (Issue #111): other platforms use
+// platform.ProjectRoots() (env or home) and never this drive letter.
+const defaultWindowsRoot = `D:\`
+
+// projectRoots returns the directories Leaves scans. NEXUS_PROJECT_ROOTS
+// (via platform.ProjectRoots) wins when explicitly set; otherwise on
+// Windows the legacy D:\ root is used when present (backward compatible),
+// falling back to the platform default (home). On non-Windows the platform
+// default (env or home) is used verbatim — never a Windows drive letter.
+func projectRoots() []string {
+	if raw := strings.TrimSpace(os.Getenv("NEXUS_PROJECT_ROOTS")); raw != "" {
+		return platform.ProjectRoots()
+	}
+	if runtime.GOOS == "windows" {
+		if fi, err := os.Stat(defaultWindowsRoot); err == nil && fi.IsDir() {
+			return []string{defaultWindowsRoot}
+		}
+	}
+	return platform.ProjectRoots()
+}
+
+// Roots returns the configured project roots (Issue #111). It is the
+// exported view of projectRoots for adapter callers that must resolve
+// root-relative paths without hardcoding a drive letter.
+func Roots() []string { return projectRoots() }
+
+// LeafDir maps a project ID ("a/b" or "a") to its absolute directory under
+// the first project root. Absolute inputs are cleaned and returned as-is.
+// Empty or "global" map to "" (no directory).
+func LeafDir(leaf string) string {
+	if leaf == "" || leaf == "global" {
+		return ""
+	}
+	if filepath.IsAbs(leaf) {
+		return filepath.Clean(leaf)
+	}
+	roots := projectRoots()
+	root := defaultWindowsRoot
+	if len(roots) > 0 && strings.TrimSpace(roots[0]) != "" {
+		root = roots[0]
+	} else if runtime.GOOS != "windows" {
+		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+			root = home
+		}
+	}
+	return filepath.Join(root, filepath.FromSlash(leaf))
+}
+
+// LeafDirs maps leaf IDs to absolute directories, skipping globals.
+func LeafDirs(leaves []string) []string {
+	out := make([]string, 0, len(leaves))
+	for _, leaf := range leaves {
+		if dir := LeafDir(leaf); dir != "" {
+			out = append(out, dir)
+		}
+	}
+	return out
+}
+
+// Leaves returns project IDs as paths relative to the project root using
+// forward slashes ("gitlab-test/2/Campus-Navigator"). A directory with
+// markers is a leaf (descent stops — no fragmenting monorepos or
+// node_modules); an unmarked dir contributes marked descendants, or itself
+// when nothing below is marked. Depth is capped (root = 0, max 4). OS-level
+// dirs are excluded. Roots come from projectRoots() (Issue #111).
 func Leaves() []string {
 	var out []string
+	seen := map[string]bool{}
 	var emit func(abs, rel string, depth int)
 	emit = func(abs, rel string, depth int) {
 		if hasMarker(abs) || depth >= 4 {
-			out = append(out, rel)
+			if !seen[rel] {
+				seen[rel] = true
+				out = append(out, rel)
+			}
 			return
 		}
 		var kids []string
@@ -92,7 +162,10 @@ func Leaves() []string {
 		}
 		if !marked {
 			// Plain folder (or depth cap): one project, don't fragment.
-			out = append(out, rel)
+			if !seen[rel] {
+				seen[rel] = true
+				out = append(out, rel)
+			}
 			return
 		}
 		for _, k := range kids {
@@ -104,15 +177,20 @@ func Leaves() []string {
 			emit(filepath.Join(abs, k), rel+"/"+k, depth+1)
 		}
 	}
-	entries, err := os.ReadDir(`D:\`)
-	if err != nil {
-		return nil
-	}
-	for _, e := range entries {
-		if !e.IsDir() || SystemDir(e.Name()) || skipDirs[strings.ToLower(e.Name())] {
+	for _, root := range projectRoots() {
+		entries, err := os.ReadDir(root)
+		if err != nil {
 			continue
 		}
-		emit(filepath.Join(`D:\`, e.Name()), e.Name(), 1)
+		for _, e := range entries {
+			if !e.IsDir() || SystemDir(e.Name()) || skipDirs[strings.ToLower(e.Name())] {
+				continue
+			}
+			emit(filepath.Join(root, e.Name()), e.Name(), 1)
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }
@@ -200,7 +278,7 @@ func ResolveLeaf(ref string) string {
 		}
 	}
 	for _, leaf := range CachedLeaves() {
-		origin, root := Fingerprint(filepath.Join(`D:\`, filepath.FromSlash(leaf)))
+		origin, root := Fingerprint(LeafDir(leaf))
 		if ref != "" && (ref == origin || ref == root) {
 			return leaf
 		}
@@ -209,18 +287,44 @@ func ResolveLeaf(ref string) string {
 }
 
 // ForPath maps an absolute native path to the deepest matching leaf ("a/b"
-// beats "a"). Returns "" when nothing matches.
+// beats "a"). Roots come from projectRoots(); legacy D:\ prefixes are also
+// honored on Windows so old transcripts still resolve after the #111 fix.
+// Returns "" when nothing matches.
 func ForPath(nativePath string) string {
 	norm := filepath.ToSlash(strings.ToLower(nativePath))
 	best := ""
-	for _, leaf := range CachedLeaves() {
-		prefix := "d:/" + strings.ToLower(leaf) + "/"
-		if strings.HasPrefix(norm, prefix) && len(leaf) > len(best) {
-			best = leaf
+	roots := projectRoots()
+	candidates := make([]string, 0, len(roots)+1)
+	for _, r := range roots {
+		if strings.TrimSpace(r) == "" {
+			continue
 		}
-		// Exact dir itself (e.g. the leaf root file listing).
-		if norm == "d:/"+strings.ToLower(leaf) {
-			best = leaf
+		candidates = append(candidates, strings.TrimSuffix(filepath.ToSlash(strings.ToLower(r)), "/"))
+	}
+	// Legacy fallback: old transcripts encode D:\ paths even when roots move.
+	if runtime.GOOS == "windows" {
+		hasD := false
+		for _, c := range candidates {
+			if c == "d:" {
+				hasD = true
+				break
+			}
+		}
+		if !hasD {
+			candidates = append(candidates, "d:")
+		}
+	}
+	for _, leaf := range CachedLeaves() {
+		lowerLeaf := strings.ToLower(leaf)
+		for _, c := range candidates {
+			prefix := c + "/" + lowerLeaf + "/"
+			if strings.HasPrefix(norm, prefix) && len(leaf) > len(best) {
+				best = leaf
+			}
+			// Exact dir itself (e.g. the leaf root file listing).
+			if norm == c+"/"+lowerLeaf && len(leaf) > len(best) {
+				best = leaf
+			}
 		}
 	}
 	return best

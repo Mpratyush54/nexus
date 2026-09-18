@@ -191,12 +191,12 @@ func TestConflictingSteerRejected(t *testing.T) {
 	}
 }
 
-// Finished runs are retained only up to MaxCompletedRuns: the
+// Finished runs are retained only up to MaxRuns: the
 // least-recently-finished run is evicted first, live runs are never
 // evicted, and an evicted runID can be re-registered fresh.
 func TestCompletedRunEvictionBound(t *testing.T) {
 	m := NewInterruptManager()
-	total := MaxCompletedRuns + 10
+	total := MaxRuns + 10
 	for i := 0; i < total; i++ {
 		id := fmt.Sprintf("run-%03d", i)
 		mustRegister(t, m, id, nil)
@@ -207,8 +207,8 @@ func TestCompletedRunEvictionBound(t *testing.T) {
 	m.mu.Lock()
 	retained := len(m.runs)
 	m.mu.Unlock()
-	if retained != MaxCompletedRuns {
-		t.Fatalf("retained finished runs = %d, want %d", retained, MaxCompletedRuns)
+	if retained != MaxRuns {
+		t.Fatalf("retained finished runs = %d, want %d", retained, MaxRuns)
 	}
 	// Oldest-finished evicted (no post-mortem reads), newest retained.
 	if evs := m.Events("run-000"); evs != nil {
@@ -228,7 +228,7 @@ func TestCompletedRunEvictionBound(t *testing.T) {
 	}
 	// Live runs are never evicted by later finishes.
 	mustRegister(t, m, "live", nil)
-	for i := 0; i < MaxCompletedRuns+5; i++ {
+	for i := 0; i < MaxRuns+5; i++ {
 		id := fmt.Sprintf("churn-%03d", i)
 		mustRegister(t, m, id, nil)
 		if err := m.Unregister(id); err != nil {
@@ -251,11 +251,11 @@ func TestCompletedRunEvictionBound(t *testing.T) {
 	}
 }
 
-// Per-run event history keeps only the most recent MaxEventsPerRun events.
+// Per-run event history keeps only the most recent MaxRunHistory events.
 func TestPerRunHistoryBound(t *testing.T) {
 	m := NewInterruptManager()
 	mustRegister(t, m, "hist", nil)
-	cycles := MaxEventsPerRun/4 + 25 // 4 events per cycle
+	cycles := MaxRunHistory/4 + 25 // 4 events per cycle
 	for i := 0; i < cycles; i++ {
 		if err := m.RequestInterrupt("hist", "alice", "again"); err != nil {
 			t.Fatalf("cycle %d RequestInterrupt: %v", i, err)
@@ -273,8 +273,8 @@ func TestPerRunHistoryBound(t *testing.T) {
 			t.Fatalf("cycle %d Resume: %v", i, err)
 		}
 	}
-	if got := len(m.Events("hist")); got != MaxEventsPerRun {
-		t.Fatalf("history len = %d, want cap %d", got, MaxEventsPerRun)
+	if got := len(m.Events("hist")); got != MaxRunHistory {
+		t.Fatalf("history len = %d, want cap %d", got, MaxRunHistory)
 	}
 	// Newest events survive: the tail must hold the last cycle's resume.
 	evs := m.Events("hist")
@@ -293,7 +293,7 @@ func TestQueueFullRejected(t *testing.T) {
 	if err := m.AcknowledgePaused("q"); err != nil {
 		t.Fatalf("AcknowledgePaused: %v", err)
 	}
-	for i := 0; i < MaxQueueDepth; i++ {
+	for i := 0; i < MaxPromptQueue; i++ {
 		if err := m.Steer("q", "alice", fmt.Sprintf("p%d", i)); err != nil {
 			t.Fatalf("Steer %d: %v", i, err)
 		}
@@ -301,8 +301,8 @@ func TestQueueFullRejected(t *testing.T) {
 	if err := m.Steer("q", "alice", "one too many"); !errors.Is(err, ErrQueueFull) {
 		t.Fatalf("over-cap Steer = %v, want ErrQueueFull", err)
 	}
-	if got := m.QueueDepth("q"); got != MaxQueueDepth {
-		t.Fatalf("queue depth = %d, want cap %d", got, MaxQueueDepth)
+	if got := m.QueueDepth("q"); got != MaxPromptQueue {
+		t.Fatalf("queue depth = %d, want cap %d", got, MaxPromptQueue)
 	}
 	// FIFO order intact across the cap, and one drain frees one slot.
 	first, ok := m.TakeNextPrompt("q")
@@ -328,10 +328,10 @@ func TestTakeNextPromptPopAllStability(t *testing.T) {
 	}
 	// Zero-latency steering lands before the ack; pause_requested accepts it.
 	n := 3*64 + 10 // force several compaction windows past head>=64
-	// Steer in batches of MaxQueueDepth, draining between batches.
+	// Steer in batches of MaxPromptQueue, draining between batches.
 	pushed := 0
 	for pushed < n {
-		batch := MaxQueueDepth
+		batch := MaxPromptQueue
 		if pushed+batch > n {
 			batch = n - pushed
 		}

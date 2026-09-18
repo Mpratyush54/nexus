@@ -9,8 +9,10 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -160,8 +162,36 @@ func checkContained(rootAbs, candidate string) error {
 	return nil
 }
 
-// containsSecret reports whether data matches any NeverPattern.
-// Fail-closed: any match blocks the operation.
+// extraSecretPatterns supplements internal/scan NeverPatterns with the
+// daemon hardening corpus (issue #118): sk-/sk-proj-, slack xox tokens,
+// PEM private keys, github_pat_, Bearer/JWT entropy. Defined here (not in
+// internal/scan, owned by another agent) so daemon enforcement stays
+// fail-closed even before the shared vocabulary expands.
+var extraSecretPatterns = initExtraSecretPatterns()
+
+func initExtraSecretPatterns() []*regexp.Regexp {
+	patterns := []string{
+		`sk-[A-Za-z0-9]{20,}`,
+		`sk-proj-[A-Za-z0-9_\-]{20,}`,
+		`xox[baprs]-[A-Za-z0-9\-]{8,}`,
+		`-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----`,
+		`github_pat_[A-Za-z0-9_]{20,}`,
+		`(?i)bearer\s+[A-Za-z0-9_\-\.~\+/]{20,}={0,2}`,
+		`eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}`,
+		`(?i)aws_secret_access_key\s*[:=]\s*['"]?[A-Za-z0-9/\+]{30,}['"]?`,
+		`(?i)client_secret\s*[:=]\s*['"]?[A-Za-z0-9_\-]{16,}['"]?`,
+	}
+	var out []*regexp.Regexp
+	for _, p := range patterns {
+		if re, err := regexp.Compile(p); err == nil {
+			out = append(out, re)
+		}
+	}
+	return out
+}
+
+// containsSecret reports whether data matches any NeverPattern or the
+// daemon-local extra corpus. Fail-closed: any match blocks the operation.
 func containsSecret(data []byte) bool {
 	s := string(data)
 	for _, re := range scan.NeverPatterns {
@@ -169,27 +199,146 @@ func containsSecret(data []byte) bool {
 			return true
 		}
 	}
+	for _, re := range extraSecretPatterns {
+		if re.MatchString(s) {
+			return true
+		}
+	}
 	return false
 }
 
+// openNoFollow opens path without following a trailing symlink where the
+// platform supports it (Unix O_NOFOLLOW); elsewhere it falls back to a
+// plain open — post-open verifyOpenedFile still rejects symlink swaps.
+func openNoFollow(path string) (*os.File, error) {
+	return openNoFollowPlatform(path)
+}
+
+// isSymlinkError reports whether err looks like an O_NOFOLLOW symlink refusal.
+func isSymlinkError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "symlink") || strings.Contains(s, "too many links") ||
+		strings.Contains(s, "eloop") || strings.Contains(s, "not a directory")
+}
+
+// readAllCapped reads up to limit+1 bytes so callers can detect overflow.
+func readAllCapped(f *os.File, limit int64) ([]byte, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	// limit is MaxFileBytes+1 (≤2MB+1): a single bounded allocation.
+	buf := make([]byte, 0, 4096)
+	tmp := make([]byte, 32<<10)
+	var total int64
+	for {
+		n, err := f.Read(tmp)
+		if n > 0 {
+			total += int64(n)
+			if total > limit {
+				// Drain-free overflow signal: return what we have plus one
+				// extra byte so the caller sees len > MaxFileBytes.
+				buf = append(buf, tmp[:n]...)
+				return buf, nil
+			}
+			buf = append(buf, tmp[:n]...)
+		}
+		if err != nil {
+			if err == io.EOF {
+				return buf, nil
+			}
+			return nil, err
+		}
+	}
+}
+
+// verifyOpenedFile performs post-open verification (issue #92): the opened
+// descriptor and a fresh Lstat of the path must agree (no swap between
+// check and use), the final component must not be a symlink, and the
+// canonical path must still be contained in the root.
+func verifyOpenedFile(root, canonical string, f *os.File) error {
+	fst, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !fst.Mode().IsRegular() {
+		return ErrNotFile
+	}
+	lst, err := os.Lstat(canonical)
+	if err != nil {
+		return err
+	}
+	if lst.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%w: symlink target swapped post-check", ErrTraversal)
+	}
+	if !os.SameFile(fst, lst) {
+		return fmt.Errorf("%w: file swapped post-check (TOCTOU)", ErrTraversal)
+	}
+	// Re-resolve containment post-open: a parent swapped to a symlink
+	// after SecureJoin must still be caught.
+	rootReal := canonicalRoot(root)
+	if resolved, err := resolveExisting(canonical); err == nil {
+		canonical = filepath.Clean(resolved)
+	} else if resolved, err := resolveExisting(filepath.Dir(canonical)); err == nil {
+		canonical = filepath.Join(filepath.Clean(resolved), filepath.Base(canonical))
+	}
+	if err := checkContained(rootReal, canonical); err != nil {
+		return err
+	}
+	return nil
+}
+
+// canonicalRoot returns the canonicalized root for containment checks.
+func canonicalRoot(root string) string {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return filepath.Clean(root)
+	}
+	rootAbs = filepath.Clean(rootAbs)
+	if resolved, err := resolveExisting(rootAbs); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return rootAbs
+}
+
 // ReadFile returns the file at workspace-relative path after sandbox,
-// size-cap, and secret checks.
+// size-cap, and secret checks. It opens the file first and verifies the
+// descriptor post-open (issue #92: O_NOFOLLOW-style + SameFile check),
+// extending TOCTOU protection to reads.
 func ReadFile(root, unsafePath string) ([]byte, error) {
 	p, err := SecureJoin(root, unsafePath)
 	if err != nil {
 		return nil, err
 	}
-	st, err := os.Stat(p)
+	f, err := openNoFollow(p)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, err
+		}
+		// Symlink final component (O_NOFOLLOW ELOOP) surfaces as traversal.
+		if isSymlinkError(err) {
+			return nil, fmt.Errorf("%w: symlink target", ErrTraversal)
+		}
+		// Fall back to a plain open so non-symlink errors keep prior shape.
+		f, err = os.Open(p)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer f.Close()
+	if err := verifyOpenedFile(root, p, f); err != nil {
 		return nil, err
 	}
-	if !st.Mode().IsRegular() {
-		return nil, ErrNotFile
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
 	}
 	if st.Size() > MaxFileBytes {
 		return nil, ErrTooLarge
 	}
-	data, err := os.ReadFile(p)
+	data, err := readAllCapped(f, MaxFileBytes+1)
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +352,9 @@ func ReadFile(root, unsafePath string) ([]byte, error) {
 }
 
 // WriteFile writes content to the workspace-relative path after sandbox,
-// size-cap, and secret checks. Parents are created as needed.
+// size-cap, and secret checks. Parents are created as needed. Writes are
+// atomic (temp file in the target dir + fsync + rename, mode 0600 per
+// issue #118) and re-verify containment post-open (issue #92).
 func WriteFile(root, unsafePath string, content []byte) error {
 	if len(content) > MaxFileBytes {
 		return ErrTooLarge
@@ -222,8 +373,66 @@ func WriteFile(root, unsafePath string, content []byte) error {
 	if filepath.Clean(p) == filepath.Clean(rootAbs) {
 		return ErrNotFile
 	}
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(p, content, 0o644)
+	// Re-verify containment after MkdirAll: a parent may have been swapped
+	// for a symlink between SecureJoin and the mkdir.
+	if p2, err := SecureJoin(root, unsafePath); err != nil {
+		return err
+	} else if filepath.Clean(p2) != filepath.Clean(p) {
+		// Canonical path moved under us; re-resolve to the fresh value.
+		p = p2
+	}
+	dir := filepath.Dir(p)
+	tmp, err := os.CreateTemp(dir, ".tmp-write-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup on failure; success path renames away.
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	// Post-open verification of the temp file (regular, same file).
+	tf, err := os.Open(tmpName)
+	if err != nil {
+		return err
+	}
+	fst, err := tf.Stat()
+	tf.Close()
+	if err != nil {
+		return err
+	}
+	if !fst.Mode().IsRegular() {
+		return ErrNotFile
+	}
+	// Final containment re-check before the atomic rename.
+	if p3, err := SecureJoin(root, unsafePath); err != nil {
+		return err
+	} else {
+		p = p3
+	}
+	if err := os.Rename(tmpName, p); err != nil {
+		return err
+	}
+	_ = os.Chmod(p, 0o600)
+	// Sync the directory so the rename is durable (best-effort).
+	if df, err := os.Open(dir); err == nil {
+		_ = df.Sync()
+		_ = df.Close()
+	}
+	return nil
 }
