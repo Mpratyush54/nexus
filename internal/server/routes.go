@@ -490,4 +490,3 @@ func (s *Server) handleEpisodeSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": episodes, "count": len(episodes)})
 }
-
