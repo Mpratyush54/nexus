@@ -2,10 +2,11 @@
 // (issue #164 / migration 015_memory_sharing).
 //
 // Visibility (per memory_items.visibility):
-//   private  — creator only
-//   shared   — creator + memory_shares (user or role)
-//   project  — all project members (default; pre-015 behavior)
-//   public   — anyone, including unauthenticated viewers
+//
+//	private  — creator only
+//	shared   — creator + memory_shares (user or role)
+//	project  — all project members (default; pre-015 behavior)
+//	public   — anyone, including unauthenticated viewers
 //
 // SearchMemory / GetMemoryItem honor these when a viewer is present on the
 // context (WithViewer). Empty viewer: SearchMemory returns project+public
@@ -165,19 +166,8 @@ func (ms *memShare) toShare() *MemoryShare {
 	}
 }
 
-// SetMemberRole records a project role for MemStore share-role matching
-// (OWNER/MEMBER today; custom roles land with Phase 3).
-func (s *MemStore) SetMemberRole(projectID, userID, role string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.ensureShares()
-	if s.memberRoles[projectID] == nil {
-		s.memberRoles[projectID] = make(map[string]string)
-	}
-	s.memberRoles[projectID][userID] = strings.ToUpper(strings.TrimSpace(role))
-}
-
-// MemberRole returns the recorded or inferred role for a project member.
+// MemberRole returns the recorded or inferred role for a project member
+// (used by memory share-role matching; RBAC writes go through RoleStore).
 func (s *MemStore) MemberRole(projectID, userID string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -189,10 +179,11 @@ func (s *MemStore) memberRoleLocked(projectID, userID string) string {
 		return role
 	}
 	if p, ok := s.projects[projectID]; ok && p != nil && p.CreatedBy == userID {
-		return "OWNER"
+		return RoleOwner
 	}
 	if s.members[projectID][userID] {
-		return "MEMBER"
+		// Legacy bool grants map to EDITOR (MEMBER → EDITOR in migration 013).
+		return RoleEditor
 	}
 	return ""
 }

@@ -38,6 +38,7 @@ func (s *Server) registerRoutes() {
 	s.registerSteerRoutes()
 	s.registerHandoffRoutes()
 	s.registerAuthExtraRoutes()
+	s.registerRBACRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -64,11 +65,11 @@ func (s *Server) handleMemberList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": members, "count": len(members)})
 }
 
-// handleMemberGrant adds a member. Only existing members may grant (team
-// trust); the grant records the granter.
+// handleMemberGrant adds a member. Requires member:invite (issue #163);
+// the grant records the granter. New members default to EDITOR.
 func (s *Server) handleMemberGrant(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
-	if !s.authorizeProject(w, r, id) {
+	if !s.authorizePermission(w, r, id, store.PermMemberInvite) {
 		return
 	}
 	var req memberRequest
@@ -86,10 +87,11 @@ func (s *Server) handleMemberGrant(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"project_id": id, "user_id": strings.TrimSpace(req.UserID)})
 }
 
-// handleMemberRevoke removes a grant. The creator cannot be revoked.
+// handleMemberRevoke removes a grant. Requires member:manage (issue #163).
+// The creator cannot be revoked.
 func (s *Server) handleMemberRevoke(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
-	if !s.authorizeProject(w, r, id) {
+	if !s.authorizePermission(w, r, id, store.PermMemberManage) {
 		return
 	}
 	var req memberRequest
@@ -340,7 +342,8 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Authorization precedes rate/quota spend (issue #134): non-members
 	// must not consume buckets keyed by attacker-chosen project IDs.
-	if !s.authorizeProject(w, r, item.ProjectID) {
+	// memory:write is required for creates (issue #163).
+	if !s.authorizePermission(w, r, item.ProjectID, store.PermMemoryWrite) {
 		return
 	}
 	if !s.eventAllowed("memory:" + strings.TrimSpace(item.ProjectID)) {

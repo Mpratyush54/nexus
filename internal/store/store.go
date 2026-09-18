@@ -93,8 +93,9 @@ type MemStore struct {
 	mu          sync.RWMutex
 	projects    map[string]*Project
 	workspaces  map[string]*Workspace
-	members     map[string]map[string]bool   // projectID -> granted userIDs (issue #149)
-	memberRoles map[string]map[string]string // projectID -> userID -> role (issue #164)
+	members     map[string]map[string]bool         // projectID -> granted userIDs (issue #149)
+	memberRoles map[string]map[string]string       // projectID -> userID -> role name (issue #163/#164)
+	roles       map[string]map[string]*ProjectRole // projectID -> roleID -> custom role (issue #163)
 	memories    map[string]*MemoryItem
 	versions    map[string][]*MemoryVersion // memoryID -> ordered version snapshots (issue #162)
 	shares      map[string]*memShare        // shareID -> grant (issue #164)
@@ -121,6 +122,7 @@ func NewMemStore() *MemStore {
 		workspaces:  make(map[string]*Workspace),
 		members:     make(map[string]map[string]bool),
 		memberRoles: make(map[string]map[string]string),
+		roles:       make(map[string]map[string]*ProjectRole),
 		memories:    make(map[string]*MemoryItem),
 		versions:    make(map[string][]*MemoryVersion),
 		shares:      make(map[string]*memShare),
