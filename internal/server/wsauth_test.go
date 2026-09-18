@@ -33,15 +33,12 @@ func authzTestSetup(t *testing.T) (*Server, *Hub, string, string, string, string
 
 	h := NewHub()
 	s.AttachHub(h)
-	// Mallory and the watcher participate via workspaces on projB so
-	// project-only subscribes pass the membership boundary (issue #141).
-	// Alice is already a member of both projects via resolveTestProject.
+	// Mallory and the watcher participate via explicit grants on projB so
+	// project-only subscribes pass the membership boundary (issue #149).
+	// Alice is already a member of both projects via resolve claim.
 	for _, u := range []string{"mallory", "watcher"} {
-		if err := s.Store.RegisterWorkspace(t.Context(), &store.Workspace{
-			ProjectID: projB, UserID: u,
-			MachineID: "m-" + u, Path: "/tmp/ws-" + u,
-		}); err != nil {
-			t.Fatalf("RegisterWorkspace %s: %v", u, err)
+		if err := s.Store.GrantMember(t.Context(), projB, u, "alice"); err != nil {
+			t.Fatalf("GrantMember %s: %v", u, err)
 		}
 	}
 	return s, h, projA, projB, sess.ID, alice

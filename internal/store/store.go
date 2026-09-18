@@ -59,12 +59,33 @@ type Store interface {
 	// channel. Sends never block the appender: slow subscribers drop events.
 	Subscribe(ctx context.Context, projectID string) (<-chan *Event, func(), error)
 
-	// IsProjectMember reports whether userID may access projectID (issue
-	// #141): workspace registered on the project, project creator, or
-	// active participant in one of its sessions. The server enforces this
-	// on every project-scoped route (403); object routes resolve
-	// object → project first.
+	// IsProjectMember reports whether userID may access projectID (issues
+	// #141, #149): the project creator or an explicit project_members
+	// grant. Workspace registration requires membership; it never creates
+	// it. The server enforces this on every project-scoped route (403);
+	// object routes resolve object → project first.
 	IsProjectMember(ctx context.Context, userID, projectID string) (bool, error)
+
+	// ClaimProject records userID as the project creator iff none is set
+	// (issue #149): the resolver establishes the first owner, so a fresh
+	// project always has exactly one bootstrap member. Never overwrites
+	// an existing creator. Returns true when this call claimed it.
+	ClaimProject(ctx context.Context, projectID, userID string) (bool, error)
+
+	// GrantMember adds userID as a project member (issue #149). GrantedBy
+	// records the granter for audit. Idempotent.
+	GrantMember(ctx context.Context, projectID, userID, grantedBy string) error
+
+	// RevokeMember removes a grant. The project creator cannot be revoked
+	// (ownership is structural); revoking a non-member is a no-op nil.
+	RevokeMember(ctx context.Context, projectID, userID string) error
+
+	// ListMembers returns user IDs with explicit grants on the project.
+	ListMembers(ctx context.Context, projectID string) ([]string, error)
+
+	// GetWorkspace fetches one workspace by id (issue #149: heartbeat
+	// ownership checks need the row before mutating it).
+	GetWorkspace(ctx context.Context, id string) (*Workspace, error)
 }
 
 // MemStore is a thread-safe in-memory Store implementation, ideal for unit testing and local development.
@@ -72,6 +93,7 @@ type MemStore struct {
 	mu         sync.RWMutex
 	projects   map[string]*Project
 	workspaces map[string]*Workspace
+	members    map[string]map[string]bool // projectID -> granted userIDs (issue #149)
 	memories   map[string]*MemoryItem
 	episodes   map[string]*Episode
 	events     []*Event
@@ -94,6 +116,7 @@ func NewMemStore() *MemStore {
 	return &MemStore{
 		projects:   make(map[string]*Project),
 		workspaces: make(map[string]*Workspace),
+		members:    make(map[string]map[string]bool),
 		memories:   make(map[string]*MemoryItem),
 		episodes:   make(map[string]*Episode),
 		events:     make([]*Event, 0),
@@ -244,6 +267,10 @@ func (s *MemStore) RegisterWorkspace(ctx context.Context, ws *Workspace) error {
 	now := time.Now().UTC()
 	ws.LastSeen = now
 	ws.IsOnline = true
+	// Designation is server-managed (issue #149): registration never
+	// designates — only the election path may. A client-supplied true
+	// would otherwise forge processor ownership at insert.
+	ws.IsDesignatedProcessor = false
 	stored := *ws
 	if stored.CreatedAt.IsZero() {
 		stored.CreatedAt = now
@@ -251,6 +278,18 @@ func (s *MemStore) RegisterWorkspace(ctx context.Context, ws *Workspace) error {
 	s.workspaces[stored.ID] = &stored
 	ws.CreatedAt = stored.CreatedAt
 	return nil
+}
+
+// GetWorkspace fetches one workspace by id (issue #149: heartbeat
+// ownership checks need the row before mutating it).
+func (s *MemStore) GetWorkspace(ctx context.Context, id string) (*Workspace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ws, ok := s.workspaces[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return cloneWorkspace(ws), nil
 }
 
 func (s *MemStore) Heartbeat(ctx context.Context, workspaceID string, branch, commitSHA string, isDirty bool) error {

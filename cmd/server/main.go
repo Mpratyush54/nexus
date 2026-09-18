@@ -104,6 +104,21 @@ func (stubStore) Subscribe(ctx context.Context, projectID string) (<-chan *store
 func (stubStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
 	return false, errStorePending
 }
+func (stubStore) ClaimProject(ctx context.Context, projectID, userID string) (bool, error) {
+	return false, errStorePending
+}
+func (stubStore) GrantMember(ctx context.Context, projectID, userID, grantedBy string) error {
+	return errStorePending
+}
+func (stubStore) RevokeMember(ctx context.Context, projectID, userID string) error {
+	return errStorePending
+}
+func (stubStore) ListMembers(ctx context.Context, projectID string) ([]string, error) {
+	return nil, errStorePending
+}
+func (stubStore) GetWorkspace(ctx context.Context, id string) (*store.Workspace, error) {
+	return nil, errStorePending
+}
 
 // Compile-time proof the stub satisfies the server seam.
 var _ store.Store = stubStore{}

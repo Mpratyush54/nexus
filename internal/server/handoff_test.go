@@ -55,7 +55,9 @@ func TestHandoffInitAndAccept(t *testing.T) {
 	}
 	// Bob watches + accepts: needs project membership first (issue #141).
 	bobToken := loginAs(t, s, "bob")
-	ensureMembership(t, s, bobToken, sess.ProjectID)
+	if err := s.Store.GrantMember(context.Background(), sess.ProjectID, "bob", "alice"); err != nil {
+		t.Fatalf("GrantMember bob: %v", err)
+	}
 
 	watcher := watchProject(t, h, "bob", sess.ProjectID)
 

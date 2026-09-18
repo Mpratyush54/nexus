@@ -53,12 +53,16 @@ func scanWorkspace(row pgx.Row) (*Workspace, error) {
 // machine/path cannot rebind an existing workspace to another
 // project/user, nor seize the designated-processor role.
 func (s *PostgresStore) RegisterWorkspace(ctx context.Context, ws *Workspace) error {
+	// Designation is server-managed (issue #149): the INSERT hardcodes
+	// false — only the election path may designate. A client-supplied
+	// true would otherwise forge processor ownership at insert.
+	ws.IsDesignatedProcessor = false
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO workspaces
 			(project_id, user_id, machine_id, path, branch, commit_sha,
 			 is_dirty, is_online, is_designated_processor, last_seen, daemon_url)
 		 VALUES ($1::uuid, $2::uuid, $3, $4, NULLIF($5,''), NULLIF($6,''),
-		         $7, true, $8, now(), NULLIF($9,''))
+		         $7, true, false, now(), NULLIF($8,''))
 		 ON CONFLICT (machine_id, path) DO UPDATE SET
 			branch = EXCLUDED.branch,
 			commit_sha = EXCLUDED.commit_sha,
@@ -68,7 +72,7 @@ func (s *PostgresStore) RegisterWorkspace(ctx context.Context, ws *Workspace) er
 			daemon_url = EXCLUDED.daemon_url
 		 RETURNING id, last_seen, created_at`,
 		ws.ProjectID, ws.UserID, ws.MachineID, ws.Path, ws.Branch, ws.CommitSHA,
-		ws.IsDirty, ws.IsDesignatedProcessor, ws.DaemonURL)
+		ws.IsDirty, ws.DaemonURL)
 	if err := row.Scan(&ws.ID, &ws.LastSeen, &ws.CreatedAt); err != nil {
 		return err
 	}

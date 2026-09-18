@@ -240,9 +240,15 @@ func TestHeartbeatOffline(t *testing.T) {
 	var project store.Project
 	decodeBody(t, rec, &project)
 
-	// Not a member yet: project state is forbidden, not 404 (issue #141 —
-	// 403 for missing and forbidden alike leaks nothing).
+	// Claimed creator is a member but has no workspaces: 404 genuinely
+	// means "nothing active" (issue #149).
 	rec = doJSON(t, s, http.MethodGet, "/workspaces/"+project.ID+"/active", token, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("active status = %d, want 404 for workspace-less project", rec.Code)
+	}
+	// A stranger with no membership gets 403 on the same route.
+	mallory := loginAs(t, s, "mallory")
+	rec = doJSON(t, s, http.MethodGet, "/workspaces/"+project.ID+"/active", mallory, nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("active status = %d, want 403 for non-member", rec.Code)
 	}

@@ -18,6 +18,9 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("GET /healthz", s.handleHealth)
 
 	s.Mux.HandleFunc("POST /projects/resolve", s.requireAuth(s.handleProjectResolve))
+	s.Mux.HandleFunc("GET /projects/{id}/members", s.requireAuth(s.handleMemberList))
+	s.Mux.HandleFunc("POST /projects/{id}/members", s.requireAuth(s.handleMemberGrant))
+	s.Mux.HandleFunc("DELETE /projects/{id}/members", s.requireAuth(s.handleMemberRevoke))
 	s.Mux.HandleFunc("POST /workspaces/register", s.requireAuth(s.handleWorkspaceRegister))
 	s.Mux.HandleFunc("POST /workspaces/heartbeat", s.requireAuth(s.handleWorkspaceHeartbeat))
 	s.Mux.HandleFunc("GET /workspaces/{projectId}/active", s.requireAuth(s.handleWorkspaceActive))
@@ -37,6 +40,73 @@ func (s *Server) registerRoutes() {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// --- project members (issue #149) ---
+
+type memberRequest struct {
+	UserID string `json:"user_id"`
+}
+
+// handleMemberList returns explicit grant user IDs (creator is implicit).
+func (s *Server) handleMemberList(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if !s.authorizeProject(w, r, id) {
+		return
+	}
+	members, err := s.Store.ListMembers(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list members: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": members, "count": len(members)})
+}
+
+// handleMemberGrant adds a member. Only existing members may grant (team
+// trust); the grant records the granter.
+func (s *Server) handleMemberGrant(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if !s.authorizeProject(w, r, id) {
+		return
+	}
+	var req memberRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.UserID) == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	if err := s.Store.GrantMember(r.Context(), id, strings.TrimSpace(req.UserID), authSubject(r)); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not grant member: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"project_id": id, "user_id": strings.TrimSpace(req.UserID)})
+}
+
+// handleMemberRevoke removes a grant. The creator cannot be revoked.
+func (s *Server) handleMemberRevoke(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if !s.authorizeProject(w, r, id) {
+		return
+	}
+	var req memberRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if strings.TrimSpace(req.UserID) == "" {
+		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	if err := s.Store.RevokeMember(r.Context(), id, strings.TrimSpace(req.UserID)); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not revoke member: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"project_id": id, "user_id": strings.TrimSpace(req.UserID), "revoked": true})
 }
 
 // --- auth ---
@@ -138,6 +208,13 @@ func (s *Server) handleProjectResolve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not resolve project: "+err.Error())
 		return
 	}
+	// Creator claim (issue #149): the first resolver to find an unclaimed
+	// project becomes its creator — the bootstrap member. Never overwrites.
+	if strings.TrimSpace(p.CreatedBy) == "" {
+		if claimed, cerr := s.Store.ClaimProject(r.Context(), p.ID, authSubject(r)); cerr == nil && claimed {
+			p.CreatedBy = authSubject(r)
+		}
+	}
 	writeJSON(w, http.StatusOK, p)
 }
 
@@ -156,8 +233,20 @@ func (s *Server) handleWorkspaceRegister(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "machine_id and path are required")
 		return
 	}
-	ws.ID = ""                 // server assigns the ID; client must not set it
+	ws.ID = "" // server assigns the ID; client must not set it
 	ws.UserID = authSubject(r) // attribution is the authenticated user (issue #141)
+	// Server-managed fields are never accepted from JSON (issue #149):
+	// designation only flows from the election path; liveness/timestamps
+	// from the store. The stores also force these, belt and suspenders.
+	ws.IsDesignatedProcessor = false
+	ws.IsOnline = false
+	ws.LastSeen = time.Time{}
+	ws.CreatedAt = time.Time{}
+	// Registration requires membership (issue #149): it bootstraps
+	// nothing — the creator claims at resolve time, others need a grant.
+	if !s.authorizeProject(w, r, ws.ProjectID) {
+		return
+	}
 	if err := s.Store.RegisterWorkspace(r.Context(), &ws); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not register workspace: "+err.Error())
 		return
@@ -179,6 +268,20 @@ func (s *Server) handleWorkspaceHeartbeat(w http.ResponseWriter, r *http.Request
 	}
 	if strings.TrimSpace(req.WorkspaceID) == "" {
 		writeError(w, http.StatusBadRequest, "workspace_id is required")
+		return
+	}
+	// Ownership (issue #149): callers heartbeat only their own workspaces.
+	ws, err := s.Store.GetWorkspace(r.Context(), strings.TrimSpace(req.WorkspaceID))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "workspace not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load workspace: "+err.Error())
+		return
+	}
+	if ws.UserID != authSubject(r) {
+		writeError(w, http.StatusForbidden, "not your workspace")
 		return
 	}
 	if err := s.Store.Heartbeat(r.Context(), req.WorkspaceID, req.Branch, req.CommitSHA, req.IsDirty); err != nil {
