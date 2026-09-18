@@ -163,9 +163,11 @@ func TestBuildContextXMLLevelsAndEscape(t *testing.T) {
 			t.Errorf("XML contains unescaped %q:\n%s", no, xml)
 		}
 	}
-	// Level ordering: organization before project.
-	if strings.Index(xml, "<organization>") > strings.Index(xml, "<project>") {
-		t.Error("organization section must precede project section")
+	// Section order matches context.AssembleXML priority (issue #135):
+	// project renders before organization (organization is lowest priority
+	// and drops first under budget pressure).
+	if strings.Index(xml, "<project>") > strings.Index(xml, "<organization>") {
+		t.Error("project section must precede organization section")
 	}
 }
 

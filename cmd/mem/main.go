@@ -32,20 +32,22 @@ type mcpStore struct {
 
 var _ mcp.Store = mcpStore{}
 
-// memoryDTO maps a store row to the MCP view. Field fidelity (Issue #116):
-// mcp.MemoryItem intentionally carries only the MCP tool surface (ID,
-// ProjectID, Key, Content, ContextSnippet, Level, Scope, Tags, Confidence,
-// Status, Source). Store-only fields — UserID, SessionID, OrgID, Embedding,
+// memoryDTO maps a store row to the MCP view. Field fidelity (Issue #116,
+// #135): every field mcp.MemoryItem carries (ID, ProjectID, UserID,
+// SessionID, Key, Content, ContextSnippet, Level, Scope, Tags, Confidence,
+// Status, Source, Embedding) is copied — the DTO grew UserID/SessionID/
+// Embedding after #116, so dropping them here would silently unsearchable
+// writes and ownerless reads. Truly store-only fields (OrgID,
 // SourceEventID, ProposedBy, ConfirmedBy, SupersededBy, UseCount,
-// LastUsedAt, CreatedAt, UpdatedAt — remain on the store row where decay /
-// relevance (plan §1.7) is served; they are documented here, not silently
-// dropped. Do NOT widen mcp.MemoryItem here (internal/mcp is read-only);
-// carry those fields through the store row instead.
+// LastUsedAt, CreatedAt, UpdatedAt) remain on the store row where decay /
+// relevance (plan §1.7) is served.
 func memoryDTO(item *store.MemoryItem) *mcp.MemoryItem {
 	return &mcp.MemoryItem{
-		ID: item.ID, ProjectID: item.ProjectID, Key: item.Key, Content: item.Content,
+		ID: item.ID, ProjectID: item.ProjectID, UserID: item.UserID, SessionID: item.SessionID,
+		Key: item.Key, Content: item.Content,
 		ContextSnippet: item.ContextSnippet, Level: item.Level, Scope: item.Scope,
 		Tags: item.Tags, Confidence: item.Confidence, Status: item.Status, Source: item.Source,
+		Embedding: item.Embedding,
 	}
 }
 
@@ -63,9 +65,11 @@ func (s mcpStore) SearchMemory(ctx context.Context, projectID, query string, tag
 
 func (s mcpStore) CreateMemoryItem(ctx context.Context, item *mcp.MemoryItem) error {
 	row := &store.MemoryItem{
-		ID: item.ID, ProjectID: item.ProjectID, Key: item.Key, Content: item.Content,
+		ID: item.ID, ProjectID: item.ProjectID, UserID: item.UserID, SessionID: item.SessionID,
+		Key: item.Key, Content: item.Content,
 		ContextSnippet: item.ContextSnippet, Level: item.Level, Scope: item.Scope,
 		Tags: item.Tags, Confidence: item.Confidence, Status: item.Status, Source: item.Source,
+		Embedding: item.Embedding,
 	}
 	if err := s.mem.CreateMemoryItem(ctx, row); err != nil {
 		return err

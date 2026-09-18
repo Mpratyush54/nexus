@@ -87,10 +87,9 @@ func TestAuditMemMemoryDTOFieldFidelity(t *testing.T) {
 	}
 }
 
-// TODO(dto-drop): memoryDTO silently drops SessionID and UseCount (plus
-// UserID/OrgID/Embedding/ProposedBy/ConfirmedBy/...). Two store rows that
-// differ ONLY in dropped fields map to identical MCP DTOs — data loss at
-// the adapter boundary. Either widen mcp.MemoryItem or document the drop.
+// DTO fidelity (issues #116, #135): mcp.MemoryItem now carries UserID,
+// SessionID, and Embedding, so rows differing in those fields map to
+// DIFFERENT DTOs — the old silent drop is closed.
 func TestAuditMemMemoryDTODropsSessionIDUseCount(t *testing.T) {
 	base := &store.MemoryItem{
 		ID: "mem_x", ProjectID: "p", Key: "k",
@@ -99,13 +98,30 @@ func TestAuditMemMemoryDTODropsSessionIDUseCount(t *testing.T) {
 	}
 	a := *base
 	a.SessionID = "sess_A"
+	a.UserID = "u_A"
+	a.Embedding = make([]float32, 1536)
 	a.UseCount = 3
 	b := *base
 	b.SessionID = "sess_B"
+	b.UserID = "u_B"
+	b.Embedding = make([]float32, 1536)
+	b.Embedding[0] = 1.0
 	b.UseCount = 99
 	da, db := memoryDTO(&a), memoryDTO(&b)
-	if !reflect.DeepEqual(da, db) {
-		t.Fatalf("expected identical DTOs when only dropped fields differ:\n%+v\n%+v", da, db)
+	// SessionID/UserID/Embedding now survive the mapping...
+	if da.SessionID != "sess_A" || db.SessionID != "sess_B" {
+		t.Fatalf("SessionID lost: %+v vs %+v", da, db)
+	}
+	if da.UserID != "u_A" || db.UserID != "u_B" {
+		t.Fatalf("UserID lost: %+v vs %+v", da, db)
+	}
+	if len(da.Embedding) != 1536 || da.Embedding[0] != 0 || db.Embedding[0] != 1.0 {
+		t.Fatal("Embedding lost in DTO mapping")
+	}
+	// ...so the DTOs differ (UseCount is store-only and collapses, which
+	// is correct: it is usage telemetry, not content).
+	if reflect.DeepEqual(da, db) {
+		t.Fatal("DTOs should differ when SessionID/UserID/Embedding differ")
 	}
 	var _ = mcp.MemoryItem{}.ID // pin the DTO type under test
 }

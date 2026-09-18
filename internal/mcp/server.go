@@ -158,9 +158,19 @@ func (s *Server) Handle(ctx context.Context, frame json.RawMessage) *Response {
 	if req.JSONRPC != JSONRPCVersion || req.Method == "" {
 		return errResult(req.ID, ErrInvalidRequest, "invalid request: jsonrpc must be \"2.0\" with a method")
 	}
-	// Notification: acknowledge by silence.
+	// Notification: acknowledge by silence. Only side-effect-free methods
+	// run (issue #135): a notification tools/call would execute
+	// memory_write/file_write with no reply, so state-changing methods
+	// are dropped instead of dispatched.
 	if req.ID == nil {
-		s.dispatch(ctx, &req) // fire-and-forget side effects only
+		switch req.Method {
+		case "notifications/initialized", "notifications/cancelled", "ping",
+			"initialize", "tools/list":
+			s.dispatch(ctx, &req)
+		default:
+			// Drop, including tools/call: JSON-RPC notifications must
+			// not cause side effects.
+		}
 		return nil
 	}
 
