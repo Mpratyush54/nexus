@@ -541,6 +541,12 @@ func (s *Server) AttachHub(h *Hub) {
 
 // serveWS authenticates, upgrades to WebSocket (stdlib Hijack), and pumps
 // messages between the socket and the hub.
+//
+// Token transport (issue #134): browsers cannot set Authorization headers
+// on native WebSocket, so ?token= is accepted as a fallback (the dashboard
+// depends on it). REST routes reject query tokens. Server request logging
+// records r.URL.Path only (never the query), and operators terminating TLS
+// at a reverse proxy should strip/log accordingly.
 func (s *Server) serveWS(h *Hub) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := r.URL.Query().Get("token")

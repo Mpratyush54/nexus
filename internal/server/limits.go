@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"central-memory/internal/governance"
 	"central-memory/internal/security"
@@ -46,15 +47,22 @@ func clampSearchLimit(raw string, w http.ResponseWriter) int {
 
 // rateGate holds per-scope token buckets. Lazily created per key so tests
 // and single-project dev servers share one bucket.
+//
+// Bound (issue #134): keys are attacker-controlled (project IDs, IPs), so
+// an unbounded map is a memory-exhaustion vector. Past maxRateGateBuckets
+// entries the least-recently-used bucket is evicted.
+const maxRateGateBuckets = 4096
+
 type rateGate struct {
-	mu      sync.Mutex
-	buckets map[string]*security.Limiter
-	rps     int
-	burst   int
+	mu       sync.Mutex
+	buckets  map[string]*security.Limiter
+	lastSeen map[string]time.Time
+	rps      int
+	burst    int
 }
 
 func newRateGate(rps, burst int) *rateGate {
-	return &rateGate{buckets: make(map[string]*security.Limiter), rps: rps, burst: burst}
+	return &rateGate{buckets: make(map[string]*security.Limiter), lastSeen: make(map[string]time.Time), rps: rps, burst: burst}
 }
 
 func (g *rateGate) allow(key string) bool {
@@ -70,7 +78,22 @@ func (g *rateGate) allow(key string) bool {
 			b = security.NewEventLimiter()
 		}
 		g.buckets[key] = b
+		if len(g.buckets) > maxRateGateBuckets {
+			var oldestKey string
+			var oldest time.Time
+			first := true
+			for k, t := range g.lastSeen {
+				if first || t.Before(oldest) {
+					oldest, oldestKey, first = t, k, false
+				}
+			}
+			if oldestKey != "" {
+				delete(g.buckets, oldestKey)
+				delete(g.lastSeen, oldestKey)
+			}
+		}
 	}
+	g.lastSeen[key] = time.Now().UTC()
 	g.mu.Unlock()
 	return b.Allow()
 }
@@ -81,6 +104,11 @@ type quotaGate struct {
 	tracker *governance.CostTracker
 	enforce governance.QuotaEnforcer
 	usage   governance.QuotaUsage
+	// Window tracking (issue #134): without day/month rollover the
+	// counters grow forever and one tenant permanently consumes the
+	// process-wide quota until restart.
+	windowDay   time.Time // date of usage.Day* counters
+	windowMonth time.Time // month of usage.Month* counters
 }
 
 func newQuotaGate() *quotaGate {
@@ -91,13 +119,29 @@ func newQuotaGate() *quotaGate {
 }
 
 // allowN checks whether n tokens fit inside quota, recording spend on success.
-// Returns false + reason when the batch would exceed a cap.
+// Returns false + reason when the batch would exceed a cap. Day/month
+// windows roll over automatically (issue #134).
 func (q *quotaGate) allowN(tokens int) (bool, string) {
 	if q == nil {
 		return true, ""
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	now := time.Now().UTC()
+	y, m, d := now.Date()
+	today := time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
+	thisMonth := time.Date(y, m, 1, 0, 0, 0, 0, time.UTC)
+	if q.windowDay.IsZero() {
+		q.windowDay, q.windowMonth = today, thisMonth
+	}
+	if !today.Equal(q.windowDay) {
+		q.windowDay = today
+		q.usage.DayTokens, q.usage.DayUSD = 0, 0
+	}
+	if !thisMonth.Equal(q.windowMonth) {
+		q.windowMonth = thisMonth
+		q.usage.MonthTokens, q.usage.MonthUSD = 0, 0
+	}
 	if ok, reason := q.enforce.AllowsBatch(q.usage, tokens, 0); !ok {
 		return false, reason
 	}

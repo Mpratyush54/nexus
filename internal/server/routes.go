@@ -336,11 +336,13 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if !s.eventAllowed("memory:" + strings.TrimSpace(item.ProjectID)) {
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+	// Authorization precedes rate/quota spend (issue #134): non-members
+	// must not consume buckets keyed by attacker-chosen project IDs.
+	if !s.authorizeProject(w, r, item.ProjectID) {
 		return
 	}
-	if !s.authorizeProject(w, r, item.ProjectID) {
+	if !s.eventAllowed("memory:" + strings.TrimSpace(item.ProjectID)) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
 	if ok, reason := s.quotaAllowed(len(item.Content)); !ok {
@@ -446,11 +448,12 @@ func (s *Server) handleEpisodeCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "episode_type is required")
 		return
 	}
-	if !s.eventAllowed("episodes:" + strings.TrimSpace(ep.ProjectID)) {
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
+	// Authorization precedes rate/quota spend (issue #134).
+	if !s.authorizeProject(w, r, ep.ProjectID) {
 		return
 	}
-	if !s.authorizeProject(w, r, ep.ProjectID) {
+	if !s.eventAllowed("episodes:" + strings.TrimSpace(ep.ProjectID)) {
+		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
 	if ok, reason := s.quotaAllowed(len(ep.Title) + len(ep.Trigger)); !ok {
