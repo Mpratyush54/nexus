@@ -36,7 +36,13 @@ func validRef(ref string) bool {
 func runGit(root string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), gitTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", root}, args...)...)
+	// Pin the binary like RunCommand does (issue #132): a bare "git"
+	// trusts PATH, so a planted git.bat/git.exe shadows the real one.
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, gitBin, append([]string{"-C", root}, args...)...)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return string(out), ctx.Err()
