@@ -6,18 +6,31 @@ aws iam put-role-policy --role-name central-memory-task-exec \
   --policy-name central-memory-read-github-secret \
   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:'"${AWS_REGION}"':833291393451:secret:central-memory/github*"}]}' 2>/dev/null || true
 
-echo "==> Resolving active ECS task definition..."
-TASK_DEF_FAMILY="central-memory-server"
-if ! aws ecs describe-task-definition --task-definition "$TASK_DEF_FAMILY" &>/dev/null; then
-  TASK_DEF_FAMILY="central-memory-srv"
+echo "==> Finding active ECS cluster and service..."
+CLUSTER="central-memory-cluster"
+SERVICE="central-memory-srv"
+
+if ! aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query "services[0].status" --output text 2>/dev/null | grep -q "ACTIVE"; then
+  if aws ecs describe-services --cluster "$CLUSTER" --services "central-memory-server" --query "services[0].status" --output text 2>/dev/null | grep -q "ACTIVE"; then
+    SERVICE="central-memory-server"
+  elif aws ecs describe-services --cluster "central-memory" --services "central-memory-srv" --query "services[0].status" --output text 2>/dev/null | grep -q "ACTIVE"; then
+    CLUSTER="central-memory"
+    SERVICE="central-memory-srv"
+  elif aws ecs describe-services --cluster "central-memory" --services "central-memory-server" --query "services[0].status" --output text 2>/dev/null | grep -q "ACTIVE"; then
+    CLUSTER="central-memory"
+    SERVICE="central-memory-server"
+  fi
 fi
-echo "Using task definition family: $TASK_DEF_FAMILY"
+echo "Active target: cluster=$CLUSTER, service=$SERVICE"
+
+CURRENT_TASK_DEF=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query "services[0].taskDefinition" --output text)
+echo "Current running task definition: $CURRENT_TASK_DEF"
 
 IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 echo "Target Image: $IMAGE"
 
 echo "==> Preparing updated task definition JSON..."
-aws ecs describe-task-definition --task-definition "$TASK_DEF_FAMILY" | \
+aws ecs describe-task-definition --task-definition "$CURRENT_TASK_DEF" | \
 jq --arg img "$IMAGE" \
    --arg api "https://api-nexus.pratyushes.dev" \
    --arg app "https://nexus.pratyushes.dev" \
@@ -40,12 +53,9 @@ jq --arg img "$IMAGE" \
 
 echo "==> Registering new ECS task definition revision..."
 REGISTERED_ARN=$(aws ecs register-task-definition --cli-input-json file:///tmp/task-def.json --query 'taskDefinition.taskDefinitionArn' --output text)
-echo "Registered: $REGISTERED_ARN"
+echo "Registered new task definition: $REGISTERED_ARN"
 
-echo "==> Updating ECS service with new task definition and force deployment..."
-aws ecs update-service --cluster central-memory-cluster --service central-memory-srv --task-definition "$REGISTERED_ARN" --force-new-deployment || \
-aws ecs update-service --cluster central-memory-cluster --service central-memory-server --task-definition "$REGISTERED_ARN" --force-new-deployment || \
-aws ecs update-service --cluster central-memory --service central-memory-srv --task-definition "$REGISTERED_ARN" --force-new-deployment || \
-aws ecs update-service --cluster central-memory --service central-memory-server --task-definition "$REGISTERED_ARN" --force-new-deployment
+echo "==> Updating ECS service with new task definition and forcing deployment..."
+aws ecs update-service --cluster "$CLUSTER" --service "$SERVICE" --task-definition "$REGISTERED_ARN" --force-new-deployment
 
-echo "==> ECS deployment initiated successfully!"
+echo "==> ECS deployment successfully initiated!"

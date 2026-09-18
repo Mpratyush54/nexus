@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUCKET="${FRONTEND_S3_BUCKET:-nexus-frontend-833291393451}"
+BUCKET="${FRONTEND_S3_BUCKET:-central-memory-frontend-833291393451}"
 echo "==> Target S3 Bucket: $BUCKET"
 
 if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   echo "Creating S3 bucket $BUCKET in ${AWS_REGION}..."
   aws s3api create-bucket --bucket "$BUCKET" --region "${AWS_REGION}" \
-    --create-bucket-configuration LocationConstraint="${AWS_REGION}" || true
+    --create-bucket-configuration LocationConstraint="${AWS_REGION}" 2>/dev/null || true
 fi
 
 aws s3api put-public-access-block --bucket "$BUCKET" \
-  --public-access-block-configuration "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false" || true
+  --public-access-block-configuration "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false" 2>/dev/null || true
 
-aws s3 website "s3://${BUCKET}" --index-document index.html --error-document index.html || true
+aws s3 website "s3://${BUCKET}" --index-document index.html --error-document index.html 2>/dev/null || true
 
 cat <<POLICY > /tmp/bucket-policy.json
 {
