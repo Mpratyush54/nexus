@@ -33,6 +33,22 @@ func auditCaptureStdout(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
+func TestAuditDefaultServerURL(t *testing.T) {
+	if defaultServerURL == "" {
+		t.Fatal("defaultServerURL must be non-empty for ldflags override")
+	}
+	t.Setenv("CENTRAL_SERVER_URL", "")
+	t.Setenv("NEXUS_SERVER", "")
+	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", t.TempDir())
+	if got := resolveServerURL(); got != defaultServerURL {
+		t.Fatalf("resolveServerURL() = %q want %q", got, defaultServerURL)
+	}
+	t.Setenv("CENTRAL_SERVER_URL", "https://override.example")
+	if got := resolveServerURL(); got != "https://override.example" {
+		t.Fatalf("env override: got %q", got)
+	}
+}
+
 func TestAuditMemUsageOutput(t *testing.T) {
 	out := auditCaptureStdout(t, usage)
 	for _, want := range []string{"mem status", "mem projects", "mem mcp", "nexus"} {
