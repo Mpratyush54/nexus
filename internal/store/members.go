@@ -21,17 +21,29 @@ import (
 // ---- MemStore ----
 
 // IsProjectMember reports whether userID may access projectID: the
-// project's creator or an explicit grant. Empty inputs are never members.
+// project's creator, an explicit grant, or an ADMIN of the project's
+// organization (issue #168). Empty inputs are never members.
 func (s *MemStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(projectID) == "" {
 		return false, nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if p, ok := s.projects[projectID]; ok && p != nil && p.CreatedBy == userID {
+	if p, ok := s.projects[projectID]; ok && p != nil {
+		if p.CreatedBy == userID {
+			return true, nil
+		}
+		if p.OrgID != "" {
+			if role, ok := s.orgMembers[p.OrgID][userID]; ok && role == OrgRoleAdmin {
+				return true, nil
+			}
+		}
+	}
+	if s.members[projectID][userID] {
 		return true, nil
 	}
-	return s.members[projectID][userID], nil
+	_, hasRole := s.memberRoles[projectID][userID]
+	return hasRole, nil
 }
 
 // ClaimProject records userID as creator iff none is set. Returns true
@@ -53,7 +65,8 @@ func (s *MemStore) ClaimProject(ctx context.Context, projectID, userID string) (
 	return true, nil
 }
 
-// GrantMember adds userID as a project member. Idempotent.
+// GrantMember adds userID as a project member with EDITOR role (issue #163).
+// Idempotent: existing members keep their current role.
 func (s *MemStore) GrantMember(ctx context.Context, projectID, userID, grantedBy string) error {
 	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(userID) == "" {
 		return errors.New("store: grant requires project id and user id")
@@ -66,7 +79,17 @@ func (s *MemStore) GrantMember(ctx context.Context, projectID, userID, grantedBy
 	if s.members[projectID] == nil {
 		s.members[projectID] = make(map[string]bool)
 	}
+	if s.memberRoles == nil {
+		s.memberRoles = make(map[string]map[string]string)
+	}
+	if s.memberRoles[projectID] == nil {
+		s.memberRoles[projectID] = make(map[string]string)
+	}
+	already := s.members[projectID][userID] || s.memberRoles[projectID][userID] != ""
 	s.members[projectID][userID] = true
+	if !already {
+		s.memberRoles[projectID][userID] = RoleEditor
+	}
 	return nil
 }
 
@@ -82,6 +105,7 @@ func (s *MemStore) RevokeMember(ctx context.Context, projectID, userID string) e
 		return fmt.Errorf("store: cannot revoke project creator: %w", ErrConflict)
 	}
 	delete(s.members[projectID], userID)
+	delete(s.memberRoles[projectID], userID)
 	return nil
 }
 
@@ -89,9 +113,19 @@ func (s *MemStore) RevokeMember(ctx context.Context, projectID, userID string) e
 func (s *MemStore) ListMembers(ctx context.Context, projectID string) ([]string, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	seen := make(map[string]bool)
 	var out []string
 	for u := range s.members[projectID] {
-		out = append(out, u)
+		if !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
+	}
+	for u := range s.memberRoles[projectID] {
+		if !seen[u] {
+			seen[u] = true
+			out = append(out, u)
+		}
 	}
 	sort.Strings(out)
 	return out, nil
@@ -99,8 +133,9 @@ func (s *MemStore) ListMembers(ctx context.Context, projectID string) ([]string,
 
 // ---- PostgresStore ----
 
-// IsProjectMember reports whether userID may access projectID: creator or
-// an explicit grant row. Malformed UUIDs fail closed with an error.
+// IsProjectMember reports whether userID may access projectID: creator,
+// explicit grant, or org ADMIN of the project's organization (issue #168).
+// Malformed UUIDs fail closed with an error.
 func (s *PostgresStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(projectID) == "" {
 		return false, nil
@@ -108,7 +143,14 @@ func (s *PostgresStore) IsProjectMember(ctx context.Context, userID, projectID s
 	var member bool
 	if err := s.pool.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM projects WHERE id = $2::uuid AND created_by = $1::uuid)
-		    OR EXISTS(SELECT 1 FROM project_members WHERE project_id = $2::uuid AND user_id = $1::uuid)`,
+		    OR EXISTS(SELECT 1 FROM project_members WHERE project_id = $2::uuid AND user_id = $1::uuid)
+		    OR EXISTS(
+		         SELECT 1 FROM projects p
+		         JOIN organization_members om ON om.org_id = p.org_id
+		          WHERE p.id = $2::uuid
+		            AND om.user_id = $1::uuid
+		            AND om.role = 'ADMIN'
+		       )`,
 		userID, projectID).Scan(&member); err != nil {
 		return false, fmt.Errorf("store: membership check: %w", err)
 	}
@@ -130,16 +172,17 @@ func (s *PostgresStore) ClaimProject(ctx context.Context, projectID, userID stri
 	return tag.RowsAffected() > 0, nil
 }
 
-// GrantMember adds userID as a project member. Idempotent.
+// GrantMember adds userID as a project member with EDITOR role (issue #163).
+// Idempotent: existing members keep their current role (ON CONFLICT DO NOTHING).
 func (s *PostgresStore) GrantMember(ctx context.Context, projectID, userID, grantedBy string) error {
 	if strings.TrimSpace(projectID) == "" || strings.TrimSpace(userID) == "" {
 		return errors.New("store: grant requires project id and user id")
 	}
 	if _, err := s.pool.Exec(ctx,
-		`INSERT INTO project_members (project_id, user_id, granted_by)
-		 VALUES ($1::uuid, $2::uuid, $3::uuid)
+		`INSERT INTO project_members (project_id, user_id, role, granted_by)
+		 VALUES ($1::uuid, $2::uuid, $3, $4::uuid)
 		 ON CONFLICT DO NOTHING`,
-		projectID, userID, nullText(grantedBy)); err != nil {
+		projectID, userID, RoleEditor, nullText(grantedBy)); err != nil {
 		return fmt.Errorf("store: grant member: %w", err)
 	}
 	return nil

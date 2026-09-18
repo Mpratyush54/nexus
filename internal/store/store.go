@@ -60,10 +60,11 @@ type Store interface {
 	Subscribe(ctx context.Context, projectID string) (<-chan *Event, func(), error)
 
 	// IsProjectMember reports whether userID may access projectID (issues
-	// #141, #149): the project creator or an explicit project_members
-	// grant. Workspace registration requires membership; it never creates
-	// it. The server enforces this on every project-scoped route (403);
-	// object routes resolve object → project first.
+	// #141, #149, #168): the project creator, an explicit project_members
+	// grant, or an ADMIN of the project's organization. Workspace
+	// registration requires membership; it never creates it. The server
+	// enforces this on every project-scoped route (403); object routes
+	// resolve object → project first.
 	IsProjectMember(ctx context.Context, userID, projectID string) (bool, error)
 
 	// ClaimProject records userID as the project creator iff none is set
@@ -90,17 +91,22 @@ type Store interface {
 
 // MemStore is a thread-safe in-memory Store implementation, ideal for unit testing and local development.
 type MemStore struct {
-	mu         sync.RWMutex
-	projects   map[string]*Project
-	workspaces map[string]*Workspace
-	members    map[string]map[string]bool // projectID -> granted userIDs (issue #149)
-	memories   map[string]*MemoryItem
-	versions   map[string][]*MemoryVersion // memoryID -> ordered version snapshots (issue #162)
-	episodes   map[string]*Episode
-	events     []*Event
-	eventSeq   int64
-	subs       map[int64]*memSubscription
-	subSeq     int64
+	mu          sync.RWMutex
+	projects    map[string]*Project
+	workspaces  map[string]*Workspace
+	members     map[string]map[string]bool         // projectID -> granted userIDs (issue #149)
+	memberRoles map[string]map[string]string       // projectID -> userID -> role name (issue #163/#164)
+	roles       map[string]map[string]*ProjectRole // projectID -> roleID -> custom role (issue #163)
+	orgs        map[string]*Organization
+	orgMembers  map[string]map[string]string // orgID -> userID -> role (issue #168)
+	memories    map[string]*MemoryItem
+	versions    map[string][]*MemoryVersion // memoryID -> ordered version snapshots (issue #162)
+	shares      map[string]*memShare        // shareID -> grant (issue #164)
+	episodes    map[string]*Episode
+	events      []*Event
+	eventSeq    int64
+	subs        map[int64]*memSubscription
+	subSeq      int64
 	// agentPerms: projectID -> agentID -> permission (issue #166).
 	agentPerms map[string]map[string]*AgentPermission
 }
@@ -117,15 +123,20 @@ var _ Store = (*MemStore)(nil)
 // NewMemStore returns an initialized in-memory store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		projects:   make(map[string]*Project),
-		workspaces: make(map[string]*Workspace),
-		members:    make(map[string]map[string]bool),
-		memories:   make(map[string]*MemoryItem),
-		versions:   make(map[string][]*MemoryVersion),
-		episodes:   make(map[string]*Episode),
-		events:     make([]*Event, 0),
-		subs:       make(map[int64]*memSubscription),
-		agentPerms: make(map[string]map[string]*AgentPermission),
+		projects:    make(map[string]*Project),
+		workspaces:  make(map[string]*Workspace),
+		members:     make(map[string]map[string]bool),
+		memberRoles: make(map[string]map[string]string),
+		roles:       make(map[string]map[string]*ProjectRole),
+		orgs:        make(map[string]*Organization),
+		orgMembers:  make(map[string]map[string]string),
+		memories:    make(map[string]*MemoryItem),
+		versions:    make(map[string][]*MemoryVersion),
+		shares:      make(map[string]*memShare),
+		episodes:    make(map[string]*Episode),
+		events:      make([]*Event, 0),
+		subs:        make(map[int64]*memSubscription),
+		agentPerms:  make(map[string]map[string]*AgentPermission),
 	}
 }
 
@@ -359,6 +370,11 @@ func (s *MemStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) error
 	if stored.Tags == nil {
 		stored.Tags = []string{}
 	}
+	if stored.Visibility == "" {
+		stored.Visibility = VisibilityProject
+	} else {
+		stored.Visibility = NormalizeVisibility(stored.Visibility)
+	}
 	now := time.Now().UTC()
 	stored.CreatedAt = now
 	stored.UpdatedAt = now
@@ -368,11 +384,27 @@ func (s *MemStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) error
 }
 
 func (s *MemStore) GetMemoryItem(ctx context.Context, id string) (*MemoryItem, error) {
+	viewerID := ViewerFrom(ctx)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	item, ok := s.memories[id]
 	if !ok {
 		return nil, ErrNotFound
+	}
+	// Raw fetch when no viewer (internal callers). WithViewer enforces
+	// visibility and returns ErrNotFound on deny (no existence leak).
+	if viewerID != "" {
+		isMember := false
+		if item.ProjectID != "" {
+			if p, ok := s.projects[item.ProjectID]; ok && p != nil && p.CreatedBy == viewerID {
+				isMember = true
+			} else {
+				isMember = s.members[item.ProjectID][viewerID]
+			}
+		}
+		if !s.memoryVisibleLocked(item, viewerID, isMember) {
+			return nil, ErrNotFound
+		}
 	}
 	return cloneMemoryItem(item), nil
 }
@@ -415,6 +447,16 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 	if effective <= 0 {
 		effective = 20
 	}
+	viewerID := ViewerFrom(ctx)
+	// Membership checked outside the memory lock (RWMutex is not reentrant).
+	isMember := false
+	if viewerID != "" {
+		ok, err := s.IsProjectMember(ctx, viewerID, projectID)
+		if err != nil {
+			return nil, err
+		}
+		isMember = ok
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -426,6 +468,15 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 			continue
 		}
 		if item.Status != StatusConfirmed && item.Status != StatusProposed {
+			continue
+		}
+		// Visibility (issue #164): empty viewer sees project+public only.
+		if viewerID == "" {
+			vis := NormalizeVisibility(item.Visibility)
+			if vis != VisibilityProject && vis != VisibilityPublic {
+				continue
+			}
+		} else if !s.memoryVisibleLocked(item, viewerID, isMember) {
 			continue
 		}
 		if len(tags) > 0 {
@@ -472,6 +523,60 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 		results = results[:effective]
 	}
 	return results, nil
+}
+
+// SearchMemoryVector ranks memories by cosine similarity (issue #165).
+// Mirrors PostgresStore.SearchMemoryVector: CONFIRMED only, confidence > 0.3,
+// non-empty embeddings. Used by local MCP/mem wiring and tests so vector
+// search works without Postgres.
+func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
+	if len(queryVec) == 0 {
+		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
+	}
+	if err := ValidateEmbeddingDim(queryVec); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	type scored struct {
+		item *MemoryItem
+		sim  float64
+	}
+	var ranked []scored
+	for _, item := range s.memories {
+		if !memoryVisibleToProject(item, projectID) {
+			continue
+		}
+		if item.Status != StatusConfirmed {
+			continue
+		}
+		if item.Confidence <= 0.3 {
+			continue
+		}
+		if len(item.Embedding) == 0 {
+			continue
+		}
+		if sim := CosineSimilarity(item.Embedding, queryVec); sim > 0 {
+			ranked = append(ranked, scored{item, sim})
+		}
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].sim == ranked[j].sim {
+			return ranked[i].item.ID < ranked[j].item.ID
+		}
+		return ranked[i].sim > ranked[j].sim
+	})
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	out := make([]*MemoryItem, 0, len(ranked))
+	for _, r := range ranked {
+		out = append(out, cloneMemoryItem(r.item))
+	}
+	return out, nil
 }
 
 func (s *MemStore) CreateEpisode(ctx context.Context, ep *Episode) error {

@@ -68,6 +68,12 @@ func (s *Server) registerExtraRoutes() {
 	// Phase 2 memory editing + version history (issue #162).
 	s.registerMemoryEditRoutes()
 
+	// Memory sharing + cross-project copy (issue #164 / Phase 4).
+	s.Mux.HandleFunc("POST /memory/{id}/share", s.requireAuth(s.handleMemoryShare))
+	s.Mux.HandleFunc("GET /memory/{id}/shares", s.requireAuth(s.handleMemorySharesList))
+	s.Mux.HandleFunc("DELETE /memory/{id}/share/{userId}", s.requireAuth(s.handleMemoryUnshare))
+	s.Mux.HandleFunc("POST /memory/{id}/copy", s.requireAuth(s.handleMemoryCopy))
+
 	// Phase 6 agent permissions + MCP tool-call logging (issue #166).
 	s.registerAgentRoutes()
 
@@ -859,8 +865,9 @@ type memoryDecisionRequest struct {
 	RejectedBy  string `json:"rejected_by"`
 }
 
-// authorizeMemory resolves a memory and enforces membership on its project
-// (issue #141): memory IDs are not authorization scope.
+// authorizeMemory resolves a memory and enforces membership + visibility
+// (issues #141, #164): memory IDs are not authorization scope. PUBLIC rows
+// are readable without project membership; other modes require CanViewMemory.
 func (s *Server) authorizeMemory(w http.ResponseWriter, r *http.Request, id string) bool {
 	item, err := s.Store.GetMemoryItem(r.Context(), id)
 	if err != nil {
@@ -871,7 +878,283 @@ func (s *Server) authorizeMemory(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "could not load memory: "+err.Error())
 		return false
 	}
-	return s.authorizeProject(w, r, item.ProjectID)
+	subject := authSubject(r)
+	vis := store.NormalizeVisibility(item.Visibility)
+	if vis == store.VisibilityPublic {
+		return true
+	}
+	isMember := false
+	if strings.TrimSpace(item.ProjectID) != "" {
+		ok, merr := s.Store.IsProjectMember(r.Context(), subject, item.ProjectID)
+		if merr != nil {
+			writeError(w, http.StatusInternalServerError, "could not check project membership")
+			return false
+		}
+		isMember = ok
+	}
+	hasShare := false
+	if vis == store.VisibilityShared {
+		hasShare = s.viewerHasMemoryShare(r, item, subject)
+	}
+	if !store.CanViewMemory(item, subject, isMember, hasShare) {
+		writeError(w, http.StatusForbidden, "not authorized to access this memory")
+		return false
+	}
+	return true
+}
+
+// memorySharingStore is implemented by MemStore + PostgresStore (issue #164).
+type memorySharingStore interface {
+	ShareMemory(ctx context.Context, memoryID, userID, role, sharedBy string) (*store.MemoryShare, error)
+	UnshareMemory(ctx context.Context, memoryID, userID string) error
+	ListMemoryShares(ctx context.Context, memoryID string) ([]*store.MemoryShare, error)
+	SetMemoryVisibility(ctx context.Context, memoryID, visibility string) error
+	CopyMemory(ctx context.Context, memoryID, targetProjectID, copiedBy string) (*store.MemoryItem, error)
+}
+
+func (s *Server) sharingStore() (memorySharingStore, bool) {
+	ss, ok := s.Store.(memorySharingStore)
+	return ss, ok
+}
+
+func (s *Server) viewerHasMemoryShare(r *http.Request, item *store.MemoryItem, subject string) bool {
+	ss, ok := s.sharingStore()
+	if !ok || item == nil || subject == "" {
+		return false
+	}
+	shares, err := ss.ListMemoryShares(r.Context(), item.ID)
+	if err != nil {
+		return false
+	}
+	role := ""
+	if item.ProjectID != "" {
+		if rs, ok := s.Store.(store.RoleStore); ok {
+			if rname, err := rs.GetMemberRole(r.Context(), subject, item.ProjectID); err == nil {
+				role = rname
+			}
+		} else if p, err := s.Store.GetProject(r.Context(), item.ProjectID); err == nil && p != nil && p.CreatedBy == subject {
+			role = "OWNER"
+		} else if ms, ok := s.Store.(*store.MemStore); ok {
+			role = ms.MemberRole(item.ProjectID, subject)
+		} else if members, err := s.Store.ListMembers(r.Context(), item.ProjectID); err == nil {
+			for _, m := range members {
+				if m == subject {
+					role = "EDITOR"
+					break
+				}
+			}
+		}
+	}
+	for _, sh := range shares {
+		if sh.SharedWithUserID != "" && sh.SharedWithUserID == subject {
+			return true
+		}
+		if sh.SharedWithRole != "" && role != "" && strings.EqualFold(sh.SharedWithRole, role) {
+			return true
+		}
+	}
+	return false
+}
+
+// filterMemoriesByVisibility applies issue #164 rules to vector-search
+// results (SearchMemory already filters via WithViewer).
+func (s *Server) filterMemoriesByVisibility(r *http.Request, items []*store.MemoryItem, subject string) []*store.MemoryItem {
+	if len(items) == 0 {
+		return items
+	}
+	out := make([]*store.MemoryItem, 0, len(items))
+	for _, item := range items {
+		if item == nil {
+			continue
+		}
+		vis := store.NormalizeVisibility(item.Visibility)
+		if vis == store.VisibilityPublic {
+			out = append(out, item)
+			continue
+		}
+		isMember := false
+		if strings.TrimSpace(item.ProjectID) != "" {
+			ok, err := s.Store.IsProjectMember(r.Context(), subject, item.ProjectID)
+			if err == nil {
+				isMember = ok
+			}
+		}
+		hasShare := false
+		if vis == store.VisibilityShared {
+			hasShare = s.viewerHasMemoryShare(r, item, subject)
+		}
+		if store.CanViewMemory(item, subject, isMember, hasShare) {
+			out = append(out, item)
+		}
+	}
+	return out
+}
+
+type memoryShareRequest struct {
+	UserID     string `json:"user_id"`
+	Role       string `json:"role"`
+	Visibility string `json:"visibility"`
+}
+
+func (s *Server) handleMemoryShare(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
+		return
+	}
+	item, err := s.Store.GetMemoryItem(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "memory not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load memory: "+err.Error())
+		return
+	}
+	if !s.authorizeProject(w, r, item.ProjectID) {
+		return
+	}
+	subject := authSubject(r)
+	ss, ok := s.sharingStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "memory sharing not supported by configured store")
+		return
+	}
+	var req memoryShareRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	if v := strings.TrimSpace(req.Visibility); v != "" {
+		if !store.IsValidVisibility(v) {
+			writeError(w, http.StatusBadRequest, "visibility must be private|shared|project|public")
+			return
+		}
+		if err := ss.SetMemoryVisibility(r.Context(), id, v); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not set visibility: "+err.Error())
+			return
+		}
+		if strings.TrimSpace(req.UserID) == "" && strings.TrimSpace(req.Role) == "" {
+			item, _ = s.Store.GetMemoryItem(r.Context(), id)
+			writeJSON(w, http.StatusOK, map[string]any{"id": id, "visibility": store.NormalizeVisibility(item.Visibility)})
+			return
+		}
+	}
+	userID := strings.TrimSpace(req.UserID)
+	role := strings.TrimSpace(req.Role)
+	if userID == "" && role == "" {
+		writeError(w, http.StatusBadRequest, "user_id or role is required (or visibility alone)")
+		return
+	}
+	if userID != "" && role != "" {
+		writeError(w, http.StatusBadRequest, "provide exactly one of user_id or role")
+		return
+	}
+	sh, err := ss.ShareMemory(r.Context(), id, userID, role, subject)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not share memory: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, sh)
+}
+
+func (s *Server) handleMemorySharesList(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
+		return
+	}
+	if !s.authorizeMemory(w, r, id) {
+		return
+	}
+	ss, ok := s.sharingStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "memory sharing not supported by configured store")
+		return
+	}
+	items, err := ss.ListMemoryShares(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list shares: "+err.Error())
+		return
+	}
+	if items == nil {
+		items = []*store.MemoryShare{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+}
+
+func (s *Server) handleMemoryUnshare(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	userID := strings.TrimSpace(r.PathValue("userId"))
+	if id == "" || userID == "" {
+		writeError(w, http.StatusBadRequest, "memory id and userId path parameters are required")
+		return
+	}
+	item, err := s.Store.GetMemoryItem(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "memory not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load memory: "+err.Error())
+		return
+	}
+	if !s.authorizeProject(w, r, item.ProjectID) {
+		return
+	}
+	ss, ok := s.sharingStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "memory sharing not supported by configured store")
+		return
+	}
+	if err := ss.UnshareMemory(r.Context(), id, userID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "share not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not unshare memory: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"memory_id": id, "user_id": userID, "revoked": true})
+}
+
+type memoryCopyRequest struct {
+	ProjectID string `json:"project_id"`
+}
+
+func (s *Server) handleMemoryCopy(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
+		return
+	}
+	if !s.authorizeMemory(w, r, id) {
+		return
+	}
+	var req memoryCopyRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	target := strings.TrimSpace(req.ProjectID)
+	if target == "" {
+		writeError(w, http.StatusBadRequest, "project_id is required")
+		return
+	}
+	// memory:write on target (Phase 3 RBAC): until roles land, membership
+	// is the write gate — same as POST /memory.
+	if !s.authorizeProject(w, r, target) {
+		return
+	}
+	ss, ok := s.sharingStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "memory copy not supported by configured store")
+		return
+	}
+	dup, err := ss.CopyMemory(r.Context(), id, target, authSubject(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not copy memory: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, dup)
 }
 
 func (s *Server) handleMemoryConfirm(w http.ResponseWriter, r *http.Request) {
@@ -880,7 +1163,7 @@ func (s *Server) handleMemoryConfirm(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
 		return
 	}
-	if !s.authorizeMemory(w, r, id) {
+	if !s.authorizeMemoryPermission(w, r, id, store.PermMemoryConfirm) {
 		return
 	}
 	var req memoryDecisionRequest
@@ -919,7 +1202,8 @@ func (s *Server) handleMemoryReject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
 		return
 	}
-	if !s.authorizeMemory(w, r, id) {
+	// Reject is the practical delete/dismiss path until soft-delete ships.
+	if !s.authorizeMemoryPermission(w, r, id, store.PermMemoryDelete) {
 		return
 	}
 	var req memoryDecisionRequest

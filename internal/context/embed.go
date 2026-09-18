@@ -1,16 +1,13 @@
-// Embedding generation pipeline (nexus issue #76).
+// Embedding generation pipeline (nexus issues #76, #165).
 //
 // The schema carries vector(1536) columns with IVFFlat indexes and the store
-// accepts precomputed vectors (ProposedInput.Embedding, FormatEmbedding),
-// but no component generated them: memory_write stored Embedding = nil, so
-// SearchMemoryVector always fell back to keyword match. This file provides
-// the generation seam:
+// accepts precomputed vectors (ProposedInput.Embedding, FormatEmbedding).
+// This file provides the generation seam:
 //
-//   - Embedder: the replaceable backend signature. Production passes an LLM
-//     embedder (OpenAI text-embedding-3-small / Ollama via net/http);
-//     HashEmbed is the deterministic stdlib interim with the same 1536-dim,
-//     L2-normalized contract, so pgvector cosine ranking works today and the
-//     LLM swap is a one-line substitution.
+//   - Embedder: the replaceable backend signature. Production selects a
+//     provider via CENTRAL_EMBEDDING_* (see embed_provider.go: openai /
+//     ollama / hash); HashEmbed remains the deterministic stdlib fallback
+//     with the same 1536-dim, L2-normalized contract.
 //   - BackfillEmbeddings: fills missing vectors for already-stored rows.
 //     Persistence stays with the caller (store writes), so pgvector remains
 //     the only retrieval path — this package never invents a second index.

@@ -451,18 +451,18 @@ The database schema carries `vector(1536)` columns with IVFFlat indexes, and `in
 
 This feature adds real LLM vector embedding support for agents and searches:
 
-- [ ] **Provider Interface**:
+- [x] **Provider Interface**:
   - `openai`: `text-embedding-3-small` (1536 dimensions, default for production)
   - `ollama`: local model (e.g. `nomic-embed-text`, `bge-m3` with endpoint)
   - `hash`: stdlib `HashEmbed` (fallback, zero external dependencies)
-- [ ] **Server & Daemon Environment Configuration**:
+- [x] **Server & Daemon Environment Configuration**:
   ```env
   CENTRAL_EMBEDDING_PROVIDER=openai           # openai | ollama | hash
   CENTRAL_EMBEDDING_API_KEY=sk-...           # OpenAI or custom API key
   CENTRAL_EMBEDDING_MODEL=text-embedding-3-small
   CENTRAL_EMBEDDING_ENDPOINT=                # Optional: custom endpoint or Ollama URL
   ```
-- [ ] **Agent & Search Integration**:
+- [x] **Agent & Search Integration**:
   - When `memory_write` runs from MCP or PWA, text is embedded via configured provider.
   - When `memory_search` runs, the query is converted to a vector and matched via pgvector cosine similarity `SearchMemoryVector`!
   - Safe fallback: if provider fails or key is missing, automatically falls back to `HashEmbed` or keyword matching.

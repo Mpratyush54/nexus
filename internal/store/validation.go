@@ -200,6 +200,9 @@ func validateMemoryItemForCreate(item *MemoryItem) error {
 	if !IsValidMemoryStatus(status) {
 		return fmt.Errorf("store: invalid status %q (want PROPOSED|CONFIRMED|REJECTED|SUPERSEDED)", item.Status)
 	}
+	if v := strings.TrimSpace(item.Visibility); v != "" && !IsValidVisibility(v) {
+		return fmt.Errorf("store: invalid visibility %q (want private|shared|project|public)", item.Visibility)
+	}
 	return ValidateMemoryScopeRules(level, item.SessionID, item.UserID)
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	memctx "central-memory/internal/context"
 	"central-memory/internal/store"
 )
 
@@ -37,6 +38,8 @@ func (s *Server) registerRoutes() {
 	s.registerSteerRoutes()
 	s.registerHandoffRoutes()
 	s.registerAuthExtraRoutes()
+	s.registerRBACRoutes()
+	s.registerOrgRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -63,11 +66,11 @@ func (s *Server) handleMemberList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": members, "count": len(members)})
 }
 
-// handleMemberGrant adds a member. Only existing members may grant (team
-// trust); the grant records the granter.
+// handleMemberGrant adds a member. Requires member:invite (issue #163);
+// the grant records the granter. New members default to EDITOR.
 func (s *Server) handleMemberGrant(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
-	if !s.authorizeProject(w, r, id) {
+	if !s.authorizePermission(w, r, id, store.PermMemberInvite) {
 		return
 	}
 	var req memberRequest
@@ -85,10 +88,11 @@ func (s *Server) handleMemberGrant(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"project_id": id, "user_id": strings.TrimSpace(req.UserID)})
 }
 
-// handleMemberRevoke removes a grant. The creator cannot be revoked.
+// handleMemberRevoke removes a grant. Requires member:manage (issue #163).
+// The creator cannot be revoked.
 func (s *Server) handleMemberRevoke(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
-	if !s.authorizeProject(w, r, id) {
+	if !s.authorizePermission(w, r, id, store.PermMemberManage) {
 		return
 	}
 	var req memberRequest
@@ -339,7 +343,8 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Authorization precedes rate/quota spend (issue #134): non-members
 	// must not consume buckets keyed by attacker-chosen project IDs.
-	if !s.authorizeProject(w, r, item.ProjectID) {
+	// memory:write is required for creates (issue #163).
+	if !s.authorizePermission(w, r, item.ProjectID, store.PermMemoryWrite) {
 		return
 	}
 	if !s.eventAllowed("memory:" + strings.TrimSpace(item.ProjectID)) {
@@ -359,6 +364,10 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 	item.ProposedBy = authSubject(r)
 	if strings.ToLower(strings.TrimSpace(item.Level)) == "personal" {
 		item.UserID = authSubject(r)
+	}
+	// Embed at write time when the client omitted a vector (issue #165).
+	if len(item.Embedding) != store.EmbeddingDim {
+		item.Embedding = s.embedText(r.Context(), memctx.EmbedTextForItem(item.Key, item.Content))
 	}
 	if err := s.Store.CreateMemoryItem(r.Context(), &item); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create memory item: "+err.Error())
@@ -411,6 +420,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "vector search failed: "+err.Error())
 			return
 		}
+		items = s.filterMemoriesByVisibility(r, items, authSubject(r))
 		recordMemoryUse(r.Context(), s.Store, items)
 		if items == nil {
 			items = []*store.MemoryItem{}
@@ -418,7 +428,29 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 		return
 	}
-	items, err := s.Store.SearchMemory(r.Context(), projectID, q.Get("q"), tags, limit)
+	// Text query → embed via configured provider, then vector search
+	// (issue #165). Falls back to keyword SearchMemory when the store has
+	// no vector path or vector ranking returns nothing.
+	query := q.Get("q")
+	viewerCtx := store.WithViewer(r.Context(), authSubject(r))
+	if strings.TrimSpace(query) != "" {
+		if vs, ok := s.Store.(interface {
+			SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
+		}); ok {
+			vec := s.embedText(r.Context(), query)
+			if len(vec) == memctx.EmbedDims {
+				if items, err := vs.SearchMemoryVector(r.Context(), projectID, vec, limit); err == nil && len(items) > 0 {
+					items = s.filterMemoriesByVisibility(r, items, authSubject(r))
+					if len(items) > 0 {
+						recordMemoryUse(r.Context(), s.Store, items)
+						writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+						return
+					}
+				}
+			}
+		}
+	}
+	items, err := s.Store.SearchMemory(viewerCtx, projectID, query, tags, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
 		return
@@ -490,4 +522,3 @@ func (s *Server) handleEpisodeSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": episodes, "count": len(episodes)})
 }
-

@@ -14,13 +14,13 @@ import (
 )
 
 const projectColumns = `id, canonical_url, root_commit, folder_name,
-	display_name, created_by, created_at`
+	display_name, org_id, created_by, created_at`
 
 func scanProject(row pgx.Row) (*Project, error) {
 	var p Project
-	var canonicalURL, rootCommit, displayName, createdBy *string
+	var canonicalURL, rootCommit, displayName, orgID, createdBy *string
 	if err := row.Scan(&p.ID, &canonicalURL, &rootCommit, &p.FolderName,
-		&displayName, &createdBy, &p.CreatedAt); err != nil {
+		&displayName, &orgID, &createdBy, &p.CreatedAt); err != nil {
 		return nil, err
 	}
 	if canonicalURL != nil {
@@ -31,6 +31,9 @@ func scanProject(row pgx.Row) (*Project, error) {
 	}
 	if displayName != nil {
 		p.DisplayName = *displayName
+	}
+	if orgID != nil {
+		p.OrgID = *orgID
 	}
 	if createdBy != nil {
 		p.CreatedBy = *createdBy
