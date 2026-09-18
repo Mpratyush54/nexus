@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -184,30 +185,120 @@ func ListTools() []Tool {
 
 // CallTool dispatches one tools/call by name. Unknown names are
 // ErrMethodNotFound (-32601); bad arguments are ErrInvalidParams (-32602).
+// Permission / rate-limit denials return ErrInvalidParams with a clear
+// message; outcomes are logged via Config.ToolLogger when set (issue #166).
 func (s *Server) CallTool(ctx context.Context, name string, rawArgs json.RawMessage) (any, *RPCError) {
+	start := time.Now()
+	if err := s.checkAccess(name); err != nil {
+		s.logToolCall(ctx, name, rawArgs, nil, err.Error(), time.Since(start))
+		return nil, &RPCError{Code: ErrInvalidParams, Message: err.Error()}
+	}
 	if s.store == nil && name != "workspace_info" {
 		return nil, &RPCError{Code: ErrInternal, Message: "no store configured"}
 	}
+	var (
+		result any
+		rpcErr *RPCError
+	)
 	switch name {
 	case "memory_search":
-		return s.handleMemorySearch(ctx, rawArgs)
+		result, rpcErr = s.handleMemorySearch(ctx, rawArgs)
 	case "memory_write":
-		return s.handleMemoryWrite(ctx, rawArgs)
+		result, rpcErr = s.handleMemoryWrite(ctx, rawArgs)
 	case "memory_reflect":
-		return s.handleMemoryReflect(ctx, rawArgs)
+		result, rpcErr = s.handleMemoryReflect(ctx, rawArgs)
 	case "episode_search":
-		return s.handleEpisodeSearch(ctx, rawArgs)
+		result, rpcErr = s.handleEpisodeSearch(ctx, rawArgs)
 	case "episode_report":
-		return s.handleEpisodeReport(ctx, rawArgs)
+		result, rpcErr = s.handleEpisodeReport(ctx, rawArgs)
 	case "workspace_info":
-		return s.handleWorkspaceInfo(ctx), nil
+		result, rpcErr = s.handleWorkspaceInfo(ctx), nil
 	case "file_read":
-		return s.handleFileRead(rawArgs)
+		result, rpcErr = s.handleFileRead(rawArgs)
 	case "file_write":
-		return s.handleFileWrite(rawArgs)
+		result, rpcErr = s.handleFileWrite(rawArgs)
 	default:
 		return nil, &RPCError{Code: ErrMethodNotFound, Message: "unknown tool: " + name}
 	}
+	errMsg := ""
+	if rpcErr != nil {
+		errMsg = rpcErr.Message
+	}
+	s.logToolCall(ctx, name, rawArgs, result, errMsg, time.Since(start))
+	return result, rpcErr
+}
+
+func (s *Server) checkAccess(tool string) error {
+	if s == nil {
+		return nil
+	}
+	access := s.cfg.Access
+	if access == nil {
+		return nil
+	}
+	if err := access.AllowTool(tool); err != nil {
+		return err
+	}
+	if s.cfg.RateLimiter != nil && access.RateLimit > 0 {
+		key := access.AgentID
+		if key == "" {
+			key = s.cfg.AgentName
+		}
+		if key == "" {
+			key = "default"
+		}
+		if !s.cfg.RateLimiter.Allow(key, access.RateLimit) {
+			return &PermissionError{Reason: fmt.Sprintf("rate limit exceeded for agent %q (%d/min)", key, access.RateLimit)}
+		}
+	}
+	return nil
+}
+
+func (s *Server) logToolCall(ctx context.Context, name string, rawArgs json.RawMessage, result any, errMsg string, d time.Duration) {
+	if s == nil || s.cfg.ToolLogger == nil {
+		return
+	}
+	agentID := s.cfg.AgentName
+	if s.cfg.Access != nil && s.cfg.Access.AgentID != "" {
+		agentID = s.cfg.Access.AgentID
+	}
+	if agentID == "" {
+		agentID = "mcp"
+	}
+	args := map[string]any{}
+	if len(rawArgs) > 0 {
+		_ = json.Unmarshal(rawArgs, &args)
+	}
+	var resultMap map[string]any
+	switch v := result.(type) {
+	case map[string]any:
+		resultMap = summarizeResult(v)
+	case nil:
+		resultMap = nil
+	default:
+		resultMap = map[string]any{"ok": errMsg == ""}
+	}
+	_ = s.cfg.ToolLogger.LogToolCall(ctx, s.cfg.ProjectID, ToolCallLog{
+		AgentID:    agentID,
+		ToolName:   name,
+		Arguments:  args,
+		Result:     resultMap,
+		Error:      errMsg,
+		DurationMs: d.Milliseconds(),
+	})
+}
+
+func summarizeResult(v map[string]any) map[string]any {
+	out := map[string]any{}
+	for _, k := range []string{"items_included", "token_count", "budget_remaining", "id", "status", "count", "bytes", "path"} {
+		if val, ok := v[k]; ok {
+			out[k] = val
+		}
+	}
+	if len(out) == 0 {
+		out["ok"] = true
+	}
+	return out
 }
 
 func invalidParams(format string, args ...any) *RPCError {

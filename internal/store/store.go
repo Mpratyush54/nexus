@@ -101,6 +101,8 @@ type MemStore struct {
 	eventSeq   int64
 	subs       map[int64]*memSubscription
 	subSeq     int64
+	// agentPerms: projectID -> agentID -> permission (issue #166).
+	agentPerms map[string]map[string]*AgentPermission
 }
 
 // memSubscription is one in-process event subscriber.
@@ -123,6 +125,7 @@ func NewMemStore() *MemStore {
 		episodes:   make(map[string]*Episode),
 		events:     make([]*Event, 0),
 		subs:       make(map[int64]*memSubscription),
+		agentPerms: make(map[string]map[string]*AgentPermission),
 	}
 }
 

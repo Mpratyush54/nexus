@@ -68,6 +68,9 @@ func (s *Server) registerExtraRoutes() {
 	// Phase 2 memory editing + version history (issue #162).
 	s.registerMemoryEditRoutes()
 
+	// Phase 6 agent permissions + MCP tool-call logging (issue #166).
+	s.registerAgentRoutes()
+
 	// Episodes.
 	s.Mux.HandleFunc("POST /episodes/{id}/resolve", s.requireAuth(s.handleEpisodeResolve))
 }

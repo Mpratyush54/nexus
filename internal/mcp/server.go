@@ -112,6 +112,17 @@ type Config struct {
 	// count) for every successful file_read/file_write (issue #96): the
 	// audit seam mirroring the daemon interceptor events. Nil disables.
 	FileAccessLog func(op, path string, size int)
+
+	// Access is the optional per-agent permission snapshot (issue #166).
+	// Nil means unrestricted (full) access — matching unconfigured agents.
+	Access *AgentAccess
+
+	// RateLimiter enforces Access.RateLimit. Nil disables client-side limiting.
+	RateLimiter *RateLimiter
+
+	// ToolLogger receives every tools/call outcome for MCP_TOOL_CALL events.
+	// Nil disables remote/local logging.
+	ToolLogger ToolCallLogger
 }
 
 // Server is a JSON-RPC 2.0 MCP server. It is safe for concurrent use;

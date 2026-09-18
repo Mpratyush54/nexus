@@ -91,6 +91,7 @@ const (
 	ToolEventGitDiffViewed          ToolEventType = "GIT_DIFF_VIEWED"
 	ToolEventGitCommitted           ToolEventType = "GIT_COMMITTED"
 	ToolEventInstructionFileChanged ToolEventType = "INSTRUCTION_FILE_CHANGED"
+	ToolEventMCPToolCall            ToolEventType = "MCP_TOOL_CALL"
 )
 
 // Tool action names accepted by LogAction. They mirror the daemon operation
@@ -103,6 +104,7 @@ const (
 	ActionCommandRun  = "command_run"
 	ActionGitDiff     = "git_diff"
 	ActionGitCommit   = "git_commit"
+	ActionMCPToolCall = "mcp_tool_call"
 )
 
 // Payload size caps. Rationale is documented in
@@ -305,6 +307,8 @@ func eventTypeForAction(action string) ToolEventType {
 		return ToolEventGitDiffViewed
 	case ActionGitCommit:
 		return ToolEventGitCommitted
+	case ActionMCPToolCall:
+		return ToolEventMCPToolCall
 	default:
 		return ToolEventType("UNKNOWN:" + action)
 	}
@@ -549,4 +553,27 @@ func (in *Interceptor) LogGitCommitted(sha, message, stat string) ToolEvent {
 		"message": message,
 		"stat":    stat,
 	})
+}
+
+// LogMCPToolCall records an MCP_TOOL_CALL event (issue #166): agent name,
+// tool, optional args/result summary, and error string.
+func (in *Interceptor) LogMCPToolCall(agentID, tool string, args, result map[string]any, errMsg string, durationMs int64) ToolEvent {
+	payload := map[string]any{
+		"agent_id":  agentID,
+		"tool_name": tool,
+		"via":       "MCP",
+	}
+	if args != nil {
+		payload["arguments"] = args
+	}
+	if result != nil {
+		payload["result"] = result
+	}
+	if errMsg != "" {
+		payload["error"] = errMsg
+	}
+	if durationMs > 0 {
+		payload["duration_ms"] = durationMs
+	}
+	return in.LogAction(ActionMCPToolCall, payload)
 }

@@ -19,9 +19,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"central-memory/internal/config"
+	"central-memory/internal/daemon"
 	"central-memory/internal/mcp"
 	"central-memory/internal/project"
 	"central-memory/internal/store"
@@ -217,11 +219,10 @@ func cmdStatus() error {
 }
 
 // cmdMCP serves the 8 plan §1.4 tools on stdin/stdout until EOF or SIGINT/
-// SIGTERM. Local wiring only: in-memory memory/episode stores (writes land
-// as PROPOSED, nothing persists), live git state + sandboxed files via the
-// daemon helpers for the current directory. Project resolution uses the full
-// identity triple (Issue #116): Fingerprint(origin, root) of the workspace
-// root plus the folder name fallback — never folder-name only.
+// SIGTERM. When ServerURL + token are configured, tools hit the Central
+// Server REST API (issue #166) so agents share project memory with the PWA;
+// otherwise an in-memory store is used for offline/local-only mode.
+// Project resolution uses the full identity triple (Issue #116).
 func cmdMCP() error {
 	root, err := filepath.Abs(".")
 	if err != nil {
@@ -232,16 +233,88 @@ func cmdMCP() error {
 	defer stop()
 
 	origin, rootCommit := project.Fingerprint(root)
-	mem := store.NewMemStore()
-	p, err := mem.ResolveProject(ctx, origin, rootCommit, name)
-	if err != nil {
-		return fmt.Errorf("mem mcp: resolve project: %w", err)
+	agentName := firstNonEmpty(os.Getenv("NEXUS_AGENT"), os.Getenv("CENTRAL_MEMORY_AGENT"), "mcp")
+	serverURL := strings.TrimSpace(resolveServerURL())
+	token := firstNonEmpty(os.Getenv("NEXUS_TOKEN"), os.Getenv("CENTRAL_MEMORY_TOKEN"))
+
+	interceptor := daemon.NewInterceptor(daemon.DefaultToolEventBuffer, nil)
+	var loggers []mcp.ToolCallLogger
+	loggers = append(loggers, interceptorToolLogger{interceptor})
+
+	cfg := mcp.Config{
+		ProjectName:   name,
+		WorkspacePath: root,
+		AgentName:     agentName,
+		RateLimiter:   mcp.NewRateLimiter(),
 	}
-	srv := mcp.NewServer(mcpStore{mem}, mcp.Config{
-		ProjectID: p.ID, ProjectName: name, WorkspacePath: root,
-	})
+
+	var st mcp.Store
+	if serverURL != "" && token != "" {
+		remote := mcp.NewHTTPStore(serverURL, token)
+		pid, display, err := remote.ResolveProject(ctx, origin, rootCommit, name)
+		if err != nil {
+			return fmt.Errorf("mem mcp: resolve project via server: %w", err)
+		}
+		if display != "" {
+			cfg.ProjectName = display
+		}
+		cfg.ProjectID = pid
+		st = remote
+		loggers = append(loggers, remote)
+		if access, err := remote.FetchAgentAccess(ctx, pid, agentName); err == nil {
+			cfg.Access = access
+		}
+	} else {
+		mem := store.NewMemStore()
+		p, err := mem.ResolveProject(ctx, origin, rootCommit, name)
+		if err != nil {
+			return fmt.Errorf("mem mcp: resolve project: %w", err)
+		}
+		cfg.ProjectID = p.ID
+		st = mcpStore{mem}
+	}
+	cfg.ToolLogger = multiToolLogger(loggers)
+
+	srv := mcp.NewServer(st, cfg)
 	if err := srv.Serve(ctx, os.Stdin, os.Stdout); err != nil && !errors.Is(err, context.Canceled) {
 		return fmt.Errorf("mem mcp: %w", err)
 	}
 	return nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
+}
+
+// interceptorToolLogger adapts daemon.Interceptor to mcp.ToolCallLogger.
+type interceptorToolLogger struct {
+	in *daemon.Interceptor
+}
+
+func (l interceptorToolLogger) LogToolCall(_ context.Context, _ string, call mcp.ToolCallLog) error {
+	if l.in == nil {
+		return nil
+	}
+	l.in.LogMCPToolCall(call.AgentID, call.ToolName, call.Arguments, call.Result, call.Error, call.DurationMs)
+	return nil
+}
+
+type multiToolLogger []mcp.ToolCallLogger
+
+func (m multiToolLogger) LogToolCall(ctx context.Context, projectID string, call mcp.ToolCallLog) error {
+	var first error
+	for _, l := range m {
+		if l == nil {
+			continue
+		}
+		if err := l.LogToolCall(ctx, projectID, call); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
