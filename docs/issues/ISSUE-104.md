@@ -32,3 +32,26 @@
 - Live-Postgres verification of `SetWorkspaceBranch`.
 - Default-workspace resolution (e.g. `?workspace_id=self` via active-workspace lookup) so callers need not track workspace ids.
 - Auth scoping: any authenticated user can currently point any workspace at any branch (matches Heartbeat's trust model; tighten if workspaces gain owners).
+
+## Merge note (2026-09-18, PR #120 resolution)
+
+- At merge time `origin/master` had superseded the `routes_extra.go` side of
+  this issue: diff/merge now enumerate via `branchSnapshot`
+  (SearchMemory universe + ResolveRead views, incl. inherited keys) instead
+  of branch-owned `ListBranchItems` rows, merge applies via
+  `applyMergeResult` with SUPERSEDED tombstones (conflicted merges report
+  `merged:false` and still persist non-conflicting keys), and checkout
+  persists a server-side active-branch pointer (`Server.checkouts`) instead
+  of the `?workspace_id=`-persisted workspace row.
+- The PR's `routes_extra.go` hunks were therefore dropped in favor of
+  master's implementation; the three HTTP tests asserting the old contract
+  (`TestBranchDiffRealChanges`, `TestBranchMergeWritesProposedAndConflicts`,
+  `TestBranchCheckoutPersistsWorkspace`) were removed — behavior remains
+  covered by `branch_flows_test.go`
+  (`TestBranchDiffEnumeratesRealContent`,
+  `TestBranchMergeAppliesToTarget`, `TestBranchCheckoutSwitchesPointer`).
+- Kept from this PR: `BranchStore` store-level API (`ListBranchItems`,
+  `SetWorkspaceBranch` + `branches_test.go`), docs (`ADR-097`, `ADR-104`,
+  `ISSUE-97`, `ISSUE-104`), and the non-superseded `routes_extra_test.go`
+  cases. Workspace-persisted checkout remains an open improvement over the
+  in-memory pointer map (see audit follow-up).
