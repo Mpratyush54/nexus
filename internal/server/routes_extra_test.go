@@ -11,7 +11,9 @@ import (
 )
 
 // resolveTestProject creates a project via the public HTTP route and
-// returns its ID.
+// returns its ID. It also registers a workspace for the token's subject so
+// the caller is a project member (issue #141): project-scoped routes 403
+// without membership, mirroring the real daemon flow (resolve → register).
 func resolveTestProject(t *testing.T, s *Server, token, folder string) string {
 	t.Helper()
 	rec := doJSON(t, s, http.MethodPost, "/projects/resolve", token, map[string]string{
@@ -25,7 +27,30 @@ func resolveTestProject(t *testing.T, s *Server, token, folder string) string {
 	if project.ID == "" {
 		t.Fatal("expected project ID")
 	}
+	rec = doJSON(t, s, http.MethodPost, "/workspaces/register", token, map[string]string{
+		"project_id": project.ID,
+		"machine_id": "test-machine-" + folder,
+		"path":       "/tmp/test-ws-" + folder,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 	return project.ID
+}
+
+// ensureMembership registers a workspace for the token's subject on an
+// existing project (issue #141): project-scoped routes 403 without it.
+// The path embeds the project ID so repeated calls never collide.
+func ensureMembership(t *testing.T, s *Server, token, projectID string) {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodPost, "/workspaces/register", token, map[string]string{
+		"project_id": projectID,
+		"machine_id": "test-machine",
+		"path":       "/tmp/test-ws-" + projectID,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("register status = %d, body = %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestSessionCreateListJoin(t *testing.T) {

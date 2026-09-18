@@ -101,6 +101,9 @@ func (stubStore) ListEvents(ctx context.Context, projectID string, sinceID int64
 func (stubStore) Subscribe(ctx context.Context, projectID string) (<-chan *store.Event, func(), error) {
 	return nil, nil, errStorePending
 }
+func (stubStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
+	return false, errStorePending
+}
 
 // Compile-time proof the stub satisfies the server seam.
 var _ store.Store = stubStore{}

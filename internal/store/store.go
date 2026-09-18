@@ -58,6 +58,13 @@ type Store interface {
 	// the given project. The returned cancel func unsubscribes and closes the
 	// channel. Sends never block the appender: slow subscribers drop events.
 	Subscribe(ctx context.Context, projectID string) (<-chan *Event, func(), error)
+
+	// IsProjectMember reports whether userID may access projectID (issue
+	// #141): workspace registered on the project, project creator, or
+	// active participant in one of its sessions. The server enforces this
+	// on every project-scoped route (403); object routes resolve
+	// object → project first.
+	IsProjectMember(ctx context.Context, userID, projectID string) (bool, error)
 }
 
 // MemStore is a thread-safe in-memory Store implementation, ideal for unit testing and local development.

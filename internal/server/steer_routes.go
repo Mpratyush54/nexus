@@ -74,6 +74,11 @@ func (s *Server) handleSteerInterrupt(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session id path parameter is required")
 		return
 	}
+	// Session-bound (issue #141): unknown sessions 404 here instead of
+	// silently dropping the event with a 200.
+	if _, ok := s.authorizeSession(w, r, id); !ok {
+		return
+	}
 	var req steerInterruptRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -101,6 +106,9 @@ func (s *Server) handleSteerAck(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "session id path parameter is required")
 		return
 	}
+	if _, ok := s.authorizeSession(w, r, id); !ok {
+		return
+	}
 	if err := m.AcknowledgePaused(id); err != nil {
 		writeSteerError(w, err)
 		return
@@ -122,6 +130,9 @@ func (s *Server) handleSteerPrompt(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "session id path parameter is required")
+		return
+	}
+	if _, ok := s.authorizeSession(w, r, id); !ok {
 		return
 	}
 	var req steerPromptRequest
@@ -148,6 +159,9 @@ func (s *Server) handleSteerResume(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "session id path parameter is required")
+		return
+	}
+	if _, ok := s.authorizeSession(w, r, id); !ok {
 		return
 	}
 	steerer := authSubject(r)

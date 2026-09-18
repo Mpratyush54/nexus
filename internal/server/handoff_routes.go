@@ -61,19 +61,12 @@ func (s *Server) handleHandoffInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	fromUser := authSubject(r)
-	projectID := ""
-	sessionID := id
-	if ss, ok := s.sessionStore(); ok {
-		sess, err := ss.GetSession(r.Context(), id)
-		if err != nil {
-			writeError(w, http.StatusNotFound, "session not found")
-			return
-		}
-		projectID = sess.ProjectID
-	} else {
-		writeError(w, http.StatusNotImplemented, "sessions are not supported by this store")
+	sess, ok := s.authorizeSession(w, r, id)
+	if !ok {
 		return
 	}
+	projectID := sess.ProjectID
+	sessionID := id
 	pkg, ev := handoff.BuildHandoffFull(projectID, sessionID, fromUser, req.ToUser,
 		req.FromAgent, req.ToAgent, req.Task, req.Memories, req.ModifiedFiles, req.Branch, req.Note)
 	s.handoffMu.Lock()
@@ -108,7 +101,21 @@ func (s *Server) handleHandoffAccept(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "handoff not found")
 		return
 	}
+	// Binding (issue #141): the package belongs to its own session — the
+	// URL session must match — and only the addressed recipient accepts.
+	// Either side's project authorizes the caller.
+	if rec.pkg.SessionID != id {
+		writeError(w, http.StatusBadRequest, "handoff does not belong to this session")
+		return
+	}
 	byUser := authSubject(r)
+	if rec.pkg.ToUser != "" && byUser != rec.pkg.ToUser {
+		writeError(w, http.StatusForbidden, "only the addressed recipient can accept this handoff")
+		return
+	}
+	if _, ok := s.authorizeSession(w, r, rec.pkg.SessionID); !ok {
+		return
+	}
 	updated, ev, err := handoff.AcceptHandoff(rec.pkg, byUser)
 	if err != nil {
 		if errors.Is(err, handoff.ErrConflict) {

@@ -91,8 +91,9 @@ func TestHandoffInitAndAccept(t *testing.T) {
 		t.Fatalf("handoff init not persisted, events = %+v", evs)
 	}
 
-	// Accept as bob.
+	// Accept as bob (member of the project — recipients outside it 403).
 	bobToken := loginAs(t, s, "bob")
+	ensureMembership(t, s, bobToken, sess.ProjectID)
 	rec = doJSON(t, s, http.MethodPost, "/sessions/"+sessID+"/handoff/accept", bobToken, map[string]any{
 		"handoff_id": pkg.ID,
 	})

@@ -88,6 +88,7 @@ type jwtHeader struct {
 
 type jwtPayload struct {
 	Sub string `json:"sub"`
+	Name string `json:"name,omitempty"`
 	Exp int64  `json:"exp"`
 	Iat int64  `json:"iat"`
 }
@@ -116,6 +117,37 @@ func (a *Authenticator) Generate(subject string, ttl time.Duration) (string, err
 		Sub: strings.TrimSpace(subject),
 		Exp: now.Add(ttl).Unix(),
 		Iat: now.Unix(),
+	})
+	encHeader := b64.EncodeToString(headerJSON)
+	encPayload := b64.EncodeToString(payloadJSON)
+	signingInput := encHeader + "." + encPayload
+	mac := hmac.New(sha256.New, a.key)
+	mac.Write([]byte(signingInput))
+	sig := b64.EncodeToString(mac.Sum(nil))
+	return signingInput + "." + sig, nil
+}
+
+// GenerateUser mints a token whose subject is the canonical user UUID
+// (issue #140): Postgres ownership columns (created_by, confirmed_by,
+// owner_id, user_id, ...) are UUID-typed, so a username subject dies at
+// the ::uuid cast. The username rides along as the display claim.
+func (a *Authenticator) GenerateUser(userID, username string, ttl time.Duration) (string, error) {
+	if strings.TrimSpace(userID) == "" {
+		return "", errors.New("user id must not be empty")
+	}
+	if len(a.key) == 0 {
+		return "", errors.New("authenticator has no key configured")
+	}
+	if ttl > MaxTokenTTL {
+		ttl = MaxTokenTTL
+	}
+	now := time.Now().UTC()
+	headerJSON, _ := json.Marshal(jwtHeader{Alg: "HS256", Typ: "JWT"})
+	payloadJSON, _ := json.Marshal(jwtPayload{
+		Sub: strings.TrimSpace(userID),
+		Name: strings.TrimSpace(username),
+		Exp:  now.Add(ttl).Unix(),
+		Iat:  now.Unix(),
 	})
 	encHeader := b64.EncodeToString(headerJSON)
 	encPayload := b64.EncodeToString(payloadJSON)
@@ -175,24 +207,50 @@ func (a *Authenticator) Validate(token string) (string, error) {
 	return payload.Sub, nil
 }
 
+// ValidateClaims is Validate plus the display username claim (issue #140).
+// Legacy tokens without a name claim validate with username "".
+func (a *Authenticator) ValidateClaims(token string) (sub, username string, err error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return "", "", ErrInvalidToken
+	}
+	sub, err = a.Validate(token)
+	if err != nil {
+		return "", "", err
+	}
+	payloadJSON, err := b64.DecodeString(parts[1])
+	if err != nil {
+		return sub, "", nil
+	}
+	var payload jwtPayload
+	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
+		return sub, "", nil
+	}
+	return sub, payload.Name, nil
+}
+
 // bearerSubject extracts and validates a "Bearer <token>" header value.
 func (a *Authenticator) bearerSubject(header string) (string, error) {
+	sub, _, err := a.bearerIdentity(header)
+	return sub, err
+}
+
+// bearerIdentity extracts and validates a "Bearer <token>" header value,
+// returning the canonical subject (user UUID for login tokens) plus the
+// display username claim ("" for legacy username-subject tokens).
+func (a *Authenticator) bearerIdentity(header string) (sub, username string, err error) {
 	if header == "" {
-		return "", ErrInvalidToken
+		return "", "", ErrInvalidToken
 	}
 	const prefix = "Bearer "
 	if !strings.HasPrefix(header, prefix) {
-		return "", ErrInvalidToken
+		return "", "", ErrInvalidToken
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
 	if token == "" {
-		return "", ErrInvalidToken
+		return "", "", ErrInvalidToken
 	}
-	sub, err := a.Validate(token)
-	if err != nil {
-		return "", err
-	}
-	return sub, nil
+	return a.ValidateClaims(token)
 }
 
 // keyID is a non-sensitive hint for debugging only (never the key itself).

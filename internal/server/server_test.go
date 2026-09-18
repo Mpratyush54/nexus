@@ -118,17 +118,23 @@ func TestLoginIssuesValidToken(t *testing.T) {
 	var out struct {
 		Token    string `json:"token"`
 		Username string `json:"username"`
+		UserID   string `json:"user_id"`
 	}
 	decodeBody(t, rec, &out)
 	if out.Token == "" {
 		t.Fatal("expected non-empty token")
 	}
-	sub, err := s.Auth.Validate(out.Token)
+	// Canonical identity (issue #140): sub is the user UUID, username rides
+	// as the display claim for Postgres UUID columns.
+	sub, username, err := s.Auth.ValidateClaims(out.Token)
 	if err != nil {
 		t.Fatalf("Validate(login token): %v", err)
 	}
-	if sub != "alice" {
-		t.Fatalf("subject = %q, want alice", sub)
+	if sub != "user-alice" {
+		t.Fatalf("subject = %q, want user UUID user-alice", sub)
+	}
+	if username != "alice" || out.Username != "alice" || out.UserID != "user-alice" {
+		t.Fatalf("username claim = %q/%q user_id = %q", username, out.Username, out.UserID)
 	}
 }
 
@@ -234,10 +240,18 @@ func TestHeartbeatOffline(t *testing.T) {
 	var project store.Project
 	decodeBody(t, rec, &project)
 
-	// A project with no workspaces has no active workspace.
+	// Not a member yet: project state is forbidden, not 404 (issue #141 —
+	// 403 for missing and forbidden alike leaks nothing).
 	rec = doJSON(t, s, http.MethodGet, "/workspaces/"+project.ID+"/active", token, nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("active status = %d, want 404 for workspace-less project", rec.Code)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("active status = %d, want 403 for non-member", rec.Code)
+	}
+
+	// Register via HTTP (membership bootstrap; UserID forced to self).
+	ensureMembership(t, s, token, project.ID)
+	rec = doJSON(t, s, http.MethodGet, "/workspaces/"+project.ID+"/active", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("active status = %d, want 200 for member", rec.Code)
 	}
 
 	ws := &store.Workspace{
@@ -289,6 +303,7 @@ func TestMemoryCRUD(t *testing.T) {
 	})
 	var project store.Project
 	decodeBody(t, rec, &project)
+	ensureMembership(t, s, token, project.ID)
 
 	content := "The team uses pytest with fixture-based setup for integration tests."
 	rec = doJSON(t, s, http.MethodPost, "/memory", token, map[string]any{
@@ -334,6 +349,7 @@ func TestEpisodeCRUD(t *testing.T) {
 	})
 	var project store.Project
 	decodeBody(t, rec, &project)
+	ensureMembership(t, s, token, project.ID)
 
 	rec = doJSON(t, s, http.MethodPost, "/episodes", token, map[string]any{
 		"project_id":     project.ID,
