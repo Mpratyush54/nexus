@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Outlet } from 'react-router-dom'
 import { CommandPalette } from './CommandPalette'
+import { DaemonBanner, LocalWorkspacePanel } from './LocalWorkspace'
 import { MobileNav, SideNav } from './SideNav'
 
 export function AppShell() {
@@ -24,6 +25,8 @@ export function AppShell() {
         <MobileNav onOpenCommand={() => setCmdOpen(true)} />
         <main className="app-main">
           <div className="app-main-inner">
+            <DaemonBanner />
+            <LocalWorkspacePanel />
             <Outlet />
           </div>
         </main>

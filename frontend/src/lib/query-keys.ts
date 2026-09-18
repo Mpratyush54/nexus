@@ -20,4 +20,19 @@ export const queryKeys = {
   agents: {
     list: (projectId: string) => ['agents', projectId] as const,
   },
+  branches: {
+    list: (projectId: string) => ['branches', projectId] as const,
+    diff: (projectId: string, source: string, target: string) =>
+      ['branches', 'diff', projectId, source, target] as const,
+  },
+  sessions: {
+    list: (projectId: string, activeOnly: boolean) =>
+      ['sessions', projectId, activeOnly] as const,
+  },
+  daemon: {
+    health: ['daemon', 'health'] as const,
+    workspace: ['daemon', 'workspace'] as const,
+    gitStatus: ['daemon', 'gitStatus'] as const,
+    gitLog: ['daemon', 'gitLog'] as const,
+  },
 }
