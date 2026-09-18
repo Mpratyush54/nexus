@@ -95,6 +95,7 @@ type MemStore struct {
 	workspaces map[string]*Workspace
 	members    map[string]map[string]bool // projectID -> granted userIDs (issue #149)
 	memories   map[string]*MemoryItem
+	versions   map[string][]*MemoryVersion // memoryID -> ordered version snapshots (issue #162)
 	episodes   map[string]*Episode
 	events     []*Event
 	eventSeq   int64
@@ -118,6 +119,7 @@ func NewMemStore() *MemStore {
 		workspaces: make(map[string]*Workspace),
 		members:    make(map[string]map[string]bool),
 		memories:   make(map[string]*MemoryItem),
+		versions:   make(map[string][]*MemoryVersion),
 		episodes:   make(map[string]*Episode),
 		events:     make([]*Event, 0),
 		subs:       make(map[int64]*memSubscription),
