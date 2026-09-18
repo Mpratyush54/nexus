@@ -1,7 +1,9 @@
 -- 004_agents.up.sql: Multi-agent registry + per-project enablement (Phase 4.1).
 --
 -- Depends on: 001_initial (projects), 003_sessions (sessions, if present).
--- Idempotent: CREATE IF NOT EXISTS + guarded seeds so reruns are safe.
+-- Idempotent: CREATE IF NOT EXISTS + DO NOTHING seeds so reruns are safe.
+-- Seed inserts never overwrite existing rows (issue #119): hand-tuned
+-- context_budgets survive re-runs; use UpsertAgent to change a definition.
 -- Agent names align with adapters/registry.go (claude, opencode, codex,
 -- antigravity, copilot, cursor, windsurf). Pull agents are served live via
 -- MCP (internal/mcp); push agents are served via generated instruction
@@ -31,12 +33,7 @@ INSERT INTO agents (name, adapter_type, capabilities, context_budget, output_fil
     ('copilot',    'push', '{"instruction_file": true}', 8000, '.github/copilot-instructions.md', 'markdown'),
     ('cursor',     'push', '{"instruction_file": true}', 6000, '.cursorrules', 'text'),
     ('windsurf',   'push', '{"instruction_file": true}', 6000, '.windsurfrules', 'text')
-ON CONFLICT (name) DO UPDATE SET
-    adapter_type   = EXCLUDED.adapter_type,
-    capabilities   = EXCLUDED.capabilities,
-    context_budget = EXCLUDED.context_budget,
-    output_file    = EXCLUDED.output_file,
-    output_format  = EXCLUDED.output_format;
+ON CONFLICT (name) DO NOTHING;
 
 -- ============================================================
 -- PROJECT_AGENTS — per-project enablement + config overrides

@@ -39,8 +39,8 @@ func (windowsService) Uninstall() error {
 	out, err := exec.Command("schtasks", "/Delete", "/TN", schtasksTaskName, "/F").CombinedOutput()
 	if err != nil {
 		// Deleting a missing task is already-uninstalled, not a failure.
-		if strings.Contains(strings.ToLower(string(out)), "cannot find") ||
-			strings.Contains(strings.ToLower(string(out)), "does not exist") {
+		// schtasks localizes messages (Issue #111): match multilingually.
+		if schtasksMissing(string(out)) {
 			return nil
 		}
 		return fmt.Errorf("platform: schtasks delete: %w: %s", err, strings.TrimSpace(string(out)))
@@ -50,17 +50,9 @@ func (windowsService) Uninstall() error {
 
 func (windowsService) Status() (ServiceStatus, error) {
 	out, err := exec.Command("schtasks", "/Query", "/TN", schtasksTaskName, "/FO", "LIST").CombinedOutput()
-	text := strings.ToLower(string(out))
-	switch {
-	case err != nil && (strings.Contains(text, "cannot find") || strings.Contains(text, "does not exist")):
-		return StatusNotInstalled, nil
-	case err != nil:
-		return StatusUnknown, fmt.Errorf("platform: schtasks query: %w: %s", err, strings.TrimSpace(string(out)))
-	case strings.Contains(text, "running"):
-		return StatusRunning, nil
-	default:
-		return StatusStopped, nil
-	}
+	// Locale-independent parsing (Issue #111): never match raw English
+	// substrings here; parseSchtasksStatus handles all locales.
+	return parseSchtasksStatus(string(out), err)
 }
 
 // windowsAppDataDir resolves %APPDATA%-adjacent config base without

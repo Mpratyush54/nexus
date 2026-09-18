@@ -143,32 +143,75 @@ func publishBridgedEvent(hub eventPublisher, ev *store.Event) error {
 
 // bridgeSubscription drains one live subscription, fanning each event out
 // until ctx ends or the channel closes (broken connection — the caller
-// resubscribes). It returns the count of delivered events. Publish errors
-// cannot happen (void Hub); a bad row is logged and skipped — one bad row
-// must never kill the stream.
+// resubscribes). It returns the count of delivered events plus the last
+// delivered event ID for backfill cursors. Publish errors cannot happen
+// (void Hub); a bad row is logged and skipped — one bad row must never
+// kill the stream.
 func bridgeSubscription(ctx context.Context, sub <-chan *store.Event, hub eventPublisher) int {
+	n, _ := bridgeSubscriptionCursor(ctx, sub, hub, 0)
+	return n
+}
+
+func bridgeSubscriptionCursor(ctx context.Context, sub <-chan *store.Event, hub eventPublisher, lastID int64) (int, int64) {
 	delivered := 0
 	for {
 		select {
 		case <-ctx.Done():
-			return delivered
+			return delivered, lastID
 		case ev, ok := <-sub:
 			if !ok {
-				return delivered // connection lost; caller resubscribes
+				return delivered, lastID // connection lost; caller resubscribes
 			}
 			if err := publishBridgedEvent(hub, ev); err != nil {
 				log.Printf("server: ws bridge: publish event: %v", err)
 				continue
 			}
 			delivered++
+			if ev != nil && ev.ID > lastID {
+				lastID = ev.ID
+			}
 		}
 	}
+}
+
+// backfill replays missed events after a reconnect (issue #88). Ordering is
+// ID-ascending; duplicates are possible when the disconnect race redelivers
+// the boundary event, so consumers must treat delivery as at-least-once and
+// dedupe on event ID.
+func backfill(ctx context.Context, list func(ctx context.Context, sinceID int64) ([]*store.Event, error), hub eventPublisher, sinceID int64) (int64, error) {
+	if list == nil {
+		return sinceID, nil
+	}
+	evs, err := list(ctx, sinceID)
+	if err != nil {
+		return sinceID, err
+	}
+	for _, ev := range evs {
+		if err := publishBridgedEvent(hub, ev); err != nil {
+			continue
+		}
+		if ev != nil && ev.ID > sinceID {
+			sinceID = ev.ID
+		}
+	}
+	return sinceID, nil
+}
+
+// bridgeConfig carries optional backfill wiring (issue #88): projectID
+// scopes ListEvents, listEvents replays missed rows after each reconnect.
+type bridgeConfig struct {
+	projectID string
+	list      func(ctx context.Context, sinceID int64) ([]*store.Event, error)
 }
 
 // bridgeLoop holds one subscription at a time and resubscribes with
 // exponential backoff when the stream ends. Returns only when ctx is done
 // (nil) or wiring is bad.
 func bridgeLoop(ctx context.Context, subscribe func(context.Context) (<-chan *store.Event, error), hub eventPublisher) error {
+	return bridgeLoopWithBackfill(ctx, subscribe, hub, bridgeConfig{})
+}
+
+func bridgeLoopWithBackfill(ctx context.Context, subscribe func(context.Context) (<-chan *store.Event, error), hub eventPublisher, cfg bridgeConfig) error {
 	if subscribe == nil {
 		return errors.New("server: ws bridge requires a subscribe func")
 	}
@@ -176,6 +219,7 @@ func bridgeLoop(ctx context.Context, subscribe func(context.Context) (<-chan *st
 		return errors.New("server: ws bridge requires a non-nil hub")
 	}
 	backoff := bridgeBackoffBase
+	var lastID int64
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -192,7 +236,18 @@ func bridgeLoop(ctx context.Context, subscribe func(context.Context) (<-chan *st
 			backoff = nextBackoff(backoff)
 			continue
 		}
-		if n := bridgeSubscription(ctx, sub, hub); n > 0 {
+		// Backfill missed rows before draining live notifications so a
+		// disconnect window does not silently lose events (issue #88).
+		if cfg.list != nil && ctx.Err() == nil {
+			if nid, berr := backfill(ctx, cfg.list, hub, lastID); berr != nil {
+				log.Printf("server: ws bridge: backfill: %v", berr)
+			} else {
+				lastID = nid
+			}
+		}
+		n, nid := bridgeSubscriptionCursor(ctx, sub, hub, lastID)
+		lastID = nid
+		if n > 0 {
 			backoff = bridgeBackoffBase
 		} else if ctx.Err() == nil {
 			log.Printf("server: ws bridge: subscription ended without deliveries (retry in %s)", backoff)
@@ -234,4 +289,37 @@ func BridgeEvents(ctx context.Context, subscribe func(context.Context) (<-chan *
 		return errors.New("server: ws bridge requires a non-nil hub")
 	}
 	return bridgeLoop(ctx, subscribe, hub)
+}
+
+// BridgeEventsWithBackfill is BridgeEvents plus ListEvents backfill (issue
+// #88): after every (re)subscribe, events after lastID are replayed before
+// live notifications drain. Delivery is at-least-once; consumers dedupe on
+// event ID. This is the production entrypoint — run it as a goroutine next
+// to Serve (issue #40).
+func BridgeEventsWithBackfill(ctx context.Context, subscribe func(context.Context) (<-chan *store.Event, error), list func(ctx context.Context, sinceID int64) ([]*store.Event, error), hub *Hub) error {
+	if hub == nil {
+		return errors.New("server: ws bridge requires a non-nil hub")
+	}
+	return bridgeLoopWithBackfill(ctx, subscribe, hub, bridgeConfig{list: list})
+}
+
+// StartBridge attaches the store → hub bridge for one project (issue #40):
+// subscribe streams live rows, ListEvents backfills across reconnects.
+func (s *Server) StartBridge(ctx context.Context, h *Hub, projectID string) error {
+	subscribe := func(ctx context.Context) (<-chan *store.Event, error) {
+		sub, cancel, err := s.Store.Subscribe(ctx, projectID)
+		if err != nil {
+			if cancel != nil {
+				cancel()
+			}
+			return nil, err
+		}
+		// Detach cancel lifetime from ctx: bridgeLoop owns resubscribe.
+		_ = cancel
+		return sub, nil
+	}
+	list := func(ctx context.Context, sinceID int64) ([]*store.Event, error) {
+		return s.Store.ListEvents(ctx, projectID, sinceID, 100)
+	}
+	return BridgeEventsWithBackfill(ctx, subscribe, list, h)
 }

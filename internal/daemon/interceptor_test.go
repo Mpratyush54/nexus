@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -387,12 +388,8 @@ func TestCheckGitCommitEmitsOnHeadChange(t *testing.T) {
 	if err := os.WriteFile(dir+"/b.txt", []byte("second\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RunCommand(dir, []string{"git", "add", "."}); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if _, err := RunCommand(dir, []string{"git", "commit", "-m", "second"}); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
+	gitShell(t, dir, "add", ".")
+	gitShell(t, dir, "commit", "-m", "second")
 	d.checkGitCommit()
 	ev := nextEvent(t, d)
 	if ev.Type != ToolEventGitCommitted {
@@ -452,13 +449,17 @@ func gitAvailable() bool {
 }
 
 // initGitRepo creates a temp git repo with one commit and returns its path.
+// It shells out directly (not via RunCommand) because the daemon allowlist
+// (issue #91) is read-only: init/config/add/commit are correctly rejected
+// by IsAllowed/RunCommand.
 func initGitRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
-		if _, err := RunCommand(dir, append([]string{"git"}, args...)); err != nil {
-			t.Fatalf("git %v: %v", args, err)
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
 		}
 	}
 	run("init")
@@ -530,5 +531,15 @@ func TestIssue99InterceptorHookupRegression(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatalf("event %d (%s): timed out waiting for sink emission", i, wt)
 		}
+	}
+}
+
+// gitShell runs a (possibly write-side) git command for test setup,
+// bypassing the read-only RunCommand allowlist.
+func gitShell(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
 	}
 }

@@ -7,6 +7,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -40,9 +41,59 @@ func scanProject(row pgx.Row) (*Project, error) {
 // ResolveProject returns the canonical project for an identity triple,
 // creating it when nothing matches. Stores the normalized URL so
 // `git@host:x/y.git` and `https://host/x/y` converge on one row.
+//
+// Atomicity (issue #86): the lookup-then-insert sequence races when two
+// daemons register the same unseen project concurrently. The INSERT uses
+// ON CONFLICT DO NOTHING (any UNIQUE violation: canonical_url or
+// root_commit) and reconciles by re-reading in priority order, so the loser
+// returns the canonical row instead of a raw unique-violation.
 func (s *PostgresStore) ResolveProject(ctx context.Context, canonicalURL, rootCommit, folderName string) (*Project, error) {
 	normURL := NormalizeGitURL(canonicalURL)
 
+	if p, err := s.lookupProject(ctx, normURL, rootCommit, folderName); err != nil {
+		return nil, err
+	} else if p != nil {
+		return p, nil
+	}
+
+	storedURL := canonicalURL
+	if normURL != "" {
+		storedURL = normURL
+	}
+	row := s.pool.QueryRow(ctx,
+		`INSERT INTO projects (canonical_url, root_commit, folder_name, display_name)
+		 VALUES (NULLIF($1,''), NULLIF($2,''), $3, $3)
+		 ON CONFLICT DO NOTHING
+		 RETURNING id, created_at`,
+		storedURL, rootCommit, folderName)
+	var id string
+	var createdAt time.Time
+	if err := row.Scan(&id, &createdAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Lost the insert race: another resolver won. Re-read in
+			// priority order so identity priority still holds.
+			if p, lerr := s.lookupProject(ctx, normURL, rootCommit, folderName); lerr != nil {
+				return nil, lerr
+			} else if p != nil {
+				return p, nil
+			}
+			return nil, errors.New("store: project resolution lost insert race and row is missing")
+		}
+		return nil, err
+	}
+	return &Project{
+		ID:           id,
+		CanonicalURL: storedURL,
+		RootCommit:   rootCommit,
+		FolderName:   folderName,
+		DisplayName:  folderName,
+		CreatedAt:    createdAt,
+	}, nil
+}
+
+// lookupProject reads in identity-priority order (URL -> root commit ->
+// folder, first-registered wins). Returns (nil, nil) when nothing matches.
+func (s *PostgresStore) lookupProject(ctx context.Context, normURL, rootCommit, folderName string) (*Project, error) {
 	if normURL != "" {
 		p, err := scanProject(s.pool.QueryRow(ctx,
 			`SELECT `+projectColumns+` FROM projects WHERE canonical_url = $1`, normURL))
@@ -72,29 +123,7 @@ func (s *PostgresStore) ResolveProject(ctx context.Context, canonicalURL, rootCo
 	if err != pgx.ErrNoRows {
 		return nil, err
 	}
-
-	storedURL := canonicalURL
-	if normURL != "" {
-		storedURL = normURL
-	}
-	row := s.pool.QueryRow(ctx,
-		`INSERT INTO projects (canonical_url, root_commit, folder_name, display_name)
-		 VALUES (NULLIF($1,''), NULLIF($2,''), $3, $3)
-		 RETURNING id, created_at`,
-		storedURL, rootCommit, folderName)
-	var id string
-	var createdAt time.Time
-	if err := row.Scan(&id, &createdAt); err != nil {
-		return nil, err
-	}
-	return &Project{
-		ID:           id,
-		CanonicalURL: storedURL,
-		RootCommit:   rootCommit,
-		FolderName:   folderName,
-		DisplayName:  folderName,
-		CreatedAt:    createdAt,
-	}, nil
+	return nil, nil
 }
 
 // GetProject fetches one project by id.

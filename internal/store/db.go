@@ -114,6 +114,11 @@ func filterPendingMigrations(sortedUps []string, applied map[string]bool) []stri
 // atomically), so a half-applied file is retried cleanly on next launch.
 // Files must stay transaction-safe: no CREATE INDEX CONCURRENTLY or other
 // non-transactional DDL (split such migrations out if ever needed).
+//
+// Concurrency (issue #107): replicas booting together serialize on a
+// session-level PostgreSQL advisory lock for the whole run, so only one
+// runner applies migrations at a time; the others block, then observe the
+// recorded versions and skip.
 func (s *PostgresStore) RunMigrations(ctx context.Context, migrationsDir string) error {
 	entries, err := os.ReadDir(migrationsDir)
 	if err != nil {
@@ -126,6 +131,16 @@ func (s *PostgresStore) RunMigrations(ctx context.Context, migrationsDir string)
 		}
 	}
 	sort.Strings(ups)
+
+	// Serialize concurrent runners (issue #107). Session-level lock:
+	// held until released below, so overlapping boots queue here instead
+	// of applying the same migration twice.
+	if _, err := s.pool.Exec(ctx, `SELECT pg_advisory_lock(hashtext('central-memory-migrations'))`); err != nil {
+		return fmt.Errorf("acquire migration lock: %w", err)
+	}
+	defer func() {
+		_, _ = s.pool.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('central-memory-migrations'))`)
+	}()
 
 	if _, err := s.pool.Exec(ctx, schemaMigrationsDDL); err != nil {
 		return fmt.Errorf("ensure schema_migrations: %w", err)

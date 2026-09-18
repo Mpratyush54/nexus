@@ -24,8 +24,8 @@
     <section class="card" aria-label="Connection">
       <h2>1 &middot; Connection</h2>
       <div class="grid2">
-        <label>API base <input id="apiBase" type="text" value="http://localhost:8080" spellcheck="false" /></label>
-        <label>WS URL <input id="wsUrl" type="text" value="ws://localhost:8080/ws" spellcheck="false" /></label>
+        <label>API base <input id="apiBase" type="text" value="" placeholder="same-origin (derived)" spellcheck="false" /></label>
+        <label>WS URL <input id="wsUrl" type="text" value="" placeholder="same-origin /ws, wss on https (derived)" spellcheck="false" /></label>
         <label>Username <input id="username" type="text" autocomplete="username" placeholder="alice" /></label>
         <label>Password <input id="password" type="password" autocomplete="current-password" placeholder="••••••" /></label>
       </div>
@@ -35,10 +35,13 @@
         <button id="wsDisconnectBtn" type="button" class="ghost">Disconnect</button>
         <span id="authState" class="muted">no token</span>
       </div>
-      <p class="hint">Token is kept in memory + <code>localStorage</code> and sent as
-        <code>Authorization: Bearer &lt;token&gt;</code> on every REST call.
-        WS has no auth header by design &mdash; the <code>subscribe</code> frame carries
-        <code>project_id</code>/<code>session_id</code> (plan &sect;3.2).</p>
+      <p class="hint">Token is kept in <code>localStorage</code> and sent as
+        <code>Authorization: Bearer &lt;token&gt;</code> on every REST call; the
+        dashboard socket appends <code>?token=</code> automatically (the WS
+        endpoint also accepts it — browsers cannot set WS headers). HTTP 401
+        or an auth <code>error</code> frame drops the token and asks for
+        re-login. API/WS default to same-origin (<code>wss</code> on
+        <code>https</code>); override only for cross-host dev.</p>
     </section>
 
     <!-- Project / session picker -->
@@ -77,7 +80,9 @@
       <div class="row">
         <label class="inline">Filter <input id="feedFilter" type="text" placeholder="e.g. FILE_MODIFIED, CONVERSATION_TURN" spellcheck="false" /></label>
         <button id="clearFeedBtn" type="button" class="ghost">Clear</button>
-        <span class="muted">Server &rarr; client <code>{"type":"event","event":{…}}</code>. Appends only &mdash; never a full-page refresh.</span>
+        <span class="muted">Server &rarr; client frames: <code>event</code>, <code>presence</code>,
+        <code>memory_update</code>, <code>episode_update</code>, <code>subscribed</code> (ack),
+        <code>error</code> (surfaced + 401 triggers re-login). Appends only &mdash; never a full-page refresh.</span>
       </div>
       <ol id="feed" class="feed" aria-live="polite"></ol>
     </section>
