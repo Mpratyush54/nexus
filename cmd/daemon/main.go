@@ -73,6 +73,7 @@ func run(args []string) error {
 	bind := fs.String("bind", defaultBind(), "bind address (127.0.0.1 local, 0.0.0.0 in containers)")
 	port := fs.Int("port", defaultPort(), "listen port")
 	serverURL := fs.String("server", os.Getenv("CENTRAL_SERVER_URL"), "central server base URL (empty = local-only mode, no register/heartbeat)")
+	serverToken := fs.String("server-token", os.Getenv("CENTRAL_SERVER_TOKEN"), "JWT bearer token for central-server calls (issue #155; required when the server has auth enabled)")
 	project := fs.String("project", strings.TrimSpace(os.Getenv("CENTRAL_PROJECT")), "project name for extraction (default: workspace folder base)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -98,6 +99,7 @@ func run(args []string) error {
 		return err
 	}
 	d.ServerURL = *serverURL
+	d.ServerToken = strings.TrimSpace(*serverToken)
 
 	// Background extraction pipeline (issue #115): Harvester + Watcher +
 	// Processor with the interceptor sink wired at startup, designation

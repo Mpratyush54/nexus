@@ -144,14 +144,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // WorkspaceIsOnline reports whether ws counts as online at time now.
 // A workspace is online only if the store flagged it online AND its last
-// heartbeat is within OfflineThreshold. The store's GetActiveWorkspace applies
-// the same 90s rule; this helper lets handlers defend in depth and is unit
-// tested directly.
+// heartbeat is within OfflineThreshold (inclusive: exact 90s silence is
+// still online, matching store.IsOnlineAt — issue #131). The store's
+// GetActiveWorkspace applies the same 90s rule; this helper lets handlers
+// defend in depth and is unit tested directly.
 func WorkspaceIsOnline(ws *store.Workspace, now time.Time) bool {
 	if ws == nil || !ws.IsOnline {
 		return false
 	}
-	return now.UTC().Sub(ws.LastSeen.UTC()) < OfflineThreshold
+	return now.UTC().Sub(ws.LastSeen.UTC()) <= OfflineThreshold
 }
 
 // --- JSON envelope helpers ---
@@ -179,16 +180,29 @@ func writeError(w http.ResponseWriter, status int, msg string) {
 	writeJSON(w, status, env)
 }
 
+// maxRequestBodyBytes caps JSON request bodies (issue #154): the daemon
+// already caps at 2MB via MaxBytesReader; the server had no cap, letting a
+// client stream gigabytes into /auth/login or /memory.
+const maxRequestBodyBytes = 2 << 20
+
 // decodeJSON decodes a JSON request body, disallowing trailing garbage.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	if r.Body == nil {
 		writeError(w, http.StatusBadRequest, "request body is required")
 		return false
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+		return false
+	}
+	// Trailing garbage after the first value is rejected (issue #154):
+	// Decode stops at the first complete value, so verify EOF follows.
+	var extra any
+	if err := dec.Decode(&extra); err == nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON body: trailing data after JSON value")
 		return false
 	}
 	return true

@@ -38,6 +38,9 @@ func TestSearchResetsDecayClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.Store.ClaimProject(ctx, p.ID, "alice"); err != nil {
+		t.Fatal(err)
+	}
 	item := store.MemoryItem{
 		ProjectID: p.ID, Key: "ops/deploy",
 		Content: "deploy with migrations applied before switching traffic over",

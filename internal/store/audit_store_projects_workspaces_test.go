@@ -244,11 +244,12 @@ func TestAuditHeartbeatRevives(t *testing.T) {
 	}
 }
 
-// BUG(#87): the header contract says "silence == 90s is still online" and
-// IsOnlineAt implements an inclusive boundary, but GetActiveWorkspace uses
-// a strict `After(threshold)` predicate — a workspace silent exactly 90s
-// is reported offline. Regression documents current MemStore behavior
-// (strict boundary, consistent with the Postgres SQL predicate).
+// FIXED (#131): GetActiveWorkspace uses the inclusive boundary —
+// silence == 90s is still online, matching IsOnlineAt/IsStaleAt and the
+// Postgres >= predicate. The exact-90s instant cannot be pinned with wall
+// clocks (any elapsed microseconds push it past the boundary), so this
+// test asserts robustly-inside/robustly-outside; the exact instant is
+// covered deterministically by TestAuditIsOnlineAtExactBoundary (pure).
 func TestAuditActiveWorkspaceExactBoundary(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
@@ -258,10 +259,16 @@ func TestAuditActiveWorkspaceExactBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.mu.Lock()
-	s.workspaces[ws.ID].LastSeen = time.Now().UTC().Add(-OfflineThreshold)
+	s.workspaces[ws.ID].LastSeen = time.Now().UTC().Add(-OfflineThreshold + time.Minute)
+	s.mu.Unlock()
+	if _, err := s.GetActiveWorkspace(ctx, proj.ID); err != nil {
+		t.Errorf("workspace silent 89s (inside boundary) should read as online, got %v", err)
+	}
+	s.mu.Lock()
+	s.workspaces[ws.ID].LastSeen = time.Now().UTC().Add(-OfflineThreshold - time.Second)
 	s.mu.Unlock()
 	if _, err := s.GetActiveWorkspace(ctx, proj.ID); err != ErrNotFound {
-		t.Errorf("workspace silent exactly 90s should read as offline under the strict After predicate, got %v", err)
+		t.Errorf("workspace silent 91s should read as offline, got %v", err)
 	}
 }
 

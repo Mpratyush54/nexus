@@ -49,8 +49,12 @@ func TestMemStoreArchiveAndStale(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Backdate past the TTL (creation stamps now).
-	old.CreatedAt = time.Now().UTC().Add(-31 * 24 * time.Hour)
+	// Backdate past the TTL (creation stamps now). Branch returns are
+	// clones (#131), so backdate the stored row via the bucket handle.
+	b := branchBucket(s)
+	b.mu.Lock()
+	b.branches[old.ID].CreatedAt = time.Now().UTC().Add(-31 * 24 * time.Hour)
+	b.mu.Unlock()
 	got, err := s.ArchiveBranch(ctx, old.ID, time.Now().UTC())
 	if err != nil {
 		t.Fatalf("ArchiveBranch: %v", err)

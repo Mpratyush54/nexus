@@ -259,3 +259,32 @@ func TestEpisodeSearchFilters(t *testing.T) {
 		t.Errorf("status count = %v, want 1", got)
 	}
 }
+
+// Over-fetch before filtering (issue #156): matches past the requested
+// limit must still be found when in-memory filters apply.
+func TestEpisodeSearchOverFetchesPastLimit(t *testing.T) {
+	s, ms := newTestServerWithT(t)
+	ctx := context.Background()
+	for i := 0; i < 5; i++ {
+		if err := ms.CreateEpisode(ctx, &Episode{
+			ProjectID: "proj_test", Title: "Timeout flake",
+			EpisodeType: "bug_fix", ErrorPatterns: []string{"Timeout"},
+			FilesInvolved: []string{"internal/other/x.go"}, Status: "OPEN",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ms.CreateEpisode(ctx, &Episode{
+		ProjectID: "proj_test", Title: "Timeout flake",
+		EpisodeType: "bug_fix", ErrorPatterns: []string{"Timeout"},
+		FilesInvolved: []string{"internal/server/ws.go"}, Status: "OPEN",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := callTool(t, s, "episode_search", map[string]any{
+		"error_pattern": "timeout", "file": "server/ws.go", "limit": 5,
+	})
+	if got := num(t, resultMap(t, r), "count"); got != 1 {
+		t.Errorf("over-fetch count = %v, want 1 (match past limit)", got)
+	}
+}

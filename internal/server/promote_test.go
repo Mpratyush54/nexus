@@ -24,6 +24,12 @@ func mustPromoteSessionMemory(t *testing.T, s *Server, tok string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Membership bootstrap (issue #149): the HTTP resolve path claims the
+	// creator, but this helper resolves via the store directly, so claim
+	// explicitly for the token subject used by the tests below.
+	if _, err := s.Store.ClaimProject(ctx, p.ID, "alice"); err != nil {
+		t.Fatal(err)
+	}
 	ensureMembership(t, s, tok, p.ID)
 	sess := &store.Session{ProjectID: p.ID, Title: "S1", CreatedBy: "u_alice"}
 	if err := ss.CreateSession(ctx, sess); err != nil {

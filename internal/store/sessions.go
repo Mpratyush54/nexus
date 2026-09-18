@@ -19,6 +19,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -52,47 +53,6 @@ type SessionParticipant struct {
 	Role      string    `json:"role"` // OWNER | MEMBER | OBSERVER
 	JoinedAt  time.Time `json:"joined_at"`
 	LeftAt    time.Time `json:"left_at,omitempty"`
-}
-
-// IsProjectMember reports whether userID may access projectID (issue #141):
-// a workspace on the project, the project's creator, or an active
-// participant in one of its sessions. Empty inputs are never members.
-func (s *MemStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
-	if strings.TrimSpace(userID) == "" || strings.TrimSpace(projectID) == "" {
-		return false, nil
-	}
-	s.mu.RLock()
-	for _, ws := range s.workspaces {
-		if ws != nil && ws.UserID == userID && ws.ProjectID == projectID {
-			s.mu.RUnlock()
-			return true, nil
-		}
-	}
-	creator := ""
-	if p, ok := s.projects[projectID]; ok && p != nil {
-		creator = p.CreatedBy
-	}
-	s.mu.RUnlock()
-	if creator != "" && creator == userID {
-		return true, nil
-	}
-	b := memSessionsOf(s)
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	for _, sess := range b.sessions {
-		if sess == nil || sess.ProjectID != projectID {
-			continue
-		}
-		if sess.CreatedBy == userID {
-			return true, nil
-		}
-		for _, part := range b.participants[sess.ID] {
-			if part != nil && part.UserID == userID && part.LeftAt.IsZero() {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
 }
 
 // PromotionCandidate is a session-level key observed in enough distinct
@@ -449,7 +409,9 @@ func (s *MemStore) PromotionCandidates(ctx context.Context, projectID string, mi
 		if m.ProjectID != projectID {
 			continue
 		}
-		if m.Status == "REJECTED" {
+		if m.Status == "REJECTED" || m.Status == "SUPERSEDED" {
+			// Terminal rows never count toward promotion (issue #131):
+			// a superseded takeaway must not promote on repetition.
 			continue
 		}
 		if byKey[m.Key] == nil {
@@ -597,24 +559,38 @@ func (s *PostgresStore) ListProjectSessions(ctx context.Context, projectID strin
 }
 
 // EndSession marks a session inactive and closes active participations.
+// Both writes run in one transaction (issue #152): without it, a failure
+// between the statements leaves an ended session with active participants.
+// Re-ending is idempotent (already-ended → nil after the existence check).
 func (s *PostgresStore) EndSession(ctx context.Context, id string) error {
-	tag, err := s.pool.Exec(ctx,
-		`UPDATE sessions SET is_active = false, ended_at = now()
-		  WHERE id = $1::uuid AND is_active`, id)
+	tx, err := s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("store: end session begin: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		// Either missing or already ended; distinguish the two.
-		if _, gerr := s.GetSession(ctx, id); gerr != nil {
-			return gerr
+	defer func() { _ = tx.Rollback(ctx) }()
+	var affected int64
+	if err := tx.QueryRow(ctx,
+		`UPDATE sessions SET is_active = false, ended_at = now()
+		  WHERE id = $1::uuid AND is_active
+		  RETURNING 1`).Scan(&affected); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Either missing or already ended; distinguish the two.
+			if _, gerr := s.GetSession(ctx, id); gerr != nil {
+				return gerr
+			}
+			return nil
 		}
-		return nil
+		return fmt.Errorf("store: end session: %w", err)
 	}
-	_, err = s.pool.Exec(ctx,
+	if _, err := tx.Exec(ctx,
 		`UPDATE session_participants SET left_at = now()
-		  WHERE session_id = $1::uuid AND left_at IS NULL`, id)
-	return err
+		  WHERE session_id = $1::uuid AND left_at IS NULL`, id); err != nil {
+		return fmt.Errorf("store: end session participants: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("store: end session commit: %w", err)
+	}
+	return nil
 }
 
 // JoinSession adds a user/agent to an active session (re-join reuses the row).
@@ -775,25 +751,6 @@ func (s *PostgresStore) ListSessionVisibleMemories(ctx context.Context, sessionI
 	return applySessionOverride(own, inherited), nil
 }
 
-// IsProjectMember reports whether userID may access projectID (issue #141):
-// workspace on the project, project creator, or active session participant.
-// Malformed UUIDs fail closed with an error (never silent membership).
-func (s *PostgresStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
-	if strings.TrimSpace(userID) == "" || strings.TrimSpace(projectID) == "" {
-		return false, nil
-	}
-	var member bool
-	if err := s.pool.QueryRow(ctx,
-		`SELECT EXISTS(SELECT 1 FROM workspaces WHERE user_id = $1::uuid AND project_id = $2::uuid)
-		    OR EXISTS(SELECT 1 FROM projects WHERE id = $2::uuid AND created_by = $1::uuid)
-		    OR EXISTS(SELECT 1 FROM session_participants p JOIN sessions s ON s.id = p.session_id
-		              WHERE p.user_id = $1::uuid AND s.project_id = $2::uuid AND p.left_at IS NULL)`,
-		userID, projectID).Scan(&member); err != nil {
-		return false, fmt.Errorf("store: membership check: %w", err)
-	}
-	return member, nil
-}
-
 // PromotionCandidates returns session-level keys seen in >= minSessions
 // distinct sessions of a project.
 func (s *PostgresStore) PromotionCandidates(ctx context.Context, projectID string, minSessions int) ([]PromotionCandidate, error) {
@@ -804,7 +761,7 @@ func (s *PostgresStore) PromotionCandidates(ctx context.Context, projectID strin
 		`SELECT "key", COUNT(DISTINCT session_id), array_agg(id::text)
 		  FROM memory_items
 		  WHERE project_id = $1::uuid AND level = 'session'
-		    AND session_id IS NOT NULL AND status <> 'REJECTED'
+		    AND session_id IS NOT NULL AND status IN ('PROPOSED','CONFIRMED')
 		  GROUP BY "key"
 		  HAVING COUNT(DISTINCT session_id) >= $2`,
 		projectID, minSessions)

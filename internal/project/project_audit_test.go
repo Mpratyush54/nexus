@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -203,6 +204,17 @@ func TestAuditForPathDeepestAndExact(t *testing.T) {
 		{`D:\a\bc\file.txt`, "a"}, // prefix boundary: a/bc must not match a/b
 		{"", ""},
 	}
+	// D:\ roots resolve only on Windows (issue #147: the legacy D:\ root
+	// exists solely on GOOS=windows; elsewhere these paths are relative
+	// and match nothing).
+	if runtime.GOOS != "windows" {
+		cases = []struct{ path, want string }{
+			{`D:\a\b\file.txt`, ""},
+			{`D:\a\file.txt`, ""},
+			{`D:\other\file.txt`, ""},
+			{"", ""},
+		}
+	}
 	for _, tc := range cases {
 		if got := ForPath(tc.path); got != tc.want {
 			t.Errorf("ForPath(%q) = %q want %q", tc.path, got, tc.want)
@@ -233,7 +245,10 @@ func TestAuditResolveLeafExactAndMiss(t *testing.T) {
 func TestAuditResolveLeafByRepoAndRoot(t *testing.T) {
 	saveLeavesState(t)
 	setFakeLeaves(t, []string{"my/proj"})
-	leafDir := filepath.Join(`D:\`, "my", "proj")
+	// Key by the resolved leaf dir, not a hardcoded drive (issue #147):
+	// LeafDir is platform-appropriate (D:\ on Windows, home/env roots
+	// elsewhere), so the fingerprint cache hits on every GOOS.
+	leafDir := LeafDir("my/proj")
 	fpMu.Lock()
 	fpCache[leafDir] = [2]string{"https://example.com/r.git", "abc123root"}
 	fpMu.Unlock()

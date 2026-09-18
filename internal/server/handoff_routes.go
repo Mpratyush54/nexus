@@ -74,6 +74,13 @@ func (s *Server) handleHandoffInit(w http.ResponseWriter, r *http.Request) {
 		s.handoffs = make(map[string]*handoffRecord)
 	}
 	s.handoffs[pkg.ID] = &handoffRecord{pkg: pkg, createdAt: time.Now().UTC()}
+	// TTL sweep (issue #134): drop records older than 24h so the in-memory
+	// map cannot grow forever and stale packages stop being replayable.
+	for id, rec := range s.handoffs {
+		if time.Since(rec.createdAt) > 24*time.Hour {
+			delete(s.handoffs, id)
+		}
+	}
 	s.handoffMu.Unlock()
 
 	s.publishHandoffEvent(projectID, sessionID, ev)
@@ -96,8 +103,8 @@ func (s *Server) handleHandoffAccept(w http.ResponseWriter, r *http.Request) {
 	}
 	s.handoffMu.Lock()
 	rec, ok := s.handoffs[req.HandoffID]
-	s.handoffMu.Unlock()
 	if !ok {
+		s.handoffMu.Unlock()
 		writeError(w, http.StatusNotFound, "handoff not found")
 		return
 	}
@@ -105,18 +112,25 @@ func (s *Server) handleHandoffAccept(w http.ResponseWriter, r *http.Request) {
 	// URL session must match — and only the addressed recipient accepts.
 	// Either side's project authorizes the caller.
 	if rec.pkg.SessionID != id {
+		s.handoffMu.Unlock()
 		writeError(w, http.StatusBadRequest, "handoff does not belong to this session")
 		return
 	}
 	byUser := authSubject(r)
 	if rec.pkg.ToUser != "" && byUser != rec.pkg.ToUser {
+		s.handoffMu.Unlock()
 		writeError(w, http.StatusForbidden, "only the addressed recipient can accept this handoff")
 		return
 	}
 	if _, ok := s.authorizeSession(w, r, rec.pkg.SessionID); !ok {
+		s.handoffMu.Unlock()
 		return
 	}
+	// Accept under the map lock (issue #134): AcceptHandoff mutates the
+	// shared package, so concurrent accepts must serialize. Double accept
+	// surfaces as 409 from the library.
 	updated, ev, err := handoff.AcceptHandoff(rec.pkg, byUser)
+	s.handoffMu.Unlock()
 	if err != nil {
 		if errors.Is(err, handoff.ErrConflict) {
 			writeError(w, http.StatusConflict, err.Error())

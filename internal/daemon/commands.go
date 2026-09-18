@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -144,8 +143,15 @@ type CommandResult struct {
 }
 
 // baseName normalizes a binary name: lowercased, ".exe" trimmed, no dirs.
+// Backslashes split explicitly (issue #147): filepath separators are
+// platform-specific, so Windows paths must parse identically on every
+// GOOS — filepath.Base/ToSlash alone leave `C:\tools\git.exe` whole on
+// Linux, inconsistent with Windows.
 func baseName(argv0 string) string {
-	b := strings.ToLower(filepath.Base(argv0))
+	b := strings.ToLower(strings.ReplaceAll(argv0, "\\", "/"))
+	if i := strings.LastIndex(b, "/"); i >= 0 {
+		b = b[i+1:]
+	}
 	return strings.TrimSuffix(b, ".exe")
 }
 

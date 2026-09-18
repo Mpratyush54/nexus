@@ -247,13 +247,14 @@ func TestListBranchItemsCopyRoundTrip(t *testing.T) {
 	}
 
 	// Two visible rows + one REJECTED row (invisible to branch reads).
-	if err := s.WriteToBranch(ctx, child.ID, &MemoryItem{Key: "a", Content: "alpha content here", Status: "CONFIRMED"}); err != nil {
+	// Contents satisfy the 20-char CHECK WriteToBranch enforces (#131).
+	if err := s.WriteToBranch(ctx, child.ID, &MemoryItem{Key: "a", Content: "alpha content here!!", Status: "CONFIRMED"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.WriteToBranch(ctx, child.ID, &MemoryItem{Key: "b", Content: "beta content here!!", Status: "PROPOSED"}); err != nil {
+	if err := s.WriteToBranch(ctx, child.ID, &MemoryItem{Key: "b", Content: "beta content here!!!", Status: "PROPOSED"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.WriteToBranch(ctx, child.ID, &MemoryItem{Key: "junk", Content: "rejected content!!", Status: "REJECTED"}); err != nil {
+	if err := s.WriteToBranch(ctx, child.ID, &MemoryItem{Key: "junk", Content: "rejected content!!!!", Status: "REJECTED"}); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.ListBranchItems(ctx, child.ID)

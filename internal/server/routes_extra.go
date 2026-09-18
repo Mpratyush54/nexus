@@ -288,6 +288,22 @@ func (s *Server) handleSessionLeave(w http.ResponseWriter, r *http.Request) {
 
 // --- branches ---
 
+// authorizeBranch enforces branch visibility on top of project membership
+// (issue #148): shared branches are open to members; private branches
+// require the owner. CheckBranchAccess was previously helper-only with no
+// production call sites.
+func (s *Server) authorizeBranch(w http.ResponseWriter, r *http.Request, br *store.MemoryBranch) bool {
+	if err := store.CheckBranchAccess(br, authSubject(r)); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "branch not found")
+			return false
+		}
+		writeError(w, http.StatusForbidden, "private branch")
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleBranchList(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
 	if !s.authorizeProject(w, r, projectID) {
@@ -318,10 +334,19 @@ func (s *Server) handleBranchList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not list branches: "+err.Error())
 		return
 	}
-	if items == nil {
-		items = []*store.MemoryBranch{}
+	// Hide private branches the caller may not read (issue #148): the
+	// list shows shared branches plus the caller's own.
+	me := authSubject(r)
+	visible := items[:0:0]
+	for _, br := range items {
+		if store.CheckBranchAccess(br, me) == nil {
+			visible = append(visible, br)
+		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+	if visible == nil {
+		visible = []*store.MemoryBranch{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": visible, "count": len(visible)})
 }
 
 type branchCreateRequest struct {
@@ -448,12 +473,13 @@ func (s *Server) applyMergeResult(ctx context.Context, targetID string, result b
 			errs = append(errs, fmt.Errorf("write %s: %w", m.Key, err))
 		}
 	}
-	// Deletions propagate as SUPERSEDED tombstones with empty content so
-	// the key disappears from branch snapshots (terminal overlay rows read
-	// as not-found) without losing history.
+	// Deletions propagate as SUPERSEDED tombstones so the key disappears
+	// from branch snapshots (terminal overlay rows read as not-found)
+	// without losing history. The marker content satisfies the 20–2000
+	// content CHECK (issue #134); tombstones are never rendered.
 	for _, key := range result.Deleted {
 		if err := bs.WriteToBranch(ctx, targetID, &store.MemoryItem{
-			Key: key, Content: "", Status: store.StatusSuperseded,
+			Key: key, Content: store.TombstoneContent, Status: store.StatusSuperseded,
 		}); err != nil {
 			errs = append(errs, fmt.Errorf("tombstone %s: %w", key, err))
 		}
@@ -494,12 +520,16 @@ func (s *Server) handleBranchCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Resolve the fork source: blank "from" (and explicit "main") mean the
 	// project's main branch; anything else is a sibling branch name.
+	// A private source the caller cannot read cannot be forked (issue #148).
 	from := strings.TrimSpace(req.From)
 	var parentID string
 	if from == "" || from == store.MainBranchName {
 		main, err := bs.EnsureMainBranch(r.Context(), projectID)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not ensure main branch: "+err.Error())
+			return
+		}
+		if !s.authorizeBranch(w, r, main) {
 			return
 		}
 		parentID = main.ID
@@ -512,6 +542,9 @@ func (s *Server) handleBranchCreate(w http.ResponseWriter, r *http.Request) {
 		parent := findBranchByName(branches, from)
 		if parent == nil {
 			writeError(w, http.StatusNotFound, "source branch "+from+" not found")
+			return
+		}
+		if !s.authorizeBranch(w, r, parent) {
 			return
 		}
 		parentID = parent.ID
@@ -574,9 +607,13 @@ func (s *Server) handleBranchCheckout(w http.ResponseWriter, r *http.Request) {
 	}
 	// Prefer an ID lookup (IDs are unambiguous across projects); fall back
 	// to a name lookup scoped by ?project_id=. Either way the resolved
-	// branch's project is authorized (issue #141).
+	// branch's project is authorized (issue #141), then its visibility
+	// (issue #148).
 	if br, err := bs.GetBranch(r.Context(), name); err == nil {
 		if !s.authorizeProject(w, r, br.ProjectID) {
+			return
+		}
+		if !s.authorizeBranch(w, r, br) {
 			return
 		}
 		s.setActiveBranch(br.ProjectID, br.ID)
@@ -597,6 +634,9 @@ func (s *Server) handleBranchCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if br := findBranchByName(branches, name); br != nil {
+		if !s.authorizeBranch(w, r, br) {
+			return
+		}
 		s.setActiveBranch(projectID, br.ID)
 		writeJSON(w, http.StatusOK, br)
 		return
@@ -649,6 +689,14 @@ func (s *Server) handleBranchDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	if target == nil {
 		writeError(w, http.StatusNotFound, "target branch "+targetName+" not found")
+		return
+	}
+	// Visibility on both inputs (issue #148): snapshots read branch
+	// content, so a private source or target is unreadable to non-owners.
+	if !s.authorizeBranch(w, r, source) {
+		return
+	}
+	if !s.authorizeBranch(w, r, target) {
 		return
 	}
 	// Enumerate branch contents via SearchMemory + ResolveRead (issue #97):
@@ -750,6 +798,14 @@ func (s *Server) handleBranchMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authorizeProject(w, r, projectID) {
+		return
+	}
+	// Visibility on both inputs (issue #148): merge reads both snapshots,
+	// so a private source cannot be merged by a non-owner member.
+	if !s.authorizeBranch(w, r, source) {
+		return
+	}
+	if !s.authorizeBranch(w, r, target) {
 		return
 	}
 	// 3-way merge over real snapshots (issue #97): base is the source's

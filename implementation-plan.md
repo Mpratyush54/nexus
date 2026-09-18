@@ -47,7 +47,12 @@
 
 ---
 
-## Current Codebase (Post-Cleanup)
+## Current Codebase (Post-Cleanup — HISTORICAL, issue #151)
+
+> Historical snapshot: commit `524342e` captured the v1 single-user CLI at
+> cleanup time. The tree has since grown far beyond this (daemon, server,
+> store, MCP, phases 1–5+); see Target Directory Structure as built and
+> the drift log under Locked Decisions for what landed.
 
 Commit `524342e` snapshots the v1 single-user CLI. The following survived:
 

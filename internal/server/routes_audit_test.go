@@ -249,18 +249,22 @@ func TestAuditRoutesExtraAuthParity(t *testing.T) {
 	}
 }
 
-// WorkspaceIsOnline boundary: exactly-at-threshold counts as offline
-// (strict < comparison), just-inside counts as online.
+// WorkspaceIsOnline boundary: exactly-at-threshold counts as online
+// (inclusive <= comparison, matching store.IsOnlineAt — issue #131),
+// just-inside counts as online, past-threshold as offline.
 func TestAuditRoutesWorkspaceOnlineBoundary(t *testing.T) {
 	now := time.Now().UTC()
 	mk := func(lastSeen time.Time) *store.Workspace {
 		return &store.Workspace{IsOnline: true, LastSeen: lastSeen}
 	}
-	if WorkspaceIsOnline(mk(now.Add(-OfflineThreshold)), now) {
-		t.Fatal("exactly-at-threshold must be offline (strict <)")
+	if !WorkspaceIsOnline(mk(now.Add(-OfflineThreshold)), now) {
+		t.Fatal("exactly-at-threshold must be online (inclusive boundary)")
 	}
 	if !WorkspaceIsOnline(mk(now.Add(-OfflineThreshold+time.Second)), now) {
 		t.Fatal("just-inside-threshold must be online")
+	}
+	if WorkspaceIsOnline(mk(now.Add(-OfflineThreshold-time.Second)), now) {
+		t.Fatal("past-threshold must be offline")
 	}
 	if WorkspaceIsOnline(nil, now) {
 		t.Fatal("nil workspace must be offline")

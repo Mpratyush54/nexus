@@ -133,7 +133,7 @@ func (s *PostgresStore) ElectDesignatedProcessor(ctx context.Context, projectID 
 		   SELECT id FROM workspaces
 		   WHERE project_id = $1::uuid
 		     AND is_online
-		     AND last_seen > now() - make_interval(secs => $2)
+		     AND last_seen >= now() - make_interval(secs => $2)
 		   ORDER BY last_seen DESC, id
 		   LIMIT 1
 		 ) AS sel
