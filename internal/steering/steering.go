@@ -242,6 +242,11 @@ func (r *run) emit(t string, payload map[string]any) {
 type InterruptManager struct {
 	mu   sync.Mutex
 	runs map[string]*run
+	// finishedOrder is the FIFO of runIDs in Unregister order. Eviction
+	// pops from the front so the least-recently-finished run goes first
+	// (LRU); entries for re-registered or already-evicted runs are
+	// skipped lazily at eviction time.
+	finishedOrder []string
 }
 
 // NewInterruptManager returns an empty manager.
@@ -267,9 +272,14 @@ func (m *InterruptManager) Register(runID string, bridge DaemonBridge) error {
 	if r, ok := m.runs[runID]; ok && r.state != StateFinished {
 		return fmt.Errorf("steering: run %q already registered", runID)
 	} else if !ok && len(m.runs) >= MaxRuns {
-		for id, r := range m.runs {
-			if r.state == StateFinished {
-				delete(m.runs, id)
+		// Evict exactly one finished run, least-recently-finished first,
+		// so post-mortem reads for the rest survive within the cap.
+		for len(m.finishedOrder) > 0 {
+			oldest := m.finishedOrder[0]
+			m.finishedOrder = m.finishedOrder[1:]
+			if r, ok := m.runs[oldest]; ok && r.state == StateFinished {
+				delete(m.runs, oldest)
+				break
 			}
 		}
 		if len(m.runs) >= MaxRuns {
@@ -296,6 +306,22 @@ func (m *InterruptManager) Unregister(runID string) error {
 	r.owner = ""
 	r.queue = nil
 	r.qhead = 0
+	m.finishedOrder = append(m.finishedOrder, runID)
+	// Bound the order queue itself: re-registers leave stale entries that
+	// eviction skips lazily, so compact once it doubles the cap.
+	if len(m.finishedOrder) > 2*MaxRuns {
+		kept := m.finishedOrder[:0]
+		for _, id := range m.finishedOrder {
+			if r, ok := m.runs[id]; ok && r.state == StateFinished {
+				kept = append(kept, id)
+			}
+		}
+		// Clear the vacated tail so dropped IDs are not retained.
+		for i := len(kept); i < len(m.finishedOrder); i++ {
+			m.finishedOrder[i] = ""
+		}
+		m.finishedOrder = kept
+	}
 	// Avoid closing done twice if RequestInterrupt already closed it.
 	select {
 	case <-r.done:
