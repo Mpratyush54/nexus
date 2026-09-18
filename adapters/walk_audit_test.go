@@ -3,6 +3,7 @@ package adapters
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -28,9 +29,14 @@ func TestAuditRootsForHomeAndLeaves(t *testing.T) {
 	if !foundHome {
 		t.Errorf("RootsFor should include home agent dir, got %v", roots)
 	}
-	// Per-leaf dot dirs for every cached leaf.
+	// Per-leaf dot dirs for every cached leaf: Join(LeafDir(leaf), dot)
+	// on every GOOS (issue #147) — never a hardcoded drive letter.
 	for _, leaf := range projectpkg.CachedLeaves() {
-		want := filepath.Join(`D:\`, filepath.FromSlash(leaf), "mydot")
+		base := projectpkg.LeafDir(leaf)
+		if base == "" {
+			continue
+		}
+		want := filepath.Join(base, "mydot")
 		found := false
 		for _, r := range roots {
 			if r == want {
@@ -51,7 +57,9 @@ func TestAuditClassifyPathBackupTable(t *testing.T) {
 	backup := []string{
 		filepath.Join("home", "user", ".claude", "projects", "x", "session.jsonl"),
 		filepath.Join("D:", "proj", ".codex", "notes.md"),
-		filepath.Join(t.TempDir(), "transcript.json"),
+		// NOTE: no t.TempDir() case here (issue #147) — Linux TempDir
+		// lives under /tmp/, which ClassifyPath intentionally ignores.
+		filepath.Join("home", "user", "transcript.json"),
 		"notes.txt",
 	}
 	for _, p := range backup {
@@ -131,9 +139,18 @@ func TestAuditProjectOfGlobalFallback(t *testing.T) {
 func TestAuditProjectOfDPrefixFallback(t *testing.T) {
 	clearAuditResolveCache(t)
 	home := t.TempDir()
-	// D:\-prefixed path with no other signal falls back to first segment.
-	if got := ProjectOf(`D:\audit-fallback-proj-xyz\file.txt`, home); got != "audit-fallback-proj-xyz" {
-		t.Errorf("ProjectOf D:\\ fallback = %q", got)
+	// D:\-prefixed path with no other signal falls back to first segment —
+	// on Windows, where D:\ is a drive root (legacy transcript encoding).
+	// On other GOOSes D:\ is not absolute and there is no D:\ default root,
+	// so the documented result is global (issue #147: assert per-OS
+	// behavior explicitly instead of pinning Windows everywhere).
+	got := ProjectOf(`D:\audit-fallback-proj-xyz\file.txt`, home)
+	if runtime.GOOS == "windows" {
+		if got != "audit-fallback-proj-xyz" {
+			t.Errorf("ProjectOf D:\\ fallback = %q", got)
+		}
+	} else if got != "global" {
+		t.Errorf("ProjectOf D:\\ fallback on %s = %q, want global (no D: drive)", runtime.GOOS, got)
 	}
 }
 
@@ -310,7 +327,7 @@ func TestAuditSafeNameCleansAndCollidesKnownBug(t *testing.T) {
 func TestAuditCopyFilteredCopiesSkipsResumes(t *testing.T) {
 	clearAuditResolveCache(t)
 	home := t.TempDir()
-	root := t.TempDir()
+	root := mksrc(t) // outside /tmp (issue #147)
 	_ = os.WriteFile(filepath.Join(root, "ok.json"), []byte("abc"), 0o644)
 	_ = os.WriteFile(filepath.Join(root, "tok-secret.json"), []byte("x"), 0o644) // NEVER
 	_ = os.WriteFile(filepath.Join(root, "debug.log"), []byte("x"), 0o644)       // IGNORE
@@ -348,8 +365,9 @@ func TestAuditCopyFilteredCopiesSkipsResumes(t *testing.T) {
 func TestAuditCopyFilteredSameBasenameCollisionKnownBug(t *testing.T) {
 	clearAuditResolveCache(t)
 	home := t.TempDir()
-	r1 := filepath.Join(t.TempDir(), "same")
-	r2 := filepath.Join(t.TempDir(), "other", "same")
+	base := mksrc(t) // outside /tmp (issue #147)
+	r1 := filepath.Join(base, "same")
+	r2 := filepath.Join(base, "other", "same")
 	_ = os.MkdirAll(r1, 0o755)
 	_ = os.MkdirAll(r2, 0o755)
 	_ = os.WriteFile(filepath.Join(r1, "f.json"), []byte("from-root-1"), 0o644)
@@ -377,7 +395,7 @@ func TestAuditCopyFilteredSameBasenameCollisionKnownBug(t *testing.T) {
 func TestAuditCopyFilteredProjectFilter(t *testing.T) {
 	clearAuditResolveCache(t)
 	home := t.TempDir()
-	root := t.TempDir()
+	root := mksrc(t) // outside /tmp (issue #147)
 	_ = os.WriteFile(filepath.Join(root, "f.json"), []byte("{}"), 0o644)
 	dest := t.TempDir()
 	copied, _, _ := CopyFiltered([]string{root}, dest, 1<<20, "definitely-no-such-project-xyz", home)

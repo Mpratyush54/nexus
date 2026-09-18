@@ -44,12 +44,17 @@ func TestAuditKindOfTable(t *testing.T) {
 }
 
 func TestAuditLeafDirOfTable(t *testing.T) {
+	// Explicit roots: deterministic on every GOOS (issue #147). Without
+	// NEXUS_PROJECT_ROOTS the result is home-/platform-dependent and
+	// cannot be pinned portably.
+	root := t.TempDir()
+	t.Setenv("NEXUS_PROJECT_ROOTS", root)
 	cases := []struct{ leaf, want string }{
 		{"", ""},
 		{"global", ""},
-		{"myproj", filepath.Join(`D:\`, "myproj")},
-		{"a/b", filepath.Join(`D:\`, "a", "b")},
-		{"a/b/c", filepath.Join(`D:\`, "a", "b", "c")},
+		{"myproj", filepath.Join(root, "myproj")},
+		{"a/b", filepath.Join(root, "a", "b")},
+		{"a/b/c", filepath.Join(root, "a", "b", "c")},
 	}
 	for _, tc := range cases {
 		if got := leafDirOf(tc.leaf); got != tc.want {
@@ -106,7 +111,7 @@ func TestAuditGenericAdapterNameRawIndexPaths(t *testing.T) {
 	if want := filepath.Join(vault, "agents", "unittest", "index.json"); g.indexPath(vault) != want {
 		t.Errorf("indexPath = %q want %q", g.indexPath(vault), want)
 	}
-	if got := g.Classify(Artifact{NativePath: filepath.Join(t.TempDir(), "session.json")}); got != ClassifyPath(filepath.Join("x", "session.json")) {
+	if got := g.Classify(Artifact{NativePath: filepath.Join("x", "session.json")}); got != ClassifyPath(filepath.Join("x", "session.json")) {
 		t.Errorf("Classify should delegate to ClassifyPath")
 	}
 }
@@ -142,7 +147,9 @@ func TestAuditDiscoverEmptyRoots(t *testing.T) {
 
 func TestAuditDiscoverFindsBackupSkipsNever(t *testing.T) {
 	clearAuditResolveCache(t)
-	root := t.TempDir()
+	// Sources outside /tmp (issue #147): ClassifyPath ignores /tmp/
+	// segments and Linux TempDir lives under /tmp.
+	root := mksrc(t)
 	if err := os.WriteFile(filepath.Join(root, "keep.json"), []byte(`{"cwd":"D:\\nowhere"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +178,7 @@ func TestAuditDiscoverFindsBackupSkipsNever(t *testing.T) {
 
 func TestAuditExportWritesIndexAndManifest(t *testing.T) {
 	clearAuditResolveCache(t)
-	root := t.TempDir()
+	root := mksrc(t)
 	content := []byte("hello export")
 	if err := os.WriteFile(filepath.Join(root, "s.json"), content, 0o644); err != nil {
 		t.Fatal(err)
@@ -211,7 +218,7 @@ func TestAuditExportWritesIndexAndManifest(t *testing.T) {
 
 func TestAuditExportSkipsLargeFiles(t *testing.T) {
 	clearAuditResolveCache(t)
-	root := t.TempDir()
+	root := mksrc(t)
 	if err := os.WriteFile(filepath.Join(root, "big.json"), []byte("1234567890"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +277,7 @@ func TestAuditNormalizeErrorPropagation(t *testing.T) {
 
 func TestAuditNormalizeWritesSessionsAndTranscript(t *testing.T) {
 	clearAuditResolveCache(t)
-	root := t.TempDir()
+	root := mksrc(t)
 	_ = os.WriteFile(filepath.Join(root, "a.json"), []byte("{}"), 0o644)
 	vault := t.TempDir()
 	g := genericAdapter{name: "normagent", absRoots: []string{root}, maxBytes: 50 << 20}
@@ -316,7 +323,7 @@ func TestAuditRestoreRejectsMissingAbsolutePath(t *testing.T) {
 
 func TestAuditRestoreRoundTrip(t *testing.T) {
 	clearAuditResolveCache(t)
-	root := t.TempDir()
+	root := mksrc(t)
 	native := filepath.Join(root, "note.json")
 	orig := []byte(`{"hello":1}`)
 	if err := os.WriteFile(native, orig, 0o644); err != nil {
