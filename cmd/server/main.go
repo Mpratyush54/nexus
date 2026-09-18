@@ -264,6 +264,10 @@ func newHandler(secret string, cfg serverConfig) http.Handler {
 func buildMux(srv *server.Server, cfg serverConfig) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /auth/login", func(w http.ResponseWriter, r *http.Request) {
+		if srv != nil && srv.Users != nil {
+			srv.Handler().ServeHTTP(w, r)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusServiceUnavailable)
 		_, _ = w.Write([]byte(`{"error":{"code":503,"message":"authentication unavailable: user store adapter pending"}}`))

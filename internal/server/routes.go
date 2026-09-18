@@ -36,6 +36,9 @@ func (s *Server) registerRoutes() {
 	s.registerExtraRoutes()
 	s.registerSteerRoutes()
 	s.registerHandoffRoutes()
+
+	// Web dashboard static assets (issue #14).
+	s.registerWebRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -488,4 +491,33 @@ func (s *Server) handleEpisodeSearch(w http.ResponseWriter, r *http.Request) {
 		episodes = []*store.Episode{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": episodes, "count": len(episodes)})
+}
+
+func (s *Server) registerWebRoutes() {
+	webDir := os.Getenv("WEB_DIR")
+	if webDir == "" {
+		for _, candidate := range []string{"/web", "web", "./web"} {
+			if fi, err := os.Stat(candidate); err == nil && fi.IsDir() {
+				webDir = candidate
+				break
+			}
+		}
+	}
+	if webDir != "" {
+		fs := http.FileServer(http.Dir(webDir))
+		s.Mux.Handle("GET /web/", http.StripPrefix("/web", fs))
+		s.Mux.Handle("GET /web", http.RedirectHandler("/web/", http.StatusMovedPermanently))
+		s.Mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, webDir+"/index.html")
+		})
+		s.Mux.HandleFunc("GET /index.html", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, webDir+"/index.html")
+		})
+		s.Mux.HandleFunc("GET /style.css", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, webDir+"/style.css")
+		})
+		s.Mux.HandleFunc("GET /app.js", func(w http.ResponseWriter, r *http.Request) {
+			http.ServeFile(w, r, webDir+"/app.js")
+		})
+	}
 }
