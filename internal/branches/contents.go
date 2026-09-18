@@ -1,5 +1,15 @@
 // Branch content enumeration (nexus issue #97).
 //
+// SCOPE (issue #135): this package is snapshot-only pure functions over
+// Entry snapshots (enumerate, diff, merge, staleness). It does NOT enforce
+// CoW itself — no overlay branch→parent→main traversal, cycle check,
+// write isolation, or max-depth guard lives here. Those guarantees belong
+// to internal/store (BranchStore: ResolveRead walks the chain, WriteToBranch
+// never touches parents, ForkBranch enforces depth). Callers must resolve
+// snapshots through a BranchLoader backed by the store; using these
+// functions over hand-built slices (e.g. an arbitrary base) yields
+// spurious auto-merges/deletes with no ancestry verification.
+//
 // DiffBranches/Merge operate on Entry snapshots, but the server previously
 // had no store-level branch enumeration: the diff/merge routes returned stub
 // shapes with "no rows copied" notes. ListBranchContents closes that gap: it

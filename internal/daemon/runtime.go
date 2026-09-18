@@ -275,6 +275,12 @@ func (r *Runtime) Start(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			flush()
+			// Stop the interceptor forwarder (issue #132): SetEventSink
+			// starts it, so Start must stop it — one leaked goroutine
+			// per run otherwise.
+			if r.Daemon != nil && r.Daemon.Interceptor != nil {
+				r.Daemon.Interceptor.Close()
+			}
 			wg.Wait()
 			return
 		case ev := <-sink.Ch:

@@ -260,11 +260,13 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 	if err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "search failed: " + err.Error()}
 	}
-	// Dedup same-key collisions (most-specific level wins, mirroring
-	// context.ResolveOverrides) before the level filter, so one key never
-	// consumes budget twice.
-	items = dedupeByKey(items)
+	// Filter before dedupe (issue #135): dedupe keeps the most-specific
+	// level per key, so deduping first would drop a key entirely when the
+	// winner's level doesn't match the filter but a loser does.
 	items = filterByLevel(items, a.Level)
+	// Dedup same-key collisions (most-specific level wins, mirroring
+	// context.ResolveOverrides) so one key never consumes budget twice.
+	items = dedupeByKey(items)
 
 	// Decay clock (plan §1.7, issue #119): serving an item counts as use.
 	// Best-effort and never fatal — stores without the method are skipped.
@@ -351,12 +353,17 @@ func dedupeByKey(items []*MemoryItem) []*MemoryItem {
 }
 
 func filterByLevel(items []*MemoryItem, level string) []*MemoryItem {
-	if level == "" {
+	if strings.TrimSpace(level) == "" {
 		return items
 	}
-	out := items[:0:len(items)]
+	// "org" is an accepted alias for the organization tier (mcpLevelRank
+	// already ranks it); match it explicitly instead of dropping everything.
+	if strings.EqualFold(strings.TrimSpace(level), "org") {
+		level = "organization"
+	}
+	out := make([]*MemoryItem, 0, len(items))
 	for _, it := range items {
-		if strings.EqualFold(it.Level, level) {
+		if it != nil && strings.EqualFold(it.Level, level) {
 			out = append(out, it)
 		}
 	}
@@ -379,8 +386,9 @@ func xmlEscape(s string) string {
 }
 
 // buildContextXML assembles memories into the inference-ready XML block from
-// implementation-plan.md §1.6, grouped SESSION > PERSONAL > PROJECT >
-// ORGANIZATION (lower levels listed last so they read as overrides).
+// implementation-plan.md §1.6. Sections render in builder priority order
+// (ephemeral, session, personal, project, organization — identical to
+// context.AssembleXML so the swap stays drop-in).
 // This is the local fallback for the future internal/context builder: keep
 // the output shape identical so the swap is drop-in.
 func buildContextXML(project, branch string, items []*MemoryItem) string {
@@ -389,9 +397,9 @@ func buildContextXML(project, branch string, items []*MemoryItem) string {
 
 // buildContextXMLBudgeted renders the same block capped to budget chars
 // (issue #41: the effective agent budget). budget <= 0 means unlimited.
-// Units that would overflow are dropped (trailing sections first to go, like
-// the context builder's greedy fill); output always stays a well-formed
-// project_memory block.
+// Units that would overflow are dropped lowest-priority-first (organization
+// goes before project, project before personal, and so on — issue #135);
+// output always stays a well-formed project_memory block.
 func buildContextXMLBudgeted(project, branch string, items []*MemoryItem, budget int) string {
 	groups := map[string][]*MemoryItem{}
 	for _, it := range items {
@@ -401,8 +409,7 @@ func buildContextXMLBudgeted(project, branch string, items []*MemoryItem, budget
 		}
 		groups[lvl] = append(groups[lvl], it)
 	}
-	header := fmt.Sprintf("<project_memory project=%q branch=%q>\n",
-		xmlEscape(project), xmlEscape(branch))
+	header := "<project_memory project=\"" + xmlEscape(project) + "\" branch=\"" + xmlEscape(branch) + "\">\n"
 	footer := "</project_memory>"
 	type section struct {
 		open  string
@@ -410,7 +417,7 @@ func buildContextXMLBudgeted(project, branch string, items []*MemoryItem, budget
 		units []string
 	}
 	var sections []section
-	for _, lvl := range []string{"organization", "project", "personal", "session", "ephemeral"} {
+	for _, lvl := range []string{"ephemeral", "session", "personal", "project", "organization"} {
 		mems := groups[lvl]
 		if len(mems) == 0 {
 			continue
@@ -421,8 +428,7 @@ func buildContextXMLBudgeted(project, branch string, items []*MemoryItem, budget
 			if scope == "" {
 				scope = "fact"
 			}
-			units = append(units, fmt.Sprintf("  <item key=%q confidence=\"%.2f\" scope=%q>\n    %s\n  </item>\n",
-				xmlEscape(it.Key), it.Confidence, xmlEscape(scope), xmlEscape(it.Content)))
+			units = append(units, "<item key=\""+xmlEscape(it.Key)+"\" confidence=\""+fmt.Sprintf("%.2f", it.Confidence)+"\" scope=\""+xmlEscape(scope)+"\">\n    "+xmlEscape(it.Content)+"\n  </item>\n")
 		}
 		sections = append(sections, section{
 			open: "<" + lvl + ">\n", close: "</" + lvl + ">\n", units: units,
@@ -597,6 +603,7 @@ func (s *Server) handleMemoryReflect(ctx context.Context, raw json.RawMessage) (
 			Confidence: 1.0,
 			Status:     "PROPOSED",
 			Source:     "agent:reflect",
+			Embedding:  s.embedForWrite(strings.TrimSpace(m.Key), m.Content),
 		}
 		if a.Summary != "" {
 			item.ContextSnippet = a.Summary
@@ -805,6 +812,9 @@ func (s *Server) handleFileWrite(raw json.RawMessage) (any, *RPCError) {
 	abs, err := secureJoin(s.cfg.WorkspacePath, a.Path)
 	if err != nil {
 		return nil, invalidParams("%s", err.Error())
+	}
+	if len(a.Content) > maxFileBytes {
+		return nil, invalidParams("content exceeds 1MB limit: %s", a.Path)
 	}
 	if containsSecret(a.Path, []byte(a.Content)) {
 		return nil, invalidParams("file %q matches secret pattern", a.Path)

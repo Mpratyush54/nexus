@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -45,26 +46,70 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-// handleLogin implements the v1 simple login: any non-empty username+password
-// yields a stub JWT. TODO(auth): validate against the users table once the
-// Postgres/RDS store lands; return 401 for unknown users / bad passwords.
+// clientIP extracts the login attempt source for rate limiting: the first
+// X-Forwarded-For hop when behind the ALB, else the direct remote address.
+func clientIP(r *http.Request) string {
+	if fwd := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); fwd != "" {
+		if i := strings.Index(fwd, ","); i >= 0 {
+			return strings.TrimSpace(fwd[:i])
+		}
+		return fwd
+	}
+	host := r.RemoteAddr
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		return h
+	}
+	return host
+}
+
+// handleLogin verifies username+password against the users table and mints
+// a JWT (issue #133). Unknown users, unset passwords, and mismatches all
+// 401 with the same message (no oracle for username enumeration). Without
+// a configured Users source the endpoint fails closed with 503. Attempts
+// are rate-limited per source IP.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if strings.TrimSpace(req.Username) == "" || req.Password == "" {
+	username := strings.TrimSpace(req.Username)
+	if username == "" || strings.TrimSpace(req.Password) == "" {
 		writeError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
-	token, err := s.Auth.Generate(strings.TrimSpace(req.Username), DefaultTokenTTL)
+	if s.login == nil {
+		s.login = newRateGate(1, 5)
+	}
+	if !s.login.allow("login:" + clientIP(r)) {
+		writeError(w, http.StatusTooManyRequests, "too many login attempts")
+		return
+	}
+	if s.Users == nil {
+		writeError(w, http.StatusServiceUnavailable, "user authentication not configured")
+		return
+	}
+	_, hash, err := s.Users.GetPasswordHash(r.Context(), username)
+	if err != nil {
+		// Unknown user and lookup failure alike: 401, no enumeration.
+		writeError(w, http.StatusUnauthorized, "invalid username or password")
+		return
+	}
+	if strings.TrimSpace(hash) == "" {
+		writeError(w, http.StatusUnauthorized, "invalid username or password")
+		return
+	}
+	if !VerifyPassword(req.Password, hash) {
+		writeError(w, http.StatusUnauthorized, "invalid username or password")
+		return
+	}
+	token, err := s.Auth.Generate(username, DefaultTokenTTL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not issue token")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":    token,
-		"username": strings.TrimSpace(req.Username),
+		"username": username,
 	})
 }
 

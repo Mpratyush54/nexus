@@ -82,8 +82,10 @@ func isAllowedGit(rest []string) bool {
 }
 
 // isDangerousGitFlag rejects options that alter configuration or invoke
-// external programs, plus credential/remote helpers and file-writing
-// redirects (--output) that could land outside the workspace.
+// external programs, plus credential/remote helpers, file-writing
+// redirects (--output) that could land outside the workspace, and
+// repo-location overrides (--git-dir/--work-tree/--bare/--namespace)
+// that escape the Dir=root confinement (issue #132).
 func isDangerousGitFlag(a string) bool {
 	low := strings.ToLower(a)
 	switch {
@@ -100,6 +102,14 @@ func isDangerousGitFlag(a string) bool {
 	case strings.HasPrefix(low, "--uploadarchive"):
 		return true
 	case strings.HasPrefix(low, "--output"):
+		return true
+	case strings.HasPrefix(low, "--git-dir"):
+		return true
+	case strings.HasPrefix(low, "--work-tree"):
+		return true
+	case low == "--bare" || strings.HasPrefix(low, "--bare="):
+		return true
+	case strings.HasPrefix(low, "--namespace"):
 		return true
 	case strings.Contains(low, "credential.helper"):
 		return true
@@ -169,7 +179,18 @@ func IsAllowed(argv []string) bool {
 	case "git":
 		return isAllowedGit(rest)
 	case "go", "cargo":
-		return len(rest) >= 1 && rest[0] == "test"
+		// -exec runs an arbitrary helper binary (issue #132): `go test
+		// -exec /tmp/evil` would execute outside the sandbox.
+		if len(rest) < 1 || rest[0] != "test" {
+			return false
+		}
+		for _, a := range rest[1:] {
+			low := strings.ToLower(a)
+			if low == "-exec" || strings.HasPrefix(low, "-exec=") {
+				return false
+			}
+		}
+		return true
 	case "npm":
 		return len(rest) >= 1 && rest[0] == "test"
 	case "pytest":

@@ -222,37 +222,70 @@ func TestAuditAuthKeyIDHygiene(t *testing.T) {
 	}
 }
 
-// handleLogin without a configured secret fails closed (issue #85): no
-// token is minted. With a key configured, the v1 stub still mints for any
-// non-empty username+password — user-table validation (401 for unknown
-// users) is a follow-up outside internal/server/auth.go's scope.
+// handleLogin verifies against the users table (issue #133): unknown
+// users, unset passwords, and mismatches all 401 identically; unconfigured
+// auth fails closed. This replaces the old stub-login pin.
 func TestAuditAuthLoginNoUsersCheck(t *testing.T) {
 	s := newTestServer()
 	s.Auth = NewAuthenticator(nil) // force unconfigured: fail closed
 	rec := doJSON(t, s, http.MethodPost, "/auth/login", "", map[string]string{
 		"username": "anyone", "password": "whatever",
 	})
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("unconfigured login status = %d, want 500 (fail closed)", rec.Code)
+	// 503 (user auth unconfigured) — fail closed either way, never a token.
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unconfigured login status = %d, want 503 (fail closed)", rec.Code)
 	}
 
 	s.Auth = NewAuthenticator([]byte("audit-login-key-1234567890"))
-	for _, creds := range []map[string]string{
-		{"username": "anyone", "password": "whatever"},
-		{"username": "ghost-user", "password": "x"},
+	// No Users source: 503, not a minted token.
+	rec = doJSON(t, s, http.MethodPost, "/auth/login", "", map[string]string{
+		"username": "anyone", "password": "whatever",
+	})
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("userless login status = %d, want 503", rec.Code)
+	}
+
+	users := newFakeUsers()
+	users.add(t, "alice", "correct-horse")
+	s.Users = users
+	for _, tc := range []struct {
+		name  string
+		creds map[string]string
+		code  int
+	}{
+		{"unknown user", map[string]string{"username": "ghost-user", "password": "x"}, http.StatusUnauthorized},
+		{"wrong password", map[string]string{"username": "alice", "password": "wrong"}, http.StatusUnauthorized},
 	} {
-		rec := doJSON(t, s, http.MethodPost, "/auth/login", "", creds)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("stub login status = %d, body = %s", rec.Code, rec.Body.String())
+		rec := doJSON(t, s, http.MethodPost, "/auth/login", "", tc.creds)
+		if rec.Code != tc.code {
+			t.Fatalf("%s: status = %d, want %d (%s)", tc.name, rec.Code, tc.code, rec.Body.String())
 		}
-		var out struct {
-			Token string `json:"token"`
-		}
-		decodeBody(t, rec, &out)
-		// TODO(auth): validate against users table; unknown users must 401.
-		if _, err := s.Auth.Validate(out.Token); err != nil {
-			t.Fatalf("stub token invalid: %v", err)
-		}
+	}
+	// Unset password hash: 401, never accepted.
+	users.hashes["nopass"] = ""
+	users.ids["nopass"] = "user-nopass"
+	rec = doJSON(t, s, http.MethodPost, "/auth/login", "", map[string]string{
+		"username": "nopass", "password": "anything",
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unset-password login status = %d, want 401", rec.Code)
+	}
+
+	// Correct credentials mint a valid token (fresh gate: the attempts
+	// above legitimately consumed the 1/s burst).
+	s.login = newRateGate(1, 5)
+	rec = doJSON(t, s, http.MethodPost, "/auth/login", "", map[string]string{
+		"username": "alice", "password": "correct-horse",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid login status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Token string `json:"token"`
+	}
+	decodeBody(t, rec, &out)
+	if sub, err := s.Auth.Validate(out.Token); err != nil || sub != "alice" {
+		t.Fatalf("login token sub = %q, err = %v", sub, err)
 	}
 }
 

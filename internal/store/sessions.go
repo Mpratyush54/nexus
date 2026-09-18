@@ -443,6 +443,9 @@ func (s *MemStore) PromoteSessionMemory(ctx context.Context, id, confirmedBy str
 	if m.Level != "session" {
 		return fmt.Errorf("memory %s is not session-scoped (level=%s)", id, m.Level)
 	}
+	if m.Status != StatusProposed && m.Status != StatusConfirmed {
+		return fmt.Errorf("memory %s has terminal status %s: %w", id, m.Status, ErrConflict)
+	}
 	m.Level = "project"
 	m.SessionID = ""
 	m.Status = "CONFIRMED"
@@ -761,11 +764,13 @@ func (s *PostgresStore) PromotionCandidates(ctx context.Context, projectID strin
 }
 
 // PromoteSessionMemory flips one session memory to project scope.
+// Terminal rows (REJECTED/SUPERSEDED) never promote (issue #131).
 func (s *PostgresStore) PromoteSessionMemory(ctx context.Context, id, confirmedBy string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE memory_items SET level = 'project', session_id = NULL,
 			status = 'CONFIRMED', confirmed_by = $2::uuid, updated_at = now()
-		  WHERE id = $1::uuid AND level = 'session'`,
+		  WHERE id = $1::uuid AND level = 'session'
+		    AND status IN ('PROPOSED','CONFIRMED')`,
 		id, nullText(confirmedBy))
 	if err != nil {
 		return err
