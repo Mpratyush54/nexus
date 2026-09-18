@@ -29,7 +29,7 @@ type MemoryItem struct {
 	Key            string
 	Content        string
 	ContextSnippet string
-	Level          string // organization | project | personal | session
+	Level          string // organization | project | personal | session | ephemeral
 	Scope          string // fact | preference | decision | constraint | pattern | episode_summary
 	Tags           []string
 	Confidence     float32

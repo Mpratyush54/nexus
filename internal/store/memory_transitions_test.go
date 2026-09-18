@@ -388,3 +388,18 @@ func TestTransitionsSetStatus(t *testing.T) {
 		t.Errorf("zero-row transition must wrap ErrNotFound, got %v", err)
 	}
 }
+
+func TestValidateMemoryLevelFiveTiers(t *testing.T) {
+	// Issue #30: the plan promises 5 tiers; migration 009 widens the CHECK.
+	for _, lvl := range []string{"organization", "project", "personal", "session", "ephemeral"} {
+		if err := ValidateMemoryLevel(lvl); err != nil {
+			t.Errorf("ValidateMemoryLevel(%q) = %v, want nil", lvl, err)
+		}
+	}
+	if err := ValidateMemoryLevel("galaxy"); err == nil {
+		t.Error("unknown level must fail")
+	}
+	if LevelEphemeral != "ephemeral" {
+		t.Errorf("LevelEphemeral = %q, want ephemeral", LevelEphemeral)
+	}
+}

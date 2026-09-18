@@ -53,6 +53,8 @@ type WatchedTarget struct {
 }
 
 // DefaultWatchedTargets lists the instruction files from plan §1.3.
+// Kept at 4 for backward compatibility; ExtendedWatchedTargets adds the
+// issue-#118 gaps (AGENTS.md, .cursor/rules).
 func DefaultWatchedTargets() []WatchedTarget {
 	return []WatchedTarget{
 		{RelPath: "CLAUDE.md", FileType: "claude_md"},
@@ -60,6 +62,18 @@ func DefaultWatchedTargets() []WatchedTarget {
 		{RelPath: ".github/copilot-instructions.md", FileType: "copilot_instructions"},
 		{RelPath: ".windsurfrules", FileType: "windsurfrules"},
 	}
+}
+
+// ExtendedWatchedTargets covers the issue-#118 watcher gaps: the base four
+// plus AGENTS.md (agents_md) and .cursor/rules (cursor_rules). Nested
+// CLAUDE.md files (e.g. pkg/foo/CLAUDE.md) are discovered by
+// NestedClaudeFiles and checked alongside the fixed targets.
+func ExtendedWatchedTargets() []WatchedTarget {
+	base := DefaultWatchedTargets()
+	return append(base,
+		WatchedTarget{RelPath: "AGENTS.md", FileType: "agents_md"},
+		WatchedTarget{RelPath: ".cursor/rules", FileType: "cursor_rules"},
+	)
 }
 
 // WatcherPollInterval is the fallback ticker period for Start().
@@ -193,11 +207,9 @@ func (s *FileHashStore) DeleteHash(workspaceID, path string) error {
 }
 
 // saveLocked rewrites the JSON file atomically (caller holds mu): write to
-// a temp file in the same directory, fsync it, then os.Rename over the
-// target. Same-dir placement makes the rename atomic, so a crash mid-write
-// can never leave a truncated state file behind (issue #109). Parent dirs
-// are created so a fresh state path works on first boot. Temp files are
-// removed best-effort on any error before the rename succeeds.
+// a temp file in the same directory, fsync, then rename (issue #109).
+// A crash mid-write never truncates the state file. Parent dirs are
+// created so a fresh state path works on first boot.
 func (s *FileHashStore) saveLocked() error {
 	data, err := json.MarshalIndent(s.hashes, "", "  ")
 	if err != nil {
@@ -205,34 +217,23 @@ func (s *FileHashStore) saveLocked() error {
 	}
 	data = append(data, '\n')
 	dir := filepath.Dir(s.path)
-	if dir != "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+	if dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
+	} else {
+		dir = "."
 	}
 	tmp, err := os.CreateTemp(dir, ".hashes-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
-	renamed := false
-	defer func() {
-		if !renamed {
-			_ = os.Remove(tmpName)
-		}
-	}()
+	defer func() { _ = os.Remove(tmpName) }()
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		return err
 	}
-	// 0600 preserved (CreateTemp already uses 0600; explicit chmod keeps
-	// it exact under unusual umasks).
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	// fsync before rename: the new content is durable before it becomes
-	// visible at the target path.
 	if err := tmp.Sync(); err != nil {
 		_ = tmp.Close()
 		return err
@@ -240,10 +241,17 @@ func (s *FileHashStore) saveLocked() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
 	if err := os.Rename(tmpName, s.path); err != nil {
 		return err
 	}
-	renamed = true
+	_ = os.Chmod(s.path, 0o600)
+	if df, err := os.Open(dir); err == nil {
+		_ = df.Sync()
+		_ = df.Close()
+	}
 	return nil
 }
 

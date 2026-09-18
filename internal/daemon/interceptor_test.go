@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -387,12 +388,8 @@ func TestCheckGitCommitEmitsOnHeadChange(t *testing.T) {
 	if err := os.WriteFile(dir+"/b.txt", []byte("second\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := RunCommand(dir, []string{"git", "add", "."}); err != nil {
-		t.Fatalf("git add: %v", err)
-	}
-	if _, err := RunCommand(dir, []string{"git", "commit", "-m", "second"}); err != nil {
-		t.Fatalf("git commit: %v", err)
-	}
+	gitShell(t, dir, "add", ".")
+	gitShell(t, dir, "commit", "-m", "second")
 	d.checkGitCommit()
 	ev := nextEvent(t, d)
 	if ev.Type != ToolEventGitCommitted {
@@ -452,13 +449,17 @@ func gitAvailable() bool {
 }
 
 // initGitRepo creates a temp git repo with one commit and returns its path.
+// It shells out directly (not via RunCommand) because the daemon allowlist
+// (issue #91) is read-only: init/config/add/commit are correctly rejected
+// by IsAllowed/RunCommand.
 func initGitRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	run := func(args ...string) {
 		t.Helper()
-		if _, err := RunCommand(dir, append([]string{"git"}, args...)); err != nil {
-			t.Fatalf("git %v: %v", args, err)
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
 		}
 	}
 	run("init")
@@ -470,4 +471,75 @@ func initGitRepo(t *testing.T) string {
 	run("add", ".")
 	run("commit", "-m", "first")
 	return dir
+}
+
+// issue99Sink is a recording ToolEventEmitter: every forwarded event lands
+// on ch (buffered; only a handful of events are expected).
+type issue99Sink struct {
+	ch chan ToolEvent
+}
+
+func (s *issue99Sink) Emit(ev ToolEvent) { s.ch <- ev }
+
+// TestIssue99InterceptorHookupRegression (issue #99, STALE finding).
+// The interceptor field, NewDaemon/Start init, and LogFileRead/
+// LogFileModified/LogCommand hooks already exist (issue #32); this test
+// pins the hookup end-to-end so a future removal fails loudly: a Daemon
+// with a recording sink attached via SetEventSink must emit one event per
+// tool call when POST /file/write, /file/read and /command/run are driven
+// over the mux with auth. Interceptor must be non-nil after NewDaemon.
+// Fast and deterministic (plain TempDir, no git repo, no sleeps).
+func TestIssue99InterceptorHookupRegression(t *testing.T) {
+	if !gitAvailable() {
+		t.Skip("git not on PATH")
+	}
+	root := t.TempDir()
+	if err := os.WriteFile(root+"/hook.txt", []byte("seed content here"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := NewDaemon(root, "test-token-99")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	if d.Interceptor == nil {
+		t.Fatal("NewDaemon left Interceptor nil, want non-nil")
+	}
+	sink := &issue99Sink{ch: make(chan ToolEvent, 16)}
+	d.SetEventSink(sink)
+
+	doPost := func(target, body string) {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		r.Header.Set("Authorization", "Bearer test-token-99")
+		w := httptest.NewRecorder()
+		d.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("POST %s: got %d (%s)", target, w.Code, w.Body.String())
+		}
+	}
+	doPost("/file/write", `{"path":"hook.txt","content":"hello hookup content"}`)
+	doPost("/file/read", `{"path":"hook.txt"}`)
+	doPost("/command/run", `{"cmd":"git","args":["version"]}`)
+
+	want := []ToolEventType{ToolEventFileModified, ToolEventFileRead, ToolEventCommandExecuted}
+	for i, wt := range want {
+		select {
+		case ev := <-sink.ch:
+			if ev.Type != wt {
+				t.Fatalf("event %d: type = %s, want %s", i, ev.Type, wt)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("event %d (%s): timed out waiting for sink emission", i, wt)
+		}
+	}
+}
+
+// gitShell runs a (possibly write-side) git command for test setup,
+// bypassing the read-only RunCommand allowlist.
+func gitShell(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v (%s)", args, err, strings.TrimSpace(string(out)))
+	}
 }

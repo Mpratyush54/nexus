@@ -21,8 +21,14 @@ func newTestServer() *Server {
 }
 
 // loginAs creates a stub JWT for tests via the authenticator directly.
+// Production authenticators fail closed without JWT_SECRET (issue #85), so
+// the helper injects a test-only key when the server is unconfigured; the
+// fail-closed path itself is covered in auth_audit_test.go.
 func loginAs(t *testing.T, s *Server, subject string) string {
 	t.Helper()
+	if !s.Auth.IsConfigured() {
+		s.Auth = NewAuthenticator([]byte("test-only-key-0123456789abcdef"))
+	}
 	token, err := s.Auth.Generate(subject, time.Hour)
 	if err != nil {
 		t.Fatalf("Generate token: %v", err)
@@ -64,6 +70,7 @@ func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, dst any) {
 
 func TestLoginIssuesValidToken(t *testing.T) {
 	s := newTestServer()
+	s.Auth = NewAuthenticator([]byte("test-only-key-0123456789abcdef"))
 	rec := doJSON(t, s, http.MethodPost, "/auth/login", "", map[string]string{
 		"username": "alice",
 		"password": "secret",
@@ -175,8 +182,11 @@ func TestResolveRegisterHeartbeatActive(t *testing.T) {
 	}
 }
 
-// TestHeartbeatOffline verifies the 90s rule: a workspace whose last heartbeat
-// is older than OfflineThreshold no longer counts as active.
+// TestHeartbeatOffline verifies the 90s rule and the Wave-1 store fix:
+// RegisterWorkspace now stores a copy (upsert on machine_id+path), so
+// mutating the caller's struct no longer ages the stored row. The 90s rule
+// itself still lives in WorkspaceIsOnline (pure helper) and in the store's
+// GetActiveWorkspace filter.
 func TestHeartbeatOffline(t *testing.T) {
 	s := newTestServer()
 	token := loginAs(t, s, "daemon-test")
@@ -187,7 +197,12 @@ func TestHeartbeatOffline(t *testing.T) {
 	var project store.Project
 	decodeBody(t, rec, &project)
 
-	// RegisterWorkspace stores the *pointer*, so mutating ws ages the stored row.
+	// A project with no workspaces has no active workspace.
+	rec = doJSON(t, s, http.MethodGet, "/workspaces/"+project.ID+"/active", token, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("active status = %d, want 404 for workspace-less project", rec.Code)
+	}
+
 	ws := &store.Workspace{
 		ProjectID: project.ID,
 		UserID:    "u_bob",
@@ -197,18 +212,34 @@ func TestHeartbeatOffline(t *testing.T) {
 	if err := s.Store.RegisterWorkspace(t.Context(), ws); err != nil {
 		t.Fatalf("RegisterWorkspace: %v", err)
 	}
+	if ws.ID == "" {
+		t.Fatal("expected server-assigned workspace ID")
+	}
+
+	// Mutating the caller's struct must NOT age the stored row (the store
+	// keeps a copy now): the pure helper sees the stale copy as offline,
+	// but the persisted workspace is still active.
 	ws.LastSeen = time.Now().UTC().Add(-(OfflineThreshold + time.Minute))
-
 	if WorkspaceIsOnline(ws, time.Now()) {
-		t.Fatal("stale workspace must not be online")
+		t.Fatal("stale copy must not be online")
+	}
+	rec = doJSON(t, s, http.MethodGet, "/workspaces/"+project.ID+"/active", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("active status = %d, want 200 (stored row unaffected by caller mutation)", rec.Code)
 	}
 
-	rec = doJSON(t, s, http.MethodGet, "/workspaces/"+project.ID+"/active", token, nil)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("active status = %d, want 404 for stale workspace", rec.Code)
+	// Upsert: re-registering the same machine/path keeps the workspace ID.
+	dup := &store.Workspace{
+		ProjectID: project.ID,
+		UserID:    "u_bob",
+		MachineID: "m-offline",
+		Path:      "/tmp/offline-proj",
 	}
-	if !strings.Contains(rec.Body.String(), `"error"`) {
-		t.Fatalf("expected error envelope, got %s", rec.Body.String())
+	if err := s.Store.RegisterWorkspace(t.Context(), dup); err != nil {
+		t.Fatalf("RegisterWorkspace upsert: %v", err)
+	}
+	if dup.ID != ws.ID {
+		t.Fatalf("upsert ID = %q, want %q", dup.ID, ws.ID)
 	}
 }
 

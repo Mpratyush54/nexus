@@ -22,23 +22,22 @@ package server
 //   - Episodes: resolve POSTs {"resolution","verification"} (both optional)
 //     to /episodes/{id}/resolve; Store.ResolveEpisode already exists.
 //
-// Known limitations (see docs/decisions/2026-09-17-fix-missing-routes.md):
-//   - RejectMemory does not exist on store.Store, so reject falls back to
-//     mutating the fetched item (persists on MemStore, which returns a live
-//     pointer; a PostgresStore needs a real RejectMemory method).
-//   - Diff/merge have no Store methods (no branch content enumeration), so
-//     they validate + resolve branches and return an explicit stub shape
-//     with a "note" field instead of fabricated data.
-//   - Branch checkout is resolve-only: the server keeps no per-client
-//     "current branch" state; the CLI/daemon tracks it locally.
+// Known behaviors (see docs/decisions/2026-09-17-fix-missing-routes.md):
+//   - RejectMemory exists on store.Store backends (Wave 1), so reject takes
+//     the native persistent path; terminal rows fail with 409.
+//   - Diff/merge enumerate real branch content via branches.ListBranchContents
+//     (SearchMemory universe + ResolveRead views) and apply merge results
+//     through WriteToBranch, with deletions as SUPERSEDED tombstones.
+//   - Branch checkout persists the project-scoped active-branch pointer
+//     (Server.checkouts); unknown branches 404.
 
 import (
 	"context"
 	"errors"
 	"net/http"
 	"strings"
-	"time"
 
+	"central-memory/internal/branches"
 	"central-memory/internal/store"
 )
 
@@ -50,6 +49,7 @@ func (s *Server) registerExtraRoutes() {
 	s.Mux.HandleFunc("GET /sessions", s.requireAuth(s.handleSessionList))
 	s.Mux.HandleFunc("POST /sessions", s.requireAuth(s.handleSessionCreate))
 	s.Mux.HandleFunc("POST /sessions/{id}/join", s.requireAuth(s.handleSessionJoin))
+	s.Mux.HandleFunc("POST /sessions/{id}/leave", s.requireAuth(s.handleSessionLeave))
 
 	// Branches (Phase 5). NOTE: "GET /branches/diff" must be registered as
 	// its own pattern; "GET /branches" matches exactly /branches only.
@@ -218,6 +218,39 @@ func (s *Server) handleSessionJoin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, p)
 }
 
+// handleSessionLeave stamps left_at on the caller's membership row
+// (issue #78: POST /sessions/{id}/leave was 404).
+func (s *Server) handleSessionLeave(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "session id path parameter is required")
+		return
+	}
+	var req sessionJoinRequest
+	if !decodeJSON(w, r, &req) {
+		return
+	}
+	ss, ok := s.sessionStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "sessions are not supported by this store")
+		return
+	}
+	userID := strings.TrimSpace(req.UserID)
+	agentID := strings.TrimSpace(req.AgentID)
+	if userID == "" && agentID == "" {
+		userID = authSubject(r)
+	}
+	if err := ss.LeaveSession(r.Context(), id, userID, agentID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "session or membership not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not leave session: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "left": true})
+}
+
 // --- branches ---
 
 func (s *Server) handleBranchList(w http.ResponseWriter, r *http.Request) {
@@ -272,6 +305,100 @@ func findBranchByName(branches []*store.MemoryBranch, name string) *store.Memory
 	for _, br := range branches {
 		if br.Name == name {
 			return br
+		}
+	}
+	return nil
+}
+
+// branchLoader adapts the store's BranchStore + SearchMemory to the
+// branches.BranchLoader seam (issue #97): the project key universe comes
+// from SearchMemory (capped), each key resolved through ResolveRead so
+// branch overlays shadow ancestors.
+type branchLoader struct {
+	store interface {
+		SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*store.MemoryItem, error)
+	}
+	branches store.BranchStore
+}
+
+func (l branchLoader) Keys(ctx context.Context, projectID string) ([]string, error) {
+	items, err := l.store.SearchMemory(ctx, projectID, "", nil, MaxSearchLimit)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(items))
+	keys := make([]string, 0, len(items))
+	for _, it := range items {
+		if it == nil || it.Key == "" {
+			continue
+		}
+		if _, dup := seen[it.Key]; dup {
+			continue
+		}
+		seen[it.Key] = struct{}{}
+		keys = append(keys, it.Key)
+	}
+	return keys, nil
+}
+
+func (l branchLoader) Read(ctx context.Context, branchID, key string) (branches.Entry, error) {
+	resolved, err := l.branches.ResolveRead(ctx, branchID, key)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return branches.Entry{}, branches.ErrBranchKeyNotFound
+		}
+		return branches.Entry{}, err
+	}
+	// Terminal overlay rows (merge tombstones, rejections) hide the key:
+	// history persists in the overlay, but the snapshot treats the key as
+	// deleted — mirroring SearchMemory's CONFIRMED/PROPOSED-only rule.
+	if resolved.Status == store.StatusSuperseded || resolved.Status == store.StatusRejected {
+		return branches.Entry{}, branches.ErrBranchKeyNotFound
+	}
+	return branches.Entry{Key: resolved.Key, Content: resolved.Content}, nil
+}
+
+// branchSnapshot builds a branches.Entry snapshot for branchID (issue #97)
+// via branches.ListBranchContents: the key universe comes from SearchMemory,
+// each key resolved through ResolveRead so branch overlays shadow ancestors.
+func (s *Server) branchSnapshot(ctx context.Context, projectID, branchID string) ([]branches.Entry, error) {
+	bs, ok := s.branchStore()
+	if !ok {
+		return nil, errors.New("branches are not supported by this store")
+	}
+	return branches.ListBranchContents(ctx, branchLoader{store: s.Store, branches: bs}, projectID, branchID)
+}
+
+// branchBaseSnapshot reads the fork-parent snapshot for 3-way merge.
+func (s *Server) branchBaseSnapshot(ctx context.Context, projectID string, source *store.MemoryBranch) ([]branches.Entry, error) {
+	if source == nil || source.ParentBranchID == "" {
+		return nil, nil
+	}
+	return s.branchSnapshot(ctx, projectID, source.ParentBranchID)
+}
+
+// applyMergeResult writes merged/deleted keys onto the target branch via
+// WriteToBranch (issue #97: ListBranchContents + apply merge result).
+func (s *Server) applyMergeResult(ctx context.Context, targetID string, result branches.MergeResult) error {
+	bs, ok := s.branchStore()
+	if !ok {
+		return errors.New("branches are not supported by this store")
+	}
+	for _, m := range result.Merged {
+		if err := bs.WriteToBranch(ctx, targetID, &store.MemoryItem{
+			Key: m.Key, Content: m.Content, Status: m.Status,
+		}); err != nil {
+			return err
+		}
+	}
+	// Deletions propagate as SUPERSEDED tombstones with empty content so
+	// the key disappears from branch snapshots (terminal overlay rows read
+	// as not-found) without losing history.
+	for _, key := range result.Deleted {
+		if err := bs.WriteToBranch(ctx, targetID, &store.MemoryItem{
+			Key: key, Content: "", Status: store.StatusSuperseded,
+		}); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -353,6 +480,29 @@ func (s *Server) handleBranchCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, child)
 }
 
+// activeBranchFor returns the checked-out branch ID for a project, or "".
+func (s *Server) activeBranchFor(projectID string) string {
+	s.checkoutMu.Lock()
+	defer s.checkoutMu.Unlock()
+	if s.checkouts == nil {
+		s.checkouts = make(map[string]string)
+	}
+	return s.checkouts[projectID]
+}
+
+func (s *Server) setActiveBranch(projectID, branchID string) {
+	s.checkoutMu.Lock()
+	defer s.checkoutMu.Unlock()
+	if s.checkouts == nil {
+		s.checkouts = make(map[string]string)
+	}
+	s.checkouts[projectID] = branchID
+}
+
+// handleBranchCheckout resolves the branch (400/404 on unknown) and
+// persists the active-branch pointer (issue #104). Contract: checkout is
+// project-scoped by default (the active branch for ?project_id=, or for the
+// resolved branch's own project when looked up by ID).
 func (s *Server) handleBranchCheckout(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.PathValue("name"))
 	if name == "" {
@@ -365,9 +515,9 @@ func (s *Server) handleBranchCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Prefer an ID lookup (IDs are unambiguous across projects); fall back
-	// to a name lookup scoped by ?project_id=. The request body ({} from the
-	// CLI) carries no scope and is intentionally ignored.
+	// to a name lookup scoped by ?project_id=.
 	if br, err := bs.GetBranch(r.Context(), name); err == nil {
+		s.setActiveBranch(br.ProjectID, br.ID)
 		writeJSON(w, http.StatusOK, br)
 		return
 	}
@@ -382,6 +532,7 @@ func (s *Server) handleBranchCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if br := findBranchByName(branches, name); br != nil {
+		s.setActiveBranch(projectID, br.ID)
 		writeJSON(w, http.StatusOK, br)
 		return
 	}
@@ -410,19 +561,19 @@ func (s *Server) handleBranchDiff(w http.ResponseWriter, r *http.Request) {
 	if sourceName == "" {
 		sourceName = store.MainBranchName
 	}
-	branches, err := bs.ListBranches(r.Context(), projectID)
+	all, err := bs.ListBranches(r.Context(), projectID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not list branches: "+err.Error())
 		return
 	}
-	source := findBranchByName(branches, sourceName)
+	source := findBranchByName(all, sourceName)
 	if source == nil {
 		// Accept raw branch IDs too (dashboard holds IDs, CLI holds names).
 		if b, gerr := bs.GetBranch(r.Context(), sourceName); gerr == nil && b.ProjectID == projectID {
 			source = b
 		}
 	}
-	target := findBranchByName(branches, targetName)
+	target := findBranchByName(all, targetName)
 	if target == nil {
 		if b, gerr := bs.GetBranch(r.Context(), targetName); gerr == nil && b.ProjectID == projectID {
 			target = b
@@ -436,20 +587,31 @@ func (s *Server) handleBranchDiff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "target branch "+targetName+" not found")
 		return
 	}
-	// No Store method enumerates branch contents, so a real key-level diff
-	// (internal/branches.Diff over snapshots) cannot be computed here.
-	// Return the resolved endpoints with empty change lists and an explicit
-	// note rather than fabricated data.
+	// Enumerate branch contents via SearchMemory + ResolveRead (issue #97):
+	// project memories supply the key universe, ResolveRead resolves each
+	// key's branch view, then branches.DiffBranches computes the key-level
+	// diff over real store data.
+	srcSnap, err := s.branchSnapshot(r.Context(), projectID, source.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read source branch: "+err.Error())
+		return
+	}
+	tgtSnap, err := s.branchSnapshot(r.Context(), projectID, target.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read target branch: "+err.Error())
+		return
+	}
+	diff := branches.DiffBranches(srcSnap, tgtSnap)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project_id": projectID,
 		"source":     source.Name,
 		"source_id":  source.ID,
 		"target":     target.Name,
 		"target_id":  target.ID,
-		"added":      []any{},
-		"removed":    []any{},
-		"modified":   []any{},
-		"note":       "key-level diff needs branch content enumeration, which the Store interface does not expose; wire internal/branches.Diff once a list-contents method exists",
+		"added":      diff.Added,
+		"removed":    diff.Removed,
+		"modified":   diff.Modified,
+		"unchanged":  diff.Unchanged,
 	})
 }
 
@@ -481,11 +643,11 @@ func (s *Server) handleBranchMerge(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(req.ProjectID)
 	resolve := func(ref string) (*store.MemoryBranch, error) {
 		if projectID != "" {
-			branches, err := bs.ListBranches(r.Context(), projectID)
+			all, err := bs.ListBranches(r.Context(), projectID)
 			if err != nil {
 				return nil, err
 			}
-			if br := findBranchByName(branches, ref); br != nil {
+			if br := findBranchByName(all, ref); br != nil {
 				return br, nil
 			}
 		}
@@ -512,19 +674,40 @@ func (s *Server) handleBranchMerge(w http.ResponseWriter, r *http.Request) {
 	if projectID == "" {
 		projectID = source.ProjectID
 	}
-	// No Store merge method exists and branch contents are not enumerable,
-	// so no rows are copied: report the resolved endpoints with zero
-	// conflicts and an explicit note. A real merge must apply
-	// internal/branches.MergeResult at the store layer (see decision doc).
+	// 3-way merge over real snapshots (issue #97): base is the source's
+	// parent snapshot (fork point approximation), falling back to the
+	// target snapshot when the parent cannot be read. The result is applied
+	// to the target via WriteToBranch so rows are actually copied.
+	baseSnap, err := s.branchBaseSnapshot(r.Context(), projectID, source)
+	if err != nil {
+		baseSnap = nil
+	}
+	srcSnap, err := s.branchSnapshot(r.Context(), projectID, source.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read source branch: "+err.Error())
+		return
+	}
+	tgtSnap, err := s.branchSnapshot(r.Context(), projectID, target.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not read target branch: "+err.Error())
+		return
+	}
+	result := branches.Merge(baseSnap, srcSnap, tgtSnap)
+	if err := s.applyMergeResult(r.Context(), target.ID, result); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not apply merge: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"source":     source.Name,
-		"source_id":  source.ID,
-		"target":     target.Name,
-		"target_id":  target.ID,
-		"project_id": projectID,
-		"merged":     true,
-		"conflicts":  []any{},
-		"note":       "no rows copied: the Store interface exposes no merge/apply method; implement merge by applying internal/branches.MergeResult in the store layer",
+		"source":       source.Name,
+		"source_id":    source.ID,
+		"target":       target.Name,
+		"target_id":    target.ID,
+		"project_id":   projectID,
+		"merged":       len(result.Conflicts) == 0,
+		"conflicts":    result.Conflicts,
+		"merged_items": result.Merged,
+		"superseded":   result.Superseded,
+		"deleted":      result.Deleted,
 	})
 }
 
@@ -565,10 +748,8 @@ func (s *Server) handleMemoryConfirm(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, item)
 }
 
-// rejectMemoryStore is implemented by stores that natively support
-// rejection. Neither MemStore nor PostgresStore does yet; the handler
-// probes for it so a future Store implementation is picked up without a
-// handler change.
+// rejectMemoryStore is implemented by stores with native rejection
+// (MemStore + PostgresStore both implement RejectMemory since Wave 1).
 type rejectMemoryStore interface {
 	RejectMemory(ctx context.Context, id, rejectedBy string) error
 }
@@ -593,6 +774,10 @@ func (s *Server) handleMemoryReject(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "memory not found")
 				return
 			}
+			if errors.Is(err, store.ErrConflict) {
+				writeError(w, http.StatusConflict, err.Error())
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "could not reject memory: "+err.Error())
 			return
 		}
@@ -604,25 +789,7 @@ func (s *Server) handleMemoryReject(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, item)
 		return
 	}
-	// Fallback: MemStore.GetMemoryItem returns the live map pointer, so a
-	// status flip persists without a new Store method. (PostgresStore
-	// returns a scanned copy, so this fallback does NOT persist there —
-	// that backend needs a real RejectMemory; see the decision doc.)
-	// MemoryItem has no RejectedBy column; only the status transition is
-	// recorded. _ = rejectedBy keeps the attribution hook visible.
-	_ = rejectedBy
-	item, err := s.Store.GetMemoryItem(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "memory not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, "could not load memory: "+err.Error())
-		return
-	}
-	item.Status = "REJECTED"
-	item.UpdatedAt = time.Now().UTC()
-	writeJSON(w, http.StatusOK, item)
+	writeError(w, http.StatusNotImplemented, "rejection not supported by configured store")
 }
 
 // --- episodes ---

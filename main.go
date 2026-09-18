@@ -41,42 +41,28 @@ func main() {
 func usage() {
 	fmt.Println(`mem — central memory (multiplayer rewrite)
 
-  mem projects                     list detected projects
-  mem status                       show system status
+  mem projects                     list detected projects (shared with cmd/mem; see also: nexus memory search)
+  mem status                       show system status (local summary; server health: nexus status)
   mem daemon install               register auto-start-on-login service
   mem daemon uninstall             remove auto-start-on-login service
   mem daemon status                report daemon service state
 
 Planned:
   mem memory search|write          query/write project memory
-  mem sessions                     list active sessions`)
+  mem sessions                     list active sessions
+
+See also: cmd/mem (mem mcp) and cmd/nexus (nexus status|memory|migrate) — projects/status share internal/project helpers.`)
 }
 
-// cmdProjects — reuses internal/project identity resolution.
+// cmdProjects — unified with cmd/mem via internal/project helpers (Issue #84).
 func cmdProjects(args []string) error {
-	for _, leaf := range project.Leaves() {
-		origin, root := project.Fingerprint(leaf)
-		id := leaf
-		if origin != "" {
-			id += "  [" + origin + "]"
-		} else if root != "" && len(root) >= 12 {
-			id += "  [root " + root[:12] + "]"
-		}
-		fmt.Println(id)
-	}
 	_ = args
-	return nil
+	return project.PrintProjects(os.Stdout)
 }
 
-// cmdStatus — minimal health check for the new architecture.
+// cmdStatus — unified with cmd/mem via internal/project helpers (Issue #84).
 func cmdStatus() error {
-	fmt.Println("mem status — multiplayer central memory")
-	fmt.Println()
-	leaves := project.CachedLeaves()
-	fmt.Printf("projects detected: %d\n", len(leaves))
-	fmt.Println("daemon: not yet implemented")
-	fmt.Println("server: not yet implemented")
-	return nil
+	return project.PrintStatus(os.Stdout)
 }
 
 // cmdDaemon — dispatches `daemon install|uninstall|status` to the

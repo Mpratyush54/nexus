@@ -46,6 +46,12 @@ func scanWorkspace(row pgx.Row) (*Workspace, error) {
 
 // RegisterWorkspace upserts on (machine_id, path): daemons re-register on
 // every startup, so a plain INSERT would collide with the UNIQUE constraint.
+//
+// Identity protection (issue #87): the conflict branch refreshes ONLY
+// mutable liveness/git fields. project_id, user_id, and
+// is_designated_processor are insert-only — a caller that knows a
+// machine/path cannot rebind an existing workspace to another
+// project/user, nor seize the designated-processor role.
 func (s *PostgresStore) RegisterWorkspace(ctx context.Context, ws *Workspace) error {
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO workspaces
@@ -54,13 +60,10 @@ func (s *PostgresStore) RegisterWorkspace(ctx context.Context, ws *Workspace) er
 		 VALUES ($1::uuid, $2::uuid, $3, $4, NULLIF($5,''), NULLIF($6,''),
 		         $7, true, $8, now(), NULLIF($9,''))
 		 ON CONFLICT (machine_id, path) DO UPDATE SET
-			project_id = EXCLUDED.project_id,
-			user_id = EXCLUDED.user_id,
 			branch = EXCLUDED.branch,
 			commit_sha = EXCLUDED.commit_sha,
 			is_dirty = EXCLUDED.is_dirty,
 			is_online = true,
-			is_designated_processor = EXCLUDED.is_designated_processor,
 			last_seen = now(),
 			daemon_url = EXCLUDED.daemon_url
 		 RETURNING id, last_seen, created_at`,
