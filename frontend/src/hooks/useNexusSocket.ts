@@ -62,6 +62,14 @@ export function useNexusSocket() {
           }
           if (msg.type === 'presence') {
             void qc.invalidateQueries({ queryKey: ['workspace'] })
+            void qc.invalidateQueries({ queryKey: ['daemon'] })
+          }
+          if (
+            msg.type === 'event' &&
+            (msg.event_type === 'WORKSPACE_LOCAL' || msg.event_type === 'workspace_local')
+          ) {
+            void qc.invalidateQueries({ queryKey: ['daemon'] })
+            void qc.invalidateQueries({ queryKey: ['workspace'] })
           }
         } catch {
           // ignore malformed frames

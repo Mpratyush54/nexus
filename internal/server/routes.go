@@ -25,6 +25,7 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /workspaces/register", s.requireAuth(s.handleWorkspaceRegister))
 	s.Mux.HandleFunc("POST /workspaces/heartbeat", s.requireAuth(s.handleWorkspaceHeartbeat))
 	s.Mux.HandleFunc("GET /workspaces/{projectId}/active", s.requireAuth(s.handleWorkspaceActive))
+	s.registerLocalBridgeRoutes()
 
 	s.Mux.HandleFunc("POST /memory", s.requireAuth(s.handleMemoryCreate))
 	s.Mux.HandleFunc("GET /memory/search", s.requireAuth(s.handleMemorySearch))
@@ -298,6 +299,12 @@ type heartbeatRequest struct {
 	Branch      string `json:"branch"`
 	CommitSHA   string `json:"commit_sha"`
 	IsDirty     bool   `json:"is_dirty"`
+	// ProxyURL is an optional same-machine browser CORS bridge (may be
+	// loopback). Relayed to the PWA via GET /workspaces/{id}/local so the
+	// UI never hardcodes :7272.
+	ProxyURL string `json:"proxy_url,omitempty"`
+	// GitLog is a truncated recent `git log` for the local panel.
+	GitLog string `json:"git_log,omitempty"`
 }
 
 func (s *Server) handleWorkspaceHeartbeat(w http.ResponseWriter, r *http.Request) {
@@ -331,6 +338,14 @@ func (s *Server) handleWorkspaceHeartbeat(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "could not record heartbeat: "+err.Error())
 		return
 	}
+	// Refresh in-memory view for the PWA local panel (daemon→server channel).
+	ws.Branch = req.Branch
+	ws.CommitSHA = req.CommitSHA
+	ws.IsDirty = req.IsDirty
+	ws.LastSeen = time.Now().UTC()
+	ws.IsOnline = true
+	snap := rememberLocalBridge(ws, req.ProxyURL, req.GitLog)
+	s.publishWorkspaceLocal(ws.ProjectID, snap)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "workspace_id": req.WorkspaceID})
 }
 

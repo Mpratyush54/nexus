@@ -326,6 +326,8 @@ func newStrictServer(t *testing.T, cap *strictCapture) *httptest.Server {
 				Branch      string `json:"branch"`
 				CommitSHA   string `json:"commit_sha"`
 				IsDirty     bool   `json:"is_dirty"`
+				ProxyURL    string `json:"proxy_url"`
+				GitLog      string `json:"git_log"`
 			}
 			if !decodeStrict(t, r, &req) {
 				w.WriteHeader(http.StatusBadRequest)
