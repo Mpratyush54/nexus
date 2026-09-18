@@ -26,5 +26,5 @@ SELECT id, created_by, 'OWNER' FROM projects WHERE created_by IS NOT NULL
 ON CONFLICT DO NOTHING;
 
 INSERT INTO project_members (project_id, user_id, role)
-SELECT DISTINCT project_id, user_id FROM workspaces WHERE user_id IS NOT NULL
+SELECT DISTINCT project_id, user_id, 'MEMBER' FROM workspaces WHERE user_id IS NOT NULL
 ON CONFLICT DO NOTHING;
