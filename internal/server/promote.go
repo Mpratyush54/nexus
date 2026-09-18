@@ -25,7 +25,7 @@ func (s *Server) handleMemoryPromote(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
 		return
 	}
-	if !s.authorizeMemory(w, r, id) {
+	if !s.authorizeMemoryPermission(w, r, id, store.PermMemoryPromote) {
 		return
 	}
 	ss, ok := s.sessionStore()

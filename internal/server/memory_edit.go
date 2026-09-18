@@ -56,7 +56,7 @@ func (s *Server) handleMemoryUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
 		return
 	}
-	if !s.authorizeMemory(w, r, id) {
+	if !s.authorizeMemoryPermission(w, r, id, store.PermMemoryEdit) {
 		return
 	}
 	es, ok := s.memoryEditStore()
@@ -95,7 +95,7 @@ func (s *Server) handleMemoryDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
 		return
 	}
-	if !s.authorizeMemory(w, r, id) {
+	if !s.authorizeMemoryPermission(w, r, id, store.PermMemoryDelete) {
 		return
 	}
 	es, ok := s.memoryEditStore()
@@ -143,7 +143,7 @@ func (s *Server) handleMemoryRevert(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
 		return
 	}
-	if !s.authorizeMemory(w, r, id) {
+	if !s.authorizeMemoryPermission(w, r, id, store.PermMemoryEdit) {
 		return
 	}
 	es, ok := s.memoryEditStore()
