@@ -117,3 +117,9 @@ Why:
 - No automated tests: static assets with no runner; covered by the manual pass
   above. A headless WS round-trip test belongs with the `ws.go` server change,
   not here.
+
+## Status update (2026-09-18, issue #151)
+
+- `internal/server/ws.go` NOW EXISTS (full WebSocket hub + routes); the
+  "does not exist yet" note in Context above is historical. The client
+  shapes it was written against match the landed protocol.

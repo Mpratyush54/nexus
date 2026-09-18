@@ -45,16 +45,16 @@ func PrintProjects(w io.Writer) error {
 }
 
 // StatusSummary returns the shared local health lines used by both `mem`
-// entrypoints: projects detected plus daemon/server placeholders. The nexus
-// CLI reports server health instead; see cmd/nexus `status`.
+// entrypoints: projects detected plus daemon/server pointers. The nexus
+// CLI reports live server health instead; see cmd/nexus `status`.
 func StatusSummary() []string {
 	leaves := CachedLeaves()
 	return []string{
 		"mem status — multiplayer central memory",
 		"",
 		fmt.Sprintf("projects detected: %d", len(leaves)),
-		"daemon: not yet implemented",
-		"server: not yet implemented",
+		"daemon: see cmd/daemon (workspace daemon binary)",
+		"server: see cmd/server + cmd/nexus status (central API)",
 	}
 }
 

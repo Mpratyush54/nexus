@@ -66,6 +66,48 @@ func (s *PostgresStore) Close() {
 	s.pool.Close()
 }
 
+// DB exposes the pool as a DBTX for seam stores (UserStore, MemoryStore)
+// that compose over any connection source (issue #37: server wiring).
+func (s *PostgresStore) DB() DBTX {
+	return poolDBTX{pool: s.pool}
+}
+
+// pgxRowsAdapter bridges pgx.Rows to the narrow Rows interface: a struct
+// value cannot satisfy an interface its pointer methods... here all methods
+// are value-receiver compatible, so a thin wrapper suffices.
+type pgxRowsAdapter struct {
+	rows pgx.Rows
+}
+
+func (r pgxRowsAdapter) Next() bool             { return r.rows.Next() }
+func (r pgxRowsAdapter) Scan(dest ...any) error { return r.rows.Scan(dest...) }
+func (r pgxRowsAdapter) Err() error             { return r.rows.Err() }
+func (r pgxRowsAdapter) Close()                 { r.rows.Close() }
+
+// poolDBTX adapts *pgxpool.Pool to DBTX (issue #37): the pool's Query
+// returns concrete pgx.Rows, which cannot satisfy the Rows interface, so
+// writes go straight through while reads wrap. Transactions (*pgx.Tx)
+// satisfy DBTX natively and bypass this adapter.
+type poolDBTX struct {
+	pool *pgxpool.Pool
+}
+
+func (p poolDBTX) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
+	return p.pool.Exec(ctx, sql, arguments...)
+}
+
+func (p poolDBTX) Query(ctx context.Context, sql string, args ...any) (Rows, error) {
+	rows, err := p.pool.Query(ctx, sql, args...)
+	if err != nil {
+		return nil, err
+	}
+	return pgxRowsAdapter{rows: rows}, nil
+}
+
+func (p poolDBTX) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	return p.pool.QueryRow(ctx, sql, args...)
+}
+
 // Ping verifies the database is reachable.
 func (s *PostgresStore) Ping(ctx context.Context) error {
 	return s.pool.Ping(ctx)

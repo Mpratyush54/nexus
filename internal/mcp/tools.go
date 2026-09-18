@@ -650,7 +650,15 @@ func (s *Server) handleEpisodeSearch(ctx context.Context, raw json.RawMessage) (
 	if limit > 50 {
 		limit = 50
 	}
-	eps, err := s.store.SearchEpisodes(ctx, projectID, a.ErrorPattern, a.Query, limit)
+	// Over-fetch before in-memory filtering (issue #156): file/status
+	// filters apply in Go after the SQL limit, so querying exactly `limit`
+	// rows can discard every row and report count 0 while matches exist
+	// past the cap. Fetch up to 10x (bounded), filter, then truncate.
+	fetchLimit := limit * 10
+	if fetchLimit > 500 {
+		fetchLimit = 500
+	}
+	eps, err := s.store.SearchEpisodes(ctx, projectID, a.ErrorPattern, a.Query, fetchLimit)
 	if err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "episode search failed: " + err.Error()}
 	}
@@ -668,6 +676,9 @@ func (s *Server) handleEpisodeSearch(ctx context.Context, raw json.RawMessage) (
 			"resolution": ep.Resolution, "verification": ep.Verification,
 			"files_involved": ep.FilesInvolved, "error_patterns": ep.ErrorPatterns,
 		})
+		if len(out) >= limit {
+			break
+		}
 	}
 	return map[string]any{"episodes": out, "count": len(out)}, nil
 }

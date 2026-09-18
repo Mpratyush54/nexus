@@ -74,28 +74,50 @@ esac
 
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-/migrations}"
 
-# Apply *.up.sql files in lexical order with psql, one transaction per
-# file (--single-transaction, issue #136: a bare -f commit is autocommit
-# per statement, so a mid-file failure used to leave a half-applied
-# migration). NOTE: this runner has no version table — the Go runner
-# (internal/store RunMigrations + schema_migrations + advisory lock) is
-# authoritative; this script is the container-boot convenience path. Do not
-# run both concurrently against one database.
+# Apply *.up.sql files in lexical order, versioned + locked (issue #150):
+# the same ledger the Go runner (internal/store RunMigrations +
+# schema_migrations + advisory lock) uses. Schema and version rule mirror
+# db.go schemaMigrationsDDL/migrationVersion exactly (version = filename
+# minus ".up.sql"):
+#   1. Ensure the ledger table.
+#   2. Read applied versions.
+#   3. Apply ONLY pending files, one transaction each, inside a single psql
+#      session holding pg_advisory_lock for the whole run — concurrent
+#      boots serialize instead of racing replays.
+# A repeat boot with everything applied is lock + no-op (no replays).
 # 001 enables pgcrypto + pgvector, so the Aurora master must pre-provision
 # extension privilege (CREATE EXTENSION needs rds_superuser or equivalent —
 # see deploy/rds-notes.md) before first boot.
 if command -v psql >/dev/null 2>&1; then
   if [ -d "$MIGRATIONS_DIR" ]; then
-    matched=0
-    for f in "$MIGRATIONS_DIR"/*.up.sql; do
-      [ -e "$f" ] || break
-      matched=1
-      echo "migrate.sh: applying $f"
-      psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f "$f"
-    done
-    if [ "$matched" = "0" ]; then
-      echo "migrate.sh: WARNING: no *.up.sql in $MIGRATIONS_DIR; skipping." >&2
-    fi
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -c "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+    applied=$(psql "$DATABASE_URL" -tAX -c "SELECT version FROM schema_migrations" 2>/dev/null || true)
+    script=$(mktemp)
+    {
+      echo "SELECT pg_advisory_lock(hashtext('central-memory-migrations'));"
+      for f in "$MIGRATIONS_DIR"/*.up.sql; do
+        [ -e "$f" ] || break
+        base=$(basename "$f")
+        ver=${base%.up.sql}
+        case "
+$applied
+" in
+          *"
+$ver
+"*) echo "-- skip $base (already applied)";;
+          *)
+             echo "\\echo 'migrate.sh: applying $f'"
+             echo "BEGIN;"
+             echo "\\ir $f"
+             echo "INSERT INTO schema_migrations (version) VALUES ('$ver') ON CONFLICT DO NOTHING;"
+             echo "COMMIT;"
+             ;;
+        esac
+      done
+      echo "SELECT pg_advisory_unlock(hashtext('central-memory-migrations'));"
+    } > "$script"
+    psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "$script"
+    rm -f "$script"
   else
     echo "migrate.sh: WARNING: migrations dir $MIGRATIONS_DIR missing; skipping." >&2
   fi

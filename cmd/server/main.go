@@ -20,11 +20,11 @@
 // applies migrations/*.up.sql before exec'ing this binary. /healthz is
 // liveness (no auth, no DB); /readyz is readiness (config + sslmode gate).
 //
-// Data-route persistence: server.New requires a server.Store and the
-// Postgres-backed adapter is a follow-up owned by the store/server issues,
-// so this entrypoint ships a stubStore that fails closed (HTTP 500) on data
-// routes. /auth/login fails closed too (no users table yet); /healthz and
-// /readyz are live. Nothing silently pretends to persist.
+// Data-route persistence: with DATABASE_URL set, run() wires PostgresStore
+// (versioned migrations via the Go runner when MIGRATIONS_DIR exists,
+// password login via users). Without a DSN the stubStore stays and data
+// routes fail closed. /auth/login fails closed too when no Users source is
+// wired; /healthz and /readyz are live. Nothing silently pretends to persist.
 package main
 
 import (
@@ -314,6 +314,12 @@ func run() error {
 	defer stop()
 
 	cfg := resolveConfig()
+	if cfg.jwtSource == "dev-default" && !cfg.localDev && os.Getenv("ALLOW_DEV_JWT") != "1" {
+		// Fail closed (issue #85): a predictable default signing key
+		// permits token forgery if a deployment omits the secret. Local
+		// dev opts in via CENTRAL_MEMORY_LOCAL_DEV=1 (or ALLOW_DEV_JWT=1).
+		return fmt.Errorf("server: JWT_SECRET unset and not a local-dev boot — set JWT_SECRET or CENTRAL_MEMORY_LOCAL_DEV=1")
+	}
 	if cfg.jwtSource == "dev-default" {
 		log.Print("server: JWT_SECRET unset — using insecure dev default (local use only)")
 	} else {
@@ -326,6 +332,30 @@ func run() error {
 	}
 
 	srv := newServer(cfg.jwtSecret)
+	// Postgres wiring (issues #37, #150): with a DSN configured, boot the
+	// real store, apply pending migrations through the versioned Go runner
+	// (same ledger migrate.sh now shares), and enable password login via
+	// the users table. Without a DSN the stub stays (fail-closed data
+	// routes). Migration dir missing (local `go run`) skips RunMigrations
+	// — migrate.sh covers container boots.
+	if cfg.databaseURL != "" {
+		pg, err := store.NewPostgresStore(ctx, cfg.databaseURL)
+		if err != nil {
+			return fmt.Errorf("server: postgres: %w", err)
+		}
+		defer pg.Close()
+		if fi, serr := os.Stat(cfg.migrationsDir); serr == nil && fi.IsDir() {
+			if err := pg.RunMigrations(ctx, cfg.migrationsDir); err != nil {
+				return fmt.Errorf("server: migrations: %w", err)
+			}
+			log.Print("server: migrations current")
+		} else {
+			log.Print("server: migrations dir missing, skipping Go-runner migrations (migrate.sh path)")
+		}
+		srv.Store = pg
+		srv.Users = server.NewUserLookup(store.NewUserStore(pg.DB()))
+		log.Print("server: postgres store + user login wired")
+	}
 	// Lifecycle tick (issue #119 box 4): no-op-idle on stubStore (it
 	// supports no sweep seams); starts sweeping once the Postgres adapter
 	// lands. Stopped via the run context.

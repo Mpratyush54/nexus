@@ -112,3 +112,7 @@ Constraints colliding here:
 - Trigger-created main (option 3): hidden writes + Aurora privilege surface +
   untestable without live DB, for no extra guarantee over the idempotent
   upsert.
+
+## Status update (2026-09-18, issue #151)
+
+- Staleness flags (`potentially_stale`) and 30-day auto-archive ARE implemented (`internal/store/branches_upkeep.go`: `MarkStale`, `ArchiveBranch`); the NOT-implemented note in Consequences above is historical.

@@ -94,3 +94,7 @@ plus docs. Constraints from the issue and the plan:
 - Framework SPA (option 3): build step + deps for zero exit-criterion gain.
 - Faking lifecycle success client-side: rejected — buttons report the real
   server answer so the missing endpoints stay visible as follow-ups.
+
+## Status update (2026-09-18, issue #151)
+
+- `internal/server/ws.go` NOW EXISTS and registers `/ws`; the proposal (no ws.go exists yet) note in Decision above is historical. Lifecycle endpoints (confirm/reject/promote) also exist now (routes_extra.go + promote.go).
