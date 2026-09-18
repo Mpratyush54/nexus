@@ -19,6 +19,11 @@ const (
 	tokenFileName = "daemon.token"
 )
 
+// tokenFileEnv overrides the token file location (issue #45): the default
+// lives under the workspace root, which read-only mounts (compose :ro)
+// cannot write. Point it at a writable path instead.
+const tokenFileEnv = "DAEMON_TOKEN_FILE"
+
 // GenerateToken returns a random 32-byte token hex-encoded (64 chars).
 func GenerateToken() (string, error) {
 	var b [32]byte
@@ -33,22 +38,39 @@ func TokenPath(root string) string {
 	return filepath.Join(root, tokenDirName, tokenFileName)
 }
 
-// SaveToken writes token to the token file, creating the parent dir with
+// ResolveTokenFile returns the token file path for root: $DAEMON_TOKEN_FILE
+// when set (writable location outside a read-only workspace mount), else the
+// default TokenPath(root).
+func ResolveTokenFile(root string) string {
+	if p := strings.TrimSpace(os.Getenv(tokenFileEnv)); p != "" {
+		return p
+	}
+	return TokenPath(root)
+}
+
+// SaveTokenTo writes token to the file at path, creating the parent dir with
 // 0700 and the file with 0600.
-func SaveToken(root, token string) error {
+func SaveTokenTo(path, token string) error {
 	if strings.TrimSpace(token) == "" {
 		return errors.New("daemon: empty token")
 	}
-	dir := filepath.Join(root, tokenDirName)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return err
+		}
 	}
-	return os.WriteFile(TokenPath(root), []byte(token), 0o600)
+	return os.WriteFile(path, []byte(token), 0o600)
 }
 
-// LoadToken reads the token file. It errors when missing or blank.
-func LoadToken(root string) (string, error) {
-	raw, err := os.ReadFile(TokenPath(root))
+// SaveToken writes token to the token file, creating the parent dir with
+// 0700 and the file with 0600.
+func SaveToken(root, token string) error {
+	return SaveTokenTo(TokenPath(root), token)
+}
+
+// LoadTokenFrom reads the token file at path. It errors when missing or blank.
+func LoadTokenFrom(path string) (string, error) {
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
@@ -59,20 +81,31 @@ func LoadToken(root string) (string, error) {
 	return tok, nil
 }
 
-// EnsureToken loads the existing token or generates, persists, and returns
-// a new one. The file is created with mode 0600.
-func EnsureToken(root string) (string, error) {
-	if tok, err := LoadToken(root); err == nil {
+// LoadToken reads the token file. It errors when missing or blank.
+func LoadToken(root string) (string, error) {
+	return LoadTokenFrom(TokenPath(root))
+}
+
+// EnsureTokenAt loads the existing token at path or generates, persists,
+// and returns a new one. The file is created with mode 0600.
+func EnsureTokenAt(path string) (string, error) {
+	if tok, err := LoadTokenFrom(path); err == nil {
 		return tok, nil
 	}
 	tok, err := GenerateToken()
 	if err != nil {
 		return "", err
 	}
-	if err := SaveToken(root, tok); err != nil {
+	if err := SaveTokenTo(path, tok); err != nil {
 		return "", err
 	}
 	return tok, nil
+}
+
+// EnsureToken loads the existing token or generates, persists, and returns
+// a new one. The file is created with mode 0600.
+func EnsureToken(root string) (string, error) {
+	return EnsureTokenAt(TokenPath(root))
 }
 
 // bearerToken extracts the token from "Authorization: Bearer <token>".

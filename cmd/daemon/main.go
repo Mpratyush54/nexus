@@ -89,7 +89,7 @@ func run(args []string) error {
 	}
 	addr := net.JoinHostPort(strings.TrimSpace(*bind), strconv.Itoa(*port))
 
-	token, err := daemon.EnsureToken(*root)
+	token, err := daemon.EnsureTokenAt(daemon.ResolveTokenFile(*root))
 	if err != nil {
 		return err
 	}

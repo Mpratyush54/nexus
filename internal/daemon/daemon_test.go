@@ -183,6 +183,33 @@ func TestTokenRoundTrip0600(t *testing.T) {
 	}
 }
 
+func TestTokenFileEnvOverride(t *testing.T) {
+	// Issue #45: read-only workspace mounts cannot persist the default
+	// token path, so $DAEMON_TOKEN_FILE relocates it.
+	root := t.TempDir()
+	custom := filepath.Join(t.TempDir(), "nested", "daemon.token")
+	t.Setenv("DAEMON_TOKEN_FILE", custom)
+	if got := ResolveTokenFile(root); got != custom {
+		t.Fatalf("ResolveTokenFile = %q, want env %q", got, custom)
+	}
+	tok, err := EnsureTokenAt(ResolveTokenFile(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	back, err := LoadTokenFrom(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back != tok {
+		t.Fatal("token mismatch after reload from override path")
+	}
+	// Default resolution is unaffected when the env is unset.
+	t.Setenv("DAEMON_TOKEN_FILE", "")
+	if got := ResolveTokenFile(root); got != TokenPath(root) {
+		t.Fatalf("ResolveTokenFile = %q, want default %q", got, TokenPath(root))
+	}
+}
+
 func TestNewDaemonValidation(t *testing.T) {
 	if _, err := NewDaemon("", "t"); err == nil {
 		t.Error("empty root accepted")

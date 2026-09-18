@@ -74,12 +74,19 @@ services:
     environment:
       CENTRAL_SERVER_URL: http://server:8080
       CENTRAL_USER_ID: compose-dev-user
+      # Token file lives OUTSIDE the read-only workspace mount (issue #45):
+      # the daemon mints/loads .central-memory/daemon.token under the
+      # workspace root, which :ro below cannot write. /tmp is writable and
+      # ephemeral per container boot (fresh token each `up`; acceptable for
+      # the demo shape — production mounts a persistent state volume here).
+      DAEMON_TOKEN_FILE: /tmp/daemon.token
     ports:
       - "7687:7687"
     volumes:
-      # Read-write on purpose: first boot mints .central-memory/daemon.token
-      # (#45). Demo mount: point at any checkout to exercise file/git ops.
-      - ../:/workspace:rw
+      # Read-only: the token lives at DAEMON_TOKEN_FILE (/tmp), so the
+      # workspace mount needs no write access (#45). Demo mount: point at
+      # any checkout to exercise file/git ops.
+      - ../:/workspace:ro
     depends_on:
       server:
         condition: service_healthy
