@@ -90,17 +90,19 @@ type Store interface {
 
 // MemStore is a thread-safe in-memory Store implementation, ideal for unit testing and local development.
 type MemStore struct {
-	mu         sync.RWMutex
-	projects   map[string]*Project
-	workspaces map[string]*Workspace
-	members    map[string]map[string]bool // projectID -> granted userIDs (issue #149)
-	memories   map[string]*MemoryItem
-	versions   map[string][]*MemoryVersion // memoryID -> ordered version snapshots (issue #162)
-	episodes   map[string]*Episode
-	events     []*Event
-	eventSeq   int64
-	subs       map[int64]*memSubscription
-	subSeq     int64
+	mu          sync.RWMutex
+	projects    map[string]*Project
+	workspaces  map[string]*Workspace
+	members     map[string]map[string]bool   // projectID -> granted userIDs (issue #149)
+	memberRoles map[string]map[string]string // projectID -> userID -> role (issue #164)
+	memories    map[string]*MemoryItem
+	versions    map[string][]*MemoryVersion // memoryID -> ordered version snapshots (issue #162)
+	shares      map[string]*memShare        // shareID -> grant (issue #164)
+	episodes    map[string]*Episode
+	events      []*Event
+	eventSeq    int64
+	subs        map[int64]*memSubscription
+	subSeq      int64
 }
 
 // memSubscription is one in-process event subscriber.
@@ -115,14 +117,16 @@ var _ Store = (*MemStore)(nil)
 // NewMemStore returns an initialized in-memory store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		projects:   make(map[string]*Project),
-		workspaces: make(map[string]*Workspace),
-		members:    make(map[string]map[string]bool),
-		memories:   make(map[string]*MemoryItem),
-		versions:   make(map[string][]*MemoryVersion),
-		episodes:   make(map[string]*Episode),
-		events:     make([]*Event, 0),
-		subs:       make(map[int64]*memSubscription),
+		projects:    make(map[string]*Project),
+		workspaces:  make(map[string]*Workspace),
+		members:     make(map[string]map[string]bool),
+		memberRoles: make(map[string]map[string]string),
+		memories:    make(map[string]*MemoryItem),
+		versions:    make(map[string][]*MemoryVersion),
+		shares:      make(map[string]*memShare),
+		episodes:    make(map[string]*Episode),
+		events:      make([]*Event, 0),
+		subs:        make(map[int64]*memSubscription),
 	}
 }
 
@@ -356,6 +360,11 @@ func (s *MemStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) error
 	if stored.Tags == nil {
 		stored.Tags = []string{}
 	}
+	if stored.Visibility == "" {
+		stored.Visibility = VisibilityProject
+	} else {
+		stored.Visibility = NormalizeVisibility(stored.Visibility)
+	}
 	now := time.Now().UTC()
 	stored.CreatedAt = now
 	stored.UpdatedAt = now
@@ -365,11 +374,27 @@ func (s *MemStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) error
 }
 
 func (s *MemStore) GetMemoryItem(ctx context.Context, id string) (*MemoryItem, error) {
+	viewerID := ViewerFrom(ctx)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	item, ok := s.memories[id]
 	if !ok {
 		return nil, ErrNotFound
+	}
+	// Raw fetch when no viewer (internal callers). WithViewer enforces
+	// visibility and returns ErrNotFound on deny (no existence leak).
+	if viewerID != "" {
+		isMember := false
+		if item.ProjectID != "" {
+			if p, ok := s.projects[item.ProjectID]; ok && p != nil && p.CreatedBy == viewerID {
+				isMember = true
+			} else {
+				isMember = s.members[item.ProjectID][viewerID]
+			}
+		}
+		if !s.memoryVisibleLocked(item, viewerID, isMember) {
+			return nil, ErrNotFound
+		}
 	}
 	return cloneMemoryItem(item), nil
 }
@@ -412,6 +437,16 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 	if effective <= 0 {
 		effective = 20
 	}
+	viewerID := ViewerFrom(ctx)
+	// Membership checked outside the memory lock (RWMutex is not reentrant).
+	isMember := false
+	if viewerID != "" {
+		ok, err := s.IsProjectMember(ctx, viewerID, projectID)
+		if err != nil {
+			return nil, err
+		}
+		isMember = ok
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -423,6 +458,15 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 			continue
 		}
 		if item.Status != StatusConfirmed && item.Status != StatusProposed {
+			continue
+		}
+		// Visibility (issue #164): empty viewer sees project+public only.
+		if viewerID == "" {
+			vis := NormalizeVisibility(item.Visibility)
+			if vis != VisibilityProject && vis != VisibilityPublic {
+				continue
+			}
+		} else if !s.memoryVisibleLocked(item, viewerID, isMember) {
 			continue
 		}
 		if len(tags) > 0 {

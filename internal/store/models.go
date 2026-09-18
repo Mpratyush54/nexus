@@ -62,6 +62,7 @@ type MemoryItem struct {
 	ProposedBy     string    `json:"proposed_by,omitempty"`
 	ConfirmedBy    string    `json:"confirmed_by,omitempty"`
 	SupersededBy   string    `json:"superseded_by,omitempty"`
+	Visibility     string    `json:"visibility,omitempty"` // private | shared | project | public
 	UseCount       int       `json:"use_count"`
 	LastUsedAt     time.Time `json:"last_used_at,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
