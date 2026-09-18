@@ -201,6 +201,39 @@ func TestQuoteArg(t *testing.T) {
 	}
 }
 
+// TestSchtasksStateFromList pins the locale-robust status parser (issue
+// #111): English plus localized Status values map correctly, and anything
+// unrecognized yields unknown instead of a false stopped/running.
+func TestSchtasksStateFromList(t *testing.T) {
+	const header = "TaskName:     \\nexus-daemon\nRun As User:  test\n"
+	cases := []struct {
+		name string
+		text string
+		want ServiceStatus
+	}{
+		{"english running", header + "Status:            Running\n", StatusRunning},
+		{"english ready", header + "Status:            Ready\n", StatusStopped},
+		{"english disabled", header + "Status:            Disabled\n", StatusStopped},
+		{"case-insensitive", header + "STATUS:            RUNNING\n", StatusRunning},
+		{"german running", header + "Status:            Wird ausgeführt\n", StatusRunning},
+		{"german ready", header + "Status:            Bereit\n", StatusStopped},
+		{"french running", header + "Statut:            En cours d'exécution\n", StatusRunning},
+		{"spanish running", header + "Estado:            En ejecución\n", StatusRunning},
+		{"russian running", header + "Состояние:         Выполняется\n", StatusRunning},
+		{"unrecognized value is unknown", header + "Status:            Inconnu\n", StatusUnknown},
+		{"no status line is unknown", "ERROR: The system cannot find the file specified.\n", StatusUnknown},
+		{"empty output is unknown", "", StatusUnknown},
+		{"empty value is unknown", header + "Status:\n", StatusUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := schtasksStateFromList(tc.text); got != tc.want {
+				t.Errorf("schtasksStateFromList = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestNoHardcodedDrivePaths guards the issue's acceptance criterion: no
 // source file in this package may contain a hardcoded Windows drive literal.
 func TestNoHardcodedDrivePaths(t *testing.T) {

@@ -356,6 +356,86 @@ func parseSchtasksStatus(output string, queryErr error) (ServiceStatus, error) {
 }
 
 // ---------------------------------------------------------------------------
+// schtasks status parsing (pure — unit-testable on any GOOS).
+// ---------------------------------------------------------------------------
+
+// schtasksStatusHeaders are the localized `schtasks /Query /FO LIST` field
+// names carrying the task state (English, French, Spanish, Italian,
+// Portuguese, Russian, Chinese). Matched case-insensitively.
+var schtasksStatusHeaders = map[string]bool{
+	"status": true, "statut": true, "estado": true, "stato": true,
+	"состояние": true, "状态": true, "状態": true, "상태": true,
+}
+
+// schtasksRunningTokens are localized "Running" state values. A task whose
+// status line contains one of these is executing; anything else recognized
+// (Ready, Disabled, Queued, ...) means installed-but-stopped.
+var schtasksRunningTokens = []string{
+	"running",         // English
+	"wird ausgeführt", // German ("Wird ausgeführt")
+	"ausgeführt",      // German (short form)
+	"en cours",        // French ("En cours d'exécution")
+	"ejecuci",         // Spanish ("En ejecución")
+	"execu",           // Portuguese ("Em execução") / Italian ("In esecuzione")
+	"uitgevoerd",      // Dutch ("Wordt uitgevoerd")
+	"wykonywane",      // Polish
+	"выполняется",     // Russian ("Выполняется")
+	"运行",              // Chinese ("正在运行")
+	"実行中",             // Japanese
+	"실행 중",            // Korean
+}
+
+// schtasksIdleTokens are localized idle state values mapping to
+// StatusStopped. Unrecognized non-empty values yield StatusUnknown rather
+// than a guess, so non-English systems never get a false stopped/running.
+var schtasksIdleTokens = []string{
+	"ready", "queued", "disabled", // English
+	"bereit", "deaktiviert", // German
+	"prêt", "pret", "désactivé", "desactive", // French
+	"lista", "deshabilitada", "en cola", // Spanish
+	"pronto", "disabilitata", "accodata", // Italian
+	"pronta", "desabilitada", // Portuguese
+	"gereed", "uitgeschakeld", // Dutch
+	"готов", "отключена", // Russian
+	"就绪",   // Chinese
+	"準備完了", // Japanese
+}
+
+// schtasksStateFromList parses `schtasks /Query /TN <name> /FO LIST` text
+// into a ServiceStatus. Existence is NOT derived here — the caller uses the
+// schtasks exit code for that (locale-independent). Returns StatusUnknown
+// when no status line is present, the value is empty, or the value is not
+// a recognized running/idle token.
+func schtasksStateFromList(text string) ServiceStatus {
+	value, found := "", false
+	for _, line := range strings.Split(text, "\n") {
+		name, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		if schtasksStatusHeaders[strings.ToLower(strings.TrimSpace(name))] {
+			value, found = strings.TrimSpace(val), true
+			break
+		}
+	}
+	if !found || strings.TrimSpace(value) == "" {
+		return StatusUnknown
+	}
+	low := strings.ToLower(value)
+	for _, tok := range schtasksRunningTokens {
+		if strings.Contains(low, tok) {
+			return StatusRunning
+		}
+	}
+	for _, tok := range schtasksIdleTokens {
+		if strings.Contains(low, tok) {
+			return StatusStopped
+		}
+	}
+	return StatusUnknown
+}
+
+// ---------------------------------------------------------------------------
 // Backend registry + CLI hooks.
 // ---------------------------------------------------------------------------
 
