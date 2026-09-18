@@ -97,6 +97,7 @@ type MemStore struct {
 	memberRoles map[string]map[string]string       // projectID -> userID -> role name (issue #163)
 	roles       map[string]map[string]*ProjectRole // projectID -> roleID -> custom role (issue #163)
 	memories    map[string]*MemoryItem
+	versions    map[string][]*MemoryVersion // memoryID -> ordered version snapshots (issue #162)
 	episodes    map[string]*Episode
 	events      []*Event
 	eventSeq    int64
@@ -122,6 +123,7 @@ func NewMemStore() *MemStore {
 		memberRoles: make(map[string]map[string]string),
 		roles:       make(map[string]map[string]*ProjectRole),
 		memories:    make(map[string]*MemoryItem),
+		versions:    make(map[string][]*MemoryVersion),
 		episodes:    make(map[string]*Episode),
 		events:      make([]*Event, 0),
 		subs:        make(map[int64]*memSubscription),

@@ -2,8 +2,9 @@ export const queryKeys = {
   health: ['health'] as const,
   memory: {
     all: ['memory'] as const,
-    search: (projectId: string, q: string) =>
-      ['memory', 'search', projectId, q] as const,
+    search: (projectId: string, q: string, level = '') =>
+      ['memory', 'search', projectId, q, level] as const,
+    history: (id: string) => ['memory', 'history', id] as const,
   },
   project: {
     current: ['project', 'current'] as const,

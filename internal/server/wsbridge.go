@@ -17,8 +17,8 @@ package server
 //     not — the Hub methods are void and never fail.
 //   - Event-type vocabulary is local (master uses raw strings, e.g.
 //     "MEMORY_PROPOSED" in memstore_test.go): memory_* → memory_update
-//     actions (proposed|confirmed|rejected), episode_* → episode_update
-//     actions (opened|updated|resolved).
+//     actions (proposed|confirmed|rejected|updated|superseded), episode_* →
+//     episode_update actions (opened|updated|resolved).
 //   - bridgeLoop holds one subscription with exponential backoff
 //     (base → max, reset on first delivery); BridgeEvents is the
 //     production entrypoint — run it as a goroutine next to Serve:
@@ -52,12 +52,14 @@ const (
 
 // Bridge event-type vocabulary (master stores raw strings).
 const (
-	bridgeMemoryProposed  = "MEMORY_PROPOSED"
-	bridgeMemoryConfirmed = "MEMORY_CONFIRMED"
-	bridgeMemoryRejected  = "MEMORY_REJECTED"
-	bridgeEpisodeOpened   = "EPISODE_OPENED"
-	bridgeEpisodeUpdated  = "EPISODE_UPDATED"
-	bridgeEpisodeResolved = "EPISODE_RESOLVED"
+	bridgeMemoryProposed   = "MEMORY_PROPOSED"
+	bridgeMemoryConfirmed  = "MEMORY_CONFIRMED"
+	bridgeMemoryRejected   = "MEMORY_REJECTED"
+	bridgeMemoryUpdated    = "MEMORY_UPDATED"
+	bridgeMemorySuperseded = "MEMORY_SUPERSEDED"
+	bridgeEpisodeOpened    = "EPISODE_OPENED"
+	bridgeEpisodeUpdated   = "EPISODE_UPDATED"
+	bridgeEpisodeResolved  = "EPISODE_RESOLVED"
 )
 
 // eventPublisher is the Hub surface the bridge needs. *Hub satisfies it;
@@ -73,7 +75,7 @@ type eventPublisher interface {
 var _ eventPublisher = (*Hub)(nil)
 
 // memoryActionForEventType maps memory lifecycle event types onto the
-// memory_update vocabulary (proposed|confirmed|rejected).
+// memory_update vocabulary (proposed|confirmed|rejected|updated|superseded).
 func memoryActionForEventType(t string) (action string, ok bool) {
 	switch t {
 	case bridgeMemoryProposed:
@@ -82,6 +84,10 @@ func memoryActionForEventType(t string) (action string, ok bool) {
 		return "confirmed", true
 	case bridgeMemoryRejected:
 		return "rejected", true
+	case bridgeMemoryUpdated:
+		return "updated", true
+	case bridgeMemorySuperseded:
+		return "superseded", true
 	default:
 		return "", false
 	}
