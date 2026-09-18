@@ -386,21 +386,48 @@ func (m *Materializer) Regenerate(ctx context.Context) error {
 }
 
 // Run subscribes to MEMORY_CONFIRMED/MEMORY_SUPERSEDED and regenerates
-// after a Debounce quiet period. It returns when ctx is done.
+// after a Debounce quiet period. It returns when ctx is done. A closed bus
+// channel resubscribes with backoff (issue #145) instead of exiting:
+// silently stopping would freeze push files with no error.
 func (m *Materializer) Run(ctx context.Context) error {
 	if m.Bus == nil {
 		<-ctx.Done()
 		return ctx.Err()
 	}
+	wait := m.Debounce
+	if wait <= 0 {
+		wait = Debounce
+	}
+	backoff := wait
+	const maxBackoff = 5 * time.Minute
+	for ctx.Err() == nil {
+		if err := m.runOnce(ctx, wait); err != nil {
+			return err
+		}
+		// Bus closed beneath us: back off and resubscribe.
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+		t := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return ctx.Err()
+		case <-t.C:
+		}
+	}
+	return ctx.Err()
+}
+
+// runOnce drains one subscription until ctx ends (nil) or the bus channel
+// closes (non-nil return → caller resubscribes).
+func (m *Materializer) runOnce(ctx context.Context, wait time.Duration) error {
 	ch, cancel, err := m.Bus.Subscribe(ctx, m.ProjectID)
 	if err != nil {
 		return err
 	}
 	defer cancel()
-	wait := m.Debounce
-	if wait <= 0 {
-		wait = Debounce
-	}
 	var timer *time.Timer
 	var timerCh <-chan time.Time
 	disarm := func() {
@@ -422,7 +449,7 @@ func (m *Materializer) Run(ctx context.Context) error {
 			return ctx.Err()
 		case ev, ok := <-ch:
 			if !ok {
-				return nil
+				return errBusClosed
 			}
 			if ev == nil || !ShouldTrigger(ev.EventType) {
 				continue
@@ -437,3 +464,7 @@ func (m *Materializer) Run(ctx context.Context) error {
 		}
 	}
 }
+
+// errBusClosed signals runOnce to resubscribe (never surfaces to callers:
+// Run loops until ctx ends).
+var errBusClosed = errors.New("materializer: event bus closed beneath Run")

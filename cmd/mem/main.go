@@ -95,17 +95,16 @@ func copyMintedMemoryFields(item *mcp.MemoryItem, row *store.MemoryItem) {
 }
 
 // episodeDTO maps a store episode to the MCP view. Field fidelity (Issue
-// #116): mcp.Episode carries the tool surface only; store-only fields —
-// Investigation, SessionID, Embedding, OpenedAt, ResolvedAt, CreatedBy,
-// ResolvedBy — stay on the store row. Investigation notes are preserved in
-// the store and served via direct store reads; the MCP episode_report /
-// episode_search surface does not expose them (internal/mcp is read-only).
+// #116, #136): Investigation, SessionID, and Embedding ride along —
+// dropping the narrative core, session link, and vector made mem-written
+// episodes unsearchable and context-poor. Store-only auditing fields
+// (OpenedAt, ResolvedAt, CreatedBy, ResolvedBy) stay on the store row.
 func episodeDTO(ep *store.Episode) *mcp.Episode {
 	return &mcp.Episode{
-		ID: ep.ID, ProjectID: ep.ProjectID, Title: ep.Title, EpisodeType: ep.EpisodeType,
-		Trigger: ep.Trigger, RootCause: ep.RootCause, Resolution: ep.Resolution,
+		ID: ep.ID, ProjectID: ep.ProjectID, SessionID: ep.SessionID, Title: ep.Title, EpisodeType: ep.EpisodeType,
+		Trigger: ep.Trigger, Investigation: ep.Investigation, RootCause: ep.RootCause, Resolution: ep.Resolution,
 		Verification: ep.Verification, Tags: ep.Tags, FilesInvolved: ep.FilesInvolved,
-		ErrorPatterns: ep.ErrorPatterns, Status: ep.Status,
+		ErrorPatterns: ep.ErrorPatterns, Embedding: ep.Embedding, Status: ep.Status,
 	}
 }
 
@@ -123,10 +122,10 @@ func (s mcpStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, q
 
 func (s mcpStore) CreateEpisode(ctx context.Context, ep *mcp.Episode) error {
 	row := &store.Episode{
-		ID: ep.ID, ProjectID: ep.ProjectID, Title: ep.Title, EpisodeType: ep.EpisodeType,
-		Trigger: ep.Trigger, RootCause: ep.RootCause, Resolution: ep.Resolution,
+		ID: ep.ID, ProjectID: ep.ProjectID, SessionID: ep.SessionID, Title: ep.Title, EpisodeType: ep.EpisodeType,
+		Trigger: ep.Trigger, Investigation: ep.Investigation, RootCause: ep.RootCause, Resolution: ep.Resolution,
 		Verification: ep.Verification, Tags: ep.Tags, FilesInvolved: ep.FilesInvolved,
-		ErrorPatterns: ep.ErrorPatterns, Status: ep.Status,
+		ErrorPatterns: ep.ErrorPatterns, Embedding: ep.Embedding, Status: ep.Status,
 	}
 	if err := s.mem.CreateEpisode(ctx, row); err != nil {
 		return err

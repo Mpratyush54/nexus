@@ -86,11 +86,13 @@ func TestAuditHybridSearchStatusFilterAbsence(t *testing.T) {
 	if keys["rej"] || keys["sup"] {
 		t.Error("REJECTED/SUPERSEDED must never be served")
 	}
-	// CURRENT BEHAVIOR PIN (divergence from store.SearchMemoryVector which is
-	// CONFIRMED-only): HybridSearch serves PROPOSED too.
-	// Desired plan behavior (regression): vector path should be CONFIRMED-only.
-	if !keys["prop"] {
-		t.Error("current behavior serves PROPOSED; if this fails the filter changed — update plan notes")
+	// Contract parity with store.SearchMemoryVector (issue #139):
+	// CONFIRMED-only — PROPOSED rows are unreviewed and stay out.
+	if keys["prop"] {
+		t.Error("PROPOSED must not be served by HybridSearch")
+	}
+	if !keys["conf"] {
+		t.Error("CONFIRMED must be served by HybridSearch")
 	}
 }
 
@@ -98,16 +100,12 @@ func TestAuditHybridSearchConfidenceFloorAbsence(t *testing.T) {
 	now := time.Now().UTC()
 	emb := []float32{1, 0}
 	weak := auditCand("weak", emb, nil, 0.05, "CONFIRMED", now)
-	got := HybridSearch(emb, nil, "", "", []*store.MemoryItem{weak, nil}, now, 0)
-	if len(got) != 1 {
-		t.Fatalf("nil candidates must be skipped; got %d", len(got))
-	}
-	// CURRENT BEHAVIOR PIN (divergence from store.SearchMemoryVector which
-	// requires confidence > 0.3): HybridSearch applies NO confidence floor.
-	// Desired plan behavior (regression): items with confidence <= 0.3
-	// should be excluded from vector results.
-	if got[0].Item.Key != "weak" {
-		t.Errorf("expected weak item served (no floor); got %+v", got)
+	strong := auditCand("strong", emb, nil, 0.9, "CONFIRMED", now)
+	got := HybridSearch(emb, nil, "", "", []*store.MemoryItem{weak, strong, nil}, now, 0)
+	// Contract parity with store.SearchMemoryVector (issue #139):
+	// confidence <= 0.3 is below the floor; nils still skipped.
+	if len(got) != 1 || got[0].Item.Key != "strong" {
+		t.Fatalf("want only the above-floor item, got %+v", got)
 	}
 }
 

@@ -43,18 +43,24 @@ type MemoryItem struct {
 }
 
 // Episode is the MCP layer's view of an episode row (subset, see above).
+// Investigation, SessionID, and Embedding ride along (issue #136) so the
+// mem adapter and search results no longer drop the narrative core,
+// session link, and vector.
 type Episode struct {
 	ID            string
 	ProjectID     string
+	SessionID     string
 	Title         string
 	EpisodeType   string // bug_fix | feature | refactor | incident | investigation | onboarding
 	Trigger       string
+	Investigation string
 	RootCause     string
 	Resolution    string
 	Verification  string
 	Tags          []string
 	FilesInvolved []string
 	ErrorPatterns []string
+	Embedding     []float32
 	Status        string // OPEN | INVESTIGATING | RESOLVED | WONT_FIX
 }
 
@@ -154,7 +160,8 @@ func ListTools() []Tool {
 			Name:        "episode_report",
 			Description: "Open a new episode for an active bug, incident, or investigation.",
 			InputSchema: schema([]string{"title", "episode_type"}, map[string]any{
-				"title": str, "episode_type": str, "trigger": str, "tags": strArr, "project_id": str,
+				"title": str, "episode_type": str, "trigger": str, "investigation": str,
+				"tags": strArr, "project_id": str, "session_id": str,
 			}),
 		},
 		{
@@ -673,11 +680,13 @@ var validEpisodeTypes = map[string]bool{
 }
 
 type episodeReportArgs struct {
-	Title       string   `json:"title"`
-	EpisodeType string   `json:"episode_type"`
-	Trigger     string   `json:"trigger"`
-	Tags        []string `json:"tags"`
-	ProjectID   string   `json:"project_id"`
+	Title         string   `json:"title"`
+	EpisodeType   string   `json:"episode_type"`
+	Trigger       string   `json:"trigger"`
+	Investigation string   `json:"investigation"`
+	Tags          []string `json:"tags"`
+	ProjectID     string   `json:"project_id"`
+	SessionID     string   `json:"session_id"`
 }
 
 func (s *Server) handleEpisodeReport(ctx context.Context, raw json.RawMessage) (any, *RPCError) {
@@ -696,12 +705,14 @@ func (s *Server) handleEpisodeReport(ctx context.Context, raw json.RawMessage) (
 		projectID = s.cfg.ProjectID
 	}
 	ep := &Episode{
-		ProjectID:   projectID,
-		Title:       strings.TrimSpace(a.Title),
-		EpisodeType: strings.ToLower(a.EpisodeType),
-		Trigger:     a.Trigger,
-		Tags:        a.Tags,
-		Status:      "OPEN",
+		ProjectID:     projectID,
+		SessionID:     strings.TrimSpace(a.SessionID),
+		Title:         strings.TrimSpace(a.Title),
+		EpisodeType:   strings.ToLower(a.EpisodeType),
+		Trigger:       a.Trigger,
+		Investigation: a.Investigation,
+		Tags:          a.Tags,
+		Status:        "OPEN",
 	}
 	if err := s.store.CreateEpisode(ctx, ep); err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "episode report failed: " + err.Error()}

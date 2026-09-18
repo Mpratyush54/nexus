@@ -21,11 +21,11 @@
       "secrets": [
         {
           "name": "DATABASE_URL",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/database-url:database_url::"
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/db-app:database_url::"
         },
         {
           "name": "JWT_SECRET",
-          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/jwt-key:jwt_key::"
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/jwt:signing_key::"
         }
       ],
       "logConfiguration": {

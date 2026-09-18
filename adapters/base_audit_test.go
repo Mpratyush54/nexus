@@ -1,6 +1,7 @@
 package adapters
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -26,8 +27,19 @@ func TestAuditArtifactFieldsRoundTrip(t *testing.T) {
 		RawPath: `V:\agents\claude\raw\0\y.jsonl`, Project: "a/b",
 		Was: "stale", Repo: "https://example.com/r.git", Root: "abc123",
 	}
-	if a.Agent != "claude" || a.Kind != "session" || a.Project != "a/b" || a.Was != "stale" || a.Repo != "https://example.com/r.git" || a.Root != "abc123" {
-		t.Errorf("Artifact fields not preserved: %+v", a)
+	// Real round-trip (issue #139): Artifacts serialize through index.json
+	// (Export) and back (Restore/migrate), so the test must prove the
+	// JSON mapping preserves every field — not just struct assignment.
+	raw, err := json.Marshal(a)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var back Artifact
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if back != a {
+		t.Errorf("JSON round-trip lost fields:\n got %+v\nwant %+v", back, a)
 	}
 }
 

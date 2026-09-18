@@ -158,8 +158,11 @@ type ScoredItem struct {
 //	score = 0.7*similarity + 0.2*max(tagMatch, keyMatch) + 0.1*recency
 //
 // Cosine similarities are clamped to [0,1] (negative cosine means
-// "opposite", which is no match for retrieval). Items with status
-// REJECTED or SUPERSEDED are never served. Results sort by descending
+// "opposite", which is no match for retrieval). Only CONFIRMED rows with
+// confidence > 0.3 are served (issue #139): this mirrors the
+// SearchMemoryVector SQL predicate (status='CONFIRMED' AND confidence>0.3)
+// so the in-memory ranker and production retrieval agree on unconfirmed
+// rows. Results sort by descending
 // score (ties: higher confidence, then key). A positive limit caps the
 // results; limit <= 0 returns all ranked items.
 func HybridSearch(queryEmb []float32, queryTags []string, queryKey, queryText string, candidates []*store.MemoryItem, now time.Time, limit int) []ScoredItem {
@@ -172,6 +175,12 @@ func HybridSearch(queryEmb []float32, queryTags []string, queryKey, queryText st
 			continue
 		}
 		if item.Status == "REJECTED" || item.Status == "SUPERSEDED" {
+			continue
+		}
+		if item.Status != "" && item.Status != "CONFIRMED" {
+			continue
+		}
+		if item.Confidence <= 0.3 {
 			continue
 		}
 		var sim float64

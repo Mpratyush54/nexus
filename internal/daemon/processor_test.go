@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 )
@@ -246,6 +247,37 @@ func TestProcessorNonDesignatedIsNoop(t *testing.T) {
 	if len(got) != 0 {
 		t.Errorf("non-designated daemon proposed %d memories, want 0", len(got))
 	}
+}
+
+// Designation gating under concurrency (issue #139): designated and
+// non-designated processors sharing event shapes must not race, and the
+// gate must hold on every call — run with -race.
+func TestProcessorDesignationConcurrent(t *testing.T) {
+	on := NewProcessor(NewInMemoryStore(nil), 0, 0, true, nil)
+	off := NewProcessor(NewInMemoryStore(nil), 0, 0, false, nil)
+	ev := []Event{turnEvent("The team decided on connect timeouts with exponential backoff retries")}
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if _, err := on.ProcessEvents(context.Background(), "proj", ev); err != nil {
+				t.Errorf("designated: %v", err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			got, err := off.ProcessEvents(context.Background(), "proj", ev)
+			if err != nil {
+				t.Errorf("non-designated: %v", err)
+				return
+			}
+			if len(got) != 0 {
+				t.Errorf("non-designated proposed %d, want 0", len(got))
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 func TestProcessorExtractClassifyConfirm(t *testing.T) {

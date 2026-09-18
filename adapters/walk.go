@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -77,19 +78,42 @@ func ProjectWas(nativePath, home string) string {
 
 var resolveCache = struct {
 	sync.Mutex
-	m map[string][2]string
-}{m: map[string][2]string{}}
+	m map[string]resolveEntry
+}{m: map[string]resolveEntry{}}
+
+// resolveEntry is a cached resolve() result pinned to the file state it
+// was computed from (issue #139): transcript content (cwd field) can
+// change under a stable path, so path-only keys served stale attributions.
+type resolveEntry struct {
+	leaf, was  string
+	size       int64
+	mtimeNanos int64
+	hasFile    bool
+}
+
+// fileFingerprint stats path for cache validation: missing files hash as
+// (no-file), so create/delete cycles invalidate too.
+func fileFingerprint(path string) (size, mtimeNanos int64, hasFile bool) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	return st.Size(), st.ModTime().UnixNano(), true
+}
 
 func resolve(nativePath, home string) (leaf, was string) {
+	size, mtimeNanos, hasFile := fileFingerprint(nativePath)
 	resolveCache.Lock()
-	if v, ok := resolveCache.m[nativePath]; ok {
+	if v, ok := resolveCache.m[nativePath]; ok &&
+		v.size == size && v.mtimeNanos == mtimeNanos && v.hasFile == hasFile {
+		leaf, was = v.leaf, v.was
 		resolveCache.Unlock()
-		return v[0], v[1]
+		return leaf, was
 	}
 	resolveCache.Unlock()
 	leaf, was = resolveUncached(nativePath, home)
 	resolveCache.Lock()
-	resolveCache.m[nativePath] = [2]string{leaf, was}
+	resolveCache.m[nativePath] = resolveEntry{leaf: leaf, was: was, size: size, mtimeNanos: mtimeNanos, hasFile: hasFile}
 	resolveCache.Unlock()
 	return leaf, was
 }
@@ -411,6 +435,14 @@ func CopyFiltered(roots []string, destRoot string, maxBytes int64, projectFilter
 				return nil
 			}
 			dst := filepath.Join(destRoot, safeName(r, ri), rel)
+			// Containment re-check (issue #137): rel comes from the walk so
+			// it should stay inside destRoot, but symlinks, case-folding,
+			// or .. segments in roots must never turn a copy into a write
+			// outside the vault.
+			if !withinDir(destRoot, dst) {
+				errs = append(errs, fmt.Errorf("copy %s: destination escapes vault", p))
+				return nil
+			}
 			if st, serr := os.Stat(dst); serr == nil && st.Size() == info.Size() && !st.ModTime().Before(info.ModTime()) {
 				copied = append(copied, Artifact{NativePath: p, RawPath: dst, Project: ProjectOf(p, home), Was: ProjectWas(p, home)})
 				return nil
@@ -427,6 +459,23 @@ func CopyFiltered(roots []string, destRoot string, maxBytes int64, projectFilter
 		}
 	}
 	return copied, skipped, errors.Join(errs...)
+}
+
+// withinDir reports whether target stays inside dir after cleaning
+// (case-insensitive on Windows, where the filesystem is).
+func withinDir(dir, target string) bool {
+	rel, err := filepath.Rel(dir, target)
+	if err != nil {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		d, t := strings.ToLower(filepath.Clean(dir)), strings.ToLower(filepath.Clean(target))
+		return t == d || strings.HasPrefix(t, d+string(filepath.Separator))
+	}
+	return true
 }
 
 // safeName maps a source root to a collision-free destination segment
