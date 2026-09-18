@@ -8,16 +8,16 @@ package store
 // Store implementations outside this package (e.g. test stubs, server fakes)
 // keep compiling.
 //
-// Scheduler note: the background loops that call these sweepers on a timer
-// belong to the daemon (plan §§1.7/2.7/6.2), not to the store — the store
-// exposes idempotent, bounded sweep primitives the daemon can invoke from
-// its existing tick. Wiring the tick is an explicit follow-up (ADR
-// deferral); everything here is safe to call from any goroutine.
+// Scheduler note: the periodic tick lives in internal/server
+// (StartLifecycleSweeper, plan §§1.7/2.7/6.2) — the server owns the durable
+// store. Everything here is idempotent, bounded, and safe to call from any
+// goroutine; SweepLifecycle is the single entrypoint the tick invokes.
 
 import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -335,4 +335,170 @@ func (s *PostgresStore) RejectMemory(ctx context.Context, id, rejectedBy string)
 // errMemoryConflict formats an illegal lifecycle edge wrapping ErrConflict.
 func errMemoryConflict(cur, next string) error {
 	return fmt.Errorf("store: illegal status transition %s -> %s: %w", cur, next, ErrConflict)
+}
+
+// ---- scheduled sweeps (issue #119 box 4) ----
+
+// ConfirmDue sweeps MemStore PROPOSED → CONFIRMED for rows whose created_at +
+// tier <= now (tier from the source tag via ParseConfirmAfter, default
+// ConfirmDueAfterDefault). It mirrors MemoryStore.ConfirmDue row-for-row so
+// local-dev converges with production; the write is idempotent.
+func (s *MemStore) ConfirmDue(_ context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int64
+	for _, m := range s.memories {
+		if m.Status != StatusProposed {
+			continue
+		}
+		after, ok := ParseConfirmAfter(m.Source)
+		if !ok {
+			after = ConfirmDueAfterDefault
+		}
+		if IsConfirmDue(m.CreatedAt, after, now) {
+			m.Status = StatusConfirmed
+			m.UpdatedAt = now
+			n++
+		}
+	}
+	return n, nil
+}
+
+// ConfirmDue sweeps Postgres PROPOSED → CONFIRMED with the same tier rule as
+// MemoryStore.ConfirmDue (pool-direct; the pool cannot satisfy DBTX, so this
+// delegates the SQL rather than the struct). Idempotent under concurrent
+// sweepers via the status predicate.
+func (s *PostgresStore) ConfirmDue(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	rows, err := s.pool.Query(ctx, BuildListProposedSQL())
+	if err != nil {
+		return 0, fmt.Errorf("store: list proposed: %w", err)
+	}
+	defer rows.Close()
+	var due []string
+	for rows.Next() {
+		var id, source string
+		var createdAt time.Time
+		if err := rows.Scan(&id, &source, &createdAt); err != nil {
+			return 0, fmt.Errorf("store: list proposed scan: %w", err)
+		}
+		after, ok := ParseConfirmAfter(source)
+		if !ok {
+			after = ConfirmDueAfterDefault
+		}
+		if IsConfirmDue(createdAt, after, now) {
+			due = append(due, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store: list proposed rows: %w", err)
+	}
+	if len(due) == 0 {
+		return 0, nil
+	}
+	tag, err := s.pool.Exec(ctx, BuildConfirmIDsSQL(), due)
+	if err != nil {
+		return 0, fmt.Errorf("store: confirm due: %w", err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// Narrow sweep seams: the periodic tick (internal/server.StartLifecycleSweeper)
+// asserts these optionally, so the broad Store interface — and every external
+// implementation (stubs, fakes) — keeps compiling unchanged.
+type (
+	// ConfirmSweeper auto-confirms due PROPOSED rows (plan §2.8 tiers).
+	ConfirmSweeper interface {
+		ConfirmDue(ctx context.Context, now time.Time) (int64, error)
+	}
+	// SessionSweeper ends sessions past their expiry (plan §2.7 + 7d grace).
+	SessionSweeper interface {
+		ExpireStaleSessions(ctx context.Context, now time.Time, ttl time.Duration) (int64, error)
+	}
+	// StaleMemoryLister triages archival candidates (plan §1.7). Triage only:
+	// disposition (supersede vs cold-store) is an operator decision.
+	StaleMemoryLister interface {
+		ListStaleMemoryCandidates(ctx context.Context, limit int) ([]*MemoryItem, error)
+	}
+	// BranchSweeper auto-archives neglected branches (plan §5.4, 30d TTL).
+	BranchSweeper interface {
+		ListBranches(ctx context.Context, projectID string) ([]*MemoryBranch, error)
+		ArchiveBranch(ctx context.Context, branchID string, now time.Time) (*MemoryBranch, error)
+	}
+)
+
+// SweepSessionTTL is the session-expiry grace the periodic tick enforces
+// (plan §2.7: session end + 7 day grace).
+const SweepSessionTTL = DefaultSessionTTL
+
+// SweepStaleListLimit bounds the triage read per tick.
+const SweepStaleListLimit = 100
+
+// SweepReport is one tick's outcome. Partial progress is reported even when
+// a later phase errors (the tick returns the first error).
+type SweepReport struct {
+	Confirmed        int64
+	ExpiredSessions  int64
+	StaleCandidates  int
+	BranchesArchived int
+	SweptAt          time.Time
+}
+
+// SweepLifecycle runs one full lifecycle tick: confirm-due → session-expiry →
+// stale triage. Nil seams are skipped, so capability-poor stores (stubs,
+// fakes, text-only) simply report zeros.
+func SweepLifecycle(ctx context.Context, now time.Time, c ConfirmSweeper, e SessionSweeper, l StaleMemoryLister) (SweepReport, error) {
+	rep := SweepReport{SweptAt: now}
+	if c != nil {
+		n, err := c.ConfirmDue(ctx, now)
+		rep.Confirmed = n
+		if err != nil {
+			return rep, err
+		}
+	}
+	if e != nil {
+		n, err := e.ExpireStaleSessions(ctx, now, SweepSessionTTL)
+		rep.ExpiredSessions = n
+		if err != nil {
+			return rep, err
+		}
+	}
+	if l != nil {
+		cands, err := l.ListStaleMemoryCandidates(ctx, SweepStaleListLimit)
+		if err != nil {
+			return rep, err
+		}
+		rep.StaleCandidates = len(cands)
+	}
+	return rep, nil
+}
+
+// SweepBranchesForProject archives every archivable branch of one project
+// (30d BranchArchiveTTL, plan §5.4). Project enumeration lives with callers
+// (dashboard/CLI); the periodic server tick covers memory/session triage
+// while branches are swept per project on demand.
+func SweepBranchesForProject(ctx context.Context, now time.Time, projectID string, b BranchSweeper) (int, error) {
+	if b == nil || strings.TrimSpace(projectID) == "" {
+		return 0, nil
+	}
+	list, err := b.ListBranches(ctx, projectID)
+	if err != nil {
+		return 0, err
+	}
+	archived := 0
+	for _, br := range list {
+		if br == nil || br.IsArchived() || !IsArchivable(br, now) {
+			continue
+		}
+		if _, err := b.ArchiveBranch(ctx, br.ID, now); err != nil {
+			return archived, err
+		}
+		archived++
+	}
+	return archived, nil
 }

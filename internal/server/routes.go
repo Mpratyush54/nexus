@@ -244,6 +244,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "vector search failed: "+err.Error())
 			return
 		}
+		recordMemoryUse(r.Context(), s.Store, items)
 		if items == nil {
 			items = []*store.MemoryItem{}
 		}
@@ -255,6 +256,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
 		return
 	}
+	recordMemoryUse(r.Context(), s.Store, items)
 	if items == nil {
 		items = []*store.MemoryItem{}
 	}

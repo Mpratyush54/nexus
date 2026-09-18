@@ -229,13 +229,21 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func newHandler(secret string, cfg serverConfig) http.Handler {
+func newServer(secret string) *server.Server {
 	srv := server.NewServer(stubStore{})
 	srv.Auth = server.NewAuthenticator([]byte(secret))
 	srv.AttachHub(server.NewHub())
 	// NOTE (#40): the store→hub bridge (Server.StartBridge) starts once the
 	// Postgres adapter lands (#37). stubStore has no projects to bridge, so
 	// launching it here would only error-loop.
+	return srv
+}
+
+func newHandler(secret string, cfg serverConfig) http.Handler {
+	return buildMux(newServer(secret), cfg)
+}
+
+func buildMux(srv *server.Server, cfg serverConfig) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /auth/login", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -299,9 +307,15 @@ func run() error {
 		log.Printf("server: database from %s (sslmode=%q)", cfg.databaseSource, cfg.sslMode)
 	}
 
+	srv := newServer(cfg.jwtSecret)
+	// Lifecycle tick (issue #119 box 4): no-op-idle on stubStore (it
+	// supports no sweep seams); starts sweeping once the Postgres adapter
+	// lands. Stopped via the run context.
+	stopSweeps := server.StartLifecycleSweeper(ctx, srv.Store, 0)
+	defer stopSweeps()
 	httpSrv := &http.Server{
 		Addr:              ":" + cfg.port,
-		Handler:           newHandler(cfg.jwtSecret, cfg),
+		Handler:           buildMux(srv, cfg),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

@@ -256,6 +256,10 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 	items = dedupeByKey(items)
 	items = filterByLevel(items, a.Level)
 
+	// Decay clock (plan §1.7, issue #119): serving an item counts as use.
+	// Best-effort and never fatal — stores without the method are skipped.
+	recordUse(ctx, s.store, items)
+
 	budget := s.tokenBudget()
 	contextXML := buildContextXMLBudgeted(s.cfg.ProjectName, s.cfg.Branch, items, budget)
 	tokens := estimateTokens(contextXML)
@@ -271,6 +275,24 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 		"items_included":   countXMLItems(contextXML),
 		"reflection_hint":  ReflectionHint,
 	}, nil
+}
+
+// recordUse bumps use_count/last_used_at on served rows so the confidence
+// decay clock (plan §1.7) resets on real retrieval. It asserts the seam
+// optionally: narrow stores (fakes, stubs) simply skip it.
+func recordUse(ctx context.Context, st Store, items []*MemoryItem) {
+	ru, ok := st.(interface {
+		RecordMemoryUse(context.Context, string) error
+	})
+	if !ok {
+		return
+	}
+	for _, it := range items {
+		if it == nil || it.ID == "" {
+			continue
+		}
+		_ = ru.RecordMemoryUse(ctx, it.ID)
+	}
 }
 
 // mcpLevelRank mirrors context.LevelRank for DTOs: session wins over
