@@ -123,6 +123,24 @@ func (s *UserStore) GetByUsername(ctx context.Context, username string) (*User, 
 	return u, nil
 }
 
+// GetByEmail fetches one user by email (case-insensitive) or ErrNotFound.
+// Used by GitHub collaborator auto-match (issue #167).
+func (s *UserStore) GetByEmail(ctx context.Context, email string) (*User, error) {
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return nil, errors.New("store: email is required")
+	}
+	u, err := scanUser(s.db.QueryRow(ctx,
+		`SELECT `+userColumns+` FROM users WHERE lower(email) = lower($1)`, email))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: user email %q: %w", email, ErrNotFound)
+		}
+		return nil, fmt.Errorf("store: get user by email: %w", err)
+	}
+	return u, nil
+}
+
 // UpdateSettings replaces the whole settings document (LLM provider, API
 // key ref, preferences) and returns the updated row.
 func (s *UserStore) UpdateSettings(ctx context.Context, id, settings string) (*User, error) {

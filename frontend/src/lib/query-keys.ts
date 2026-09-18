@@ -12,4 +12,12 @@ export const queryKeys = {
   workspace: {
     active: (projectId: string) => ['workspace', 'active', projectId] as const,
   },
+  team: {
+    members: (projectId: string) => ['team', 'members', projectId] as const,
+    roles: (projectId: string) => ['team', 'roles', projectId] as const,
+    github: (projectId: string) => ['team', 'github', projectId] as const,
+  },
+  agents: {
+    list: (projectId: string) => ['agents', projectId] as const,
+  },
 }

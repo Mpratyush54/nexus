@@ -77,6 +77,9 @@ func (s *Server) registerExtraRoutes() {
 	// Phase 6 agent permissions + MCP tool-call logging (issue #166).
 	s.registerAgentRoutes()
 
+	// Phase 7 GitHub collaborator import (issue #167).
+	s.registerGitHubRoutes()
+
 	// Episodes.
 	s.Mux.HandleFunc("POST /episodes/{id}/resolve", s.requireAuth(s.handleEpisodeResolve))
 }

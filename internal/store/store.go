@@ -109,6 +109,9 @@ type MemStore struct {
 	subSeq      int64
 	// agentPerms: projectID -> agentID -> permission (issue #166).
 	agentPerms map[string]map[string]*AgentPermission
+	// githubLinks / githubUsers: Phase 7 GitHub import (issue #167).
+	githubLinks map[string]*GitHubLink
+	githubUsers map[string]*GitHubUserMap
 }
 
 // memSubscription is one in-process event subscriber.
@@ -137,6 +140,8 @@ func NewMemStore() *MemStore {
 		events:      make([]*Event, 0),
 		subs:        make(map[int64]*memSubscription),
 		agentPerms:  make(map[string]map[string]*AgentPermission),
+		githubLinks: make(map[string]*GitHubLink),
+		githubUsers: make(map[string]*GitHubUserMap),
 	}
 }
 
