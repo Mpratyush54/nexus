@@ -247,8 +247,12 @@ func BuildConfirmIDsSQL() string {
 // session_id and flipping level to 'project'. The session_id IS NOT NULL
 // guard keeps the write idempotent (re-promotion touches zero rows).
 func BuildPromoteKeySQL() string {
+	// Guards (issue #131): only live session rows promote — REJECTED /
+	// SUPERSEDED rows stay terminal (no resurrection), and only
+	// level='session' rows qualify (project rows are already there).
 	return `UPDATE memory_items SET session_id = NULL, level = 'project', updated_at = now() ` +
-		`WHERE project_id = $1 AND key = $2 AND session_id IS NOT NULL`
+		`WHERE project_id = $1::uuid AND key = $2 AND session_id IS NOT NULL ` +
+		`AND level = 'session' AND status IN ('PROPOSED','CONFIRMED')`
 }
 
 // BuildSetStatusSQL renders a validated single-row transition. Both the id

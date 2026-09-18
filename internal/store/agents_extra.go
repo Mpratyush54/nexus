@@ -18,6 +18,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
@@ -207,7 +208,7 @@ func (r *AgentRegistry) OutputFileFor(agentName string) string {
 
 // ---- Postgres-backed CRUD (production path) ----
 
-const agentColumns = `id, name, adapter_type, capabilities, context_budget, output_file, output_format`
+const agentColumns = `id::TEXT, name, adapter_type, capabilities, context_budget, output_file, output_format`
 
 func scanAgent(row pgx.Row) (*Agent, error) {
 	var a Agent
@@ -257,7 +258,7 @@ func (s *PostgresStore) GetAgentByName(ctx context.Context, name string) (*Agent
 // UpsertAgent inserts or updates an agent row by name.
 func (s *PostgresStore) UpsertAgent(ctx context.Context, a *Agent) error {
 	if a == nil || strings.TrimSpace(a.Name) == "" {
-		return ErrConflict
+		return fmt.Errorf("store: agent name is required")
 	}
 	budget := a.ContextBudget
 	if budget <= 0 {
@@ -272,7 +273,7 @@ func (s *PostgresStore) UpsertAgent(ctx context.Context, a *Agent) error {
 		     context_budget = EXCLUDED.context_budget,
 		     output_file = EXCLUDED.output_file,
 		     output_format = EXCLUDED.output_format
-		 RETURNING id`,
+		 RETURNING id::TEXT`,
 		strings.ToLower(strings.TrimSpace(a.Name)), a.AdapterType,
 		marshalPayload(a.Capabilities), budget,
 		a.OutputFile, a.OutputFormat).Scan(&a.ID)
@@ -297,7 +298,7 @@ func (s *PostgresStore) SetProjectAgent(ctx context.Context, projectID, agentNam
 // ListProjectAgents returns enablement rows for one project.
 func (s *PostgresStore) ListProjectAgents(ctx context.Context, projectID string) ([]*ProjectAgent, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT pa.project_id, pa.agent_id, a.name, pa.enabled, pa.config
+		`SELECT pa.project_id::TEXT, pa.agent_id::TEXT, a.name, pa.enabled, pa.config
 		  FROM project_agents pa JOIN agents a ON a.id = pa.agent_id
 		  WHERE pa.project_id = $1::uuid ORDER BY a.name`, nullText(projectID))
 	if err != nil {

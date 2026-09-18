@@ -132,20 +132,27 @@ func (s *PostgresStore) RunMigrations(ctx context.Context, migrationsDir string)
 	}
 	sort.Strings(ups)
 
-	// Serialize concurrent runners (issue #107). Session-level lock:
-	// held until released below, so overlapping boots queue here instead
-	// of applying the same migration twice.
-	if _, err := s.pool.Exec(ctx, `SELECT pg_advisory_lock(hashtext('central-memory-migrations'))`); err != nil {
+	// Serialize concurrent runners (issue #107, #131). pg_advisory_lock is
+	// session-level, so the lock, the version table work, and the unlock
+	// MUST all run on one dedicated connection: pool.Exec would route
+	// lock/unlock to arbitrary connections, leaking the lock and failing
+	// to serialize. Acquire a conn for the whole run instead.
+	conn, err := s.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration conn: %w", err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock(hashtext('central-memory-migrations'))`); err != nil {
 		return fmt.Errorf("acquire migration lock: %w", err)
 	}
 	defer func() {
-		_, _ = s.pool.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('central-memory-migrations'))`)
+		_, _ = conn.Exec(context.Background(), `SELECT pg_advisory_unlock(hashtext('central-memory-migrations'))`)
 	}()
 
-	if _, err := s.pool.Exec(ctx, schemaMigrationsDDL); err != nil {
+	if _, err := conn.Exec(ctx, schemaMigrationsDDL); err != nil {
 		return fmt.Errorf("ensure schema_migrations: %w", err)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT version FROM schema_migrations`)
+	rows, err := conn.Query(ctx, `SELECT version FROM schema_migrations`)
 	if err != nil {
 		return fmt.Errorf("read schema_migrations: %w", err)
 	}

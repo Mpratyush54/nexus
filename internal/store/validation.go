@@ -26,6 +26,23 @@ const LevelEphemeral = "ephemeral"
 // Postgres fails the query at runtime (issue #105).
 const EmbeddingDim = 1536
 
+// ValidateEvent rejects events Postgres cannot represent (issue #131):
+// project_id is NOT NULL + ::uuid ("" dies with a raw syntax error) and
+// event_type is NOT NULL. Both backends enforce this so MemStore never
+// stores unownable ""-project rows that Postgres would 500 on.
+func ValidateEvent(ev *Event) error {
+	if ev == nil {
+		return fmt.Errorf("store: event is required")
+	}
+	if strings.TrimSpace(ev.ProjectID) == "" {
+		return fmt.Errorf("store: event project_id is required")
+	}
+	if strings.TrimSpace(ev.EventType) == "" {
+		return fmt.Errorf("store: event event_type is required")
+	}
+	return nil
+}
+
 // ValidateEmbeddingDim rejects wrong-width vectors before SQL. Nil/empty is
 // the legitimate "no embedding" state and passes.
 func ValidateEmbeddingDim(vec []float32) error {

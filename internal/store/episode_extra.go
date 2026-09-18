@@ -192,7 +192,11 @@ func (s *MemStore) SearchEpisodesByErrorPattern(ctx context.Context, projectID, 
 }
 
 // SearchEpisodesByErrorPattern is the exact-match retrieval from plan §2.4.
+// An empty projectID returns an empty list (MemStore parity).
 func (s *PostgresStore) SearchEpisodesByErrorPattern(ctx context.Context, projectID, pattern string) ([]*Episode, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return []*Episode{}, nil
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+episodeColumns+` FROM episodes
 		  WHERE project_id = $1::uuid
@@ -227,7 +231,11 @@ func (s *MemStore) SearchEpisodesByFile(ctx context.Context, projectID, file str
 }
 
 // SearchEpisodesByFile is the file-involvement lookup from plan §2.4.
+// An empty projectID returns an empty list (MemStore parity).
 func (s *PostgresStore) SearchEpisodesByFile(ctx context.Context, projectID, file string) ([]*Episode, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return []*Episode{}, nil
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+episodeColumns+` FROM episodes
 		  WHERE project_id = $1::uuid
