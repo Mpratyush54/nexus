@@ -6,6 +6,7 @@ package server
 // covered there; these tests pin the HTTP contract.
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"strings"
@@ -93,7 +94,11 @@ func TestSearchMemoryHandlerVectorPath(t *testing.T) {
 }
 
 func TestSearchMemoryHandlerVectorUnsupportedStore400(t *testing.T) {
-	s := newTestServer() // MemStore: text only
+	// Store interface without SearchMemoryVector (issue #37): MemStore now
+	// implements vector search (#165), so wrap behind the narrow Store
+	// interface so the method is not promoted.
+	s := NewServer(struct{ store.Store }{Store: store.NewMemStore()})
+	s.Log.SetOutput(&bytes.Buffer{})
 	tok := loginAs(t, s, "alice")
 	projectID := resolveTestProject(t, s, tok, "vec-unsupported-proj")
 	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&embedding=["+vec1536Raw()+"]", tok, nil)
