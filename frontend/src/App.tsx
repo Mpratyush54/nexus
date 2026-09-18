@@ -1,11 +1,13 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from '@/components/AppShell'
+import { AgentsPage } from '@/pages/AgentsPage'
 import { LandingPage } from '@/pages/LandingPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { MemoryPage } from '@/pages/MemoryPage'
 import { PlaceholderPage } from '@/pages/PlaceholderPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { SignupPage } from '@/pages/SignupPage'
+import { TeamPage } from '@/pages/TeamPage'
 import { AppProviders } from '@/providers/AppProviders'
 import { GuestRoute, ProtectedRoute } from '@/routes/guards'
 
@@ -25,26 +27,8 @@ export default function App() {
             <Route path="/app" element={<AppShell />}>
               <Route index element={<Navigate to="memory" replace />} />
               <Route path="memory" element={<MemoryPage />} />
-              <Route
-                path="agents"
-                element={
-                  <PlaceholderPage
-                    title="Agents"
-                    blurb="Live MCP call log, connection HUD, and permission matrix."
-                    tone="teal"
-                  />
-                }
-              />
-              <Route
-                path="team"
-                element={
-                  <PlaceholderPage
-                    title="Team"
-                    blurb="Members, roles, presence dots, and GitHub collaborator import."
-                    tone="accent"
-                  />
-                }
-              />
+              <Route path="agents" element={<AgentsPage />} />
+              <Route path="team" element={<TeamPage />} />
               <Route
                 path="branches"
                 element={

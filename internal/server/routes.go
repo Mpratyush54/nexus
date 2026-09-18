@@ -52,7 +52,8 @@ type memberRequest struct {
 	UserID string `json:"user_id"`
 }
 
-// handleMemberList returns explicit grant user IDs (creator is implicit).
+// handleMemberList returns explicit grant user IDs with roles (creator is
+// included as OWNER when RoleStore is available).
 func (s *Server) handleMemberList(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	if !s.authorizeProject(w, r, id) {
@@ -63,7 +64,40 @@ func (s *Server) handleMemberList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not list members: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": members, "count": len(members)})
+	type memberRow struct {
+		UserID string `json:"user_id"`
+		Role   string `json:"role,omitempty"`
+	}
+	rows := make([]memberRow, 0, len(members)+1)
+	seen := map[string]bool{}
+	rs, hasRoles := s.roleStore()
+
+	// Include project creator as OWNER when known.
+	if proj, perr := s.Store.GetProject(r.Context(), id); perr == nil && proj != nil && proj.CreatedBy != "" {
+		role := store.RoleOwner
+		if hasRoles {
+			if rname, rerr := rs.GetMemberRole(r.Context(), proj.CreatedBy, id); rerr == nil {
+				role = rname
+			}
+		}
+		rows = append(rows, memberRow{UserID: proj.CreatedBy, Role: role})
+		seen[proj.CreatedBy] = true
+	}
+
+	for _, uid := range members {
+		if seen[uid] {
+			continue
+		}
+		row := memberRow{UserID: uid}
+		if hasRoles {
+			if rname, rerr := rs.GetMemberRole(r.Context(), uid, id); rerr == nil {
+				row.Role = rname
+			}
+		}
+		rows = append(rows, row)
+		seen[uid] = true
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": rows, "count": len(rows)})
 }
 
 // handleMemberGrant adds a member. Requires member:invite (issue #163);
