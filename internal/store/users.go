@@ -159,6 +159,89 @@ func (s *UserStore) SetPasswordHash(ctx context.Context, id, hash string) error 
 	return nil
 }
 
+// GetPasswordHashByID returns the stored password hash for a user id.
+func (s *UserStore) GetPasswordHashByID(ctx context.Context, id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", errors.New("store: user id is required")
+	}
+	var hash *string
+	if err := s.db.QueryRow(ctx,
+		`SELECT password_hash FROM users WHERE id = $1`, id).Scan(&hash); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", fmt.Errorf("store: user %s: %w", id, ErrNotFound)
+		}
+		return "", fmt.Errorf("store: get password hash by id: %w", err)
+	}
+	if hash == nil {
+		return "", nil
+	}
+	return *hash, nil
+}
+
+// UpdateProfile updates optional email and/or settings for a user.
+// Empty email clears the column (NULL). Pass settings="" to leave settings unchanged.
+func (s *UserStore) UpdateProfile(ctx context.Context, id string, email *string, settings *string) (*User, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, errors.New("store: user id is required")
+	}
+	if email == nil && settings == nil {
+		return s.GetByID(ctx, id)
+	}
+
+	setParts := make([]string, 0, 2)
+	args := []any{id}
+	argN := 2
+	if email != nil {
+		setParts = append(setParts, fmt.Sprintf("email = $%d", argN))
+		args = append(args, nullText(strings.TrimSpace(*email)))
+		argN++
+	}
+	if settings != nil {
+		setParts = append(setParts, fmt.Sprintf("settings = $%d::JSONB", argN))
+		args = append(args, normalizeSettings(*settings))
+		argN++
+	}
+
+	q := `UPDATE users SET ` + strings.Join(setParts, ", ") + ` WHERE id = $1 RETURNING ` + userColumns
+	u, err := scanUser(s.db.QueryRow(ctx, q, args...))
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("store: user %s: %w", id, ErrNotFound)
+		}
+		return nil, fmt.Errorf("store: update user profile: %w", err)
+	}
+	return u, nil
+}
+
+// UsageStats aggregates per-user activity counters for GET /users/me/usage.
+type UsageStats struct {
+	MemoriesCreated int64 `json:"memories_created"`
+	EpisodesCreated int64 `json:"episodes_created"`
+	RequestsApprox  int64 `json:"requests_approx"`
+}
+
+// GetUsage returns simple aggregate counts for a user.
+func (s *UserStore) GetUsage(ctx context.Context, userID string) (*UsageStats, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, errors.New("store: user id is required")
+	}
+	var stats UsageStats
+	err := s.db.QueryRow(ctx, `
+		SELECT
+		  (SELECT COUNT(*) FROM memory_items WHERE proposed_by::TEXT = $1 OR user_id::TEXT = $1),
+		  (SELECT COUNT(*) FROM episodes WHERE created_by::TEXT = $1)
+	`, userID).Scan(&stats.MemoriesCreated, &stats.EpisodesCreated)
+	if err != nil {
+		return nil, fmt.Errorf("store: user usage: %w", err)
+	}
+	// No request counter table yet — approximate as memory+episode writes.
+	stats.RequestsApprox = stats.MemoriesCreated + stats.EpisodesCreated
+	return &stats, nil
+}
+
 // GetPasswordHash returns the user id + stored hash for login verification.
 // Empty hash means no password set (login must 401, never accept).
 func (s *UserStore) GetPasswordHash(ctx context.Context, username string) (string, string, error) {

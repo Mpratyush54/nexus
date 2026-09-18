@@ -57,6 +57,12 @@ type Server struct {
 	// production; tests wire fakes.
 	Users UserLookup
 
+	// Accounts is the full user store for signup/profile/usage (issue #161).
+	Accounts *store.UserStore
+
+	// Tokens is the API token store for mint/list/revoke (issue #161).
+	Tokens *store.APITokenStore
+
 	// checkouts tracks active branch per project (issue #104): checkout
 	// mutates this map, never just echoes the resolved branch.
 	checkoutMu sync.Mutex
@@ -132,9 +138,9 @@ func (s *Server) authorizeProject(w http.ResponseWriter, r *http.Request, projec
 	return true
 }
 
-// Handler returns the request-logging middleware chain around the mux.
+// Handler returns the CORS + request-logging middleware chain around the mux.
 func (s *Server) Handler() http.Handler {
-	return s.withLogging(s.Mux)
+	return s.withCORS(s.withLogging(s.Mux))
 }
 
 // ServeHTTP implements http.Handler so *Server can be passed to http.Serve directly.
@@ -230,16 +236,16 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 	})
 }
 
-// requireAuth enforces the JWT stub on protected routes. /auth/login and
-// /healthz are registered without this wrapper. On failure it returns 401
-// with the standard error envelope.
+// requireAuth enforces JWT or API-token auth on protected routes. /auth/login,
+// /auth/signup, and /healthz are registered without this wrapper.
 //
 // Identity (issue #140): X-Auth-Subject carries the canonical user UUID
 // (login mints sub=users.id) for Postgres UUID columns; X-Auth-User
-// carries the display username for logs and UI.
+// carries the display username for logs and UI. X-Auth-Token-ID is set for
+// opaque API tokens so WS clients can be dropped on revoke (issue #161).
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sub, username, err := s.Auth.bearerIdentity(r.Header.Get("Authorization"))
+		id, err := s.resolveBearer(r)
 		if err != nil {
 			if err == ErrExpiredToken {
 				writeError(w, http.StatusUnauthorized, "token expired")
@@ -248,8 +254,97 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			writeError(w, http.StatusUnauthorized, "missing or invalid bearer token")
 			return
 		}
-		r.Header.Set("X-Auth-Subject", sub)
-		r.Header.Set("X-Auth-User", username)
+		r.Header.Set("X-Auth-Subject", id.Sub)
+		r.Header.Set("X-Auth-User", id.Username)
+		if id.TokenID != "" {
+			r.Header.Set("X-Auth-Token-ID", id.TokenID)
+		}
 		next(w, r)
 	}
+}
+
+type resolvedAuth struct {
+	Sub      string
+	Username string
+	TokenID  string
+}
+
+func (s *Server) resolveBearer(r *http.Request) (resolvedAuth, error) {
+	header := r.Header.Get("Authorization")
+	if header == "" {
+		return resolvedAuth{}, ErrInvalidToken
+	}
+	const prefix = "Bearer "
+	if !strings.HasPrefix(header, prefix) {
+		return resolvedAuth{}, ErrInvalidToken
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(header, prefix))
+	if token == "" {
+		return resolvedAuth{}, ErrInvalidToken
+	}
+	if strings.HasPrefix(token, "nxs_") {
+		return s.resolveAPIToken(r, token)
+	}
+	sub, username, err := s.Auth.ValidateClaims(token)
+	if err != nil {
+		return resolvedAuth{}, err
+	}
+	return resolvedAuth{Sub: sub, Username: username}, nil
+}
+
+func (s *Server) resolveAPIToken(r *http.Request, raw string) (resolvedAuth, error) {
+	if s.Tokens == nil {
+		return resolvedAuth{}, ErrInvalidToken
+	}
+	tok, err := s.Tokens.LookupActiveByHash(r.Context(), hashAPITokenSecret(raw))
+	if err != nil {
+		return resolvedAuth{}, ErrInvalidToken
+	}
+	username := ""
+	if s.Accounts != nil {
+		if u, uerr := s.Accounts.GetByID(r.Context(), tok.UserID); uerr == nil && u != nil {
+			username = u.Username
+		}
+	}
+	_ = s.Tokens.TouchLastUsed(r.Context(), tok.ID)
+	return resolvedAuth{Sub: tok.UserID, Username: username, TokenID: tok.ID}, nil
+}
+
+// corsAllowedOrigins lists browser origins allowed to call the API.
+func corsAllowedOrigins() map[string]bool {
+	allowed := map[string]bool{
+		"https://nexus.pratyushes.dev": true,
+		"http://localhost:5173":        true,
+		"http://127.0.0.1:5173":        true,
+		"http://localhost:4173":        true,
+		"http://127.0.0.1:4173":        true,
+	}
+	if extra := strings.TrimSpace(os.Getenv("CORS_ORIGINS")); extra != "" {
+		for _, o := range strings.Split(extra, ",") {
+			o = strings.TrimSpace(o)
+			if o != "" {
+				allowed[o] = true
+			}
+		}
+	}
+	return allowed
+}
+
+func (s *Server) withCORS(next http.Handler) http.Handler {
+	allowed := corsAllowedOrigins()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" && allowed[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+		}
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }

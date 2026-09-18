@@ -94,6 +94,7 @@ const TypingTTL = 6 * time.Second
 type Client struct {
 	ID        string
 	UserID    string
+	TokenID   string // api token id when auth was via nxs_*; empty for JWT sessions
 	ProjectID string
 	SessionID string
 
@@ -245,6 +246,31 @@ func (h *Hub) Remove(id string) {
 			close(c.Send)
 		}()
 	}
+}
+
+// DropByToken forcibly disconnects every client bound to an API token id
+// (issue #161 instant revoke). Returns how many sockets were dropped.
+func (h *Hub) DropByToken(tokenID string) int {
+	tokenID = strings.TrimSpace(tokenID)
+	if tokenID == "" || h == nil {
+		return 0
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	n := 0
+	for id, c := range h.clients {
+		if c.TokenID != tokenID {
+			continue
+		}
+		delete(h.clients, id)
+		c.markClosed()
+		func() {
+			defer func() { _ = recover() }()
+			close(c.Send)
+		}()
+		n++
+	}
+	return n
 }
 
 // ClientCount reports the number of connected clients.
@@ -554,7 +580,10 @@ func (s *Server) serveWS(h *Hub) http.HandlerFunc {
 		if authHeader == "" && token != "" {
 			authHeader = "Bearer " + token
 		}
-		sub, err := s.Auth.bearerSubject(authHeader)
+		// Reuse resolveBearer so API tokens (nxs_*) work on WS too.
+		req := r.Clone(r.Context())
+		req.Header.Set("Authorization", authHeader)
+		id, err := s.resolveBearer(req)
 		if err != nil {
 			if err == ErrExpiredToken {
 				writeError(w, http.StatusUnauthorized, "token expired")
@@ -566,10 +595,15 @@ func (s *Server) serveWS(h *Hub) http.HandlerFunc {
 		conn, rw, err := upgradeToWebSocket(w, r)
 		if err != nil {
 			// upgradeToWebSocket already wrote the failure status.
-			s.Log.Printf("ws upgrade failed for %q: %v", sub, err)
+			s.Log.Printf("ws upgrade failed for %q: %v", id.Sub, err)
 			return
 		}
-		c := &Client{ID: newWSClientID(), UserID: sub, Send: make(chan []byte, SendBufferSize)}
+		c := &Client{
+			ID:      newWSClientID(),
+			UserID:  id.Sub,
+			TokenID: id.TokenID,
+			Send:    make(chan []byte, SendBufferSize),
+		}
 		h.Add(c)
 		defer func() {
 			h.Remove(c.ID)

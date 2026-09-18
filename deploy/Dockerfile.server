@@ -22,16 +22,14 @@ COPY --from=build /out/central-server /usr/local/bin/central-server
 # Forward-only migrations only. Down-migrations are destructive and must
 # never ship in the prod image (issue #128).
 COPY --from=build /src/migrations/*.up.sql /migrations/
-COPY --from=build /src/web/ /web/
 COPY deploy/migrate.sh /usr/local/bin/migrate.sh
-RUN chown -R 10001:10001 /migrations /web \
+RUN chown -R 10001:10001 /migrations \
   && chmod +x /usr/local/bin/migrate.sh \
   && chmod 444 /migrations/*.up.sql
 USER 10001
 EXPOSE 8080
 ENV PORT=8080 \
-    MIGRATIONS_DIR=/migrations \
-    WEB_DIR=/web
+    MIGRATIONS_DIR=/migrations
 # Liveness only; readiness (/readyz, DB+sslmode gate) is the ECS check.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=60s \
   CMD wget -qO- http://localhost:8080/healthz | grep -q '"ok":true'
