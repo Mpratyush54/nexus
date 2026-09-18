@@ -2,10 +2,24 @@ package main
 
 import (
 	"testing"
+
+	"central-memory/internal/config"
 )
 
 // Audit coverage for cmd/daemon/main.go flag validation. run() binds a
 // listener and blocks on success, so only failing paths are tested here.
+
+func TestAuditDefaultServerURL(t *testing.T) {
+	t.Setenv("CENTRAL_SERVER_URL", "")
+	t.Setenv("NEXUS_SERVER", "")
+	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", t.TempDir())
+	if defaultServerURL == "" {
+		t.Fatal("defaultServerURL must be non-empty for ldflags override")
+	}
+	if got := config.ResolveServerURL(defaultServerURL); got != defaultServerURL {
+		t.Fatalf("ResolveServerURL = %q want %q", got, defaultServerURL)
+	}
+}
 
 func TestAuditDaemonInvalidPort(t *testing.T) {
 	for _, args := range [][]string{
