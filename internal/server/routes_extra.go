@@ -65,6 +65,9 @@ func (s *Server) registerExtraRoutes() {
 	s.Mux.HandleFunc("POST /memory/{id}/reject", s.requireAuth(s.handleMemoryReject))
 	s.Mux.HandleFunc("POST /memory/{id}/promote", s.requireAuth(s.handleMemoryPromote))
 
+	// Phase 2 memory editing + version history (issue #162).
+	s.registerMemoryEditRoutes()
+
 	// Episodes.
 	s.Mux.HandleFunc("POST /episodes/{id}/resolve", s.requireAuth(s.handleEpisodeResolve))
 }

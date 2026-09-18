@@ -22,11 +22,23 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"central-memory/internal/config"
 	memctx "central-memory/internal/context"
 	"central-memory/internal/mcp"
 	"central-memory/internal/project"
 	"central-memory/internal/store"
 )
+
+// defaultServerURL is the compile-time ServerURL fallback (Phase 9 / issue #169).
+// Override at build time:
+//
+//	go build -ldflags "-X main.defaultServerURL=https://api-nexus.pratyushes.dev" ./cmd/mem
+var defaultServerURL = "https://api-nexus.pratyushes.dev"
+
+// resolveServerURL applies tiers 2–4 of the ServerURL cascade for mem.
+func resolveServerURL() string {
+	return config.ResolveServerURL(defaultServerURL)
+}
 
 type mcpStore struct {
 	mem *store.MemStore

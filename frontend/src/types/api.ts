@@ -45,6 +45,31 @@ export type MemoryItem = {
   updated_at: string
 }
 
+/** Partial update body for PUT /memory/{id}. */
+export type MemoryUpdatePayload = {
+  key?: string
+  content?: string
+  tags?: string[]
+  level?: string
+  scope?: string
+  context_snippet?: string
+}
+
+export type MemoryVersion = {
+  id?: string | number
+  memory_id?: string
+  version: number
+  key: string
+  content: string
+  tags?: string[]
+  level?: string
+  scope?: string
+  edited_by?: string
+  created_at: string
+}
+
+export type MemoryShareVisibility = 'private' | 'shared' | 'project' | 'public'
+
 export type ListResponse<T> = {
   items: T[]
   count: number

@@ -24,6 +24,24 @@ func TestAuditGlobalArgsShorthand(t *testing.T) {
 	}
 }
 
+func TestAuditDefaultServerURLCascade(t *testing.T) {
+	t.Setenv("CENTRAL_SERVER_URL", "")
+	t.Setenv("NEXUS_SERVER", "")
+	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", t.TempDir())
+	if defaultServerURL == "" {
+		t.Fatal("defaultServerURL must be non-empty for ldflags override")
+	}
+	cfg := defaultConfig()
+	if cfg.ServerURL != defaultServerURL {
+		t.Fatalf("defaultConfig.ServerURL = %q want %q", cfg.ServerURL, defaultServerURL)
+	}
+	t.Setenv("NEXUS_SERVER", "https://from-env.example")
+	cfg = defaultConfig()
+	if cfg.ServerURL != "https://from-env.example" {
+		t.Fatalf("env cascade: got %q", cfg.ServerURL)
+	}
+}
+
 func TestAuditStatusParseRejectsPositionals(t *testing.T) {
 	if _, err := parseStatusArgs([]string{"extra"}); err == nil {
 		t.Error("status with positional must fail")
