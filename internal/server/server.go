@@ -19,6 +19,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"central-memory/internal/store"
@@ -38,18 +39,63 @@ type Server struct {
 	Mux   *http.ServeMux
 	Auth  *Authenticator
 	Log   *log.Logger
+
+	// Ingest rate-limit gates (issues #93/#100). Lazily initialized so
+	// zero-value Servers in tests still enforce defaults.
+	events *rateGate
+	fileop *rateGate
+	quota  *quotaGate
+
+	// checkouts tracks active branch per project (issue #104): checkout
+	// mutates this map, never just echoes the resolved branch.
+	checkoutMu sync.Mutex
+	checkouts  map[string]string
+
+	// steer manager + hub for steering routes/WS (issue #42).
+	// Set via AttachSteering; nil means steering routes 501.
+	steerMu sync.RWMutex
+	steer   steerManager
+	hub     *Hub
+
+	// handoffs stores in-flight handoff packages (issue #82).
+	handoffMu sync.Mutex
+	handoffs  map[string]*handoffRecord
 }
 
 // NewServer wires routes onto a fresh stdlib ServeMux.
 func NewServer(st store.Store) *Server {
 	s := &Server{
-		Store: st,
-		Mux:   http.NewServeMux(),
-		Auth:  NewAuthenticatorFromEnv(),
-		Log:   log.New(os.Stderr, "[central-server] ", log.LstdFlags),
+		Store:     st,
+		Mux:       http.NewServeMux(),
+		Auth:      NewAuthenticatorFromEnv(),
+		Log:       log.New(os.Stderr, "[central-server] ", log.LstdFlags),
+		events:    newRateGate(100, 100),
+		fileop:    newRateGate(50, 50),
+		quota:     newQuotaGate(),
+		checkouts: make(map[string]string),
+		handoffs:  make(map[string]*handoffRecord),
 	}
 	s.registerRoutes()
 	return s
+}
+
+// eventAllowed enforces the 100 events/s gate before expensive ingest work.
+func (s *Server) eventAllowed(scope string) bool {
+	if s.events == nil {
+		s.events = newRateGate(100, 100)
+	}
+	if scope == "" {
+		scope = "global"
+	}
+	return s.events.allow(scope)
+}
+
+// quotaAllowed enforces governance token quotas on ingest content.
+func (s *Server) quotaAllowed(chars int) (bool, string) {
+	if s.quota == nil {
+		s.quota = newQuotaGate()
+	}
+	return s.quota.allowN(estimateIngestTokens(chars))
 }
 
 // Handler returns the request-logging middleware chain around the mux.

@@ -6,7 +6,7 @@ package store
 // Master (db.go/models.go/memory.go) uses raw strings ("PROPOSED",
 // "project", ...) with no exported constants. Defining them here is purely
 // additive: no master file is touched, values transcribe the
-// migrations/001 CHECK constraints exactly.
+// migrations/001 CHECK constraints exactly (plus 'ephemeral' from 009).
 const (
 	StatusProposed   = "PROPOSED"
 	StatusConfirmed  = "CONFIRMED"
@@ -19,6 +19,9 @@ const (
 	LevelProject      = "project"
 	LevelPersonal     = "personal"
 	LevelSession      = "session"
+	// LevelEphemeral lives in validation.go (canonical 5th-tier const);
+	// it wins every override contest (see context.LevelRank) and is never
+	// emitted by heuristic classification — producers assign it explicitly.
 )
 
 // FormatEmbedding renders a vector for an embedding parameter. It wraps

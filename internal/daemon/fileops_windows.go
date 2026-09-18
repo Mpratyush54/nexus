@@ -4,10 +4,19 @@ package daemon
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"syscall"
 	"unsafe"
 )
+
+// openNoFollowPlatform is the Windows fallback: no O_NOFOLLOW flag exists,
+// so open normally — verifyOpenedFile's Lstat-symlink + SameFile +
+// GetFinalPathNameByHandle containment checks still close the TOCTOU window
+// (junction/reparse-point safe via resolveExisting).
+func openNoFollowPlatform(path string) (*os.File, error) {
+	return os.Open(path)
+}
 
 var (
 	modKernel32                   = syscall.NewLazyDLL("kernel32.dll")

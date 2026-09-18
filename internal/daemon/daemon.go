@@ -20,12 +20,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"central-memory/internal/security"
+	"central-memory/internal/steering"
 )
 
 // HeartbeatInterval is the daemon -> server heartbeat period (30s).
@@ -66,6 +70,10 @@ type Daemon struct {
 	// Nil-safe: emission helpers no-op when it is nil; use SetEventSink to
 	// attach a downstream sink (tests, server client wiring).
 	Interceptor *Interceptor
+	// SteerMgr is the optional steering gate (issue #80, daemon side only).
+	// Nil means ungated (local-only mode, tests). When set, file/command
+	// handlers call GateBeforeToolCall before executing.
+	SteerMgr *steering.InterruptManager
 	// lastHEAD is the last observed HEAD SHA for the GIT_COMMITTED
 	// HEAD-change detector (see checkGitCommit). Guarded by mu. Issue #32.
 	lastHEAD string
@@ -75,6 +83,12 @@ type Daemon struct {
 
 	client *http.Client
 	mu     sync.Mutex
+
+	// eventLimiter guards event-emitting paths (100 events/s, issue #93).
+	// fileOpsLimiter guards file/command handlers (50 file-ops/s).
+	// Lax when nil (zero-value Daemons in tests); NewDaemon installs both.
+	eventLimiter   *security.Limiter
+	fileOpsLimiter *security.Limiter
 }
 
 // NewDaemon builds a daemon bound to root, authenticated by token.
@@ -108,11 +122,13 @@ func NewDaemon(root, token string) (*Daemon, error) {
 		machine = "unknown"
 	}
 	d := &Daemon{
-		Root:        abs,
-		Token:       token,
-		MachineID:   machine,
-		Interceptor: NewInterceptor(0, nil),
-		client:      &http.Client{Timeout: 15 * time.Second},
+		Root:           abs,
+		Token:          token,
+		MachineID:      machine,
+		Interceptor:    NewInterceptor(0, nil),
+		client:         &http.Client{Timeout: 15 * time.Second},
+		eventLimiter:   security.NewEventLimiter(),
+		fileOpsLimiter: security.NewFileOpsLimiter(),
 	}
 	// Best-effort: pick up a workspace ID persisted by a previous run so a
 	// restarted daemon can heartbeat without re-registering. Issue #31.
@@ -132,6 +148,7 @@ func NewDaemon(root, token string) (*Daemon, error) {
 	d.mux.HandleFunc("/git/diff", d.requireAuth(d.handleGitDiff))
 	d.mux.HandleFunc("/git/log", d.requireAuth(d.handleGitLog))
 	d.mux.HandleFunc("/command/run", d.requireAuth(d.handleCommandRun))
+	d.mux.HandleFunc("/metrics", d.requireAuth(d.handleMetrics))
 	return d, nil
 }
 
@@ -160,6 +177,72 @@ func (d *Daemon) emit(ev ToolEvent) {
 		return
 	}
 	d.Interceptor.emitTry(ev)
+}
+
+// Dropped reports Layer-1 events shed under backpressure (issue #99/#115):
+// interceptor queue drops (no sink or full) plus ChanEmitter downstream
+// drops are not visible here; the interceptor count is the source of truth.
+// Nil-safe: a nil daemon or interceptor reports 0.
+func (d *Daemon) Dropped() int64 {
+	if d == nil || d.Interceptor == nil {
+		return 0
+	}
+	return d.Interceptor.Dropped()
+}
+
+// handleMetrics exposes the Layer-1 drop counter (issue #99): GET /metrics
+// returns {"dropped": N} so operators can scrape interceptor backpressure.
+func (d *Daemon) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"dropped": d.Dropped()})
+}
+
+// allowEvent enforces the 100 events/s limiter (issue #93). Nil limiter is
+// lax (zero-value Daemons); otherwise a false Allow means 429.
+func (d *Daemon) allowEvent() bool {
+	if d == nil || d.eventLimiter == nil {
+		return true
+	}
+	return d.eventLimiter.Allow()
+}
+
+// allowFileOp enforces the 50 file-ops/s limiter (issue #93).
+func (d *Daemon) allowFileOp() bool {
+	if d == nil || d.fileOpsLimiter == nil {
+		return true
+	}
+	return d.fileOpsLimiter.Allow()
+}
+
+// gateTool invokes the steering gate hook (issue #80, daemon side only).
+// It returns hold/prompt per GateBeforeToolCall; a nil manager or nil
+// daemon is a pass-through (false, nil). When hold is true the caller must
+// wait on SteerMgr.Done(runID) before executing; when prompt != nil it must
+// be injected with priority before the tool call.
+func (d *Daemon) gateTool(runID string) (bool, *steering.SteerPrompt) {
+	if d == nil || d.SteerMgr == nil {
+		return false, nil
+	}
+	return GateBeforeToolCall(d.SteerMgr, runID)
+}
+
+// gateRunID extracts the optional run_id for steering gating from the
+// request: JSON body field "run_id" when present, else "" (ungated).
+func gateRunIDFromBody(body []byte) string {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return ""
+	}
+	if s, ok := m["run_id"].(string); ok {
+		return strings.TrimSpace(s)
+	}
+	if s, ok := m["runId"].(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return ""
 }
 
 // checkGitCommit is the HEAD-change detector feeding GIT_COMMITTED
@@ -194,18 +277,24 @@ func (d *Daemon) checkGitCommit() {
 // Start serves the daemon on addr (e.g. "127.0.0.1:0" is rejected — pass an
 // explicit port). It blocks until the server stops.
 func (d *Daemon) Start(addr string) error {
+	d.mu.Lock()
 	d.srv = &http.Server{Addr: addr, Handler: d.mux}
-	return d.srv.ListenAndServe()
+	srv := d.srv
+	d.mu.Unlock()
+	return srv.ListenAndServe()
 }
 
 // Close gracefully stops a started daemon.
 func (d *Daemon) Close() error {
-	if d.srv == nil {
+	d.mu.Lock()
+	srv := d.srv
+	d.mu.Unlock()
+	if srv == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return d.srv.Shutdown(ctx)
+	return srv.Shutdown(ctx)
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +495,31 @@ func (d *Daemon) DaemonURL() string {
 	return "http://" + strings.TrimSpace(d.srv.Addr)
 }
 
+// AdvertisedDaemonURL returns the URL safe to persist to the server
+// (issue #118): loopback-bound daemons (127.0.0.1/::1/localhost) are not
+// dialable from other hosts, so "" is returned instead of an undialable
+// loopback URL. DaemonURL itself is preserved for backward compatibility;
+// Register uses this helper.
+func (d *Daemon) AdvertisedDaemonURL() string {
+	raw := d.DaemonURL()
+	if raw == "" {
+		return ""
+	}
+	host := strings.TrimPrefix(strings.TrimPrefix(raw, "http://"), "https://")
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	h := strings.ToLower(strings.Trim(strings.Trim(host, "[]"), " "))
+	switch h {
+	case "127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1":
+		return ""
+	}
+	if strings.HasPrefix(h, "127.") {
+		return ""
+	}
+	return raw
+}
+
 // registerRequest mirrors store.Workspace JSON for registration. Field names
 // must stay in sync with the server decoder (unknown fields are rejected).
 type registerRequest struct {
@@ -530,7 +644,7 @@ func (d *Daemon) Register(ctx context.Context, serverURL string) error {
 		Branch:    branch,
 		CommitSHA: commit,
 		IsDirty:   dirty,
-		DaemonURL: d.DaemonURL(),
+		DaemonURL: d.AdvertisedDaemonURL(),
 	}, &out); err != nil {
 		return err
 	}
@@ -580,9 +694,31 @@ func heartbeatBackoff(failures int) time.Duration {
 	return backoff
 }
 
-// StartHeartbeat POSTs heartbeat snapshots every interval until ctx ends.
-// The first beat fires immediately; failures are logged (previously
-// swallowed) and retried with exponential backoff while they persist.
+// isNotFoundHeartbeat reports whether err means the server has no such
+// workspace (404 or "register first"): the daemon must re-register.
+func isNotFoundHeartbeat(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "404") || strings.Contains(s, "not found") ||
+		strings.Contains(s, "register first")
+}
+
+// clearWorkspaceID drops the cached workspace ID (memory only; the file is
+// left for diagnostics) so the next beat re-registers.
+func (d *Daemon) clearWorkspaceID() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.WorkspaceID = ""
+}
+
+// StartHeartbeat runs the resilient lifecycle state machine (issue #106):
+// UNREGISTERED -> REGISTERING -> HEARTBEATING -> RECONNECTING. The first
+// beat fires immediately; heartbeat failures back off exponentially
+// (heartbeatBackoff applied to the actual sleep, not just logged); a
+// missing workspace ID or a 404 heartbeat triggers re-Register until it
+// succeeds.
 func (d *Daemon) StartHeartbeat(ctx context.Context, serverURL string, interval time.Duration) {
 	if interval <= 0 {
 		interval = HeartbeatInterval
@@ -598,19 +734,43 @@ func (d *Daemon) StartHeartbeat(ctx context.Context, serverURL string, interval 
 	}
 	failures := 0
 	beat := func() {
+		// UNREGISTERED/RECONNECTING: no workspace ID means register first.
+		if d.getWorkspaceID() == "" {
+			if base == "" {
+				return
+			}
+			if err := d.Register(ctx, base); err != nil {
+				failures++
+				log.Printf("daemon: register: %v (retry in %s)", err, heartbeatBackoff(failures))
+				return
+			}
+			failures = 0
+			return
+		}
 		if err := d.HeartbeatOnce(ctx, base); err != nil {
 			failures++
 			log.Printf("daemon: heartbeat: %v (retry in %s)", err, heartbeatBackoff(failures))
+			if isNotFoundHeartbeat(err) {
+				// Server lost the workspace (restart/404): drop the ID so
+				// the next beat re-registers instead of 404-looping.
+				d.clearWorkspaceID()
+			}
 		} else {
 			failures = 0
 		}
 	}
 	beat()
-	t := time.NewTicker(interval)
-	defer t.Stop()
 	for {
+		// Apply actual backoff to the sleep (issue #106): the timer is
+		// interval normally, heartbeatBackoff(failures) while failing.
+		wait := interval
+		if failures > 0 {
+			wait = heartbeatBackoff(failures)
+		}
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			return
 		case <-t.C:
 			beat()
@@ -623,12 +783,17 @@ func (d *Daemon) StartHeartbeat(ctx context.Context, serverURL string, interval 
 // ---------------------------------------------------------------------------
 
 type fileReadReq struct {
-	Path string `json:"path"`
+	Path  string `json:"path"`
+	RunID string `json:"run_id"`
 }
 
 func (d *Daemon) handleFileRead(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !d.allowFileOp() {
+		writeErr(w, http.StatusTooManyRequests, security.ErrRateLimited.Error())
 		return
 	}
 	var req fileReadReq
@@ -639,14 +804,31 @@ func (d *Daemon) handleFileRead(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "path is required")
 		return
 	}
+	// Issue #80 (daemon side): steering gate before tool effects.
+	if hold, prompt := d.gateTool(req.RunID); hold || prompt != nil {
+		if prompt != nil {
+			log.Printf("daemon: steer prompt for run %q: %s", req.RunID, prompt.Prompt)
+		}
+		if hold {
+			if !waitForResume(r.Context(), d.SteerMgr, req.RunID) {
+				writeErr(w, http.StatusLocked, "tool call held for steering resume")
+				return
+			}
+		}
+	}
 	data, err := ReadFile(d.Root, req.Path)
 	if err != nil {
 		writeFileErr(w, err)
 		return
 	}
-	// Issue #32: passive FILE_READ event (secret-screened in normalize).
-	if d.Interceptor != nil {
-		d.Interceptor.LogFileRead(req.Path, int64(len(data)), string(data))
+	// Issue #32/#99/#118: passive FILE_READ event with bounded preview
+	// (first MaxPreviewBytes only, so the interceptor never copies 1MB).
+	if d.Interceptor != nil && d.allowEvent() {
+		n := len(data)
+		if n > MaxPreviewBytes {
+			n = MaxPreviewBytes
+		}
+		d.Interceptor.LogFileRead(req.Path, int64(len(data)), string(data[:n]))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"path":    req.Path,
@@ -658,11 +840,16 @@ func (d *Daemon) handleFileRead(w http.ResponseWriter, r *http.Request) {
 type fileWriteReq struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
+	RunID   string `json:"run_id"`
 }
 
 func (d *Daemon) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !d.allowFileOp() {
+		writeErr(w, http.StatusTooManyRequests, security.ErrRateLimited.Error())
 		return
 	}
 	var req fileWriteReq
@@ -673,6 +860,18 @@ func (d *Daemon) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "path is required")
 		return
 	}
+	// Issue #80 (daemon side): steering gate before tool effects.
+	if hold, prompt := d.gateTool(req.RunID); hold || prompt != nil {
+		if prompt != nil {
+			log.Printf("daemon: steer prompt for run %q: %s", req.RunID, prompt.Prompt)
+		}
+		if hold {
+			if !waitForResume(r.Context(), d.SteerMgr, req.RunID) {
+				writeErr(w, http.StatusLocked, "tool call held for steering resume")
+				return
+			}
+		}
+	}
 	// Best-effort snapshot for the FILE_MODIFIED diff (issue #32).
 	oldContent, _ := ReadFile(d.Root, req.Path)
 	if err := WriteFile(d.Root, req.Path, []byte(req.Content)); err != nil {
@@ -680,10 +879,34 @@ func (d *Daemon) handleFileWrite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Issue #32: passive FILE_MODIFIED event (secret-screened in normalize).
-	if d.Interceptor != nil {
+	if d.Interceptor != nil && d.allowEvent() {
 		d.Interceptor.LogFileModified(req.Path, string(oldContent), req.Content, int64(len(req.Content)))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": len(req.Content)})
+}
+
+// waitForResume blocks until the steering run resumes (Gate nil) or ctx
+// ends. It polls the gate so a Resume re-arms execution promptly.
+func waitForResume(ctx context.Context, mgr *steering.InterruptManager, runID string) bool {
+	if mgr == nil || strings.TrimSpace(runID) == "" {
+		return true
+	}
+	done := mgr.Done(runID)
+	if done == nil {
+		return true
+	}
+	t := time.NewTicker(50 * time.Millisecond)
+	defer t.Stop()
+	for {
+		if hold, _ := GateBeforeToolCall(mgr, runID); !hold {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-t.C:
+		}
+	}
 }
 
 // writeFileErr maps sandbox errors to HTTP statuses: traversal/secret -> 403,
@@ -714,10 +937,18 @@ func (d *Daemon) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if !d.allowFileOp() {
+		writeErr(w, http.StatusTooManyRequests, security.ErrRateLimited.Error())
+		return
+	}
 	branch, commit, dirty, porcelain, err := GitStatus(d.Root)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	// Issue #118: cap porcelain at 1MB like file reads.
+	if len(porcelain) > MaxFileBytes {
+		porcelain = porcelain[:MaxFileBytes] + "\n...[truncated]..."
 	}
 	// Issue #32: HEAD-change detector feeding GIT_COMMITTED.
 	d.checkGitCommit()
@@ -729,6 +960,10 @@ func (d *Daemon) handleGitStatus(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !d.allowFileOp() {
+		writeErr(w, http.StatusTooManyRequests, security.ErrRateLimited.Error())
 		return
 	}
 	ref := r.URL.Query().Get("ref")
@@ -752,9 +987,13 @@ func (d *Daemon) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Issue #118: truncate uncapped git output at 1MB.
+	if len(diff) > MaxFileBytes {
+		diff = diff[:MaxFileBytes] + "\n...[truncated]..."
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ref": ref, "diff": diff})
 	// Issue #32: passive GIT_DIFF_VIEWED event + HEAD-change detector.
-	if d.Interceptor != nil {
+	if d.Interceptor != nil && d.allowEvent() {
 		d.Interceptor.LogGitDiff(ref, diff, DiffStat(diff))
 	}
 	d.checkGitCommit()
@@ -763,6 +1002,10 @@ func (d *Daemon) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleGitLog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	if !d.allowFileOp() {
+		writeErr(w, http.StatusTooManyRequests, security.ErrRateLimited.Error())
 		return
 	}
 	n := 20
@@ -777,6 +1020,10 @@ func (d *Daemon) handleGitLog(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Issue #118: truncate uncapped git output at 1MB.
+	if len(out) > MaxFileBytes {
+		out = out[:MaxFileBytes] + "\n...[truncated]..."
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"log": out})
 }
 
@@ -789,10 +1036,15 @@ func (d *Daemon) handleCommandRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if !d.allowFileOp() {
+		writeErr(w, http.StatusTooManyRequests, security.ErrRateLimited.Error())
+		return
+	}
 	var req struct {
-		Cmd  string   `json:"cmd"`
-		Args []string `json:"args"`
-		Argv []string `json:"argv"`
+		Cmd   string   `json:"cmd"`
+		Args  []string `json:"args"`
+		Argv  []string `json:"argv"`
+		RunID string   `json:"run_id"`
 	}
 	if !decodeBody(w, r, &req) {
 		return
@@ -809,6 +1061,18 @@ func (d *Daemon) handleCommandRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, ErrNotAllowed.Error())
 		return
 	}
+	// Issue #80 (daemon side): steering gate before tool effects.
+	if hold, prompt := d.gateTool(req.RunID); hold || prompt != nil {
+		if prompt != nil {
+			log.Printf("daemon: steer prompt for run %q: %s", req.RunID, prompt.Prompt)
+		}
+		if hold {
+			if !waitForResume(r.Context(), d.SteerMgr, req.RunID) {
+				writeErr(w, http.StatusLocked, "tool call held for steering resume")
+				return
+			}
+		}
+	}
 	res, err := RunCommand(d.Root, argv)
 	if err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -820,7 +1084,7 @@ func (d *Daemon) handleCommandRun(w http.ResponseWriter, r *http.Request) {
 	}
 	// Issue #32: passive COMMAND_EXECUTED event (secret-screened in normalize).
 	// A `git` invocation may have moved HEAD: run the commit detector.
-	if d.Interceptor != nil {
+	if d.Interceptor != nil && d.allowEvent() {
 		d.Interceptor.LogCommand(res.Command, res.Args, res.ExitCode, res.Output)
 	}
 	if len(argv) > 0 && baseName(argv[0]) == "git" {

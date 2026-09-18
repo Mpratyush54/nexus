@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -134,7 +135,7 @@ func (s *MemStore) ResolveProject(ctx context.Context, canonicalURL, rootCommit,
 	if normURL != "" {
 		for _, p := range s.projects {
 			if NormalizeGitURL(p.CanonicalURL) == normURL {
-				return p, nil
+				return cloneProject(p), nil
 			}
 		}
 	}
@@ -143,16 +144,28 @@ func (s *MemStore) ResolveProject(ctx context.Context, canonicalURL, rootCommit,
 	if rootCommit != "" {
 		for _, p := range s.projects {
 			if p.RootCommit != "" && p.RootCommit == rootCommit {
-				return p, nil
+				return cloneProject(p), nil
 			}
 		}
 	}
 
-	// 3. Fallback to folder name
+	// 3. Fallback to folder name. Ambiguous by nature: first-registered
+	// wins (earliest CreatedAt, ID tie-break), matching the Postgres
+	// ORDER BY created_at ASC LIMIT 1 contract (issue #110). Holding the
+	// write lock across lookup+insert keeps concurrent first registration
+	// atomic in-process (issue #86); the Postgres path reconciles races
+	// via INSERT ... ON CONFLICT DO NOTHING + reselect.
+	var folderWinner *Project
 	for _, p := range s.projects {
 		if p.FolderName == folderName {
-			return p, nil
+			if folderWinner == nil || p.CreatedAt.Before(folderWinner.CreatedAt) ||
+				(p.CreatedAt.Equal(folderWinner.CreatedAt) && p.ID < folderWinner.ID) {
+				folderWinner = p
+			}
 		}
+	}
+	if folderWinner != nil {
+		return cloneProject(folderWinner), nil
 	}
 
 	// 4. Create new project if not resolved
@@ -170,7 +183,7 @@ func (s *MemStore) ResolveProject(ctx context.Context, canonicalURL, rootCommit,
 		CreatedAt:    time.Now().UTC(),
 	}
 	s.projects[id] = p
-	return p, nil
+	return cloneProject(p), nil
 }
 
 func (s *MemStore) GetProject(ctx context.Context, id string) (*Project, error) {
@@ -180,18 +193,56 @@ func (s *MemStore) GetProject(ctx context.Context, id string) (*Project, error) 
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return p, nil
+	return cloneProject(p), nil
 }
 
 func (s *MemStore) RegisterWorkspace(ctx context.Context, ws *Workspace) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if strings.TrimSpace(ws.ProjectID) == "" {
+		return errors.New("store: workspace project id is required")
+	}
+	if _, ok := s.projects[ws.ProjectID]; !ok {
+		return fmt.Errorf("store: workspace project %s: %w", ws.ProjectID, ErrNotFound)
+	}
+	if strings.TrimSpace(ws.MachineID) == "" || strings.TrimSpace(ws.Path) == "" {
+		return errors.New("store: workspace machine_id and path are required")
+	}
+	// Upsert on (machine_id, path) like Postgres ON CONFLICT (issue #87):
+	// re-registration refreshes only mutable liveness/git fields. Identity
+	// and ownership (project, user, designated-processor) are preserved so
+	// a caller that knows a machine/path cannot rebind the workspace to
+	// another project/user.
+	for _, existing := range s.workspaces {
+		if existing.MachineID == ws.MachineID && existing.Path == ws.Path {
+			existing.Branch = ws.Branch
+			existing.CommitSHA = ws.CommitSHA
+			existing.IsDirty = ws.IsDirty
+			existing.DaemonURL = ws.DaemonURL
+			existing.LastSeen = time.Now().UTC()
+			existing.IsOnline = true
+			ws.ID = existing.ID
+			ws.ProjectID = existing.ProjectID
+			ws.UserID = existing.UserID
+			ws.IsDesignatedProcessor = existing.IsDesignatedProcessor
+			ws.CreatedAt = existing.CreatedAt
+			ws.LastSeen = existing.LastSeen
+			ws.IsOnline = true
+			return nil
+		}
+	}
 	if ws.ID == "" {
 		ws.ID = newID("ws")
 	}
-	ws.LastSeen = time.Now().UTC()
+	now := time.Now().UTC()
+	ws.LastSeen = now
 	ws.IsOnline = true
-	s.workspaces[ws.ID] = ws
+	stored := *ws
+	if stored.CreatedAt.IsZero() {
+		stored.CreatedAt = now
+	}
+	s.workspaces[stored.ID] = &stored
+	ws.CreatedAt = stored.CreatedAt
 	return nil
 }
 
@@ -227,27 +278,39 @@ func (s *MemStore) GetActiveWorkspace(ctx context.Context, projectID string) (*W
 	if mostRecent == nil {
 		return nil, ErrNotFound
 	}
-	return mostRecent, nil
+	return cloneWorkspace(mostRecent), nil
 }
 
 func (s *MemStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) error {
+	if err := validateMemoryItemForCreate(item); err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if item.ID == "" {
-		item.ID = newID("mem")
+	stored := cloneMemoryItem(item)
+	if stored.ID == "" {
+		stored.ID = newID("mem")
 	}
-	if item.Confidence == 0 {
-		item.Confidence = 1.0
+	if stored.Confidence == 0 {
+		stored.Confidence = 1.0
 	}
-	if item.Status == "" {
-		item.Status = "PROPOSED"
+	if stored.Status == "" {
+		stored.Status = StatusProposed
 	}
-	if item.Level == "" {
-		item.Level = "project"
+	if stored.Level == "" {
+		stored.Level = LevelProject
 	}
-	item.CreatedAt = time.Now().UTC()
-	item.UpdatedAt = item.CreatedAt
-	s.memories[item.ID] = item
+	if stored.Scope == "" {
+		stored.Scope = "fact"
+	}
+	if stored.Tags == nil {
+		stored.Tags = []string{}
+	}
+	now := time.Now().UTC()
+	stored.CreatedAt = now
+	stored.UpdatedAt = now
+	s.memories[stored.ID] = stored
+	*item = *cloneMemoryItem(stored)
 	return nil
 }
 
@@ -258,9 +321,12 @@ func (s *MemStore) GetMemoryItem(ctx context.Context, id string) (*MemoryItem, e
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return item, nil
+	return cloneMemoryItem(item), nil
 }
 
+// ConfirmMemory flips PROPOSED -> CONFIRMED (issue #89 DAG). Re-confirming a
+// CONFIRMED row is idempotent; terminal states (REJECTED, SUPERSEDED) and
+// unknown ids fail instead of resurrecting rows.
 func (s *MemStore) ConfirmMemory(ctx context.Context, id string, confirmedBy string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -268,13 +334,34 @@ func (s *MemStore) ConfirmMemory(ctx context.Context, id string, confirmedBy str
 	if !ok {
 		return ErrNotFound
 	}
-	item.Status = "CONFIRMED"
+	switch item.Status {
+	case StatusProposed:
+		item.Status = StatusConfirmed
+	case StatusConfirmed:
+		// idempotent re-confirm
+	default:
+		return errMemoryConflict(item.Status, StatusConfirmed)
+	}
 	item.ConfirmedBy = confirmedBy
 	item.UpdatedAt = time.Now().UTC()
 	return nil
 }
 
+// memoryVisibleToProject encodes the scope-isolation rule (issue #102):
+// NULL-project rows are visible only when explicitly organization-level.
+// Personal/session/ephemeral rows with no project never leak globally.
+func memoryVisibleToProject(m *MemoryItem, projectID string) bool {
+	if m.ProjectID != "" {
+		return m.ProjectID == projectID
+	}
+	return m.Level == LevelOrganization
+}
+
 func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error) {
+	effective := limit
+	if effective <= 0 {
+		effective = 20
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -282,11 +369,27 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 	terms := strings.Fields(strings.ToLower(query))
 
 	for _, item := range s.memories {
-		if item.ProjectID != "" && item.ProjectID != projectID {
+		if !memoryVisibleToProject(item, projectID) {
 			continue
 		}
-		if item.Status != "CONFIRMED" && item.Status != "PROPOSED" {
+		if item.Status != StatusConfirmed && item.Status != StatusProposed {
 			continue
+		}
+		if len(tags) > 0 {
+			hit := false
+			set := make(map[string]struct{}, len(item.Tags))
+			for _, t := range item.Tags {
+				set[t] = struct{}{}
+			}
+			for _, t := range tags {
+				if _, ok := set[t]; ok {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				continue
+			}
 		}
 
 		// Simple term match fallback
@@ -300,26 +403,66 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 		}
 
 		if matched || len(terms) == 0 {
-			results = append(results, item)
+			results = append(results, cloneMemoryItem(item))
 		}
-		if limit > 0 && len(results) >= limit {
-			break
+	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].Confidence == results[j].Confidence {
+			if results[i].CreatedAt.Equal(results[j].CreatedAt) {
+				return results[i].ID < results[j].ID
+			}
+			return results[i].CreatedAt.After(results[j].CreatedAt)
 		}
+		return results[i].Confidence > results[j].Confidence
+	})
+	if len(results) > effective {
+		results = results[:effective]
 	}
 	return results, nil
 }
 
 func (s *MemStore) CreateEpisode(ctx context.Context, ep *Episode) error {
+	if strings.TrimSpace(ep.Title) == "" {
+		return errors.New("store: episode title is required")
+	}
+	if strings.TrimSpace(ep.EpisodeType) == "" {
+		return errors.New("store: episode_type is required (want bug_fix|feature|refactor|incident|investigation|onboarding)")
+	}
+	if err := ValidateEpisodeType(ep.EpisodeType); err != nil {
+		return err
+	}
+	if err := ValidateEmbeddingDim(ep.Embedding); err != nil {
+		return err
+	}
+	status := ep.Status
+	if strings.TrimSpace(status) == "" {
+		status = "OPEN"
+	} else {
+		status = strings.ToUpper(strings.TrimSpace(status))
+		if err := ValidateEpisodeStatus(status); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ep.ID == "" {
-		ep.ID = newID("ep")
+	stored := cloneEpisode(ep)
+	if stored.ID == "" {
+		stored.ID = newID("ep")
 	}
-	if ep.Status == "" {
-		ep.Status = "OPEN"
+	stored.EpisodeType = strings.ToLower(strings.TrimSpace(stored.EpisodeType))
+	stored.Status = status
+	if stored.Tags == nil {
+		stored.Tags = []string{}
 	}
-	ep.OpenedAt = time.Now().UTC()
-	s.episodes[ep.ID] = ep
+	if stored.FilesInvolved == nil {
+		stored.FilesInvolved = []string{}
+	}
+	if stored.ErrorPatterns == nil {
+		stored.ErrorPatterns = []string{}
+	}
+	stored.OpenedAt = time.Now().UTC()
+	s.episodes[stored.ID] = stored
+	*ep = *cloneEpisode(stored)
 	return nil
 }
 
@@ -330,15 +473,21 @@ func (s *MemStore) GetEpisode(ctx context.Context, id string) (*Episode, error) 
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return ep, nil
+	return cloneEpisode(ep), nil
 }
 
+// ResolveEpisode closes an open arc (issue #103). Only OPEN and
+// INVESTIGATING arcs resolve; RESOLVED/WONT_FIX are terminal and unknown
+// ids report ErrNotFound. Re-resolution fails instead of overwriting.
 func (s *MemStore) ResolveEpisode(ctx context.Context, id, resolution, verification, resolvedBy string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ep, ok := s.episodes[id]
 	if !ok {
 		return ErrNotFound
+	}
+	if ep.Status != "OPEN" && ep.Status != "INVESTIGATING" {
+		return fmt.Errorf("store: episode %s is %s, only OPEN/INVESTIGATING resolve: %w", id, ep.Status, ErrConflict)
 	}
 	ep.Status = "RESOLVED"
 	ep.Resolution = resolution
@@ -350,6 +499,10 @@ func (s *MemStore) ResolveEpisode(ctx context.Context, id, resolution, verificat
 }
 
 func (s *MemStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query string, limit int) ([]*Episode, error) {
+	effective := limit
+	if effective <= 0 {
+		effective = 20
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -377,29 +530,56 @@ func (s *MemStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, 
 			}
 		}
 		if match || (lowErr == "" && lowQ == "") {
-			results = append(results, ep)
+			results = append(results, cloneEpisode(ep))
 		}
-		if limit > 0 && len(results) >= limit {
-			break
+	}
+	sort.Slice(results, func(i, j int) bool {
+		if results[i].OpenedAt.Equal(results[j].OpenedAt) {
+			return results[i].ID > results[j].ID
 		}
+		return results[i].OpenedAt.After(results[j].OpenedAt)
+	})
+	if len(results) > effective {
+		results = results[:effective]
 	}
 	return results, nil
 }
 
 func (s *MemStore) AppendEvent(ctx context.Context, ev *Event) error {
+	stored := cloneEvent(ev)
+	if stored.Payload == nil {
+		// Match Postgres (column NOT NULL marshals nil to '{}'): a nil
+		// payload round-trips as an empty map (issue #110).
+		stored.Payload = make(map[string]any)
+	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.eventSeq++
-	ev.ID = s.eventSeq
-	ev.CreatedAt = time.Now().UTC()
-	s.events = append(s.events, ev)
-	// Fan out to in-process subscribers; never block the appender.
+	stored.ID = s.eventSeq
+	stored.CreatedAt = time.Now().UTC()
+	s.events = append(s.events, stored)
+	// Snapshot subscribers under RLock and send after unlocking (issue
+	// #119): fan-out sends must never hold the store lock.
+	s.mu.Unlock()
+
+	ev.ID = stored.ID
+	ev.CreatedAt = stored.CreatedAt
+	if ev.Payload == nil {
+		ev.Payload = make(map[string]any)
+	}
+
+	s.mu.RLock()
+	subs := make([]*memSubscription, 0, len(s.subs))
 	for _, sub := range s.subs {
-		if sub.projectID != "" && sub.projectID != ev.ProjectID {
+		subs = append(subs, sub)
+	}
+	s.mu.RUnlock()
+	// Fan out to in-process subscribers; never block the appender.
+	for _, sub := range subs {
+		if sub.projectID != "" && sub.projectID != stored.ProjectID {
 			continue
 		}
 		select {
-		case sub.ch <- ev:
+		case sub.ch <- cloneEvent(stored):
 		default: // slow subscriber: drop, it can catch up via ListEvents
 		}
 	}
@@ -407,14 +587,15 @@ func (s *MemStore) AppendEvent(ctx context.Context, ev *Event) error {
 }
 
 func (s *MemStore) ListEvents(ctx context.Context, projectID string, sinceID int64, limit int) ([]*Event, error) {
+	effective := ClampEventsLimit(limit)
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	var results []*Event
 	for _, ev := range s.events {
 		if ev.ProjectID == projectID && ev.ID > sinceID {
-			results = append(results, ev)
-			if limit > 0 && len(results) >= limit {
+			results = append(results, cloneEvent(ev))
+			if len(results) >= effective {
 				break
 			}
 		}
@@ -425,6 +606,11 @@ func (s *MemStore) ListEvents(ctx context.Context, projectID string, sinceID int
 // Subscribe registers an in-process subscriber for subsequently appended
 // events of one project. Buffered (64) + non-blocking send: a lagging
 // reader drops events and can backfill with ListEvents.
+//
+// Cancel semantics (issue #110): the cancel func closes a dedicated done
+// channel that the reaper goroutine selects on, so the goroutine terminates
+// promptly when cancel is invoked — it does not linger until the parent
+// context fires.
 func (s *MemStore) Subscribe(ctx context.Context, projectID string) (<-chan *Event, func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -433,8 +619,10 @@ func (s *MemStore) Subscribe(ctx context.Context, projectID string) (<-chan *Eve
 	ch := make(chan *Event, 64)
 	s.subs[id] = &memSubscription{projectID: projectID, ch: ch}
 	var once sync.Once
+	done := make(chan struct{})
 	cancel := func() {
 		once.Do(func() {
+			close(done)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			if _, ok := s.subs[id]; ok {
@@ -443,10 +631,14 @@ func (s *MemStore) Subscribe(ctx context.Context, projectID string) (<-chan *Eve
 			}
 		})
 	}
-	// Context cancellation also unsubscribes.
+	// Context cancellation also unsubscribes; the goroutine exits on
+	// whichever fires first (cancel or parent ctx).
 	go func() {
-		<-ctx.Done()
-		cancel()
+		select {
+		case <-ctx.Done():
+			cancel()
+		case <-done:
+		}
 	}()
 	return ch, cancel, nil
 }

@@ -30,6 +30,9 @@ func TestMemoryWriteValidation(t *testing.T) {
 		{"bad level", map[string]any{
 			"key": "a/b", "content": strings.Repeat("z", 40), "level": "galaxy",
 		}, true},
+		{"ephemeral level", map[string]any{
+			"key": "a/b", "content": strings.Repeat("e", 40), "level": "ephemeral",
+		}, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

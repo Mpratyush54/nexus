@@ -158,11 +158,17 @@ func TestSearchSemanticRanking(t *testing.T) {
 	ctx := context.Background()
 	s := NewMemStore()
 
-	mustEpisode(t, ctx, s, "p1", "x-match", nil, nil, []float32{1, 0})
-	mustEpisode(t, ctx, s, "p1", "y-other", nil, nil, []float32{0, 1})
+	// Full-width sparse vectors (issue #105: schema is vector(1536)).
+	// Sparse so unrelated episodes score exactly 0 and stay filtered.
+	xVec := make([]float32, EmbeddingDim)
+	xVec[0] = 1
+	yVec := make([]float32, EmbeddingDim)
+	yVec[1] = 1
+	mustEpisode(t, ctx, s, "p1", "x-match", nil, nil, xVec)
+	mustEpisode(t, ctx, s, "p1", "y-other", nil, nil, yVec)
 	mustEpisode(t, ctx, s, "p1", "no-embedding", nil, nil, nil)
 
-	got, err := s.SearchEpisodesSemantic(ctx, "p1", []float32{1, 0}, 5)
+	got, err := s.SearchEpisodesSemantic(ctx, "p1", xVec, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,8 +177,11 @@ func TestSearchSemanticRanking(t *testing.T) {
 	}
 
 	// Limit respected.
-	mustEpisode(t, ctx, s, "p1", "x-match-2", nil, nil, []float32{1, 0.1})
-	got, _ = s.SearchEpisodesSemantic(ctx, "p1", []float32{1, 0}, 1)
+	xVec2 := make([]float32, EmbeddingDim)
+	xVec2[0] = 1
+	xVec2[1] = 0.1
+	mustEpisode(t, ctx, s, "p1", "x-match-2", nil, nil, xVec2)
+	got, _ = s.SearchEpisodesSemantic(ctx, "p1", xVec, 1)
 	if len(got) != 1 {
 		t.Fatalf("limit: got %d, want 1", len(got))
 	}
