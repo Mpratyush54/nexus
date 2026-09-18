@@ -416,6 +416,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "vector search failed: "+err.Error())
 			return
 		}
+		items = s.filterMemoriesByVisibility(r, items, authSubject(r))
 		recordMemoryUse(r.Context(), s.Store, items)
 		if items == nil {
 			items = []*store.MemoryItem{}
@@ -427,6 +428,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	// (issue #165). Falls back to keyword SearchMemory when the store has
 	// no vector path or vector ranking returns nothing.
 	query := q.Get("q")
+	viewerCtx := store.WithViewer(r.Context(), authSubject(r))
 	if strings.TrimSpace(query) != "" {
 		if vs, ok := s.Store.(interface {
 			SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
@@ -434,14 +436,17 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			vec := s.embedText(r.Context(), query)
 			if len(vec) == memctx.EmbedDims {
 				if items, err := vs.SearchMemoryVector(r.Context(), projectID, vec, limit); err == nil && len(items) > 0 {
-					recordMemoryUse(r.Context(), s.Store, items)
-					writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
-					return
+					items = s.filterMemoriesByVisibility(r, items, authSubject(r))
+					if len(items) > 0 {
+						recordMemoryUse(r.Context(), s.Store, items)
+						writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+						return
+					}
 				}
 			}
 		}
 	}
-	items, err := s.Store.SearchMemory(r.Context(), projectID, query, tags, limit)
+	items, err := s.Store.SearchMemory(viewerCtx, projectID, query, tags, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
 		return
