@@ -79,9 +79,11 @@ func memEvent(t, project, session string) *store.Event {
 
 func TestBridgeMemoryMapping(t *testing.T) {
 	cases := map[string]string{
-		bridgeMemoryProposed:  "proposed",
-		bridgeMemoryConfirmed: "confirmed",
-		bridgeMemoryRejected:  "rejected",
+		bridgeMemoryProposed:   "proposed",
+		bridgeMemoryConfirmed:  "confirmed",
+		bridgeMemoryRejected:   "rejected",
+		bridgeMemoryUpdated:    "updated",
+		bridgeMemorySuperseded: "superseded",
 	}
 	for eventType, want := range cases {
 		fp := &fakePublisher{}
@@ -139,7 +141,7 @@ func TestBridgeGenericEventEnvelope(t *testing.T) {
 func TestBridgeUnknownTypeFallsBackToGeneric(t *testing.T) {
 	// Unmapped types ride a generic event frame, never an invented action.
 	fp := &fakePublisher{}
-	if err := publishBridgedEvent(fp, memEvent("MEMORY_SUPERSEDED", "p1", "")); err != nil {
+	if err := publishBridgedEvent(fp, memEvent("FILE_MODIFIED", "p1", "")); err != nil {
 		t.Fatal(err)
 	}
 	if got := fp.last(); got.method != "event" {
