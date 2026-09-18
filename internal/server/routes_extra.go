@@ -80,6 +80,9 @@ func (s *Server) registerExtraRoutes() {
 	// Phase 7 GitHub collaborator import (issue #167).
 	s.registerGitHubRoutes()
 
+	// Phase 17 notifications + Web Push subscribe (issue #176).
+	s.registerNotificationRoutes()
+
 	// Episodes.
 	s.Mux.HandleFunc("POST /episodes/{id}/resolve", s.requireAuth(s.handleEpisodeResolve))
 }
