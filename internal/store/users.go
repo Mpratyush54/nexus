@@ -138,6 +138,49 @@ func (s *UserStore) UpdateSettings(ctx context.Context, id, settings string) (*U
 	return u, nil
 }
 
+// SetPasswordHash stores a pre-hashed password for login verification
+// (issue #133; migration 011). The hash itself is produced by the server
+// (PBKDF2-SHA256, see internal/server/auth.go) or the nexus CLI —
+// plaintext passwords never reach the store layer.
+func (s *UserStore) SetPasswordHash(ctx context.Context, id, hash string) error {
+	if strings.TrimSpace(id) == "" {
+		return errors.New("store: user id is required")
+	}
+	if strings.TrimSpace(hash) == "" {
+		return errors.New("store: password hash is required")
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1`, id, strings.TrimSpace(hash))
+	if err != nil {
+		return fmt.Errorf("store: set password hash: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("store: user %s: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// GetPasswordHash returns the user id + stored hash for login verification.
+// Empty hash means no password set (login must 401, never accept).
+func (s *UserStore) GetPasswordHash(ctx context.Context, username string) (string, string, error) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return "", "", errors.New("store: username is required")
+	}
+	var id string
+	var hash *string
+	if err := s.db.QueryRow(ctx,
+		`SELECT id::TEXT AS id, password_hash FROM users WHERE username = $1`, username).Scan(&id, &hash); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", fmt.Errorf("store: user %q: %w", username, ErrNotFound)
+		}
+		return "", "", fmt.Errorf("store: get password hash: %w", err)
+	}
+	if hash == nil {
+		return id, "", nil
+	}
+	return id, *hash, nil
+}
+
 // Delete removes a user. Rows referencing the user (projects.created_by,
 // workspaces.user_id) block deletion with a foreign-key error —
 // reassignment is a follow-up.

@@ -77,6 +77,10 @@ func (s *PostgresStore) CreateEpisode(ctx context.Context, ep *Episode) error {
 	if err := ValidateEpisodeType(ep.EpisodeType); err != nil {
 		return err
 	}
+	// Normalize to the CHECK set's lowercase form (issue #131): validation
+	// is case-insensitive but Postgres CHECK is not, and MemStore stores
+	// lowercase — without this, "Bug_Fix" passes Go and dies in SQL.
+	ep.EpisodeType = strings.ToLower(strings.TrimSpace(ep.EpisodeType))
 	if err := ValidateEmbeddingDim(ep.Embedding); err != nil {
 		return err
 	}
@@ -149,8 +153,12 @@ func (s *PostgresStore) ResolveEpisode(ctx context.Context, id, resolution, veri
 }
 
 // SearchEpisodes matches on error pattern, narrative text, or lists all
-// when both filters are empty (MemStore parity).
+// when both filters are empty (MemStore parity). An empty projectID returns
+// an empty list (avoids a raw uuid-syntax error from $1::uuid).
 func (s *PostgresStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query string, limit int) ([]*Episode, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return []*Episode{}, nil
+	}
 	if limit <= 0 {
 		limit = 20
 	}
@@ -163,6 +171,7 @@ func (s *PostgresStore) SearchEpisodes(ctx context.Context, projectID, errorPatt
 		                WHERE p ILIKE '%'||$2||'%')
 		         OR $3 <> '' AND (title ILIKE '%'||$3||'%'
 		                          OR COALESCE(trigger,'') ILIKE '%'||$3||'%'
+		                          OR COALESCE(investigation,'') ILIKE '%'||$3||'%'
 		                          OR COALESCE(root_cause,'') ILIKE '%'||$3||'%'
 		                          OR COALESCE(resolution,'') ILIKE '%'||$3||'%'))
 		  ORDER BY opened_at DESC, id DESC

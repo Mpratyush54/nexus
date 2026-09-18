@@ -855,6 +855,9 @@ func (p *Processor) ProcessEvents(ctx context.Context, project string, events []
 	for i := range proposals {
 		proposals[i].ConfirmAfter = ConfirmationDelay(proposals[i])
 		proposals[i].ProposedAt = now
+		// Secret-screened (issue #132): proposal content derives from
+		// conversation/LLM text that routinely contains pasted secrets.
+		proposals[i].Content = redact(proposals[i].Content)
 		if p.Store != nil {
 			if err := p.Store.Save(proposals[i]); err != nil {
 				return proposals[:i], err
@@ -893,7 +896,7 @@ func (p *Processor) ProcessToolEvents(ctx context.Context, project string, evs [
 	}
 	pr := Proposal{
 		Key:        KeyFromContent(content),
-		Content:    content,
+		Content:    redact(content),
 		Level:      LevelProject,
 		Scope:      ScopeEpisodeSummary,
 		Confidence: 0.8,

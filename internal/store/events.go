@@ -11,6 +11,8 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -46,7 +48,16 @@ func scanEvent(row pgx.Row) (*Event, error) {
 }
 
 // AppendEvent inserts one immutable event; id + created_at come back.
+// ProjectID and EventType are required (issue #131): Postgres rejects ""
+// with a raw uuid-syntax 500, so both backends validate up front and
+// MemStore no longer stores unownable ""-project rows.
 func (s *PostgresStore) AppendEvent(ctx context.Context, ev *Event) error {
+	if ev == nil {
+		return fmt.Errorf("store: event is required")
+	}
+	if err := ValidateEvent(ev); err != nil {
+		return err
+	}
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO events
 			(project_id, session_id, user_id, agent_id,
@@ -63,7 +74,12 @@ func (s *PostgresStore) AppendEvent(ctx context.Context, ev *Event) error {
 // ListEvents returns up to `limit` events for a project after sinceID,
 // oldest first. limit <= 0 means the default page (20); oversized limits
 // clamp to MaxEventsLimit so backfills stay bounded (issue #119).
+// An empty projectID returns an empty list (MemStore parity; avoids a raw
+// uuid-syntax error from $1::uuid).
 func (s *PostgresStore) ListEvents(ctx context.Context, projectID string, sinceID int64, limit int) ([]*Event, error) {
+	if strings.TrimSpace(projectID) == "" {
+		return []*Event{}, nil
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+eventColumns+` FROM events
 		  WHERE project_id = $1::uuid AND id > $2

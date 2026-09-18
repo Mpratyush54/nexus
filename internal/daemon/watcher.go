@@ -422,7 +422,9 @@ func (w *Watcher) CheckOnce() []ToolEvent {
 				"file_type": t.FileType,
 				"old_hash":  oldHash,
 				"new_hash":  hash,
-				"diff":      diff,
+				// Secret-screened (issue #132): instruction files hold
+				// API keys and tokens; the diff lands in the event stream.
+				"diff": redact(diff),
 			},
 			CreatedAt: now,
 		}

@@ -36,6 +36,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"sync"
 	"time"
 
 	"central-memory/internal/store"
@@ -177,21 +178,37 @@ func bridgeSubscriptionCursor(ctx context.Context, sub <-chan *store.Event, hub 
 // backfill replays missed events after a reconnect (issue #88). Ordering is
 // ID-ascending; duplicates are possible when the disconnect race redelivers
 // the boundary event, so consumers must treat delivery as at-least-once and
-// dedupe on event ID.
+// dedupe on event ID. Pages repeat until a call yields no new IDs (issue
+// #134: a single capped page silently dropped everything past the cap),
+// bounded by a hard iteration cap so a wedged store cannot spin forever.
 func backfill(ctx context.Context, list func(ctx context.Context, sinceID int64) ([]*store.Event, error), hub eventPublisher, sinceID int64) (int64, error) {
 	if list == nil {
 		return sinceID, nil
 	}
-	evs, err := list(ctx, sinceID)
-	if err != nil {
-		return sinceID, err
-	}
-	for _, ev := range evs {
-		if err := publishBridgedEvent(hub, ev); err != nil {
-			continue
+	const maxBackfillPages = 100
+	for i := 0; i < maxBackfillPages; i++ {
+		if ctx.Err() != nil {
+			return sinceID, ctx.Err()
 		}
-		if ev != nil && ev.ID > sinceID {
-			sinceID = ev.ID
+		evs, err := list(ctx, sinceID)
+		if err != nil {
+			return sinceID, err
+		}
+		if len(evs) == 0 {
+			return sinceID, nil
+		}
+		advanced := false
+		for _, ev := range evs {
+			if err := publishBridgedEvent(hub, ev); err != nil {
+				continue
+			}
+			if ev != nil && ev.ID > sinceID {
+				sinceID = ev.ID
+				advanced = true
+			}
+		}
+		if !advanced {
+			return sinceID, nil
 		}
 	}
 	return sinceID, nil
@@ -305,8 +322,20 @@ func BridgeEventsWithBackfill(ctx context.Context, subscribe func(context.Contex
 
 // StartBridge attaches the store → hub bridge for one project (issue #40):
 // subscribe streams live rows, ListEvents backfills across reconnects.
+// The previous subscription is canceled before each resubscribe (issue
+// #134): discarding cancel leaks the LISTEN conn / reaper goroutine and
+// leaves phantom fan-out entries behind.
 func (s *Server) StartBridge(ctx context.Context, h *Hub, projectID string) error {
+	var mu sync.Mutex
+	var prevCancel func()
 	subscribe := func(ctx context.Context) (<-chan *store.Event, error) {
+		mu.Lock()
+		prev := prevCancel
+		prevCancel = nil
+		mu.Unlock()
+		if prev != nil {
+			prev()
+		}
 		sub, cancel, err := s.Store.Subscribe(ctx, projectID)
 		if err != nil {
 			if cancel != nil {
@@ -314,8 +343,9 @@ func (s *Server) StartBridge(ctx context.Context, h *Hub, projectID string) erro
 			}
 			return nil, err
 		}
-		// Detach cancel lifetime from ctx: bridgeLoop owns resubscribe.
-		_ = cancel
+		mu.Lock()
+		prevCancel = cancel
+		mu.Unlock()
 		return sub, nil
 	}
 	list := func(ctx context.Context, sinceID int64) ([]*store.Event, error) {

@@ -46,6 +46,16 @@ type Server struct {
 	fileop *rateGate
 	quota  *quotaGate
 
+	// login throttles /auth/login attempts (issue #133): 1/s sustained,
+	// burst 5 per source IP. Lazily initialized like the gates above.
+	login *rateGate
+
+	// Users resolves login usernames to password hashes (issue #133).
+	// Nil means authentication is unconfigured and /auth/login fails
+	// closed with 503. Wire NewUserLookup(store.NewUserStore(db)) in
+	// production; tests wire fakes.
+	Users UserLookup
+
 	// checkouts tracks active branch per project (issue #104): checkout
 	// mutates this map, never just echoes the resolved branch.
 	checkoutMu sync.Mutex
@@ -72,6 +82,7 @@ func NewServer(st store.Store) *Server {
 		events:    newRateGate(100, 100),
 		fileop:    newRateGate(50, 50),
 		quota:     newQuotaGate(),
+		login:     newRateGate(1, 5),
 		checkouts: make(map[string]string),
 		handoffs:  make(map[string]*handoffRecord),
 	}

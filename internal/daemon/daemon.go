@@ -288,7 +288,13 @@ func (d *Daemon) Start(addr string) error {
 func (d *Daemon) Close() error {
 	d.mu.Lock()
 	srv := d.srv
+	in := d.Interceptor
 	d.mu.Unlock()
+	// Stop the interceptor forwarder (issue #132): otherwise its goroutine
+	// leaks one per daemon run.
+	if in != nil {
+		in.Close()
+	}
 	if srv == nil {
 		return nil
 	}

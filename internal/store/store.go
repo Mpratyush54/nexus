@@ -524,7 +524,7 @@ func (s *MemStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, 
 			}
 		}
 		if !match && lowQ != "" {
-			narrative := strings.ToLower(ep.Title + " " + ep.Trigger + " " + ep.RootCause + " " + ep.Resolution)
+			narrative := strings.ToLower(ep.Title + " " + ep.Trigger + " " + ep.Investigation + " " + ep.RootCause + " " + ep.Resolution)
 			if strings.Contains(narrative, lowQ) {
 				match = true
 			}
@@ -546,6 +546,9 @@ func (s *MemStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, 
 }
 
 func (s *MemStore) AppendEvent(ctx context.Context, ev *Event) error {
+	if err := ValidateEvent(ev); err != nil {
+		return err
+	}
 	stored := cloneEvent(ev)
 	if stored.Payload == nil {
 		// Match Postgres (column NOT NULL marshals nil to '{}'): a nil
@@ -568,20 +571,33 @@ func (s *MemStore) AppendEvent(ctx context.Context, ev *Event) error {
 	}
 
 	s.mu.RLock()
-	subs := make([]*memSubscription, 0, len(s.subs))
-	for _, sub := range s.subs {
-		subs = append(subs, sub)
+	type subSnap struct {
+		id  int64
+		sub *memSubscription
+	}
+	subs := make([]subSnap, 0, len(s.subs))
+	for id, sub := range s.subs {
+		subs = append(subs, subSnap{id: id, sub: sub})
 	}
 	s.mu.RUnlock()
 	// Fan out to in-process subscribers; never block the appender.
-	for _, sub := range subs {
-		if sub.projectID != "" && sub.projectID != stored.ProjectID {
+	// Each send re-checks membership under RLock: cancel() deletes +
+	// closes the channel under the write lock, so the existence check
+	// and the send are mutually exclusive with close — a snapshot taken
+	// before cancel can never send on a closed channel (issue #131).
+	for _, sn := range subs {
+		if sn.sub.projectID != "" && sn.sub.projectID != stored.ProjectID {
 			continue
 		}
-		select {
-		case sub.ch <- cloneEvent(stored):
-		default: // slow subscriber: drop, it can catch up via ListEvents
+		s.mu.RLock()
+		_, ok := s.subs[sn.id]
+		if ok {
+			select {
+			case sn.sub.ch <- cloneEvent(stored):
+			default: // slow subscriber: drop, it can catch up via ListEvents
+			}
 		}
+		s.mu.RUnlock()
 	}
 	return nil
 }

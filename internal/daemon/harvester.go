@@ -689,6 +689,8 @@ func lastNewline(b []byte) int {
 }
 
 // turnPayload renders a Turn into the CONVERSATION_TURN payload shape.
+// Content is secret-screened (issue #132): transcripts routinely contain
+// pasted secrets, and the event stream lands in Postgres.
 func turnPayload(action, agent, path string, t Turn) map[string]any {
 	p := map[string]any{
 		"action":     action,
@@ -696,7 +698,7 @@ func turnPayload(action, agent, path string, t Turn) map[string]any {
 		"path":       path,
 		"session_id": sessionID(path),
 		"speaker":    t.Speaker,
-		"content":    t.Content,
+		"content":    redact(t.Content),
 	}
 	if !t.Timestamp.IsZero() {
 		p["timestamp"] = t.Timestamp.UTC().Format(time.RFC3339Nano)
@@ -917,6 +919,10 @@ func (h *Harvester) CheckIdle() []Event {
 	for _, path := range due {
 		h.completed[path] = true
 		turns := append([]Turn(nil), h.batch[path]...)
+		// Drain the batch (issue #132): without this the session's turns
+		// accumulate forever and every re-armed idle re-emits all old
+		// turns to the Memory Processor (duplicate extraction + LLM cost).
+		delete(h.batch, path)
 		detail := strconv.Itoa(len(turns)) + " turns harvested"
 		if _, isSQLite := h.sqlite[path]; isSQLite && len(turns) == 0 {
 			detail = "sqlite/vscdb source: rows not parsed (no driver); " +
@@ -924,7 +930,7 @@ func (h *Harvester) CheckIdle() []Event {
 		}
 		flat := make([]any, 0, len(turns))
 		for _, t := range turns {
-			m := map[string]any{"speaker": t.Speaker, "content": t.Content}
+			m := map[string]any{"speaker": t.Speaker, "content": redact(t.Content)}
 			if !t.Timestamp.IsZero() {
 				m["timestamp"] = t.Timestamp.UTC().Format(time.RFC3339Nano)
 			}
