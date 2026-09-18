@@ -21,15 +21,23 @@ import (
 // ---- MemStore ----
 
 // IsProjectMember reports whether userID may access projectID: the
-// project's creator or an explicit grant. Empty inputs are never members.
+// project's creator, an explicit grant, or an ADMIN of the project's
+// organization (issue #168). Empty inputs are never members.
 func (s *MemStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(projectID) == "" {
 		return false, nil
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if p, ok := s.projects[projectID]; ok && p != nil && p.CreatedBy == userID {
-		return true, nil
+	if p, ok := s.projects[projectID]; ok && p != nil {
+		if p.CreatedBy == userID {
+			return true, nil
+		}
+		if p.OrgID != "" {
+			if role, ok := s.orgMembers[p.OrgID][userID]; ok && role == OrgRoleAdmin {
+				return true, nil
+			}
+		}
 	}
 	return s.members[projectID][userID], nil
 }
@@ -99,8 +107,9 @@ func (s *MemStore) ListMembers(ctx context.Context, projectID string) ([]string,
 
 // ---- PostgresStore ----
 
-// IsProjectMember reports whether userID may access projectID: creator or
-// an explicit grant row. Malformed UUIDs fail closed with an error.
+// IsProjectMember reports whether userID may access projectID: creator,
+// explicit grant, or org ADMIN of the project's organization (issue #168).
+// Malformed UUIDs fail closed with an error.
 func (s *PostgresStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
 	if strings.TrimSpace(userID) == "" || strings.TrimSpace(projectID) == "" {
 		return false, nil
@@ -108,7 +117,14 @@ func (s *PostgresStore) IsProjectMember(ctx context.Context, userID, projectID s
 	var member bool
 	if err := s.pool.QueryRow(ctx,
 		`SELECT EXISTS(SELECT 1 FROM projects WHERE id = $2::uuid AND created_by = $1::uuid)
-		    OR EXISTS(SELECT 1 FROM project_members WHERE project_id = $2::uuid AND user_id = $1::uuid)`,
+		    OR EXISTS(SELECT 1 FROM project_members WHERE project_id = $2::uuid AND user_id = $1::uuid)
+		    OR EXISTS(
+		         SELECT 1 FROM projects p
+		         JOIN organization_members om ON om.org_id = p.org_id
+		          WHERE p.id = $2::uuid
+		            AND om.user_id = $1::uuid
+		            AND om.role = 'ADMIN'
+		       )`,
 		userID, projectID).Scan(&member); err != nil {
 		return false, fmt.Errorf("store: membership check: %w", err)
 	}

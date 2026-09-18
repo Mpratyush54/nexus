@@ -37,6 +37,7 @@ func (s *Server) registerRoutes() {
 	s.registerSteerRoutes()
 	s.registerHandoffRoutes()
 	s.registerAuthExtraRoutes()
+	s.registerOrgRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

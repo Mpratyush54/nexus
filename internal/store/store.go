@@ -60,10 +60,11 @@ type Store interface {
 	Subscribe(ctx context.Context, projectID string) (<-chan *Event, func(), error)
 
 	// IsProjectMember reports whether userID may access projectID (issues
-	// #141, #149): the project creator or an explicit project_members
-	// grant. Workspace registration requires membership; it never creates
-	// it. The server enforces this on every project-scoped route (403);
-	// object routes resolve object → project first.
+	// #141, #149, #168): the project creator, an explicit project_members
+	// grant, or an ADMIN of the project's organization. Workspace
+	// registration requires membership; it never creates it. The server
+	// enforces this on every project-scoped route (403); object routes
+	// resolve object → project first.
 	IsProjectMember(ctx context.Context, userID, projectID string) (bool, error)
 
 	// ClaimProject records userID as the project creator iff none is set
@@ -94,6 +95,8 @@ type MemStore struct {
 	projects   map[string]*Project
 	workspaces map[string]*Workspace
 	members    map[string]map[string]bool // projectID -> granted userIDs (issue #149)
+	orgs       map[string]*Organization
+	orgMembers map[string]map[string]string // orgID -> userID -> role (issue #168)
 	memories   map[string]*MemoryItem
 	versions   map[string][]*MemoryVersion // memoryID -> ordered version snapshots (issue #162)
 	episodes   map[string]*Episode
@@ -118,6 +121,8 @@ func NewMemStore() *MemStore {
 		projects:   make(map[string]*Project),
 		workspaces: make(map[string]*Workspace),
 		members:    make(map[string]map[string]bool),
+		orgs:       make(map[string]*Organization),
+		orgMembers: make(map[string]map[string]string),
 		memories:   make(map[string]*MemoryItem),
 		versions:   make(map[string][]*MemoryVersion),
 		episodes:   make(map[string]*Episode),
