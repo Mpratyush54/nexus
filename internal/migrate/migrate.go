@@ -144,11 +144,9 @@ func normalizeGitURL(raw string) string {
 // inserted; with dryRun=false the same counts describe what the store
 // adapter must insert (binding is a follow-up; see package doc).
 func Run(vaultPath string, dryRun bool) (Counts, error) {
-	var dirs []string
-	for _, leaf := range project.Leaves() {
-		dirs = append(dirs, filepath.Join(`D:\`, filepath.FromSlash(leaf)))
-	}
-	return RunWith(vaultPath, dirs, dryRun, project.Fingerprint)
+	// Leaf absolute dirs come from project.LeafDirs (platform-aware roots
+	// with a Windows-only D:\ default, Issue #111) — never a hardcoded drive.
+	return RunWith(vaultPath, project.LeafDirs(project.Leaves()), dryRun, project.Fingerprint)
 }
 
 // RunWith is Run with injectable project dirs and fingerprinter for tests.

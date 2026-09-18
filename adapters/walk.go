@@ -2,6 +2,8 @@ package adapters
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"os"
@@ -14,16 +16,22 @@ import (
 )
 
 // RootsFor builds candidate native dirs: home-level + per-project dot dirs.
-// Leaf projects come from project.Leaves so nested repos (D:\gitlab-test/X)
-// each get their own dot-dir roots, not just the top folder.
+// Leaf projects come from project.Leaves so nested repos (<root>/gitlab-test/X)
+// each get their own dot-dir roots, not just the top folder. Leaf absolute
+// paths come from project.LeafDir (platform-aware roots, Issue #111) — never
+// a hardcoded drive letter.
 func RootsFor(home string, agentDirs []string, projectDotDirs []string) []string {
 	var roots []string
 	for _, d := range agentDirs {
 		roots = append(roots, filepath.Join(home, d))
 	}
 	for _, leaf := range project.CachedLeaves() {
+		base := project.LeafDir(leaf)
+		if base == "" {
+			continue
+		}
 		for _, dot := range projectDotDirs {
-			roots = append(roots, filepath.Join(`D:\`, filepath.FromSlash(leaf), dot))
+			roots = append(roots, filepath.Join(base, dot))
 		}
 	}
 	return roots
@@ -117,12 +125,12 @@ func resolveUncached(nativePath, home string) (string, string) {
 	if leaf, was := claudeDirSuffix(nativePath); leaf != "" {
 		return leaf, was
 	}
-	if strings.HasPrefix(nativePath, `D:\`) {
-		rel := strings.TrimPrefix(nativePath, `D:\`)
-		if i := strings.Index(rel, string(filepath.Separator)); i > 0 {
-			return rel[:i], ""
-		}
-		return rel, ""
+	// Root-relative fallback (Issue #111): first segment under any known
+	// project root. Legacy D:\ paths still resolve via project.ForPath above
+	// (which honors the Windows D:\ default); this covers env-configured
+	// roots without hardcoding a drive letter.
+	if leaf, ok := rootRelativeLeaf(nativePath); ok {
+		return leaf, ""
 	}
 	if proj := workspaceProject(nativePath); proj != "" {
 		return proj, ""
@@ -224,8 +232,8 @@ func workspaceFolder(p string) string {
 }
 
 // claudeDirSuffix handles pre-move Claude dir names (D--SERVER-automation
-// for a repo now at D:\a\SERVER-automation): the encoded name must end with
-// "-" + the leaf's encoded base, and exactly one leaf may match.
+// for a repo now at <root>/a/SERVER-automation): the encoded name must end
+// with "-" + the leaf's encoded base, and exactly one leaf may match.
 func claudeDirSuffix(nativePath string) (string, string) {
 	marker := string(filepath.Separator) + "projects" + string(filepath.Separator)
 	i := strings.LastIndex(strings.ToLower(nativePath), marker)
@@ -252,9 +260,52 @@ func claudeDirSuffix(nativePath string) (string, string) {
 	return "", ""
 }
 
+// rootRelativeLeaf returns the first path segment under any known project
+// root (Issue #111 platform-aware fallback). It covers new folders not yet
+// in the leaf cache without hardcoding a drive letter. ok=false when the
+// path is not under a known root.
+func rootRelativeLeaf(nativePath string) (leaf string, ok bool) {
+	norm := filepath.ToSlash(strings.ToLower(nativePath))
+	for _, r := range project.Roots() {
+		if strings.TrimSpace(r) == "" {
+			continue
+		}
+		prefix := strings.TrimSuffix(filepath.ToSlash(strings.ToLower(r)), "/") + "/"
+		if !strings.HasPrefix(norm, prefix) {
+			continue
+		}
+		rel := strings.TrimPrefix(norm, prefix)
+		// Return the top-level segment ("a" for "a/b/c"); deeper leaves are
+		// resolved by project.ForPath before this fallback runs.
+		if i := strings.Index(rel, "/"); i > 0 {
+			return rel[:i], true
+		}
+		if rel != "" {
+			return rel, true
+		}
+	}
+	return "", false
+}
+
+// encodeClaudeDir encodes an absolute path the same way Claude does (":",
+// "\", "/" -> "-") for dir-name comparison.
+func encodeClaudeDir(abs string) string {
+	var b strings.Builder
+	for _, r := range abs {
+		if r == ':' || r == '\\' || r == '/' {
+			b.WriteRune('-')
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return strings.ToLower(b.String())
+}
+
 // every known leaf the same way Claude does (":", "\", "/" -> "-") and
 // matching case-insensitively. Handles nested repos and literal dashes
-// because the match is against real leaves, not string surgery.
+// because the match is against real leaves, not string surgery. Candidate
+// absolute paths are built from project.Roots() (Issue #111) plus the
+// legacy Windows D:\ form so old encodings still match.
 func claudeDirProject(nativePath string) string {
 	marker := string(filepath.Separator) + "projects" + string(filepath.Separator)
 	i := strings.LastIndex(strings.ToLower(nativePath), marker)
@@ -268,17 +319,19 @@ func claudeDirProject(nativePath string) string {
 	}
 	enc = strings.ToLower(enc)
 	for _, leaf := range project.CachedLeaves() {
-		full := `D:\` + filepath.FromSlash(leaf)
-		var b strings.Builder
-		for _, r := range full {
-			if r == ':' || r == '\\' || r == '/' {
-				b.WriteRune('-')
-			} else {
-				b.WriteRune(r)
-			}
+		candidates := []string{project.LeafDir(leaf)}
+		// Legacy encoding used D:\ even when roots move; keep matching it.
+		legacy := filepath.Join(`D:\`, filepath.FromSlash(leaf))
+		if legacy != candidates[0] {
+			candidates = append(candidates, legacy)
 		}
-		if strings.ToLower(b.String()) == enc {
-			return leaf
+		for _, full := range candidates {
+			if full == "" {
+				continue
+			}
+			if encodeClaudeDir(full) == enc {
+				return leaf
+			}
 		}
 	}
 	return ""
@@ -301,13 +354,9 @@ func workspaceProject(p string) string {
 					if leaf := project.ForPath(decoded); leaf != "" {
 						return leaf
 					}
-					if strings.HasPrefix(strings.ToLower(decoded), `d:\`) {
-						rel := strings.TrimPrefix(decoded, `D:\`)
-						rel = strings.TrimPrefix(rel, `d:\`)
-						if j := strings.Index(rel, `\`); j > 0 {
-							return rel[:j]
-						}
-						return rel
+					// Root-relative fallback without hardcoding D:\ (Issue #111).
+					if leaf, ok := rootRelativeLeaf(decoded); ok {
+						return leaf
 					}
 				}
 			}
@@ -327,11 +376,22 @@ func workspaceProject(p string) string {
 // pointer rule: record, don't copy). Resumable: a destination file with the
 // same size and equal-or-newer modtime is counted without re-copying, so an
 // interrupted 16K-file harvest finishes on re-run instead of restarting.
-// Returns copied + skipped lists.
+// Returns copied + skipped lists plus an aggregated error (Issue #108):
+// copy/mkdir failures are collected across all roots via errors.Join instead
+// of being swallowed; walk errors on missing roots are ignored (Discover
+// with missing roots must stay non-fatal), other walk errors are aggregated.
 func CopyFiltered(roots []string, destRoot string, maxBytes int64, projectFilter string, home string) (copied, skipped []Artifact, err error) {
+	var errs []error
 	for ri, r := range roots {
-		_ = filepath.Walk(r, func(p string, info os.FileInfo, werr error) error {
-			if werr != nil || info.IsDir() {
+		walkErr := filepath.Walk(r, func(p string, info os.FileInfo, werr error) error {
+			if werr != nil {
+				if os.IsNotExist(werr) {
+					return nil
+				}
+				errs = append(errs, fmt.Errorf("walk %s: %w", p, werr))
+				return nil
+			}
+			if info.IsDir() {
 				return nil
 			}
 			switch ClassifyPath(p) {
@@ -345,34 +405,47 @@ func CopyFiltered(roots []string, destRoot string, maxBytes int64, projectFilter
 				skipped = append(skipped, Artifact{NativePath: p, Project: ProjectOf(p, home)})
 				return nil
 			}
-			rel, _ := filepath.Rel(r, p)
+			rel, relErr := filepath.Rel(r, p)
+			if relErr != nil {
+				errs = append(errs, fmt.Errorf("rel %s: %w", p, relErr))
+				return nil
+			}
 			dst := filepath.Join(destRoot, safeName(r, ri), rel)
 			if st, serr := os.Stat(dst); serr == nil && st.Size() == info.Size() && !st.ModTime().Before(info.ModTime()) {
 				copied = append(copied, Artifact{NativePath: p, RawPath: dst, Project: ProjectOf(p, home), Was: ProjectWas(p, home)})
 				return nil
 			}
-			if err := copyFile(p, dst); err != nil {
+			if cerr := copyFile(p, dst); cerr != nil {
+				errs = append(errs, fmt.Errorf("copy %s: %w", p, cerr))
 				return nil
 			}
 			copied = append(copied, Artifact{NativePath: p, RawPath: dst, Project: ProjectOf(p, home)})
 			return nil
 		})
+		if walkErr != nil && !os.IsNotExist(walkErr) {
+			errs = append(errs, fmt.Errorf("walk root %s: %w", r, walkErr))
+		}
 	}
-	return copied, skipped, nil
+	return copied, skipped, errors.Join(errs...)
 }
 
+// safeName maps a source root to a collision-free destination segment
+// (Issue #108). The root index prefixes the cleaned base name so two roots
+// with the same folder name ("projA/.claude" vs "projB/.claude") land in
+// different dest dirs. Cleaning replaces ':' and ' ' with '_' and maps
+// "."/empty to "root".
 func safeName(root string, i int) string {
 	b := filepath.Base(root)
 	if b == "." || b == "" {
 		b = "root"
 	}
-	// Prefix with index to avoid collisions between same-named project dirs.
-	return filepath.Clean(strings.Map(func(r rune) rune {
+	cleaned := strings.Map(func(r rune) rune {
 		if r == ':' || r == ' ' {
 			return '_'
 		}
 		return r
-	}, b))
+	}, b)
+	return filepath.Clean(fmt.Sprintf("%02d-%s", i, cleaned))
 }
 
 func copyFile(src, dst string) error {

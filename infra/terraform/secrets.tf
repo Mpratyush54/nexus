@@ -5,6 +5,18 @@
 # random_password into aws_secretsmanager_secret_version, and the ECS task
 # (ecs.tf) consumes them via the `secrets` block (valueFrom = ARN), which
 # lands in the container as environment variables at launch.
+#
+# Single credential story (issues #112/#127): the app authenticates as a
+# DEDICATED app user (var.app_username, default "central_app") — never the
+# master username with a divergent password. The master secret is RDS-managed
+# (manage_master_user_password); the operator bootstraps the app user once
+# from the master (CREATE USER + GRANT, see deploy/rds-notes.md §bootstrap),
+# then this secret's password is the app user's password. The secret stores
+# BOTH the discrete parts (ecs.tf injects DB_HOST/DB_PORT/DB_NAME/DB_USER/
+# DB_PASSWORD + DB_SSLMODE=require; the server and migrate.sh assemble the
+# DSN identically) AND a prebuilt database_url (?sslmode=require) for
+# consumers that take DATABASE_URL verbatim (ecs-task.json sample, local
+# DATABASE_URL boots). Both describe the same credential by construction.
 
 resource "random_password" "db_app" {
   length           = 32
@@ -13,7 +25,7 @@ resource "random_password" "db_app" {
 }
 
 resource "random_password" "jwt" {
-  # HS256 key for server.Options.JWTSecret (>= 32 chars enforced by bootstrap).
+  # HS256 key for the server JWT (JWT_SECRET, >= 32 chars).
   length           = 64
   special          = true
   override_special = "-_"
@@ -21,24 +33,27 @@ resource "random_password" "jwt" {
 
 resource "aws_secretsmanager_secret" "db_app" {
   name                    = "${var.project}/db-app"
-  description             = "App DB credentials for the central-memory server (issue #20)."
+  description             = "App DB credentials for the central-memory server (dedicated app user, see deploy/rds-notes.md bootstrap; issue #127)."
   recovery_window_in_days = 7
 }
 
 resource "aws_secretsmanager_secret_version" "db_app" {
   secret_id = aws_secretsmanager_secret.db_app.id
   secret_string = jsonencode({
-    username = var.db_username
+    username = var.app_username
     password = random_password.db_app.result
     host     = aws_rds_cluster.main.endpoint
     port     = 5432
     dbname   = var.db_name
+    # Same credential, prebuilt for DATABASE_URL consumers. sslmode=require
+    # matches rds.force_ssl=1 (aurora.tf); local dev overrides explicitly.
+    database_url = "postgres://${var.app_username}:${random_password.db_app.result}@${aws_rds_cluster.main.endpoint}:5432/${var.db_name}?sslmode=require"
   })
 }
 
 resource "aws_secretsmanager_secret" "jwt" {
   name                    = "${var.project}/jwt"
-  description             = "JWT signing key for the central-memory server (issue #20)."
+  description             = "JWT signing key for the central-memory server, consumed as JWT_SECRET (issue #112)."
   recovery_window_in_days = 7
 }
 

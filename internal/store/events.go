@@ -61,14 +61,15 @@ func (s *PostgresStore) AppendEvent(ctx context.Context, ev *Event) error {
 }
 
 // ListEvents returns up to `limit` events for a project after sinceID,
-// oldest first. limit <= 0 means "no cap" for backfills.
+// oldest first. limit <= 0 means the default page (20); oversized limits
+// clamp to MaxEventsLimit so backfills stay bounded (issue #119).
 func (s *PostgresStore) ListEvents(ctx context.Context, projectID string, sinceID int64, limit int) ([]*Event, error) {
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+eventColumns+` FROM events
 		  WHERE project_id = $1::uuid AND id > $2
 		  ORDER BY id ASC
 		  LIMIT $3`,
-		projectID, sinceID, nilLimit(limit))
+		projectID, sinceID, ClampEventsLimit(limit))
 	if err != nil {
 		return nil, err
 	}
@@ -82,13 +83,6 @@ func (s *PostgresStore) ListEvents(ctx context.Context, projectID string, sinceI
 		out = append(out, ev)
 	}
 	return out, rows.Err()
-}
-
-func nilLimit(limit int) any {
-	if limit <= 0 {
-		return nil // LIMIT NULL == no limit
-	}
-	return limit
 }
 
 // eventNotice is the JSON body fanned out by notify_event().

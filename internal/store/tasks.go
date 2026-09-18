@@ -234,6 +234,11 @@ func (s *TaskStore) ListByProject(ctx context.Context, projectID, status string,
 // read first and the transition is validated with CanTransitionTaskStatus,
 // so illegal jumps (e.g. DONE → IN_PROGRESS, BLOCKED → DONE) fail before
 // any write. updated_at is bumped by the database.
+//
+// Concurrency (issue #103): the write is conditional on the observed
+// current status (compare-and-set). A concurrent transition between the
+// read and the write touches zero rows and surfaces as a wrapped
+// ErrConflict instead of a silent last-write-wins overwrite.
 func (s *TaskStore) SetStatus(ctx context.Context, id, status string) (*Task, error) {
 	normalized, ok := NormalizeTaskStatus(status)
 	if !ok {
@@ -247,11 +252,15 @@ func (s *TaskStore) SetStatus(ctx context.Context, id, status string) (*Task, er
 		return nil, fmt.Errorf("store: illegal task transition %s -> %s", current.Status, normalized)
 	}
 	t, err := scanTask(s.db.QueryRow(ctx,
-		`UPDATE tasks SET status = $2, updated_at = now() WHERE id = $1 RETURNING `+taskColumns,
-		id, normalized))
+		`UPDATE tasks SET status = $2, updated_at = now() WHERE id = $1 AND status = $3 RETURNING `+taskColumns,
+		id, normalized, current.Status))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: task %s: %w", id, ErrNotFound)
+			if _, gerr := s.GetByID(ctx, id); gerr != nil {
+				return nil, gerr
+			}
+			return nil, fmt.Errorf("store: task %s changed concurrently (%s -> %s lost race): %w",
+				id, current.Status, normalized, ErrConflict)
 		}
 		return nil, fmt.Errorf("store: set task status: %w", err)
 	}

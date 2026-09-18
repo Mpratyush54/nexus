@@ -17,6 +17,8 @@ package materializer
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -269,6 +271,44 @@ func DefaultTargets() []Target {
 		{AgentName: "cursor", FilePath: ".cursorrules", Format: "text", Budget: 6000},
 		{AgentName: "windsurf", FilePath: ".windsurfrules", Format: "text", Budget: 6000},
 	}
+}
+
+// AddTarget validates and registers one push target (issue #41). Invalid
+// targets fail before they can break Regenerate: blank agent names and
+// paths, absolute paths (targets are workspace-relative), unknown formats,
+// and non-positive budgets are rejected. Re-adding an existing FilePath
+// replaces it so bootstrap code can override DefaultTargets per project.
+func (m *Materializer) AddTarget(t Target) error {
+	if strings.TrimSpace(t.AgentName) == "" {
+		return errors.New("materializer: agent name is required")
+	}
+	if strings.TrimSpace(t.FilePath) == "" {
+		return errors.New("materializer: file path is required")
+	}
+	// Targets are workspace-relative: reject absolute, rooted, and
+	// volume-qualified paths on every OS (filepath.IsAbs alone misses
+	// Unix-rooted "/x" on Windows, which still escapes the sandbox join).
+	if filepath.IsAbs(t.FilePath) || filepath.VolumeName(t.FilePath) != "" ||
+		strings.HasPrefix(t.FilePath, "/") || strings.HasPrefix(t.FilePath, `\`) {
+		return errors.New("materializer: file path must be workspace-relative")
+	}
+	switch strings.ToLower(strings.TrimSpace(t.Format)) {
+	case "markdown", "text":
+	default:
+		return errors.New("materializer: format must be markdown or text")
+	}
+	if t.Budget <= 0 {
+		return errors.New("materializer: budget must be positive")
+	}
+	t.Format = strings.ToLower(strings.TrimSpace(t.Format))
+	for i, cur := range m.Targets {
+		if cur.FilePath == t.FilePath {
+			m.Targets[i] = t
+			return nil
+		}
+	}
+	m.Targets = append(m.Targets, t)
+	return nil
 }
 
 // Materializer subscribes to memory events and regenerates push files.

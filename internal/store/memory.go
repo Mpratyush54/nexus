@@ -5,12 +5,12 @@ package store
 // SearchMemory is the keyword/tag fallback (works with zero embeddings);
 // SearchMemoryVector is the primary semantic path once the Memory Processor
 // backfills embedding vector(1536). Both honor project scoping: only rows
-// with a matching project_id, or NULL-project rows explicitly marked
-// level='organization' (the org tier is the global tier by design), are
-// visible. NULL-project personal/session rows never leak across projects.
+// with an explicit organization level and NULL project_id are visible to
+// every project (issue #102).
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -75,7 +75,12 @@ func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
 }
 
 // CreateMemoryItem inserts one memory, applying MemStore-identical defaults.
+// CHECK-mirroring validation runs before SQL so both backends reject the
+// same rows (issues #102, #119).
 func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) error {
+	if err := validateMemoryItemForCreate(item); err != nil {
+		return err
+	}
 	if item.Confidence == 0 {
 		item.Confidence = 1.0
 	}
@@ -126,24 +131,35 @@ func (s *PostgresStore) GetMemoryItem(ctx context.Context, id string) (*MemoryIt
 	return m, err
 }
 
-// ConfirmMemory flips PROPOSED -> CONFIRMED and records who confirmed.
+// ConfirmMemory flips PROPOSED -> CONFIRMED and records who confirmed
+// (issue #89 DAG). The write is conditional: re-confirming CONFIRMED stays
+// idempotent, but terminal states (REJECTED, SUPERSEDED) are never
+// resurrected — zero touched rows distinguish unknown ids (ErrNotFound)
+// from illegal edges (ErrConflict).
 func (s *PostgresStore) ConfirmMemory(ctx context.Context, id string, confirmedBy string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE memory_items SET status = 'CONFIRMED',
 			confirmed_by = $2::uuid, updated_at = now()
-		 WHERE id = $1::uuid`, id, nullText(confirmedBy))
+		 WHERE id = $1::uuid AND status IN ('PROPOSED','CONFIRMED')`, id, nullText(confirmedBy))
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return ErrNotFound
+		if _, gerr := s.GetMemoryItem(ctx, id); gerr != nil {
+			return gerr
+		}
+		return errMemoryConflict("non-PROPOSED", "CONFIRMED")
 	}
 	return nil
 }
 
 // SearchMemory is the text fallback: substring match on key/content, exact
 // tag hit, or empty query (list). MemStore parity: same CONFIRMED/PROPOSED
-// visibility; NULL-project rows match only when level='organization'.
+// visibility, org-level rows included.
+//
+// Scope isolation (issue #102): NULL-project rows match only when
+// explicitly organization-level. Personal/session rows with a NULL
+// project_id never leak across projects.
 func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error) {
 	if limit <= 0 {
 		limit = 20
@@ -183,6 +199,12 @@ func nilTextArray(tags []string) any {
 // SearchMemoryVector is the primary semantic path (plan §1.5): cosine
 // similarity over pgvector, CONFIRMED only, confidence floor 0.3.
 func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
+	if len(queryVec) == 0 {
+		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
+	}
+	if err := ValidateEmbeddingDim(queryVec); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 20
 	}
