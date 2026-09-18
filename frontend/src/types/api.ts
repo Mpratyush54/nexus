@@ -41,6 +41,7 @@ export type MemoryItem = {
   proposed_by?: string
   confirmed_by?: string
   use_count: number
+  visibility?: MemoryShareVisibility | string
   created_at: string
   updated_at: string
 }
@@ -68,6 +69,22 @@ export type MemoryVersion = {
   created_at: string
 }
 
+export type MemoryHistory = {
+  current: MemoryVersion | null
+  items: MemoryVersion[]
+}
+
+export type ProjectEvent = {
+  id: number
+  project_id: string
+  session_id?: string
+  user_id?: string
+  agent_id?: string
+  event_type: string
+  payload?: Record<string, unknown>
+  created_at: string
+}
+
 export type MemoryShareVisibility = 'private' | 'shared' | 'project' | 'public'
 
 export type ListResponse<T> = {
@@ -78,9 +95,28 @@ export type ListResponse<T> = {
 export type Project = {
   id: string
   folder_name?: string
+  display_name?: string
   canonical_url?: string
   root_commit?: string
+  org_id?: string
   created_by?: string
+  created_at?: string
+}
+
+export type Organization = {
+  id: string
+  name: string
+  slug?: string
+  created_by?: string
+  created_at: string
+}
+
+export type OrganizationMember = {
+  org_id: string
+  user_id: string
+  role: 'ADMIN' | 'MEMBER' | string
+  granted_by?: string
+  created_at?: string
 }
 
 export type WsEnvelope = {

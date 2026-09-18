@@ -135,6 +135,9 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	if !s.enforcePlanDimension(w, r, store.OwnerUser, authSubject(r), "orgs") {
+		return
+	}
 	o, err := os.CreateOrganization(r.Context(), req.Name, req.Slug, authSubject(r))
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -143,6 +146,9 @@ func (s *Server) handleOrgCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "could not create organization: "+err.Error())
 		return
+	}
+	if bs, ok := s.billingStore(); ok {
+		_, _ = bs.EnsureSubscription(r.Context(), store.OwnerOrg, o.ID)
 	}
 	writeJSON(w, http.StatusCreated, o)
 }
@@ -219,6 +225,9 @@ func (s *Server) handleOrgMemberAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.UserID) == "" {
 		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	if !s.enforcePlanDimension(w, r, store.OwnerOrg, id, "members") {
 		return
 	}
 	m, err := os.AddOrgMember(r.Context(), id, req.UserID, req.Role, authSubject(r))
@@ -315,6 +324,9 @@ func (s *Server) handleOrgProjectCreate(w http.ResponseWriter, r *http.Request) 
 	}
 	if strings.TrimSpace(req.FolderName) == "" {
 		writeError(w, http.StatusBadRequest, "folder_name is required")
+		return
+	}
+	if !s.enforcePlanDimension(w, r, store.OwnerOrg, id, "projects") {
 		return
 	}
 	p, err := os.CreateOrgProject(r.Context(), id, req.FolderName, req.DisplayName, req.CanonicalURL, req.RootCommit, authSubject(r))

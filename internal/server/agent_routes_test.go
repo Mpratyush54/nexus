@@ -160,6 +160,38 @@ func TestLogMCPToolCallHelper(t *testing.T) {
 	}
 }
 
+func TestMCPToolCallList(t *testing.T) {
+	s := newTestServer()
+	token := loginAs(t, s, "alice")
+	projectID := resolveTestProject(t, s, token, "mcp-list-proj")
+
+	rec := doJSON(t, s, http.MethodPost, "/projects/"+projectID+"/mcp/tool-calls", token, map[string]any{
+		"agent_id":  "cursor-agent",
+		"tool_name": "memory_write",
+		"arguments": map[string]any{"key": "k"},
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("post = %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, s, http.MethodGet, "/projects/"+projectID+"/mcp/tool-calls", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list = %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Count int `json:"count"`
+		Items []struct {
+			EventType string `json:"event_type"`
+			AgentID   string `json:"agent_id"`
+			ToolName  string `json:"tool_name"`
+		} `json:"items"`
+	}
+	decodeBody(t, rec, &out)
+	if out.Count != 1 || out.Items[0].EventType != EventMCPToolCall || out.Items[0].ToolName != "memory_write" {
+		t.Fatalf("list = %+v", out)
+	}
+}
+
 func bytesContains(haystack, needle []byte) bool {
 	return len(needle) == 0 || (len(haystack) >= len(needle) &&
 		(string(haystack) == string(needle) || len(haystack) > 0 && containsBytes(haystack, needle)))

@@ -109,7 +109,14 @@ func (s *Server) handleUsersMeGet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not load user")
 		return
 	}
-	writeJSON(w, http.StatusOK, u)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":                u.ID,
+		"username":          u.Username,
+		"email":             u.Email,
+		"settings":          u.Settings,
+		"created_at":        u.CreatedAt,
+		"is_platform_admin": s.userIsPlatformAdmin(r.Context(), u.ID, u.Username),
+	})
 }
 
 type usersMePutRequest struct {

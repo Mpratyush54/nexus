@@ -17,7 +17,7 @@ export function ProtectedRoute() {
 export function GuestRoute() {
   const { isAuthenticated } = useAuth()
   if (isAuthenticated) {
-    return <Navigate to="/app/memory" replace />
+    return <Navigate to="/app/dashboard" replace />
   }
   return <Outlet />
 }

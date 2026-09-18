@@ -34,3 +34,13 @@ export function useDeleteAgent() {
     },
   })
 }
+
+export function useMCPFeed() {
+  const { projectId, isAuthenticated } = useAuth()
+  return useQuery({
+    queryKey: queryKeys.agents.mcpFeed(projectId ?? ''),
+    enabled: isAuthenticated && Boolean(projectId),
+    queryFn: async ({ signal }) => (await agentsApi.listToolCalls(projectId!, signal)).items,
+    refetchInterval: 15_000,
+  })
+}

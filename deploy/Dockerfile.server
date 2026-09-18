@@ -13,7 +13,12 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -o /out/central-server ./cmd/server
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILT_AT=unknown
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X central-memory/internal/buildinfo.Version=${VERSION} -X central-memory/internal/buildinfo.Commit=${COMMIT} -X central-memory/internal/buildinfo.BuiltAt=${BUILT_AT}" \
+    -o /out/central-server ./cmd/server
 
 FROM alpine:3.21
 RUN apk add --no-cache postgresql16-client wget \

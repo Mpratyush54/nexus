@@ -20,7 +20,7 @@ export function LoginPage() {
       {
         onSuccess: () => {
           push({ title: 'Signed in', detail: `Welcome, ${username.trim()}` })
-          navigate('/app/memory')
+          navigate('/app/dashboard')
         },
         onError: (err) => {
           const message = err instanceof ApiError ? err.message : 'Login failed'

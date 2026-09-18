@@ -22,6 +22,7 @@ func (s *Server) registerGitHubRoutes() {
 	s.Mux.HandleFunc("POST /projects/{id}/github/import", s.requireAuth(s.handleGitHubImport))
 	s.Mux.HandleFunc("GET /projects/{id}/github/status", s.requireAuth(s.handleGitHubStatus))
 	s.Mux.HandleFunc("DELETE /projects/{id}/github/disconnect", s.requireAuth(s.handleGitHubDisconnect))
+	s.registerGitHubOAuthRoutes()
 }
 
 type githubConnectRequest struct {
@@ -69,10 +70,23 @@ func (s *Server) handleGitHubConnect(w http.ResponseWriter, r *http.Request) {
 	owner := strings.TrimSpace(req.Owner)
 	repo := strings.TrimSpace(req.Repo)
 	if owner == "" || repo == "" {
+		if inferredOwner, inferredRepo := s.githubOwnerRepoFromProject(r, id); inferredOwner != "" && inferredRepo != "" {
+			if owner == "" {
+				owner = inferredOwner
+			}
+			if repo == "" {
+				repo = inferredRepo
+			}
+		}
+	}
+	if owner == "" || repo == "" {
 		writeError(w, http.StatusBadRequest, "owner and repo are required")
 		return
 	}
 	token := strings.TrimSpace(req.AccessToken)
+	if token == "" {
+		token = s.oauthTokenFor(authSubject(r))
+	}
 	if token == "" {
 		token = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	}
@@ -108,26 +122,51 @@ func (s *Server) handleGitHubStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "github integration not supported by configured store")
 		return
 	}
+	suggestedOwner, suggestedRepo := s.githubOwnerRepoFromProject(r, id)
+	cfg := s.githubOAuthConfig()
+	oauthLinked := s.oauthTokenFor(authSubject(r)) != ""
 	link, err := gs.GetGitHubLink(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeJSON(w, http.StatusOK, map[string]any{"connected": false, "project_id": id})
+			writeJSON(w, http.StatusOK, map[string]any{
+				"connected":        false,
+				"project_id":       id,
+				"suggested_owner":  suggestedOwner,
+				"suggested_repo":   suggestedRepo,
+				"has_token":        oauthLinked || strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != "",
+				"oauth_configured": cfg.Configured(),
+				"oauth_linked":     oauthLinked,
+			})
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "could not load github status: "+err.Error())
 		return
 	}
+	htmlURL := "https://github.com/" + link.Owner + "/" + link.Repo
 	writeJSON(w, http.StatusOK, map[string]any{
-		"connected":      true,
-		"project_id":     link.ProjectID,
-		"owner":          link.Owner,
-		"repo":           link.Repo,
-		"sync_mode":      link.SyncMode,
-		"connected_by":   link.ConnectedBy,
-		"connected_at":   link.ConnectedAt,
-		"last_import_at": link.LastImportAt,
-		"has_token":      strings.TrimSpace(link.AccessToken) != "" || strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != "",
+		"connected":        true,
+		"project_id":       link.ProjectID,
+		"owner":            link.Owner,
+		"repo":             link.Repo,
+		"html_url":         htmlURL,
+		"sync_mode":        link.SyncMode,
+		"connected_by":     link.ConnectedBy,
+		"connected_at":     link.ConnectedAt,
+		"last_import_at":   link.LastImportAt,
+		"suggested_owner":  suggestedOwner,
+		"suggested_repo":   suggestedRepo,
+		"has_token":        strings.TrimSpace(link.AccessToken) != "" || oauthLinked || strings.TrimSpace(os.Getenv("GITHUB_TOKEN")) != "",
+		"oauth_configured": cfg.Configured(),
+		"oauth_linked":     oauthLinked,
 	})
+}
+
+func (s *Server) githubOwnerRepoFromProject(r *http.Request, projectID string) (owner, repo string) {
+	p, err := s.Store.GetProject(r.Context(), projectID)
+	if err != nil || p == nil {
+		return "", ""
+	}
+	return github.ParseOwnerRepo(p.CanonicalURL)
 }
 
 func (s *Server) handleGitHubDisconnect(w http.ResponseWriter, r *http.Request) {
@@ -156,6 +195,10 @@ func (s *Server) handleGitHubImport(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizePermission(w, r, id, store.PermMemberInvite) {
 		return
 	}
+	ownerType, ownerID := s.billingOwnerForProject(r.Context(), id)
+	if !s.enforcePlanDimension(w, r, ownerType, ownerID, "github_import") {
+		return
+	}
 	gs, ok := s.githubStore()
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "github integration not supported by configured store")
@@ -164,13 +207,36 @@ func (s *Server) handleGitHubImport(w http.ResponseWriter, r *http.Request) {
 	link, err := gs.GetGitHubLink(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusBadRequest, "connect a GitHub repository first")
+			owner, repo := s.githubOwnerRepoFromProject(r, id)
+			if owner == "" || repo == "" {
+				writeError(w, http.StatusBadRequest, "connect a GitHub repository first")
+				return
+			}
+			link = &store.GitHubLink{
+				ProjectID:   id,
+				Owner:       owner,
+				Repo:        repo,
+				AccessToken: strings.TrimSpace(s.oauthTokenFor(authSubject(r))),
+				SyncMode:    "one_time",
+				ConnectedBy: authSubject(r),
+				ConnectedAt: time.Now().UTC(),
+			}
+			if link.AccessToken == "" {
+				link.AccessToken = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+			}
+			if uerr := gs.UpsertGitHubLink(r.Context(), link); uerr != nil {
+				writeError(w, http.StatusInternalServerError, "could not connect github: "+uerr.Error())
+				return
+			}
+		} else {
+			writeError(w, http.StatusInternalServerError, "could not load github link: "+err.Error())
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not load github link: "+err.Error())
-		return
 	}
 	token := strings.TrimSpace(link.AccessToken)
+	if token == "" {
+		token = s.oauthTokenFor(authSubject(r))
+	}
 	if token == "" {
 		token = strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	}

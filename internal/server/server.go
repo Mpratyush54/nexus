@@ -87,6 +87,10 @@ type Server struct {
 	// when the client omits a precomputed embedding (issue #165). Nil
 	// selects EmbedderFromEnv at first use (hash fallback by default).
 	Embedder memctx.Embedder
+
+	// PushClient is the HTTP client used for Web Push delivery. Nil uses
+	// http.DefaultClient; tests inject an httptest client.
+	PushClient *http.Client
 }
 
 // NewServer wires routes onto a fresh stdlib ServeMux.

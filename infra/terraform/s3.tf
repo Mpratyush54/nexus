@@ -90,6 +90,45 @@ resource "aws_s3_bucket_lifecycle_configuration" "snapshots" {
   }
 }
 
+resource "aws_s3_bucket" "releases" {
+  bucket = "${var.project}-releases"
+}
+
+resource "aws_s3_bucket_versioning" "releases" {
+  bucket = aws_s3_bucket.releases.id
+  versioning_configuration { status = "Enabled" }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "releases" {
+  bucket = aws_s3_bucket.releases.id
+  rule {
+    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "releases" {
+  bucket                  = aws_s3_bucket.releases.id
+  block_public_acls       = false
+  block_public_policy     = false
+  ignore_public_acls      = false
+  restrict_public_buckets = false
+}
+
+resource "aws_s3_bucket_policy" "releases_public_read" {
+  bucket = aws_s3_bucket.releases.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Sid       = "PublicReadCLI"
+      Effect    = "Allow"
+      Principal = "*"
+      Action    = "s3:GetObject"
+      Resource  = "${aws_s3_bucket.releases.arn}/*"
+    }]
+  })
+  depends_on = [aws_s3_bucket_public_access_block.releases]
+}
+
 # Gateway endpoint so private-subnet tasks reach S3 without NAT (cost) or
 # blackholing where no NAT exists (#128). Uses the caller's route tables
 # (var.private_route_table_ids); empty = endpoint created without

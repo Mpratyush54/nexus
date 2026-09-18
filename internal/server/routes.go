@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"central-memory/internal/buildinfo"
 	memctx "central-memory/internal/context"
 	"central-memory/internal/store"
 )
@@ -41,10 +42,17 @@ func (s *Server) registerRoutes() {
 	s.registerAuthExtraRoutes()
 	s.registerRBACRoutes()
 	s.registerOrgRoutes()
+	s.registerBillingRoutes()
+	s.registerAdminRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"version": buildinfo.Version,
+		"commit":  buildinfo.Commit,
+		"app":     buildinfo.AppAPI,
+	})
 }
 
 // --- project members (issue #149) ---
@@ -114,6 +122,10 @@ func (s *Server) handleMemberGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.UserID) == "" {
 		writeError(w, http.StatusBadRequest, "user_id is required")
+		return
+	}
+	ownerType, ownerID := s.billingOwnerForProject(r.Context(), id)
+	if !s.enforcePlanDimension(w, r, ownerType, ownerID, "members") {
 		return
 	}
 	if err := s.Store.GrantMember(r.Context(), id, strings.TrimSpace(req.UserID), authSubject(r)); err != nil {
@@ -396,6 +408,10 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizePermission(w, r, item.ProjectID, store.PermMemoryWrite) {
 		return
 	}
+	ownerType, ownerID := s.billingOwnerForProject(r.Context(), item.ProjectID)
+	if !s.enforcePlanDimension(w, r, ownerType, ownerID, "memories") {
+		return
+	}
 	if !s.eventAllowed("memory:" + strings.TrimSpace(item.ProjectID)) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
@@ -422,6 +438,8 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not create memory item: "+err.Error())
 		return
 	}
+	s.notifyProjectActivity(item.ProjectID, "MEMORY_PROPOSED", "/app/memory")
+	s.publishMemoryLifecycle(&item, "MEMORY_PROPOSED", "proposed")
 	writeJSON(w, http.StatusCreated, &item)
 }
 

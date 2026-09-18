@@ -48,6 +48,16 @@ export function useActiveWorkspaces() {
   })
 }
 
+export function useProjectPresence() {
+  const { projectId, isAuthenticated } = useAuth()
+  return useQuery({
+    queryKey: queryKeys.workspace.presence(projectId ?? ''),
+    enabled: isAuthenticated && Boolean(projectId),
+    refetchInterval: 15_000,
+    queryFn: async () => (await teamApi.presence(projectId!)).items ?? [],
+  })
+}
+
 export function useGrantMember() {
   const { projectId } = useAuth()
   const qc = useQueryClient()
@@ -117,6 +127,23 @@ export function useGitHubDisconnect() {
     mutationFn: () => teamApi.githubDisconnect(projectId!),
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: queryKeys.team.github(projectId ?? '') })
+      void qc.invalidateQueries({ queryKey: queryKeys.team.githubRepos(projectId ?? '') })
     },
+  })
+}
+
+export function useGitHubRepos(enabled: boolean) {
+  const { projectId, isAuthenticated } = useAuth()
+  return useQuery({
+    queryKey: queryKeys.team.githubRepos(projectId ?? ''),
+    enabled: isAuthenticated && Boolean(projectId) && enabled,
+    queryFn: async () => (await teamApi.githubRepos(projectId!)).items ?? [],
+  })
+}
+
+export function useGitHubOAuthStart() {
+  const { projectId } = useAuth()
+  return useMutation({
+    mutationFn: () => teamApi.githubOAuthStart(projectId!),
   })
 }

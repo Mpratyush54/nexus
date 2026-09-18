@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion'
-import { FolderGit2, UserPlus } from 'lucide-react'
-import { useMemo, useState, type FormEvent } from 'react'
+import { ExternalLink, FolderGit2, UserPlus } from 'lucide-react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
@@ -10,6 +11,8 @@ import {
   useGitHubConnect,
   useGitHubDisconnect,
   useGitHubImport,
+  useGitHubOAuthStart,
+  useGitHubRepos,
   useGitHubStatus,
   useGrantMember,
   useMembers,
@@ -32,6 +35,7 @@ function initials(id: string) {
 export function TeamPage() {
   const { projectId, user } = useAuth()
   const { push } = useToast()
+  const [params, setParams] = useSearchParams()
   const members = useMembers()
   const roles = useRoles()
   const github = useGitHubStatus()
@@ -42,12 +46,38 @@ export function TeamPage() {
   const connect = useGitHubConnect()
   const disconnect = useGitHubDisconnect()
   const doImport = useGitHubImport()
+  const oauthStart = useGitHubOAuthStart()
 
   const [inviteId, setInviteId] = useState('')
-  const [owner, setOwner] = useState('')
-  const [repo, setRepo] = useState('')
-  const [token, setToken] = useState('')
+  const [showRepos, setShowRepos] = useState(false)
   const [importItems, setImportItems] = useState<GitHubImportItem[] | null>(null)
+
+  const suggestedOwner = github.data?.suggested_owner?.trim() || ''
+  const suggestedRepo = github.data?.suggested_repo?.trim() || ''
+  const connected = Boolean(github.data?.connected)
+  const oauthLinked = Boolean(github.data?.oauth_linked)
+  const oauthConfigured = Boolean(github.data?.oauth_configured)
+  const repos = useGitHubRepos(showRepos && !connected && (oauthLinked || oauthConfigured))
+
+  useEffect(() => {
+    const flag = params.get('github')
+    if (!flag) return
+    if (flag === 'linked') {
+      setShowRepos(true)
+      push({ title: 'GitHub connected', detail: 'Pick a repository to link', tone: 'teal' })
+    } else if (flag === 'error') {
+      push({
+        title: 'GitHub connect failed',
+        detail: params.get('message') || 'OAuth error',
+        tone: 'danger',
+      })
+    }
+    setParams({}, { replace: true })
+  }, [params, push, setParams])
+
+  useEffect(() => {
+    if (oauthLinked && !connected) setShowRepos(true)
+  }, [oauthLinked, connected])
 
   const onlineByUser = useMemo(() => {
     const map = new Set<string>()
@@ -84,34 +114,11 @@ export function TeamPage() {
     })
   }
 
-  const onConnect = (e: FormEvent) => {
-    e.preventDefault()
-    connect.mutate(
-      {
-        owner: owner.trim(),
-        repo: repo.trim(),
-        access_token: token.trim() || undefined,
-        sync_mode: 'manual',
-      },
-      {
-        onSuccess: () => {
-          push({ title: 'GitHub connected', detail: `${owner}/${repo}` })
-          setToken('')
-        },
-        onError: (err) =>
-          push({
-            title: 'Connect failed',
-            detail: err instanceof ApiError ? err.message : 'Unknown error',
-            tone: 'danger',
-          }),
-      },
-    )
-  }
-
-  const onImport = () => {
+  const runImport = () => {
     doImport.mutate(undefined, {
       onSuccess: (res) => {
         setImportItems(res.items)
+        setShowRepos(false)
         push({
           title: 'Import complete',
           detail: `${res.imported} granted · ${res.invites} need signup`,
@@ -126,6 +133,62 @@ export function TeamPage() {
         }),
     })
   }
+
+  const linkAndImport = (owner: string, repo: string) => {
+    connect.mutate(
+      { owner, repo, sync_mode: 'one_time' },
+      {
+        onSuccess: () => runImport(),
+        onError: (err) =>
+          push({
+            title: 'Connect failed',
+            detail: err instanceof ApiError ? err.message : 'Unknown error',
+            tone: 'danger',
+          }),
+      },
+    )
+  }
+
+  const onPrimaryGitHub = () => {
+    if (connected) {
+      runImport()
+      return
+    }
+    if (suggestedOwner && suggestedRepo) {
+      linkAndImport(suggestedOwner, suggestedRepo)
+      return
+    }
+    if (oauthLinked) {
+      setShowRepos(true)
+      return
+    }
+    if (oauthConfigured) {
+      oauthStart.mutate(undefined, {
+        onSuccess: (res) => {
+          window.location.href = res.authorize_url
+        },
+        onError: (err) =>
+          push({
+            title: 'Could not start GitHub',
+            detail: err instanceof ApiError ? err.message : 'Unknown error',
+            tone: 'danger',
+          }),
+      })
+      return
+    }
+    push({
+      title: 'GitHub OAuth not configured',
+      detail: 'Set GITHUB_CLIENT_ID / SECRET on the server, or resolve a project from a GitHub remote.',
+      tone: 'amber',
+    })
+  }
+
+  const importBusy = connect.isPending || doImport.isPending || oauthStart.isPending
+  const repoURL =
+    github.data?.html_url ||
+    (github.data?.owner && github.data?.repo
+      ? `https://github.com/${github.data.owner}/${github.data.repo}`
+      : '')
 
   if (!projectId) {
     return (
@@ -142,25 +205,37 @@ export function TeamPage() {
             Members, roles, presence, and GitHub collaborator import.
           </p>
         </div>
-        <div className="flex -space-x-2">
-          {(members.data ?? []).slice(0, 8).map((m, i) => (
-            <motion.div
-              key={m.user_id}
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: i * 0.04 }}
-              title={m.user_id}
-              className="app-avatar relative flex h-9 w-9 items-center justify-center rounded-full border border-border bg-raised text-[10px] font-medium text-fg"
-            >
-              {initials(m.user_id)}
-              <span
-                className={[
-                  'absolute bottom-0 right-0 h-2 w-2 rounded-full border border-surface',
-                  onlineByUser.has(m.user_id) ? 'bg-teal' : 'bg-muted',
-                ].join(' ')}
-              />
-            </motion.div>
-          ))}
+        <div className="flex flex-wrap items-center gap-3">
+          <Button type="button" size="sm" onClick={onPrimaryGitHub} disabled={importBusy || github.isLoading}>
+            <FolderGit2 className="h-3.5 w-3.5" />
+            {importBusy
+              ? 'Working…'
+              : connected
+                ? 'Import from GitHub'
+                : suggestedOwner && suggestedRepo
+                  ? 'Import from GitHub'
+                  : 'Connect GitHub'}
+          </Button>
+          <div className="flex -space-x-2">
+            {(members.data ?? []).slice(0, 8).map((m, i) => (
+              <motion.div
+                key={m.user_id}
+                initial={{ opacity: 0, y: 6 }}
+                animate={{ opacity: 1, y: 0 }}
+                transition={{ delay: i * 0.04 }}
+                title={m.user_id}
+                className="app-avatar relative flex h-9 w-9 items-center justify-center rounded-full border border-border bg-raised text-[10px] font-medium text-fg"
+              >
+                {initials(m.user_id)}
+                <span
+                  className={[
+                    'absolute bottom-0 right-0 h-2 w-2 rounded-full border border-surface',
+                    onlineByUser.has(m.user_id) ? 'bg-teal' : 'bg-muted',
+                  ].join(' ')}
+                />
+              </motion.div>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -262,23 +337,49 @@ export function TeamPage() {
       <GlassPanel className="space-y-4 p-5">
         <div className="flex flex-wrap items-center gap-2">
           <FolderGit2 className="h-4 w-4 text-fg-dim" />
-          <h2 className="text-sm font-medium text-fg">GitHub import</h2>
-          {github.data?.connected ? (
-            <StatusPill tone="teal">{`${github.data.owner ?? ''}/${github.data.repo ?? ''}`}</StatusPill>
+          <h2 className="text-sm font-medium text-fg">GitHub</h2>
+          {connected ? (
+            <StatusPill tone="teal">{`${github.data?.owner ?? ''}/${github.data?.repo ?? ''}`}</StatusPill>
+          ) : suggestedOwner && suggestedRepo ? (
+            <StatusPill tone="accent">{`${suggestedOwner}/${suggestedRepo}`}</StatusPill>
+          ) : oauthLinked ? (
+            <StatusPill tone="teal">account linked</StatusPill>
           ) : (
             <StatusPill>not linked</StatusPill>
           )}
         </div>
+        <p className="text-xs text-fg-dim">
+          Connect with GitHub, pick a repo, import collaborators. No typing owner or token.
+        </p>
 
-        {github.data?.connected ? (
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" size="sm" onClick={onImport} disabled={doImport.isPending}>
-              {doImport.isPending ? 'Importing…' : 'Import collaborators'}
-            </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button type="button" size="sm" onClick={onPrimaryGitHub} disabled={importBusy}>
+            {importBusy
+              ? 'Working…'
+              : connected
+                ? 'Import collaborators'
+                : suggestedOwner && suggestedRepo
+                  ? 'Import from GitHub'
+                  : oauthLinked
+                    ? 'Choose repository'
+                    : 'Connect GitHub'}
+          </Button>
+          {connected && repoURL ? (
+            <a
+              href={repoURL}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-xs text-fg-dim hover:border-border-strong hover:text-fg"
+            >
+              <ExternalLink className="h-3.5 w-3.5" />
+              Open repo
+            </a>
+          ) : null}
+          {connected ? (
             <Button
               type="button"
               size="sm"
-              variant="secondary"
+              variant="ghost"
               disabled={disconnect.isPending}
               onClick={() =>
                 disconnect.mutate(undefined, {
@@ -291,50 +392,44 @@ export function TeamPage() {
             >
               Disconnect
             </Button>
-            {github.data.last_import_at ? (
-              <span className="self-center text-xs text-muted">
-                Last import {formatRelative(github.data.last_import_at)}
-              </span>
+          ) : null}
+          {github.data?.last_import_at ? (
+            <span className="self-center text-xs text-muted">
+              Last import {formatRelative(github.data.last_import_at)}
+            </span>
+          ) : null}
+        </div>
+
+        {showRepos && !connected ? (
+          <div className="max-h-72 space-y-1 overflow-y-auto border-t border-border pt-3">
+            {repos.isLoading ? <p className="text-sm text-muted">Loading your repositories…</p> : null}
+            {repos.isError ? (
+              <p className="text-sm text-danger">
+                {repos.error instanceof ApiError ? repos.error.message : 'Could not list repos'}
+              </p>
+            ) : null}
+            {(repos.data ?? []).map((r) => (
+              <button
+                key={r.id}
+                type="button"
+                disabled={importBusy}
+                onClick={() => linkAndImport(r.owner, r.name)}
+                className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2 text-left text-sm hover:bg-raised"
+              >
+                <span className="min-w-0">
+                  <span className="block truncate font-mono text-fg">{r.full_name}</span>
+                  {r.description ? (
+                    <span className="block truncate text-xs text-muted">{r.description}</span>
+                  ) : null}
+                </span>
+                <StatusPill tone={r.private ? 'amber' : 'neutral'}>{r.private ? 'private' : 'public'}</StatusPill>
+              </button>
+            ))}
+            {!repos.isLoading && !(repos.data ?? []).length && oauthLinked ? (
+              <p className="text-sm text-muted">No repositories returned for this GitHub account.</p>
             ) : null}
           </div>
-        ) : (
-          <form onSubmit={onConnect} className="grid gap-3 sm:grid-cols-2">
-            <label className="block">
-              <span className="mb-1 block text-xs text-fg-dim">Owner</span>
-              <input
-                value={owner}
-                onChange={(e) => setOwner(e.target.value)}
-                required
-                className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none focus:border-amber"
-              />
-            </label>
-            <label className="block">
-              <span className="mb-1 block text-xs text-fg-dim">Repo</span>
-              <input
-                value={repo}
-                onChange={(e) => setRepo(e.target.value)}
-                required
-                className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none focus:border-amber"
-              />
-            </label>
-            <label className="block sm:col-span-2">
-              <span className="mb-1 block text-xs text-fg-dim">
-                Access token (optional if server has GITHUB_TOKEN)
-              </span>
-              <input
-                type="password"
-                value={token}
-                onChange={(e) => setToken(e.target.value)}
-                className="h-10 w-full rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber"
-              />
-            </label>
-            <div>
-              <Button type="submit" size="sm" disabled={connect.isPending}>
-                Connect repository
-              </Button>
-            </div>
-          </form>
-        )}
+        ) : null}
 
         {importItems ? (
           <ul className="max-h-64 space-y-2 overflow-y-auto border-t border-border pt-3">

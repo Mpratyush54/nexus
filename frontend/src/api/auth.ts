@@ -18,6 +18,7 @@ export type UserProfile = {
   email?: string
   settings?: Record<string, unknown>
   created_at: string
+  is_platform_admin?: boolean
 }
 
 export type UsageStats = {

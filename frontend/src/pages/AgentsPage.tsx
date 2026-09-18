@@ -6,7 +6,7 @@ import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useToast } from '@/components/ui/Toast'
-import { useAgents, useDeleteAgent, useUpsertAgent } from '@/hooks/useAgents'
+import { useAgents, useDeleteAgent, useMCPFeed, useUpsertAgent } from '@/hooks/useAgents'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
@@ -45,6 +45,7 @@ export function AgentsPage() {
   const agents = useAgents()
   const upsert = useUpsertAgent()
   const remove = useDeleteAgent()
+  const feed = useMCPFeed()
 
   const [agentId, setAgentId] = useState('')
   const [mode, setMode] = useState('full')
@@ -98,9 +99,37 @@ export function AgentsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Agents</h1>
         <p className="mt-1 text-sm text-fg-dim">
-          MCP permission matrix, rate limits, and connection modes.
+          Live MCP call log, HUD connections, and the permission matrix.
         </p>
       </div>
+
+      <GlassPanel className="space-y-3 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-medium text-fg">Live MCP feed</h2>
+          <StatusPill tone={(feed.data ?? []).length > 0 ? 'teal' : 'neutral'}>
+            MCP_TOOL_CALL
+          </StatusPill>
+        </div>
+        <div className="max-h-72 overflow-auto rounded-lg border border-border bg-base/80 p-3 font-mono text-[11px] leading-5 text-fg">
+          {(feed.data ?? []).length === 0 && !feed.isLoading ? (
+            <p className="text-muted">Waiting for MCP_TOOL_CALL events…</p>
+          ) : null}
+          {(feed.data ?? []).map((call) => {
+            const ts = call.created_at ? formatRelative(call.created_at) : ''
+            const args = call.arguments ? JSON.stringify(call.arguments) : ''
+            return (
+              <div key={String(call.id)} className="border-b border-border/60 py-1 last:border-0">
+                <span className="text-muted">{ts || 'now'}</span>{' '}
+                <span className="text-teal">{call.agent_id || 'agent'}</span>{' '}
+                <span className="text-amber">{call.tool_name || '?'}</span>
+                {call.duration_ms ? <span className="text-muted"> {call.duration_ms}ms</span> : null}
+                {call.error ? <span className="text-danger"> ERR {call.error}</span> : null}
+                {args ? <div className="truncate text-muted">{args}</div> : null}
+              </div>
+            )
+          })}
+        </div>
+      </GlassPanel>
 
       <GlassPanel className="space-y-4 p-5">
         <h2 className="text-sm font-medium text-fg">

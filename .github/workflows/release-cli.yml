@@ -1,0 +1,131 @@
+name: Release CLI & daemon
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version label (defaults to tag or short SHA)
+        required: false
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AWS_REGION: ap-south-1
+  ROLE_TO_ASSUME: arn:aws:iam::833291393451:role/GitHubActions-CentralMemory-Deploy
+  API_URL: https://api-nexus.pratyushes.dev
+
+jobs:
+  build:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+          - goos: windows
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Resolve version
+        id: meta
+        run: |
+          VER="${{ github.event.inputs.version }}"
+          if [ -z "$VER" ]; then
+            if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+              VER="${GITHUB_REF_NAME}"
+            else
+              VER="0.0.0-${GITHUB_SHA:0:7}"
+            fi
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Build binaries
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VER: ${{ steps.meta.outputs.version }}
+        run: |
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+          LDFLAGS="-s -w -X central-memory/internal/buildinfo.Version=${VER} -X central-memory/internal/buildinfo.Commit=${GITHUB_SHA} -X central-memory/internal/buildinfo.BuiltAt=${{ steps.meta.outputs.built_at }} -X main.defaultServerURL=${API_URL}"
+          go build -trimpath -ldflags "$LDFLAGS" -o "dist/nexus-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus
+          go build -trimpath -ldflags "$LDFLAGS" -o "dist/nexus-daemon-${GOOS}-${GOARCH}${EXT}" ./cmd/daemon
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Resolve version
+        id: meta
+        run: |
+          VER="${{ github.event.inputs.version }}"
+          if [ -z "$VER" ]; then
+            if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+              VER="${GITHUB_REF_NAME}"
+            else
+              VER="0.0.0-${GITHUB_SHA:0:7}"
+            fi
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          ls -la dist
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.version }}
+          name: Nexus ${{ steps.meta.outputs.version }}
+          generate_release_notes: true
+          files: dist/*
+
+      - name: Configure AWS Credentials (OIDC)
+        continue-on-error: true
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3
+        continue-on-error: true
+        run: |
+          BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
+          if [ -z "$BUCKET" ]; then BUCKET="central-memory-releases"; fi
+          PREFIX="s3://${BUCKET}/cli/${{ steps.meta.outputs.version }}"
+          aws s3 sync dist "$PREFIX" || true
+          echo "S3 prefix: $PREFIX"

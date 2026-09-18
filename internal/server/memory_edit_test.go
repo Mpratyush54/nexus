@@ -27,6 +27,24 @@ func TestMemoryEditHistoryRevertDelete(t *testing.T) {
 	var created store.MemoryItem
 	decodeBody(t, rec, &created)
 
+	// Fresh rows expose the live item as current even before any edit.
+	rec = doJSON(t, s, http.MethodGet, "/memory/"+created.ID+"/history", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("history-after-create status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var hist0 struct {
+		Current *store.MemoryVersion   `json:"current"`
+		Items   []*store.MemoryVersion `json:"items"`
+		Count   int                    `json:"count"`
+	}
+	decodeBody(t, rec, &hist0)
+	if hist0.Current == nil || hist0.Current.Content != created.Content {
+		t.Fatalf("current after create = %+v, want live content", hist0.Current)
+	}
+	if hist0.Count != 0 {
+		t.Fatalf("snapshot count after create = %d, want 0", hist0.Count)
+	}
+
 	// Partial PUT.
 	rec = doJSON(t, s, http.MethodPut, "/memory/"+created.ID, token, map[string]any{
 		"content": "The team uses pytest with fixture-based setup for integration tests and e2e.",
@@ -66,10 +84,14 @@ func TestMemoryEditHistoryRevertDelete(t *testing.T) {
 		t.Fatalf("history status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var hist struct {
-		Items []*store.MemoryVersion `json:"items"`
-		Count int                    `json:"count"`
+		Current *store.MemoryVersion   `json:"current"`
+		Items   []*store.MemoryVersion `json:"items"`
+		Count   int                    `json:"count"`
 	}
 	decodeBody(t, rec, &hist)
+	if hist.Current == nil || hist.Current.Content != updated.Content {
+		t.Fatalf("current after edit = %+v, want updated content", hist.Current)
+	}
 	if hist.Count != 1 || len(hist.Items) != 1 {
 		t.Fatalf("history = %+v, want 1 version", hist)
 	}

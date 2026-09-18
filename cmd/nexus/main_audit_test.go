@@ -71,7 +71,7 @@ func TestAuditStatusAgainstHttptest(t *testing.T) {
 func TestAuditNexusUsageMentionsCommands(t *testing.T) {
 	var out bytes.Buffer
 	usage(&out)
-	for _, want := range []string{"memory search", "session list", "branch list", "episode list", "doctor", "migrate"} {
+	for _, want := range []string{"memory search", "session list", "branch list", "episode list", "doctor", "migrate", "update", "daemon"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("usage missing %q", want)
 		}

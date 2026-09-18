@@ -32,6 +32,7 @@ func (s *Server) registerAgentRoutes() {
 	s.Mux.HandleFunc("DELETE /projects/{id}/agents/{agentId}", s.requireAuth(s.handleAgentDelete))
 	s.Mux.HandleFunc("GET /projects/{id}/agents/{agentId}", s.requireAuth(s.handleAgentGet))
 	s.Mux.HandleFunc("POST /projects/{id}/mcp/tool-calls", s.requireAuth(s.handleMCPToolCall))
+	s.Mux.HandleFunc("GET /projects/{id}/mcp/tool-calls", s.requireAuth(s.handleMCPToolCallList))
 }
 
 type agentPutRequest struct {
@@ -239,6 +240,87 @@ func (s *Server) handleMCPToolCall(w http.ResponseWriter, r *http.Request) {
 		"created_at": ev.CreatedAt,
 		"payload":    payload,
 	})
+}
+
+type mcpToolCallItem struct {
+	ID         int64          `json:"id"`
+	EventType  string         `json:"event_type"`
+	AgentID    string         `json:"agent_id,omitempty"`
+	ToolName   string         `json:"tool_name,omitempty"`
+	Arguments  map[string]any `json:"arguments,omitempty"`
+	Result     map[string]any `json:"result,omitempty"`
+	Error      string         `json:"error,omitempty"`
+	DurationMs int64          `json:"duration_ms,omitempty"`
+	SessionID  string         `json:"session_id,omitempty"`
+	UserID     string         `json:"user_id,omitempty"`
+	Payload    map[string]any `json:"payload,omitempty"`
+	CreatedAt  time.Time      `json:"created_at"`
+}
+
+func (s *Server) handleMCPToolCallList(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if !s.authorizeProject(w, r, id) {
+		return
+	}
+	events, err := s.Store.ListEvents(r.Context(), id, 0, 200)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list tool calls: "+err.Error())
+		return
+	}
+	items := make([]mcpToolCallItem, 0, len(events))
+	for _, ev := range events {
+		if ev == nil || ev.EventType != EventMCPToolCall {
+			continue
+		}
+		items = append(items, flattenMCPToolCall(ev))
+	}
+	for i, j := 0, len(items)-1; i < j; i, j = i+1, j-1 {
+		items[i], items[j] = items[j], items[i]
+	}
+	if len(items) > 80 {
+		items = items[:80]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+}
+
+func flattenMCPToolCall(ev *store.Event) mcpToolCallItem {
+	item := mcpToolCallItem{
+		ID:        ev.ID,
+		EventType: ev.EventType,
+		SessionID: ev.SessionID,
+		UserID:    ev.UserID,
+		Payload:   ev.Payload,
+		CreatedAt: ev.CreatedAt,
+	}
+	if ev.Payload == nil {
+		return item
+	}
+	if v, _ := ev.Payload["agent_id"].(string); v != "" {
+		item.AgentID = v
+	} else if ev.AgentID != "" {
+		item.AgentID = ev.AgentID
+	}
+	if v, _ := ev.Payload["tool_name"].(string); v != "" {
+		item.ToolName = v
+	}
+	if v, _ := ev.Payload["error"].(string); v != "" {
+		item.Error = v
+	}
+	switch n := ev.Payload["duration_ms"].(type) {
+	case float64:
+		item.DurationMs = int64(n)
+	case int64:
+		item.DurationMs = n
+	case int:
+		item.DurationMs = int64(n)
+	}
+	if m, ok := ev.Payload["arguments"].(map[string]any); ok {
+		item.Arguments = m
+	}
+	if m, ok := ev.Payload["result"].(map[string]any); ok {
+		item.Result = m
+	}
+	return item
 }
 
 // publishMCPToolCall fans a MCP_TOOL_CALL event to the hub (nil-safe).

@@ -16,8 +16,6 @@ import (
 	"time"
 )
 
-const version = "0.1.0"
-
 func main() {
 	cfg := defaultConfig()
 	rest, err := parseGlobalArgs(os.Args[1:], &cfg)
@@ -54,10 +52,14 @@ func main() {
 		runErr = runDoctor(ctx, cfg, rest[1:], os.Stdout)
 	case "migrate":
 		runErr = runMigrate(ctx, cfg, rest[1:], os.Stdout)
+	case "update":
+		runErr = runUpdate(ctx, cfg, rest[1:], os.Stdout)
+	case "daemon":
+		runErr = runDaemonCmd(cfg, rest[1:], os.Stdout)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	case "version", "--version":
-		fmt.Fprintln(os.Stdout, "nexus", version)
+		runErr = runVersion(ctx, cfg, rest[1:], os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n", rest[0])
 		usage(os.Stderr)
@@ -192,14 +194,17 @@ Commands:
   status                          server health (+ active workspace with -p)
   memory search [-p ID] [--level L] [--limit N] "<query>"
   memory propose -k KEY [-p ID] [--level L] "<fact>"
-  memory confirm <id>             (Phase 2: server route pending, graceful 404)
-  memory reject <id>              (Phase 2: server route pending, graceful 404)
-  session list|create|join        (Phase 3: server routes pending, graceful 404)
-  branch list|fork|checkout|diff|merge   (Phase 5: server routes pending)
+  memory confirm <id>
+  memory reject <id>
+  session list|create|join
+  branch list|fork|checkout|diff|merge
   episode list [-p ID] [--limit N]
   episode search [-p ID] "<error or query>"
   doctor                          probe server, daemon, and git
-  migrate [--vault PATH] [--dry-run]   import legacy vault (see also: mem mcp local-mode)
+  migrate [--vault PATH] [--dry-run]   import legacy vault
+  version [--check]               print CLI version (and latest release)
+  update [--channel stable] [--yes]    download the latest CLI binary
+  daemon install|uninstall|status      install the local workspace daemon as a login service
 
 Global flags (env fallbacks: NEXUS_SERVER / CENTRAL_SERVER_URL, NEXUS_TOKEN, NEXUS_DAEMON, NEXUS_PROJECT):
   --server URL   central server base URL (default: env → ~/.config/central-memory/config.json → compile-time)

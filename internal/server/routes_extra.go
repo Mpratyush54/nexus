@@ -79,9 +79,16 @@ func (s *Server) registerExtraRoutes() {
 
 	// Phase 7 GitHub collaborator import (issue #167).
 	s.registerGitHubRoutes()
+	s.registerPresenceRoutes()
 
 	// Phase 17 notifications + Web Push subscribe (issue #176).
 	s.registerNotificationRoutes()
+
+	// Project activity feed (plan §10).
+	s.registerActivityRoutes()
+	s.registerDashboardRoutes()
+
+	s.registerExportRoutes()
 
 	// Episodes.
 	s.Mux.HandleFunc("POST /episodes/{id}/resolve", s.requireAuth(s.handleEpisodeResolve))
@@ -1193,6 +1200,8 @@ func (s *Server) handleMemoryConfirm(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "CONFIRMED"})
 		return
 	}
+	s.publishMemoryLifecycle(item, "MEMORY_CONFIRMED", "confirmed")
+	s.notifyProjectActivity(item.ProjectID, "MEMORY_CONFIRMED", "/app/memory")
 	writeJSON(w, http.StatusOK, item)
 }
 
@@ -1238,6 +1247,7 @@ func (s *Server) handleMemoryReject(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "REJECTED"})
 			return
 		}
+		s.publishMemoryLifecycle(item, "MEMORY_REJECTED", "rejected")
 		writeJSON(w, http.StatusOK, item)
 		return
 	}

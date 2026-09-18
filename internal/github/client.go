@@ -140,6 +140,39 @@ func mapGitHubPerm(admin, maintain, push, triage, pull bool, roleName string) st
 	}
 }
 
+// ParseOwnerRepo extracts owner/repo from a GitHub URL, SSH remote, or
+// "owner/repo" shorthand. Returns empty strings when nothing GitHub-shaped.
+func ParseOwnerRepo(raw string) (owner, repo string) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return "", ""
+	}
+	s = strings.TrimSuffix(s, ".git")
+	s = strings.TrimRight(s, "/")
+	lower := strings.ToLower(s)
+	if i := strings.Index(lower, "github.com"); i >= 0 {
+		rest := s[i+len("github.com"):]
+		rest = strings.TrimLeft(rest, "/:")
+		if at := strings.Index(rest, "@"); at >= 0 && (strings.Index(rest, "/") == -1 || at < strings.Index(rest, "/")) {
+			rest = rest[at+1:]
+		}
+		parts := strings.Split(rest, "/")
+		if len(parts) >= 2 {
+			return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		}
+		return "", ""
+	}
+	// scp-like git@github.com:owner/repo already handled above; "owner/repo".
+	if strings.Contains(s, "://") || strings.Contains(s, "@") {
+		return "", ""
+	}
+	parts := strings.Split(s, "/")
+	if len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+		return parts[0], parts[1]
+	}
+	return "", ""
+}
+
 // MapPermissionToRole converts GitHub permission → Central Memory built-in role.
 // admin/maintain → ADMIN, write/triage → EDITOR, read → VIEWER.
 func MapPermissionToRole(perm string) string {

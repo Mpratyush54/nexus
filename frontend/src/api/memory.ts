@@ -1,5 +1,14 @@
 import { apiRequest } from '@/lib/api-client'
-import { ApiError, type ListResponse, type MemoryItem, type MemoryUpdatePayload, type MemoryVersion } from '@/types/api'
+import { ApiError, type ListResponse, type MemoryItem, type MemoryShareVisibility, type MemoryUpdatePayload, type MemoryVersion } from '@/types/api'
+
+export type MemoryShare = {
+  id: string
+  memory_id: string
+  shared_with_user_id?: string
+  shared_with_role?: string
+  shared_by?: string
+  created_at: string
+}
 
 export type MemorySearchParams = {
   projectId: string
@@ -52,12 +61,11 @@ export const memoryApi = {
   /** GET /memory/{id}/history — returns null when endpoint is missing (404). */
   history(id: string, signal?: AbortSignal) {
     return gracefulNotFound(async () => {
-      const data = await apiRequest<ListResponse<MemoryVersion> | MemoryVersion[]>(
-        `/memory/${id}/history`,
-        { signal },
-      )
-      if (Array.isArray(data)) return data
-      return data.items ?? []
+      const data = await apiRequest<
+        (ListResponse<MemoryVersion> & { current?: MemoryVersion | null }) | MemoryVersion[]
+      >(`/memory/${id}/history`, { signal })
+      if (Array.isArray(data)) return { current: null, items: data }
+      return { current: data.current ?? null, items: data.items ?? [] }
     })
   },
 
@@ -69,5 +77,27 @@ export const memoryApi = {
         body: { version },
       }),
     )
+  },
+
+  shares(id: string, signal?: AbortSignal) {
+    return apiRequest<ListResponse<MemoryShare>>(`/memory/${id}/shares`, { signal })
+  },
+
+  share(
+    id: string,
+    input: { visibility?: MemoryShareVisibility; user_id?: string; role?: string },
+  ) {
+    return apiRequest(`/memory/${id}/share`, { method: 'POST', body: input })
+  },
+
+  unshare(id: string, userId: string) {
+    return apiRequest(`/memory/${id}/share/${userId}`, { method: 'DELETE' })
+  },
+
+  copy(id: string, projectId: string) {
+    return apiRequest<MemoryItem>(`/memory/${id}/copy`, {
+      method: 'POST',
+      body: { project_id: projectId },
+    })
   },
 }

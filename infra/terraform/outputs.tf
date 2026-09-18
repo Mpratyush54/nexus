@@ -41,3 +41,8 @@ output "snapshots_bucket" {
   description = "S3 bucket for exported memory snapshots / episode attachments."
   value       = aws_s3_bucket.snapshots.id
 }
+
+output "releases_bucket" {
+  description = "S3 bucket for CLI/daemon/PWA versioned release artifacts (nexus update)."
+  value       = aws_s3_bucket.releases.id
+}

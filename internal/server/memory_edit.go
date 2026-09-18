@@ -134,7 +134,27 @@ func (s *Server) handleMemoryHistory(w http.ResponseWriter, r *http.Request) {
 	if versions == nil {
 		versions = []*store.MemoryVersion{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": versions, "count": len(versions)})
+	item, err := s.Store.GetMemoryItem(r.Context(), id)
+	if err != nil {
+		writeMemoryEditError(w, err, "could not list memory history")
+		return
+	}
+	current := &store.MemoryVersion{
+		MemoryID:  item.ID,
+		Version:   0,
+		Key:       item.Key,
+		Content:   item.Content,
+		Tags:      item.Tags,
+		Level:     item.Level,
+		Scope:     item.Scope,
+		EditedBy:  item.ProposedBy,
+		CreatedAt: item.UpdatedAt,
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current": current,
+		"items":   versions,
+		"count":   len(versions),
+	})
 }
 
 func (s *Server) handleMemoryRevert(w http.ResponseWriter, r *http.Request) {
@@ -196,10 +216,17 @@ func (s *Server) publishMemoryLifecycle(item *store.MemoryItem, eventType, actio
 		return
 	}
 	payload := memoryItemPayload(item)
+	userID := strings.TrimSpace(item.UserID)
+	if userID == "" {
+		userID = strings.TrimSpace(item.ConfirmedBy)
+	}
+	if userID == "" {
+		userID = strings.TrimSpace(item.ProposedBy)
+	}
 	_ = s.Store.AppendEvent(context.Background(), &store.Event{
 		ProjectID: item.ProjectID,
 		SessionID: item.SessionID,
-		UserID:    item.UserID,
+		UserID:    userID,
 		EventType: eventType,
 		Payload:   payload,
 	})

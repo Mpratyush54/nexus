@@ -287,7 +287,7 @@ function MemoryCard({
             </span>
           ) : null}
           <span className="text-[11px] text-muted">{formatRelative(item.updated_at)}</span>
-          <div className="ml-auto flex gap-1 opacity-100 transition md:opacity-0 md:group-hover:opacity-100">
+          <div className="ml-auto flex gap-1">
             {onEdit ? (
               <Button variant="ghost" size="sm" onClick={onEdit} type="button" aria-label="Edit">
                 <Pencil size={12} />
@@ -300,9 +300,10 @@ function MemoryCard({
                 size="sm"
                 onClick={onHistory}
                 type="button"
-                aria-label="History"
+                aria-label="Version history"
               >
                 <History size={12} />
+                History
               </Button>
             ) : null}
             {onShare ? (

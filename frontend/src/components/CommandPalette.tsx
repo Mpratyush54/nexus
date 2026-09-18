@@ -1,12 +1,14 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Bot, GitBranch, Search, Settings, Users } from 'lucide-react'
+import { Activity, Bell, Bot, Building2, GitBranch, LayoutDashboard, MessageSquare, Search, Settings, Shield, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 const items = [
+  { id: 'dashboard', label: 'Dashboard', hint: 'Metrics and activity graph', icon: LayoutDashboard, to: '/app/dashboard' },
   { id: 'memory', label: 'Memory', hint: 'Review queue & editor', icon: Search, to: '/app/memory' },
   { id: 'agents', label: 'Agents', hint: 'MCP activity & permissions', icon: Bot, to: '/app/agents' },
-  { id: 'team', label: 'Team', hint: 'Members, roles, presence', icon: Users, to: '/app/team' },
+  { id: 'team', label: 'Team', hint: 'Members, roles, GitHub', icon: Users, to: '/app/team' },
+  { id: 'org', label: 'Org', hint: 'Organizations, projects, billing', icon: Building2, to: '/app/org' },
   {
     id: 'branches',
     label: 'Branches',
@@ -15,9 +17,37 @@ const items = [
     to: '/app/branches',
   },
   {
+    id: 'sessions',
+    label: 'Sessions',
+    hint: 'Handoffs and live presence',
+    icon: MessageSquare,
+    to: '/app/sessions',
+  },
+  {
+    id: 'activity',
+    label: 'Activity',
+    hint: 'Project event log with filters',
+    icon: Activity,
+    to: '/app/activity',
+  },
+  {
+    id: 'notifications',
+    label: 'Notifications',
+    hint: 'Inbox, preferences, devices',
+    icon: Bell,
+    to: '/app/notifications',
+  },
+  {
+    id: 'admin',
+    label: 'Platform',
+    hint: 'Super Admin, versions, CLI releases',
+    icon: Shield,
+    to: '/app/admin',
+  },
+  {
     id: 'settings',
     label: 'Settings',
-    hint: 'Tokens, GitHub, notifications',
+    hint: 'Tokens, plan, export',
     icon: Settings,
     to: '/app/settings',
   },

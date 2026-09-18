@@ -22,6 +22,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -278,6 +279,49 @@ func (h *Hub) ClientCount() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients)
+}
+
+// PresenceSnapshot is one live user on a project channel.
+type PresenceSnapshot struct {
+	UserID    string `json:"user_id"`
+	Status    string `json:"status"`
+	ProjectID string `json:"project_id,omitempty"`
+}
+
+// PresenceForProject lists unique online/typing/idle users subscribed to
+// projectID. Offline clients are omitted. A nil hub returns nil.
+func (h *Hub) PresenceForProject(projectID string) []PresenceSnapshot {
+	if h == nil {
+		return nil
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil
+	}
+	now := h.now()
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	seen := make(map[string]PresenceSnapshot)
+	for _, c := range h.clients {
+		if c == nil || strings.TrimSpace(c.UserID) == "" || c.ProjectID != projectID {
+			continue
+		}
+		st := c.Status(now)
+		if st == PresenceOffline {
+			continue
+		}
+		prev, ok := seen[c.UserID]
+		if ok && prev.Status == PresenceTyping {
+			continue
+		}
+		seen[c.UserID] = PresenceSnapshot{UserID: c.UserID, Status: st, ProjectID: c.ProjectID}
+	}
+	out := make([]PresenceSnapshot, 0, len(seen))
+	for _, p := range seen {
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].UserID < out[j].UserID })
+	return out
 }
 
 // Get returns the client with id, or nil.

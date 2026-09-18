@@ -31,6 +31,7 @@ import (
 	"strings"
 	"syscall"
 
+	"central-memory/internal/buildinfo"
 	"central-memory/internal/config"
 	"central-memory/internal/daemon"
 	"central-memory/internal/materializer"
@@ -80,6 +81,14 @@ func designatedFromEnv() bool {
 }
 
 func run(args []string) error {
+	if len(args) == 1 && (args[0] == "version" || args[0] == "-version" || args[0] == "--version") {
+		fmt.Printf("nexus-daemon %s", buildinfo.Version)
+		if buildinfo.Commit != "" && buildinfo.Commit != "unknown" {
+			fmt.Printf(" (%s)", buildinfo.Commit)
+		}
+		fmt.Println()
+		return nil
+	}
 	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	root := fs.String("root", ".", "workspace root directory")
 	bind := fs.String("bind", defaultBind(), "bind address (127.0.0.1 local, 0.0.0.0 in containers)")

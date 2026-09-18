@@ -58,3 +58,36 @@ export async function apiRequest<T>(path: string, opts: RequestOpts = {}): Promi
 
   return data as T
 }
+
+export async function apiDownload(
+  path: string,
+  opts: { token?: string | null; auth?: boolean } = {},
+): Promise<{ blob: Blob; filename: string; contentType: string }> {
+  const headers: Record<string, string> = { Accept: '*/*' }
+  const token = opts.token === undefined ? storage.getToken() : opts.token
+  const auth = opts.auth !== false
+  if (auth) {
+    if (!token) throw new ApiError(401, 'Not authenticated')
+    headers.Authorization = `Bearer ${token}`
+  }
+  const res = await fetch(`${API_BASE}${path}`, { method: 'GET', headers })
+  if (!res.ok) {
+    const text = await res.text()
+    let message = res.statusText || 'Request failed'
+    try {
+      const err = JSON.parse(text) as ApiErrorBody
+      if (err?.error?.message) message = err.error.message
+    } catch {
+      if (text) message = text
+    }
+    throw new ApiError(res.status, message)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('Content-Disposition') ?? ''
+  const match = /filename="?([^"]+)"?/i.exec(cd)
+  return {
+    blob,
+    filename: match?.[1] ?? 'nexus-export',
+    contentType: res.headers.get('Content-Type') ?? blob.type,
+  }
+}

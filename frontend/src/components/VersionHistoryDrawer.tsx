@@ -31,49 +31,63 @@ function lineDiff(prev: string, next: string) {
   return rows
 }
 
+function currentFromItem(item: MemoryItem): MemoryVersion {
+  return {
+    memory_id: item.id,
+    version: 0,
+    key: item.key,
+    content: item.content,
+    tags: item.tags,
+    level: item.level,
+    scope: item.scope,
+    edited_by: item.proposed_by,
+    created_at: item.updated_at,
+  }
+}
+
+function versionLabel(v: MemoryVersion) {
+  return v.version === 0 ? 'Current' : `v${v.version}`
+}
+
 export function VersionHistoryDrawer({ item, open, onClose }: Props) {
   const titleId = useId()
   const { push } = useToast()
   const history = useMemoryHistory(item?.id ?? null, open && Boolean(item))
   const revert = useRevertMemory()
-  const [selected, setSelected] = useState<number | null>(null)
+  const [selected, setSelected] = useState(0)
 
   useEffect(() => {
     if (!open) return
+    setSelected(0)
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open, onClose])
+  }, [open, onClose, item?.id])
 
   const versions = useMemo(() => {
-    const list = history.data ?? []
-    return [...list].sort((a, b) => b.version - a.version)
-  }, [history.data])
+    if (!item) return []
+    const snapshots = [...(history.data?.items ?? [])].sort((a, b) => b.version - a.version)
+    const current = history.data?.current ?? currentFromItem(item)
+    return [current, ...snapshots]
+  }, [history.data, item])
 
-  useEffect(() => {
-    if (versions.length && selected === null) {
-      setSelected(versions[0]?.version ?? null)
-    }
-  }, [versions, selected])
-
-  const active: MemoryVersion | undefined = versions.find((v) => v.version === selected)
-  const older = versions.find((v) => active && v.version === active.version - 1)
-  const diffRows = active
-    ? lineDiff(older?.content ?? '', active.content)
-    : []
+  const active: MemoryVersion | undefined = versions.find((v) => v.version === selected) ?? versions[0]
+  const olderIndex = versions.findIndex((v) => v.version === active?.version)
+  const older = olderIndex >= 0 ? versions[olderIndex + 1] : undefined
+  const diffRows = active ? lineDiff(older?.content ?? '', active.content) : []
 
   const onRevert = (version: number) => {
-    if (!item) return
+    if (!item || version < 1) return
     revert.mutate(
       { id: item.id, version },
       {
         onSuccess: (result) => {
           if (result === null) {
             push({
-              title: 'Revert API not ready',
-              detail: 'POST /memory/{id}/revert returned 404.',
+              title: 'Revert failed',
+              detail: 'The history API is not available.',
               tone: 'amber',
             })
             return
@@ -90,8 +104,6 @@ export function VersionHistoryDrawer({ item, open, onClose }: Props) {
       },
     )
   }
-
-  const unavailable = history.isSuccess && history.data === null
 
   return (
     <AnimatePresence>
@@ -146,28 +158,11 @@ export function VersionHistoryDrawer({ item, open, onClose }: Props) {
                 </p>
               ) : null}
 
-              {unavailable ? (
-                <div className="space-y-2 px-5 py-4">
-                  <p className="text-sm text-fg-dim">
-                    Version history API is not available yet (404 on{' '}
-                    <code className="font-mono text-xs">GET /memory/{'{id}'}/history</code>).
-                  </p>
-                  <p className="text-xs text-muted">
-                    When the backend ships, this drawer will show a timeline with diffs and
-                    one-click revert.
-                  </p>
-                </div>
-              ) : null}
-
-              {!history.isLoading && !unavailable && versions.length === 0 ? (
-                <p className="px-5 py-4 text-sm text-fg-dim">No prior versions yet.</p>
-              ) : null}
-
-              {versions.length > 0 ? (
+              {!history.isLoading && versions.length > 0 ? (
                 <div className="grid min-h-0 flex-1 grid-rows-[auto_1fr]">
-                  <ul className="max-h-44 space-y-1 overflow-y-auto border-b border-border px-3 py-3">
+                  <ul className="max-h-52 space-y-1 overflow-y-auto border-b border-border px-3 py-3">
                     {versions.map((v) => (
-                      <li key={v.version}>
+                      <li key={`${v.memory_id ?? item.id}-${v.version}`}>
                         <button
                           type="button"
                           onClick={() => setSelected(v.version)}
@@ -178,8 +173,13 @@ export function VersionHistoryDrawer({ item, open, onClose }: Props) {
                               : 'text-fg-dim hover:bg-raised/60 hover:text-fg',
                           ].join(' ')}
                         >
-                          <span className="font-mono text-xs">v{v.version}</span>
-                          <span className="text-[11px] text-muted">
+                          <span className="flex min-w-0 items-center gap-2">
+                            <span className="font-mono text-xs">{versionLabel(v)}</span>
+                            {v.edited_by ? (
+                              <span className="truncate text-[11px] text-muted">{v.edited_by}</span>
+                            ) : null}
+                          </span>
+                          <span className="shrink-0 text-[11px] text-muted">
                             {formatRelative(v.created_at)}
                           </span>
                         </button>
@@ -192,17 +192,25 @@ export function VersionHistoryDrawer({ item, open, onClose }: Props) {
                       <>
                         <div className="mb-3 flex items-center justify-between gap-2">
                           <p className="text-xs text-fg-dim">
-                            Diff vs {older ? `v${older.version}` : 'empty'}
+                            {active.version === 0
+                              ? older
+                                ? `Live vs ${versionLabel(older)}`
+                                : 'Current content'
+                              : `Diff vs ${older ? versionLabel(older) : 'empty'}`}
                           </p>
-                          <Button
-                            size="sm"
-                            variant="secondary"
-                            disabled={revert.isPending}
-                            onClick={() => onRevert(active.version)}
-                          >
-                            <RotateCcw size={12} />
-                            Revert
-                          </Button>
+                          {active.version >= 1 ? (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              disabled={revert.isPending}
+                              onClick={() => onRevert(active.version)}
+                            >
+                              <RotateCcw size={12} />
+                              Restore
+                            </Button>
+                          ) : (
+                            <span className="text-[11px] text-muted">Live version</span>
+                          )}
                         </div>
                         <pre className="overflow-x-auto rounded-lg border border-border bg-base p-3 font-mono text-[11px] leading-5">
                           {diffRows.map((row, i) => (

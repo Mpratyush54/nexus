@@ -20,11 +20,32 @@ export type GitHubStatus = {
   project_id: string
   owner?: string
   repo?: string
+  html_url?: string
   sync_mode?: string
   connected_by?: string
   connected_at?: string
   last_import_at?: string | null
   has_token?: boolean
+  suggested_owner?: string
+  suggested_repo?: string
+  oauth_configured?: boolean
+  oauth_linked?: boolean
+}
+
+export type GitHubRepo = {
+  id: number
+  full_name: string
+  name: string
+  owner: string
+  private: boolean
+  html_url: string
+  default_branch?: string
+  description?: string
+}
+
+export type PresencePerson = {
+  user_id: string
+  status: string
 }
 
 export type GitHubImportItem = {
@@ -103,6 +124,17 @@ export const teamApi = {
   },
   githubDisconnect(projectId: string) {
     return apiRequest(`/projects/${projectId}/github/disconnect`, { method: 'DELETE' })
+  },
+  githubOAuthStart(projectId: string) {
+    return apiRequest<{ authorize_url: string }>(
+      `/projects/${projectId}/github/oauth/start?format=json`,
+    )
+  },
+  githubRepos(projectId: string) {
+    return apiRequest<ListResponse<GitHubRepo>>(`/projects/${projectId}/github/repos`)
+  },
+  presence(projectId: string) {
+    return apiRequest<ListResponse<PresencePerson>>(`/projects/${projectId}/presence`)
   },
   activeWorkspaces(projectId: string) {
     return apiRequest<ListResponse<ActiveWorkspace> | ActiveWorkspace | ActiveWorkspace[]>(

@@ -16,7 +16,7 @@ import (
 // routes_extra.go reject persistence. Reuses helpers from server_test.go
 // (newTestServer, loginAs, doJSON, decodeBody); never edits them.
 
-// /healthz must be exactly {"ok":true} with no auth.
+// /healthz is unauthenticated and always includes ok=true (ECS/wget probes).
 func TestAuditRoutesHealthzShape(t *testing.T) {
 	s := newTestServer()
 	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
@@ -29,8 +29,11 @@ func TestAuditRoutesHealthzShape(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
 		t.Fatalf("healthz not JSON: %v (%s)", err, rec.Body.String())
 	}
-	if len(out) != 1 || out["ok"] != true {
-		t.Fatalf("healthz = %s, want exactly {\"ok\":true}", rec.Body.String())
+	if out["ok"] != true {
+		t.Fatalf("healthz = %s, want ok=true", rec.Body.String())
+	}
+	if _, ok := out["version"]; !ok {
+		t.Fatalf("healthz missing version: %s", rec.Body.String())
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "application/json") {
 		t.Fatalf("Content-Type = %q, want application/json", ct)

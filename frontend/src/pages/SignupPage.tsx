@@ -25,7 +25,7 @@ export function SignupPage() {
       {
         onSuccess: () => {
           push({ title: 'Account created', detail: `Welcome, ${username.trim()}` })
-          navigate('/app/memory')
+          navigate('/app/dashboard')
         },
         onError: (err) => {
           const message = err instanceof ApiError ? err.message : 'Signup failed'

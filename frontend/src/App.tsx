@@ -1,14 +1,19 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { AppShell } from '@/components/AppShell'
+import { ActivityPage } from '@/pages/ActivityPage'
+import { AdminPage } from '@/pages/AdminPage'
 import { AgentsPage } from '@/pages/AgentsPage'
 import { BranchesPage } from '@/pages/BranchesPage'
+import { DashboardPage } from '@/pages/DashboardPage'
 import { LandingPage } from '@/pages/LandingPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { MemoryPage } from '@/pages/MemoryPage'
+import { NotificationsPage } from '@/pages/NotificationsPage'
 import { SessionsPage } from '@/pages/SessionsPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { SignupPage } from '@/pages/SignupPage'
 import { TeamPage } from '@/pages/TeamPage'
+import { OrgPage } from '@/pages/OrgPage'
 import { AppProviders } from '@/providers/AppProviders'
 import { GuestRoute, ProtectedRoute } from '@/routes/guards'
 
@@ -26,12 +31,18 @@ export default function App() {
 
           <Route element={<ProtectedRoute />}>
             <Route path="/app" element={<AppShell />}>
-              <Route index element={<Navigate to="memory" replace />} />
+              <Route index element={<Navigate to="dashboard" replace />} />
+              <Route path="dashboard" element={<DashboardPage />} />
               <Route path="memory" element={<MemoryPage />} />
               <Route path="agents" element={<AgentsPage />} />
               <Route path="team" element={<TeamPage />} />
+              <Route path="org" element={<OrgPage />} />
+              <Route path="org/:orgId" element={<OrgPage />} />
               <Route path="branches" element={<BranchesPage />} />
               <Route path="sessions" element={<SessionsPage />} />
+              <Route path="activity" element={<ActivityPage />} />
+              <Route path="notifications" element={<NotificationsPage />} />
+              <Route path="admin" element={<AdminPage />} />
               <Route path="settings" element={<SettingsPage />} />
             </Route>
           </Route>

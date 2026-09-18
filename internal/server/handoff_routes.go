@@ -167,4 +167,5 @@ func (s *Server) publishHandoffEvent(projectID, sessionID string, ev handoff.Eve
 			h.PublishEvent(projectID, sessionID, ev.Type, payload, ev.FromUser)
 		}()
 	}
+	s.notifyProjectActivity(projectID, ev.Type, "/app/sessions")
 }

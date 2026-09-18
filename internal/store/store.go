@@ -112,6 +112,12 @@ type MemStore struct {
 	// githubLinks / githubUsers: Phase 7 GitHub import (issue #167).
 	githubLinks map[string]*GitHubLink
 	githubUsers map[string]*GitHubUserMap
+	// Super Admin + release registry (platform control plane).
+	platformAdmins map[string]bool
+	releases       map[string]*AppRelease
+	// Billing catalog + subscriptions (org and personal).
+	plans       map[string]*Plan
+	billingSubs map[string]*Subscription // ownerType/ownerID
 }
 
 // memSubscription is one in-process event subscriber.
@@ -126,22 +132,26 @@ var _ Store = (*MemStore)(nil)
 // NewMemStore returns an initialized in-memory store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		projects:    make(map[string]*Project),
-		workspaces:  make(map[string]*Workspace),
-		members:     make(map[string]map[string]bool),
-		memberRoles: make(map[string]map[string]string),
-		roles:       make(map[string]map[string]*ProjectRole),
-		orgs:        make(map[string]*Organization),
-		orgMembers:  make(map[string]map[string]string),
-		memories:    make(map[string]*MemoryItem),
-		versions:    make(map[string][]*MemoryVersion),
-		shares:      make(map[string]*memShare),
-		episodes:    make(map[string]*Episode),
-		events:      make([]*Event, 0),
-		subs:        make(map[int64]*memSubscription),
-		agentPerms:  make(map[string]map[string]*AgentPermission),
-		githubLinks: make(map[string]*GitHubLink),
-		githubUsers: make(map[string]*GitHubUserMap),
+		projects:       make(map[string]*Project),
+		workspaces:     make(map[string]*Workspace),
+		members:        make(map[string]map[string]bool),
+		memberRoles:    make(map[string]map[string]string),
+		roles:          make(map[string]map[string]*ProjectRole),
+		orgs:           make(map[string]*Organization),
+		orgMembers:     make(map[string]map[string]string),
+		memories:       make(map[string]*MemoryItem),
+		versions:       make(map[string][]*MemoryVersion),
+		shares:         make(map[string]*memShare),
+		episodes:       make(map[string]*Episode),
+		events:         make([]*Event, 0),
+		subs:           make(map[int64]*memSubscription),
+		agentPerms:     make(map[string]map[string]*AgentPermission),
+		githubLinks:    make(map[string]*GitHubLink),
+		githubUsers:    make(map[string]*GitHubUserMap),
+		platformAdmins: make(map[string]bool),
+		releases:       make(map[string]*AppRelease),
+		plans:          defaultPlanMap(),
+		billingSubs:    make(map[string]*Subscription),
 	}
 }
 
