@@ -44,7 +44,7 @@ func TestAuditServerStubStoreFailClosed(t *testing.T) {
 			return err
 		},
 		"SearchEpisodes": func() error {
-			_, err := st.SearchEpisodes(ctx, "p", "e", "q", 1)
+			_, err := st.SearchEpisodes(ctx, "p", "e", "q", "", "", 1)
 			return err
 		},
 		"ResolveEpisode": func() error { return st.ResolveEpisode(ctx, "id", "r", "v", "by") },

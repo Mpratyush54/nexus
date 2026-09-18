@@ -87,7 +87,7 @@ type Project struct {
 type Store interface {
 	SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error)
 	CreateMemoryItem(ctx context.Context, item *MemoryItem) error
-	SearchEpisodes(ctx context.Context, projectID, errorPattern, query string, limit int) ([]*Episode, error)
+	SearchEpisodes(ctx context.Context, projectID, errorPattern, query, file, status string, limit int) ([]*Episode, error)
 	CreateEpisode(ctx context.Context, ep *Episode) error
 	GetActiveWorkspace(ctx context.Context, projectID string) (*Workspace, error)
 	GetProject(ctx context.Context, id string) (*Project, error)
@@ -650,18 +650,15 @@ func (s *Server) handleEpisodeSearch(ctx context.Context, raw json.RawMessage) (
 	if limit > 50 {
 		limit = 50
 	}
-	eps, err := s.store.SearchEpisodes(ctx, projectID, a.ErrorPattern, a.Query, limit)
+	// File/status filter inside the store query BEFORE the limit (issue
+	// #156): post-filtering a capped result set silently drops matches past
+	// the limit window.
+	eps, err := s.store.SearchEpisodes(ctx, projectID, a.ErrorPattern, a.Query, a.File, a.Status, limit)
 	if err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "episode search failed: " + err.Error()}
 	}
 	out := make([]map[string]any, 0, len(eps))
 	for _, ep := range eps {
-		if a.File != "" && !fileInvolved(ep, a.File) {
-			continue
-		}
-		if a.Status != "" && !strings.EqualFold(ep.Status, a.Status) {
-			continue
-		}
 		out = append(out, map[string]any{
 			"id": ep.ID, "title": ep.Title, "episode_type": ep.EpisodeType,
 			"status": ep.Status, "trigger": ep.Trigger, "root_cause": ep.RootCause,
@@ -670,15 +667,6 @@ func (s *Server) handleEpisodeSearch(ctx context.Context, raw json.RawMessage) (
 		})
 	}
 	return map[string]any{"episodes": out, "count": len(out)}, nil
-}
-
-func fileInvolved(ep *Episode, file string) bool {
-	for _, f := range ep.FilesInvolved {
-		if strings.Contains(strings.ToLower(f), strings.ToLower(file)) {
-			return true
-		}
-	}
-	return false
 }
 
 var validEpisodeTypes = map[string]bool{

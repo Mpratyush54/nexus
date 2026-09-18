@@ -57,7 +57,7 @@ func TestCreateEpisodeNormalizesTypeCase(t *testing.T) {
 	if err := s.CreateEpisode(ctx, &Episode{ProjectID: "p1", Title: "mixed case type here", EpisodeType: "Bug_Fix"}); err != nil {
 		t.Fatalf("CreateEpisode: %v", err)
 	}
-	eps, err := s.SearchEpisodes(ctx, "p1", "", "", 10)
+	eps, err := s.SearchEpisodes(ctx, "p1", "", "", "", "", 10)
 	if err != nil {
 		t.Fatal(err)
 	}

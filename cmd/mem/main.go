@@ -112,8 +112,8 @@ func episodeDTO(ep *store.Episode) *mcp.Episode {
 	}
 }
 
-func (s mcpStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query string, limit int) ([]*mcp.Episode, error) {
-	episodes, err := s.mem.SearchEpisodes(ctx, projectID, errorPattern, query, limit)
+func (s mcpStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query, file, status string, limit int) ([]*mcp.Episode, error) {
+	episodes, err := s.mem.SearchEpisodes(ctx, projectID, errorPattern, query, file, status, limit)
 	if err != nil {
 		return nil, err
 	}

@@ -238,7 +238,7 @@ func TestAuditSearchEpisodesOrdering(t *testing.T) {
 	}
 	want := []string{"newest ep", "middle ep", "oldest ep"}
 	for run := 0; run < 10; run++ {
-		res, err := s.SearchEpisodes(ctx, "p1", "", "", 0)
+		res, err := s.SearchEpisodes(ctx, "p1", "", "", "", "", 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -263,7 +263,7 @@ func TestAuditSearchEpisodesLimitDefault(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	res, err := s.SearchEpisodes(ctx, "p1", "", "", 0)
+	res, err := s.SearchEpisodes(ctx, "p1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestAuditSearchEpisodesEmptyFiltersList(t *testing.T) {
 	if err := s.CreateEpisode(ctx, &Episode{ProjectID: "other", Title: "ep other", EpisodeType: "feature"}); err != nil {
 		t.Fatal(err)
 	}
-	res, err := s.SearchEpisodes(ctx, "p1", "", "", 0)
+	res, err := s.SearchEpisodes(ctx, "p1", "", "", "", "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

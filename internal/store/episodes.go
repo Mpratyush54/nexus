@@ -155,7 +155,7 @@ func (s *PostgresStore) ResolveEpisode(ctx context.Context, id, resolution, veri
 // SearchEpisodes matches on error pattern, narrative text, or lists all
 // when both filters are empty (MemStore parity). An empty projectID returns
 // an empty list (avoids a raw uuid-syntax error from $1::uuid).
-func (s *PostgresStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query string, limit int) ([]*Episode, error) {
+func (s *PostgresStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query, file, status string, limit int) ([]*Episode, error) {
 	if strings.TrimSpace(projectID) == "" {
 		return []*Episode{}, nil
 	}
@@ -174,9 +174,13 @@ func (s *PostgresStore) SearchEpisodes(ctx context.Context, projectID, errorPatt
 		                          OR COALESCE(investigation,'') ILIKE '%'||$3||'%'
 		                          OR COALESCE(root_cause,'') ILIKE '%'||$3||'%'
 		                          OR COALESCE(resolution,'') ILIKE '%'||$3||'%'))
+		    AND ($5 = '' OR EXISTS (
+		               SELECT 1 FROM unnest(files_involved) f
+		                WHERE f ILIKE '%'||$5||'%'))
+		    AND ($6 = '' OR UPPER(status) = UPPER($6))
 		  ORDER BY opened_at DESC, id DESC
 		  LIMIT $4`,
-		projectID, errorPattern, query, limit)
+		projectID, errorPattern, query, limit, file, status)
 	if err != nil {
 		return nil, err
 	}

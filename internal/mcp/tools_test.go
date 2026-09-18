@@ -259,3 +259,31 @@ func TestEpisodeSearchFilters(t *testing.T) {
 		t.Errorf("status count = %v, want 1", got)
 	}
 }
+
+func TestEpisodeSearchFileMatchPastLimitWindow(t *testing.T) {
+	// Issue #156: filtering AFTER a capped query silently drops matches
+	// past the limit window. Filters must narrow inside the store query:
+	// with limit=2 and the only file match seeded last, count must be 1.
+	s, ms := newTestServerWithT(t)
+	ctx := context.Background()
+	for range 5 {
+		if err := ms.CreateEpisode(ctx, &Episode{
+			ProjectID: "proj_test", Title: "Decoy slip",
+			EpisodeType: "investigation", FilesInvolved: []string{"decoy.go"},
+			Status: "OPEN",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ms.CreateEpisode(ctx, &Episode{
+		ProjectID: "proj_test", Title: "Real leak",
+		EpisodeType: "bug_fix", FilesInvolved: []string{"internal/store/db.go"},
+		Status: "OPEN",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r := callTool(t, s, "episode_search", map[string]any{"file": "store/db.go", "limit": 2})
+	if got := num(t, resultMap(t, r), "count"); got != 1 {
+		t.Errorf("file count = %v, want 1 (match past the limit window)", got)
+	}
+}

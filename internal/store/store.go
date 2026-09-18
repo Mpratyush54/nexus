@@ -47,7 +47,11 @@ type Store interface {
 	// Episodes
 	CreateEpisode(ctx context.Context, ep *Episode) error
 	GetEpisode(ctx context.Context, id string) (*Episode, error)
-	SearchEpisodes(ctx context.Context, projectID, errorPattern, query string, limit int) ([]*Episode, error)
+	// SearchEpisodes matches on error pattern / narrative text, then narrows
+	// by file (substring of files_involved) and status (case-insensitive).
+	// Filters apply inside the query BEFORE the limit (issue #156), so a
+	// file/status match past the raw limit window is still returned.
+	SearchEpisodes(ctx context.Context, projectID, errorPattern, query, file, status string, limit int) ([]*Episode, error)
 	ResolveEpisode(ctx context.Context, id, resolution, verification, resolvedBy string) error
 
 	// Events
@@ -505,7 +509,7 @@ func (s *MemStore) ResolveEpisode(ctx context.Context, id, resolution, verificat
 	return nil
 }
 
-func (s *MemStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query string, limit int) ([]*Episode, error) {
+func (s *MemStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query, file, status string, limit int) ([]*Episode, error) {
 	effective := limit
 	if effective <= 0 {
 		effective = 20
@@ -516,6 +520,7 @@ func (s *MemStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, 
 	var results []*Episode
 	lowErr := strings.ToLower(errorPattern)
 	lowQ := strings.ToLower(query)
+	lowFile := strings.ToLower(file)
 
 	for _, ep := range s.episodes {
 		if ep.ProjectID != projectID {
@@ -536,9 +541,26 @@ func (s *MemStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, 
 				match = true
 			}
 		}
-		if match || (lowErr == "" && lowQ == "") {
-			results = append(results, cloneEpisode(ep))
+		if !(match || (lowErr == "" && lowQ == "")) {
+			continue
 		}
+		// File/status narrow BEFORE the limit (issue #156).
+		if lowFile != "" {
+			hit := false
+			for _, f := range ep.FilesInvolved {
+				if strings.Contains(strings.ToLower(f), lowFile) {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				continue
+			}
+		}
+		if status != "" && !strings.EqualFold(ep.Status, status) {
+			continue
+		}
+		results = append(results, cloneEpisode(ep))
 	}
 	sort.Slice(results, func(i, j int) bool {
 		if results[i].OpenedAt.Equal(results[j].OpenedAt) {

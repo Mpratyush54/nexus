@@ -228,7 +228,7 @@ func TestAuditMemMcpStoreCreateEcho(t *testing.T) {
 	if ep.ID == "" || ep.Status != "OPEN" {
 		t.Fatalf("episode echo wrong: %+v", ep)
 	}
-	eps, err := s.SearchEpisodes(ctx, p.ID, "", "timeout", 10)
+	eps, err := s.SearchEpisodes(ctx, p.ID, "", "timeout", "", "", 10)
 	if err != nil {
 		t.Fatalf("SearchEpisodes: %v", err)
 	}

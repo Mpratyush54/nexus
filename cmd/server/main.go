@@ -1,5 +1,4 @@
-// Command server — local-dev entrypoint for the central API server
-// (issue #39, plan target tree).
+// Command server — central API server entrypoint (issues #39, #37).
 //
 // Env-configured, thin wiring only. Canonical env contract (single source of
 // truth: deploy/secrets-notes.md + docs/decisions/ADR-045-deploy-env-contract):
@@ -86,7 +85,7 @@ func (stubStore) CreateEpisode(ctx context.Context, ep *store.Episode) error {
 func (stubStore) GetEpisode(ctx context.Context, id string) (*store.Episode, error) {
 	return nil, errStorePending
 }
-func (stubStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query string, limit int) ([]*store.Episode, error) {
+func (stubStore) SearchEpisodes(ctx context.Context, projectID, errorPattern, query, file, status string, limit int) ([]*store.Episode, error) {
 	return nil, errStorePending
 }
 func (stubStore) ResolveEpisode(ctx context.Context, id, resolution, verification, resolvedBy string) error {
@@ -242,17 +241,47 @@ func newServer(secret string) *server.Server {
 	return srv
 }
 
-func newHandler(secret string, cfg serverConfig) http.Handler {
-	return buildMux(newServer(secret), cfg)
+// newPostgresServer wires the production backend (issue #37): connect with
+// the resolved DSN, run boot-time migrations (idempotent under
+// schema_migrations, safe alongside deploy/migrate.sh), attach the hub and
+// start the store→hub bridge for all projects. The cleanup func drains the
+// pool; the bridge exits with ctx. A nil DSN is a caller error.
+func newPostgresServer(ctx context.Context, secret, dsn, migrationsDir string) (*server.Server, func(), error) {
+	if strings.TrimSpace(dsn) == "" {
+		return nil, nil, fmt.Errorf("server: postgres backend requires a DSN")
+	}
+	pg, err := store.NewPostgresStore(ctx, dsn)
+	if err != nil {
+		return nil, nil, fmt.Errorf("server: connect postgres: %w", err)
+	}
+	if err := pg.RunMigrations(ctx, migrationsDir); err != nil {
+		pg.Close()
+		return nil, nil, fmt.Errorf("server: boot migrations: %w", err)
+	}
+	srv := server.NewServer(pg)
+	srv.Auth = server.NewAuthenticator([]byte(secret))
+	hub := server.NewHub()
+	srv.AttachHub(hub)
+	if err := srv.StartBridge(ctx, hub, ""); err != nil {
+		pg.Close()
+		return nil, nil, fmt.Errorf("server: start event bridge: %w", err)
+	}
+	return srv, pg.Close, nil
 }
 
-func buildMux(srv *server.Server, cfg serverConfig) http.Handler {
+func newHandler(secret string, cfg serverConfig) http.Handler {
+	return buildMux(newServer(secret), cfg, true)
+}
+
+func buildMux(srv *server.Server, cfg serverConfig, stub bool) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /auth/login", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = w.Write([]byte(`{"error":{"code":503,"message":"authentication unavailable: user store adapter pending"}}`))
-	})
+	if stub {
+		mux.HandleFunc("POST /auth/login", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":{"code":503,"message":"authentication unavailable: user store adapter pending"}}`))
+		})
+	}
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
 		dirOK := true
 		if fi, err := os.Stat(cfg.migrationsDir); err != nil || !fi.IsDir() {
@@ -274,11 +303,19 @@ func buildMux(srv *server.Server, cfg serverConfig) http.Handler {
 			"sslmode":           cfg.sslMode,
 			"migrations_dir":    cfg.migrationsDir,
 			"migrations_dir_ok": dirOK,
-			"store":             "stub (fail-closed data routes pending adapter)",
+			"store":             storeLabel(stub),
 		})
 	})
 	mux.Handle("/", srv.Handler())
 	return mux
+}
+
+// storeLabel names the data backend for /readyz.
+func storeLabel(stub bool) string {
+	if stub {
+		return "stub (fail-closed data routes pending adapter)"
+	}
+	return "postgres"
 }
 
 func getenv(key, fallback string) string {
@@ -310,7 +347,17 @@ func run() error {
 		log.Printf("server: database from %s (sslmode=%q)", cfg.databaseSource, cfg.sslMode)
 	}
 
-	srv := newServer(cfg.jwtSecret)
+	srv, cleanup, stub := newServer(cfg.jwtSecret), func() {}, true
+	if cfg.databaseURL != "" {
+		var err error
+		srv, cleanup, err = newPostgresServer(ctx, cfg.jwtSecret, cfg.databaseURL, cfg.migrationsDir)
+		if err != nil {
+			return err
+		}
+		stub = false
+		log.Printf("server: postgres backend ready (migrations applied from %s; event bridge live)", cfg.migrationsDir)
+	}
+	defer cleanup()
 	// Lifecycle tick (issue #119 box 4): no-op-idle on stubStore (it
 	// supports no sweep seams); starts sweeping once the Postgres adapter
 	// lands. Stopped via the run context.
@@ -318,7 +365,7 @@ func run() error {
 	defer stopSweeps()
 	httpSrv := &http.Server{
 		Addr:              ":" + cfg.port,
-		Handler:           buildMux(srv, cfg),
+		Handler:           buildMux(srv, cfg, stub),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

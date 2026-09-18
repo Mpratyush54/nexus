@@ -361,7 +361,7 @@ func (s *Server) handleEpisodeSearch(w http.ResponseWriter, r *http.Request) {
 	if limit < 0 {
 		return
 	}
-	episodes, err := s.Store.SearchEpisodes(r.Context(), projectID, q.Get("error_pattern"), q.Get("q"), limit)
+	episodes, err := s.Store.SearchEpisodes(r.Context(), projectID, q.Get("error_pattern"), q.Get("q"), "", "", limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
 		return

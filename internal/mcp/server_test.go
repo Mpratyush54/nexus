@@ -112,11 +112,12 @@ func (f *fakeStore) CreateEpisode(_ context.Context, ep *Episode) error {
 	return nil
 }
 
-func (f *fakeStore) SearchEpisodes(_ context.Context, projectID, errorPattern, query string, limit int) ([]*Episode, error) {
+func (f *fakeStore) SearchEpisodes(_ context.Context, projectID, errorPattern, query, file, status string, limit int) ([]*Episode, error) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	lowErr := strings.ToLower(errorPattern)
 	lowQ := strings.ToLower(query)
+	lowFile := strings.ToLower(file)
 	var out []*Episode
 	for _, ep := range f.episodes {
 		if ep.ProjectID != "" && ep.ProjectID != projectID {
@@ -142,9 +143,26 @@ func (f *fakeStore) SearchEpisodes(_ context.Context, projectID, errorPattern, q
 			narrative := strings.ToLower(ep.Title + " " + ep.Trigger + " " + ep.RootCause + " " + ep.Resolution)
 			match = strings.Contains(narrative, lowQ)
 		}
-		if match || (lowErr == "" && lowQ == "") {
-			out = append(out, ep)
+		if !(match || (lowErr == "" && lowQ == "")) {
+			continue
 		}
+		// File/status narrow BEFORE the limit (issue #156).
+		if lowFile != "" {
+			hit := false
+			for _, fi := range ep.FilesInvolved {
+				if strings.Contains(strings.ToLower(fi), lowFile) {
+					hit = true
+					break
+				}
+			}
+			if !hit {
+				continue
+			}
+		}
+		if status != "" && !strings.EqualFold(ep.Status, status) {
+			continue
+		}
+		out = append(out, ep)
 		if limit > 0 && len(out) >= limit {
 			break
 		}

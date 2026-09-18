@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -151,5 +152,19 @@ func TestContractReadyzEndpoint(t *testing.T) {
 	h2.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if rec2.Code != http.StatusServiceUnavailable {
 		t.Fatalf("readyz status = %d, want 503 without require/local-dev", rec2.Code)
+	}
+}
+
+func TestPostgresServerRequiresDSN(t *testing.T) {
+	// Issue #37: empty DSN fails before any I/O (no network in tests).
+	if _, _, err := newPostgresServer(context.Background(), "secret", "", t.TempDir()); err == nil {
+		t.Fatal("empty DSN accepted, want error")
+	}
+}
+
+func TestPostgresServerRejectsUnparseableDSN(t *testing.T) {
+	// Parse failure surfaces without dialing (ParseConfig rejects "://bad").
+	if _, _, err := newPostgresServer(context.Background(), "secret", "://bad", t.TempDir()); err == nil {
+		t.Fatal("unparseable DSN accepted, want error")
 	}
 }
