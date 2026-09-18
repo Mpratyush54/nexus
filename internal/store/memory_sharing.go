@@ -2,10 +2,11 @@
 // (issue #164 / migration 015_memory_sharing).
 //
 // Visibility (per memory_items.visibility):
-//   private  — creator only
-//   shared   — creator + memory_shares (user or role)
-//   project  — all project members (default; pre-015 behavior)
-//   public   — anyone, including unauthenticated viewers
+//
+//	private  — creator only
+//	shared   — creator + memory_shares (user or role)
+//	project  — all project members (default; pre-015 behavior)
+//	public   — anyone, including unauthenticated viewers
 //
 // SearchMemory / GetMemoryItem honor these when a viewer is present on the
 // context (WithViewer). Empty viewer: SearchMemory returns project+public
