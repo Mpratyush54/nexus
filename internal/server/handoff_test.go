@@ -53,6 +53,9 @@ func TestHandoffInitAndAccept(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSession: %v", err)
 	}
+	// Bob watches + accepts: needs project membership first (issue #141).
+	bobToken := loginAs(t, s, "bob")
+	ensureMembership(t, s, bobToken, sess.ProjectID)
 
 	watcher := watchProject(t, h, "bob", sess.ProjectID)
 
@@ -92,8 +95,6 @@ func TestHandoffInitAndAccept(t *testing.T) {
 	}
 
 	// Accept as bob (member of the project — recipients outside it 403).
-	bobToken := loginAs(t, s, "bob")
-	ensureMembership(t, s, bobToken, sess.ProjectID)
 	rec = doJSON(t, s, http.MethodPost, "/sessions/"+sessID+"/handoff/accept", bobToken, map[string]any{
 		"handoff_id": pkg.ID,
 	})
