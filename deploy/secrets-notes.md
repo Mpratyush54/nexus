@@ -9,6 +9,7 @@
 | `central-memory/db-app` | `username`,`password`,`host`,`port`,`dbname` | `DB_USER`…`DB_NAME` (+ `DB_SSLMODE=require` env) → DSN assembled identically by `migrate.sh` and `cmd/server` | server, migrate.sh |
 | `central-memory/db-app` | `database_url` (same credential, `?sslmode=require` prebuilt) | `DATABASE_URL` verbatim | server, migrate.sh, `ecs-task.json` sample |
 | `central-memory/jwt` | `signing_key` | **`JWT_SECRET`** (canonical; `CENTRAL_MEMORY_JWT_KEY` still accepted as legacy fallback) | server |
+| (plain env / optional) | — | `CENTRAL_EMBEDDING_PROVIDER` (`openai`\|`ollama`\|`hash`), `CENTRAL_EMBEDDING_API_KEY`, `CENTRAL_EMBEDDING_MODEL`, `CENTRAL_EMBEDDING_ENDPOINT` | server, `mem mcp` (issue #165; defaults to hash) |
 
 Rules:
 

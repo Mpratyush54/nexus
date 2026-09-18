@@ -24,6 +24,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	memctx "central-memory/internal/context"
 )
 
 const (
@@ -104,10 +106,14 @@ type Config struct {
 	// Budgets resolves the seed budget for AgentName
 	// (*store.AgentRegistry in production). Nil skips registry lookup.
 	Budgets BudgetResolver
-	// Embed selects the embedding backend for memory_write (issue #76).
+	// Embed selects a sync embedding backend for memory_write (issue #76).
 	// Nil selects HashEmbed (deterministic stdlib interim, 1536-dim).
-	// Production substitutes an LLM embedder with the same shape.
+	// Prefer Embedder when both are set (issue #165).
 	Embed EmbedFunc
+	// Embedder is the async provider seam (openai / ollama / hash via
+	// CENTRAL_EMBEDDING_*). When set it wins over Embed; failures fall
+	// back to HashEmbed inside the provider wrapper.
+	Embedder memctx.Embedder
 	// FileAccessLog, when set, receives (op, workspace-relative path, byte
 	// count) for every successful file_read/file_write (issue #96): the
 	// audit seam mirroring the daemon interceptor events. Nil disables.

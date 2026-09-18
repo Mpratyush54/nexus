@@ -469,6 +469,60 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 	return results, nil
 }
 
+// SearchMemoryVector ranks memories by cosine similarity (issue #165).
+// Mirrors PostgresStore.SearchMemoryVector: CONFIRMED only, confidence > 0.3,
+// non-empty embeddings. Used by local MCP/mem wiring and tests so vector
+// search works without Postgres.
+func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
+	if len(queryVec) == 0 {
+		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
+	}
+	if err := ValidateEmbeddingDim(queryVec); err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	type scored struct {
+		item *MemoryItem
+		sim  float64
+	}
+	var ranked []scored
+	for _, item := range s.memories {
+		if !memoryVisibleToProject(item, projectID) {
+			continue
+		}
+		if item.Status != StatusConfirmed {
+			continue
+		}
+		if item.Confidence <= 0.3 {
+			continue
+		}
+		if len(item.Embedding) == 0 {
+			continue
+		}
+		if sim := CosineSimilarity(item.Embedding, queryVec); sim > 0 {
+			ranked = append(ranked, scored{item, sim})
+		}
+	}
+	sort.Slice(ranked, func(i, j int) bool {
+		if ranked[i].sim == ranked[j].sim {
+			return ranked[i].item.ID < ranked[j].item.ID
+		}
+		return ranked[i].sim > ranked[j].sim
+	})
+	if len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	out := make([]*MemoryItem, 0, len(ranked))
+	for _, r := range ranked {
+		out = append(out, cloneMemoryItem(r.item))
+	}
+	return out, nil
+}
+
 func (s *MemStore) CreateEpisode(ctx context.Context, ep *Episode) error {
 	if strings.TrimSpace(ep.Title) == "" {
 		return errors.New("store: episode title is required")
