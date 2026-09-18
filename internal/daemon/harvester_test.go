@@ -154,16 +154,121 @@ func TestIdleDetection(t *testing.T) {
 }
 
 func TestMatchesWorkspace(t *testing.T) {
-	h := NewHarvester(`D:\central-memory`, nil)
-	if !h.MatchesWorkspace(`C:\Users\x\.claude\projects\D---central-memory\abc.jsonl`) {
+	root := filepath.Join(string(filepath.Separator), "tmp", "central-memory")
+	h := NewHarvester(root, nil)
+	if !h.MatchesWorkspace(filepath.Join("some", "projects", "central-memory", "abc.jsonl")) {
 		t.Fatal("path containing workspace folder name should match")
 	}
-	if h.MatchesWorkspace(`/home/u/.claude/projects/other-project/abc.jsonl`) {
+	if h.MatchesWorkspace(filepath.Join("some", "projects", "other-project", "abc.jsonl")) {
 		t.Fatal("other project's path must not match")
 	}
 	empty := NewHarvester("", nil)
 	if !empty.MatchesWorkspace("/anything/at/all.jsonl") {
 		t.Fatal("empty workspace should match all (no filter)")
+	}
+}
+
+// TestWorkspaceMatchPriority pins the issue-#109 ordering: normalized
+// remote URL > root commit > folder name. Pure — no git binary needed.
+func TestWorkspaceMatchPriority(t *testing.T) {
+	const origin = "git@github.com:org/proj.git"
+	const root = "abc123root"
+	cases := []struct {
+		name                           string
+		origin, root, folder           string
+		candOrigin, candRoot, candPath string
+		want                           MatchLevel
+	}{
+		{
+			name:   "remote URL wins despite different folder",
+			origin: origin, root: root, folder: "proj",
+			candOrigin: "https://github.com/ORG/proj.git", candRoot: "other", candPath: "/x/other/abc.jsonl",
+			want: MatchRemoteURL,
+		},
+		{
+			name:   "root commit wins over folder fallback",
+			origin: origin, root: root, folder: "proj",
+			candOrigin: "git@github.com:org/unrelated.git", candRoot: root, candPath: "/x/proj/abc.jsonl",
+			want: MatchRootCommit,
+		},
+		{
+			name:   "root match with no folder overlap",
+			origin: "", root: root, folder: "proj",
+			candOrigin: "", candRoot: root, candPath: "/x/api/abc.jsonl",
+			want: MatchRootCommit,
+		},
+		{
+			name:   "folder fallback when no identity",
+			origin: "", root: "", folder: "proj",
+			candOrigin: "", candRoot: "", candPath: "/x/proj/abc.jsonl",
+			want: MatchFolderName,
+		},
+		{
+			name:   "generic folder name does not match",
+			origin: "", root: "", folder: "proj",
+			candOrigin: "", candRoot: "", candPath: "/x/api/abc.jsonl",
+			want: MatchNone,
+		},
+		{
+			name:   "URL mismatch and root mismatch reject",
+			origin: origin, root: root, folder: "proj",
+			candOrigin: "git@github.com:org/other.git", candRoot: "zzz", candPath: "/x/api/abc.jsonl",
+			want: MatchNone,
+		},
+		{
+			name:   "URL mismatch with no roots still rejects folder fallback",
+			origin: origin, root: root, folder: "proj",
+			candOrigin: "git@github.com:org/other.git", candRoot: "", candPath: "/x/proj/abc.jsonl",
+			want: MatchNone,
+		},
+		{
+			name:   "fork: URL differs but shared root still matches",
+			origin: origin, root: root, folder: "proj",
+			candOrigin: "git@github.com:someone/proj-fork.git", candRoot: root, candPath: "/x/other/abc.jsonl",
+			want: MatchRootCommit,
+		},
+		{
+			name:   "blank candidate identity cannot claim URL/root",
+			origin: origin, root: root, folder: "proj",
+			candOrigin: "", candRoot: "", candPath: "/x/api/abc.jsonl",
+			want: MatchNone,
+		},
+	}
+	for _, tc := range cases {
+		if got := ClassifyWorkspaceMatch(tc.origin, tc.root, tc.folder, tc.candOrigin, tc.candRoot, tc.candPath); got != tc.want {
+			t.Errorf("%s: got %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestMatchesCandidateIdentity pins MatchesCandidate on a harvester with
+// injected git identity (struct literal — no git binary): a transcript
+// from an unrelated repo sharing the generic folder name "api" must be
+// rejected once identities differ, while the same-remote transcript is
+// accepted even when the path carries no folder hint.
+func TestMatchesCandidateIdentity(t *testing.T) {
+	h := &Harvester{
+		workspace:  filepath.Join(string(filepath.Separator), "work", "api"),
+		folderName: "api",
+		origin:     "git@github.com:org/my-api.git",
+		rootCommit: "rootAAA",
+	}
+	if !h.MatchesCandidate("https://github.com/org/my-api", "different-root", "/transcripts/no-hint-here/s.jsonl") {
+		t.Error("same normalized remote must match regardless of path")
+	}
+	if !h.MatchesCandidate("git@github.com:org/other.git", "rootAAA", "/transcripts/no-hint-here/s.jsonl") {
+		t.Error("same root commit must match regardless of path")
+	}
+	if h.MatchesCandidate("git@github.com:org/other.git", "rootBBB", "/transcripts/api/s.jsonl") {
+		t.Error("unrelated repo sharing generic folder name must not match when identities differ")
+	}
+	// Path-only fallback preserved when neither side records identity.
+	plain := &Harvester{folderName: "api"}
+	if !plain.MatchesCandidate("", "", "/transcripts/api/s.jsonl") {
+		t.Error("folder fallback must still match when no identity is known")
+	}
+	if plain.MatchesCandidate("", "", "/transcripts/server/s.jsonl") {
+		t.Error("folder fallback must still reject non-matching paths")
 	}
 }
 

@@ -139,7 +139,7 @@ func (s *MemStore) GetEpisodeTimeline(ctx context.Context, episodeID string) ([]
 	var out []*Event
 	for _, ev := range s.events {
 		if ev.EpisodeID == episodeID {
-			out = append(out, ev)
+			out = append(out, cloneEvent(ev))
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -182,7 +182,7 @@ func (s *MemStore) SearchEpisodesByErrorPattern(ctx context.Context, projectID, 
 		}
 		for _, p := range ep.ErrorPatterns {
 			if p == pattern {
-				out = append(out, ep)
+				out = append(out, cloneEpisode(ep))
 				break
 			}
 		}
@@ -217,7 +217,7 @@ func (s *MemStore) SearchEpisodesByFile(ctx context.Context, projectID, file str
 		}
 		for _, f := range ep.FilesInvolved {
 			if f == file {
-				out = append(out, ep)
+				out = append(out, cloneEpisode(ep))
 				break
 			}
 		}
@@ -303,6 +303,12 @@ func sqrtFloat(x float64) float64 {
 // queryVec, descending (plan §2.4 query #2). Episodes without embeddings or
 // with dimension mismatches are skipped. Ties break by ID for determinism.
 func (s *MemStore) SearchEpisodesSemantic(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*Episode, error) {
+	if len(queryVec) == 0 {
+		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
+	}
+	if err := ValidateEmbeddingDim(queryVec); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 5 // plan §2.4 caps semantic results at 5
 	}
@@ -332,7 +338,7 @@ func (s *MemStore) SearchEpisodesSemantic(ctx context.Context, projectID string,
 	}
 	out := make([]*Episode, 0, len(ranked))
 	for _, r := range ranked {
-		out = append(out, r.ep)
+		out = append(out, cloneEpisode(r.ep))
 	}
 	return out, nil
 }
@@ -340,6 +346,12 @@ func (s *MemStore) SearchEpisodesSemantic(ctx context.Context, projectID string,
 // SearchEpisodesSemantic is the production semantic path (mirrors
 // SearchMemoryVector): pgvector cosine ordering over episode narratives.
 func (s *PostgresStore) SearchEpisodesSemantic(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*Episode, error) {
+	if len(queryVec) == 0 {
+		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
+	}
+	if err := ValidateEmbeddingDim(queryVec); err != nil {
+		return nil, err
+	}
 	if limit <= 0 {
 		limit = 5
 	}

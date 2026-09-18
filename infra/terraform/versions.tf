@@ -11,9 +11,25 @@ terraform {
       version = "~> 3.0"
     }
   }
-  # Remote state: partial S3 backend in backend.tf (issue #45) — supply
-  # bucket/key/region/lock table at init time via -backend-config (see the
-  # example there). Plain `terraform init` keeps local state for dev.
+  # Remote state (#45): S3 + DynamoDB lock. Intentionally left as a
+  # DOCUMENTED example rather than an active backend block so `terraform
+  # validate` stays credential-free in CI. To enable: create the bucket +
+  # table once, uncomment, and `terraform init -reconfigure`.
+  #
+  #   backend "s3" {
+  #     bucket         = "central-memory-tfstate-<ACCOUNT>"
+  #     key            = "central-memory/prod.tfstate"
+  #     region         = "us-east-1"
+  #     encrypt        = true
+  #     dynamodb_table = "central-memory-tf-locks"
+  #   }
+  #
+  # Bootstrap (one-time, manual):
+  #   aws s3api create-bucket --bucket central-memory-tfstate-<ACCOUNT>
+  #   aws dynamodb create-table --table-name central-memory-tf-locks \
+  #     --attribute-definitions AttributeName=LockID,AttributeType=S \
+  #     --key-schema AttributeName=LockID,KeyType=HASH \
+  #     --billing-mode PAY_PER_REQUEST
 }
 
 provider "aws" {

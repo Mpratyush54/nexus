@@ -34,13 +34,14 @@ const (
 const RecencyDecayDays = 90.0
 
 // CosineSimilarity returns the cosine similarity of a and b in [-1, 1].
-// Vectors of unequal length are compared over their shared prefix (min
-// length); empty or zero-magnitude vectors score 0.
+// Vectors of unequal length score 0 (issue #105): pgvector rejects
+// dimension mismatches, and prefix-matching silently minted bogus positives.
+// Empty or zero-magnitude vectors also score 0.
 func CosineSimilarity(a, b []float32) float64 {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
+	if len(a) != len(b) {
+		return 0
 	}
+	n := len(a)
 	if n == 0 {
 		return 0
 	}
@@ -144,11 +145,11 @@ func textSimilarity(queryText string, item *store.MemoryItem) float64 {
 
 // ScoredItem pairs a memory with its retrieval signals and final score.
 type ScoredItem struct {
-	Item       *store.MemoryItem
-	Similarity float64
+	Item        *store.MemoryItem
+	Similarity  float64
 	TagKeyBoost float64
-	Recency    float64
-	Score      float64
+	Recency     float64
+	Score       float64
 }
 
 // HybridSearch ranks candidates with vector similarity as the primary

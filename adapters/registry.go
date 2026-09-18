@@ -2,6 +2,7 @@ package adapters
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,10 +12,18 @@ import (
 )
 
 // genericAdapter implements Adapter via configured native roots.
+//
+// Role (Issue #117): adapters are transcript locators for the harvester —
+// Discover/Classify locate agent transcript files under home and project
+// dot-dirs. Export/Restore/Normalize below are the legacy vault-backup shim
+// (vault/agent/raw + index.json + manifest.json); they are retained for
+// backward compatibility (migrate imports legacy vaults) but new code should
+// treat adapters as locators, not backup agents. The vault parameter is a
+// legacy vault root; harvester paths use project roots instead.
 type genericAdapter struct {
 	name       string
 	agentDirs  []string // relative to %USERPROFILE%
-	projectDot []string // relative to D:\<proj>\
+	projectDot []string // relative to <project-root>\<proj>\ (see project.Roots)
 	absRoots   []string // absolute dirs (env-expanded at use)
 	maxBytes   int64    // large-file cap (50MB pointer rule)
 }
@@ -62,9 +71,14 @@ func (g genericAdapter) indexPath(vault string) string {
 
 // Export copies BACKUP files to vault + writes index.json (native->raw)
 // so Restore can map back. Skipped large files are recorded, not copied.
+//
+// Deprecated legacy-vault shim (Issue #117): retained for backward
+// compatibility (migrate imports legacy vaults). All copy, mkdir, marshal,
+// and write errors are propagated and aggregated (Issue #108) — a clean
+// return means every file landed.
 func (g genericAdapter) Export(vault string) error {
 	home, _ := os.UserHomeDir()
-	copied, skipped, _ := CopyFiltered(g.roots(), g.rawDir(vault), g.maxBytes, "", home)
+	copied, skipped, copyErr := CopyFiltered(g.roots(), g.rawDir(vault), g.maxBytes, "", home)
 	for i := range copied {
 		copied[i].Agent = g.name
 		copied[i].Kind = kindOf(copied[i].NativePath)
@@ -74,26 +88,39 @@ func (g genericAdapter) Export(vault string) error {
 			copied[i].Repo, copied[i].Root = projectpkg.Fingerprint(leafDir)
 		}
 	}
-	_ = os.MkdirAll(filepath.Join(vault, "agents", g.name), 0o755)
-	b, _ := json.MarshalIndent(map[string]any{
+	if err := os.MkdirAll(filepath.Join(vault, "agents", g.name), 0o755); err != nil {
+		return errors.Join(copyErr, fmt.Errorf("%s: create agent dir: %w", g.name, err))
+	}
+	b, merr := json.MarshalIndent(map[string]any{
 		"agent": g.name, "at": time.Now().UTC().Format(time.RFC3339),
 		"files": copied, "skipped_large": skipped,
 	}, "", "  ")
-	if err := os.WriteFile(g.indexPath(vault), b, 0o644); err != nil {
-		return err
+	if merr != nil {
+		return errors.Join(copyErr, fmt.Errorf("%s: encode index: %w", g.name, merr))
 	}
-	return writeManifest(vault, g.name, skipped)
+	if err := os.WriteFile(g.indexPath(vault), b, 0o644); err != nil {
+		return errors.Join(copyErr, fmt.Errorf("%s: write index: %w", g.name, err))
+	}
+	if err := writeManifest(vault, g.name, skipped); err != nil {
+		return errors.Join(copyErr, err)
+	}
+	return copyErr
 }
 
 // Restore copies vault raw files back to native paths. Project filter:
 // empty = all agents' files everywhere; set = only that project's files
 // across this adapter. Same-absolute-path enforced: project restores require
-// D:\<project> to exist; existing files are backed up to
-// <path>.pre-restore-TIMESTAMP before overwrite. `at` is accepted for future
-// restic snapshots (P3); P2 only holds latest and warns.
+// the leaf's directory under the configured project roots (Issue #111) to
+// exist; existing files are backed up to <path>.pre-restore-TIMESTAMP before
+// overwrite. `at` is accepted for historical snapshots but only the latest
+// export is held, so a non-empty value warns and restores latest.
+//
+// Deprecated legacy-vault shim (Issue #117): retained for backward
+// compatibility. Copy/mkdir failures are aggregated and returned (Issue
+// #108) instead of reporting a clean restore.
 func (g genericAdapter) Restore(vault, project, at string) error {
 	if at != "" {
-		fmt.Fprintf(os.Stderr, "[%s] note: --at %q accepted but P2 holds latest only (time travel lands in P3/restic)\n", g.name, at)
+		fmt.Fprintf(os.Stderr, "[%s] note: --at %q accepted but only the latest export is held; restoring latest\n", g.name, at)
 	}
 	if project != "" {
 		// Accept leaf IDs, git origin URLs, and root-commit hashes: moved or
@@ -101,8 +128,13 @@ func (g genericAdapter) Restore(vault, project, at string) error {
 		if leaf := projectpkg.ResolveLeaf(project); leaf != "" {
 			project = leaf
 		}
-		if _, err := os.Stat(filepath.Join(`D:\`, filepath.FromSlash(project))); os.IsNotExist(err) {
-			return errNoTarget{project, filepath.Join(`D:\`, filepath.FromSlash(project))}
+		target := projectpkg.LeafDir(project)
+		if target == "" {
+			// Fall back to leaf-relative display when roots are unset.
+			target = filepath.FromSlash(project)
+		}
+		if _, err := os.Stat(target); os.IsNotExist(err) {
+			return errNoTarget{project, target}
 		}
 	}
 	data, err := os.ReadFile(g.indexPath(vault))
@@ -117,25 +149,37 @@ func (g genericAdapter) Restore(vault, project, at string) error {
 	}
 	stamp := time.Now().Format("20060102-150405")
 	restored := 0
+	var errs []error
+	var skippedMissing int
 	for _, f := range idx.Files {
 		if project != "" && f.Project != project && f.Repo != project && f.Root != project {
 			continue
 		}
 		if _, err := os.Stat(f.RawPath); err != nil {
+			skippedMissing++
 			continue
 		}
 		if err := os.MkdirAll(filepath.Dir(f.NativePath), 0o755); err != nil {
+			errs = append(errs, fmt.Errorf("mkdir %s: %w", filepath.Dir(f.NativePath), err))
 			continue
 		}
 		if _, err := os.Stat(f.NativePath); err == nil {
-			_ = copyFile(f.NativePath, f.NativePath+".pre-restore-"+stamp)
+			if berr := copyFile(f.NativePath, f.NativePath+".pre-restore-"+stamp); berr != nil {
+				errs = append(errs, fmt.Errorf("backup %s: %w", f.NativePath, berr))
+				continue
+			}
 		}
-		if err := copyFile(f.RawPath, f.NativePath); err == nil {
-			restored++
+		if err := copyFile(f.RawPath, f.NativePath); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", f.NativePath, err))
+			continue
 		}
+		restored++
 	}
 	fmt.Printf("[%s] restored %d files%s\n", g.name, restored, suffix(project))
-	return nil
+	if skippedMissing > 0 {
+		fmt.Fprintf(os.Stderr, "[%s] note: skipped %d files with missing vault copies\n", g.name, skippedMissing)
+	}
+	return errors.Join(errs...)
 }
 
 func suffix(project string) string {
@@ -145,8 +189,17 @@ func suffix(project string) string {
 	return " for project " + project
 }
 
+// Normalize builds the harvester transcript index (sessions.jsonl +
+// transcript.md) from Discover results.
+//
+// Deprecated legacy-vault shim (Issue #117): the output layout is retained
+// for migrate compatibility. All encoding and write errors are propagated
+// (Issue #108).
 func (g genericAdapter) Normalize(vault string) error {
-	arts, _ := g.Discover()
+	arts, err := g.Discover()
+	if err != nil {
+		return fmt.Errorf("%s: discover: %w", g.name, err)
+	}
 	ndir := filepath.Join(vault, "agents", g.name, "normalized")
 	if err := os.MkdirAll(ndir, 0o755); err != nil {
 		return err
@@ -157,14 +210,22 @@ func (g genericAdapter) Normalize(vault string) error {
 	}
 	defer f.Close()
 	enc := json.NewEncoder(f)
-	md, _ := os.Create(filepath.Join(ndir, "transcript.md"))
+	md, err := os.Create(filepath.Join(ndir, "transcript.md"))
+	if err != nil {
+		return fmt.Errorf("%s: create transcript.md: %w", g.name, err)
+	}
 	defer md.Close()
-	md.WriteString("# " + g.name + " normalized index\n\n")
+	if _, err := md.WriteString("# " + g.name + " normalized index\n\n"); err != nil {
+		return fmt.Errorf("%s: write transcript header: %w", g.name, err)
+	}
+	var errs []error
 	for _, a := range arts {
-		info, _ := os.Stat(a.NativePath)
+		info, statErr := os.Stat(a.NativePath)
 		var size int64
 		var mod string
-		if info != nil {
+		if statErr != nil {
+			errs = append(errs, fmt.Errorf("stat %s: %w", a.NativePath, statErr))
+		} else {
 			size = info.Size()
 			mod = info.ModTime().UTC().Format(time.RFC3339)
 		}
@@ -172,22 +233,33 @@ func (g genericAdapter) Normalize(vault string) error {
 		if leafDir := leafDirOf(a.Project); leafDir != "" {
 			repo, root = projectpkg.Fingerprint(leafDir)
 		}
-		enc.Encode(map[string]any{
+		if err := enc.Encode(map[string]any{
 			"session_id": a.NativePath, "agent": g.name, "project": a.Project,
 			"kind": a.Kind, "updated": mod, "size": size,
 			"repo": repo, "root": root, "was": a.Was,
-		})
-		md.WriteString("- [" + a.Project + "/" + a.Kind + "] " + a.NativePath + "\n")
+		}); err != nil {
+			errs = append(errs, fmt.Errorf("encode %s: %w", a.NativePath, err))
+			continue
+		}
+		if _, err := md.WriteString("- [" + a.Project + "/" + a.Kind + "] " + a.NativePath + "\n"); err != nil {
+			errs = append(errs, fmt.Errorf("write transcript %s: %w", a.NativePath, err))
+		}
 	}
-	return nil
+	// Close-time flush errors (buffered encoder/file) must not be swallowed.
+	if err := f.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("%s: close sessions.jsonl: %w", g.name, err))
+	}
+	if err := md.Close(); err != nil {
+		errs = append(errs, fmt.Errorf("%s: close transcript.md: %w", g.name, err))
+	}
+	return errors.Join(errs...)
 }
 
-// leafDirOf maps a project ID ("a/b" or "a") to its D:\ directory.
+// leafDirOf maps a project ID ("a/b" or "a") to its absolute directory
+// under the configured project roots (Issue #111). Kept for backward
+// compatibility; new code should prefer project.LeafDir directly.
 func leafDirOf(leaf string) string {
-	if leaf == "" || leaf == "global" {
-		return ""
-	}
-	return filepath.Join(`D:\`, filepath.FromSlash(leaf))
+	return projectpkg.LeafDir(leaf)
 }
 
 func kindOf(p string) string {
@@ -203,11 +275,16 @@ func kindOf(p string) string {
 }
 
 func writeManifest(vault, agent string, skipped []Artifact) error {
-	_ = os.MkdirAll(filepath.Join(vault, "agents", agent), 0o755)
-	b, _ := json.MarshalIndent(map[string]any{
+	if err := os.MkdirAll(filepath.Join(vault, "agents", agent), 0o755); err != nil {
+		return fmt.Errorf("%s: create agent dir: %w", agent, err)
+	}
+	b, err := json.MarshalIndent(map[string]any{
 		"agent": agent, "at": time.Now().UTC().Format(time.RFC3339),
 		"skipped_large": skipped,
 	}, "", "  ")
+	if err != nil {
+		return fmt.Errorf("%s: encode manifest: %w", agent, err)
+	}
 	return os.WriteFile(filepath.Join(vault, "agents", agent, "manifest.json"), b, 0o644)
 }
 

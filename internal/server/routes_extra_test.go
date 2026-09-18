@@ -169,7 +169,7 @@ func TestBranchListForkCheckoutDiffMerge(t *testing.T) {
 		t.Fatalf("merge status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 	var merge struct {
-		Merged    bool `json:"merged"`
+		Merged    bool  `json:"merged"`
 		Conflicts []any `json:"conflicts"`
 	}
 	decodeBody(t, rec, &merge)
@@ -218,7 +218,7 @@ func TestMemoryConfirmReject(t *testing.T) {
 		t.Fatalf("status = %q, want CONFIRMED", confirmed.Status)
 	}
 
-	// Reject path (no Store.RejectMemory: fallback status flip).
+	// Reject path (native Store.RejectMemory: durable on every backend).
 	rid := create("testing/reject")
 	rec = doJSON(t, s, http.MethodPost, "/memory/"+rid+"/reject", token, map[string]any{})
 	if rec.Code != http.StatusOK {

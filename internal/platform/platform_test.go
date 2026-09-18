@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,7 +25,7 @@ func TestConfigDirForGOOS(t *testing.T) {
 		if !strings.HasSuffix(got, "nexus") {
 			t.Errorf("goos=%s: got %q, want suffix nexus", tc.goos, got)
 		}
-		if !strings.Contains(got, tc.wantSub) && tc.goos != "linux" {
+		if !strings.Contains(strings.ReplaceAll(got, `\`, `/`), strings.ReplaceAll(tc.wantSub, `\`, `/`)) && tc.goos != "linux" {
 			t.Errorf("goos=%s: got %q, want it to contain %q", tc.goos, got, tc.wantSub)
 		}
 		if strings.Contains(got, "D:") {
@@ -123,7 +124,7 @@ func TestRenderSystemdUnitContainsExecStart(t *testing.T) {
 	if !strings.Contains(unit, exe) {
 		t.Errorf("unit missing executable %q:\n%s", exe, unit)
 	}
-	for _, want := range []string{"WantedBy=default.target", "Restart=on-failure", "daemon", "--port"} {
+	for _, want := range []string{"WantedBy=default.target", "Restart=always", "StandardOutput=journal", "StandardError=journal", "daemon", "--port"} {
 		if !strings.Contains(unit, want) {
 			t.Errorf("unit missing %q:\n%s", want, unit)
 		}
@@ -133,10 +134,44 @@ func TestRenderSystemdUnitContainsExecStart(t *testing.T) {
 func TestRenderLaunchdPlistContainsExecutable(t *testing.T) {
 	exe := filepath.Join("opt", "nexus", "nexus")
 	plist := RenderLaunchdPlist(LaunchdLabel, exe, []string{"daemon", "run"})
-	for _, want := range []string{LaunchdLabel, exe, "ProgramArguments", "RunAtLoad", "KeepAlive", "daemon"} {
+	for _, want := range []string{LaunchdLabel, exe, "ProgramArguments", "RunAtLoad", "KeepAlive", "ThrottleInterval", "StandardOutPath", "StandardErrorPath", "daemon"} {
 		if !strings.Contains(plist, want) {
 			t.Errorf("plist missing %q:\n%s", want, plist)
 		}
+	}
+}
+
+// TestParseSchtasksStatusMultilingual pins locale-independent status parsing
+// (Issue #111): missing-task output in several languages maps to
+// not-installed, running states map to running, other output maps to stopped.
+func TestParseSchtasksStatusMultilingual(t *testing.T) {
+	for _, out := range []string{
+		`ERROR: The specified task name "nexus-daemon" cannot be found`,
+		`FEHLER: Der Aufgabenname wurde nicht gefunden`,
+		`ERREUR : le nom de tâche est introuvable`,
+	} {
+		st, err := parseSchtasksStatus(out, fmt.Errorf("exit 1"))
+		if err != nil {
+			t.Errorf("missing output %q should not error, got %v", out, err)
+		}
+		if st != StatusNotInstalled {
+			t.Errorf("missing output %q = %q, want not-installed", out, st)
+		}
+	}
+	st, err := parseSchtasksStatus("Status:          Running", nil)
+	if err != nil || st != StatusRunning {
+		t.Errorf("running = (%q,%v), want (running,nil)", st, err)
+	}
+	st, err = parseSchtasksStatus("Status: Wird ausgeführt", nil)
+	if err != nil || st != StatusRunning {
+		t.Errorf("german running = (%q,%v), want (running,nil)", st, err)
+	}
+	st, err = parseSchtasksStatus("Status:          Ready", nil)
+	if err != nil || st != StatusStopped {
+		t.Errorf("ready = (%q,%v), want (stopped,nil)", st, err)
+	}
+	if _, err := parseSchtasksStatus("access denied", fmt.Errorf("exit 1")); err == nil {
+		t.Error("unexpected query failure should return error")
 	}
 }
 
@@ -163,6 +198,39 @@ func TestQuoteArg(t *testing.T) {
 	}
 	if got := quoteArg(`C:\my tools\nexus.exe`); !strings.HasPrefix(got, `"`) {
 		t.Errorf("spaced path quoted: got %q", got)
+	}
+}
+
+// TestSchtasksStateFromList pins the locale-robust status parser (issue
+// #111): English plus localized Status values map correctly, and anything
+// unrecognized yields unknown instead of a false stopped/running.
+func TestSchtasksStateFromList(t *testing.T) {
+	const header = "TaskName:     \\nexus-daemon\nRun As User:  test\n"
+	cases := []struct {
+		name string
+		text string
+		want ServiceStatus
+	}{
+		{"english running", header + "Status:            Running\n", StatusRunning},
+		{"english ready", header + "Status:            Ready\n", StatusStopped},
+		{"english disabled", header + "Status:            Disabled\n", StatusStopped},
+		{"case-insensitive", header + "STATUS:            RUNNING\n", StatusRunning},
+		{"german running", header + "Status:            Wird ausgeführt\n", StatusRunning},
+		{"german ready", header + "Status:            Bereit\n", StatusStopped},
+		{"french running", header + "Statut:            En cours d'exécution\n", StatusRunning},
+		{"spanish running", header + "Estado:            En ejecución\n", StatusRunning},
+		{"russian running", header + "Состояние:         Выполняется\n", StatusRunning},
+		{"unrecognized value is unknown", header + "Status:            Inconnu\n", StatusUnknown},
+		{"no status line is unknown", "ERROR: The system cannot find the file specified.\n", StatusUnknown},
+		{"empty output is unknown", "", StatusUnknown},
+		{"empty value is unknown", header + "Status:\n", StatusUnknown},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := schtasksStateFromList(tc.text); got != tc.want {
+				t.Errorf("schtasksStateFromList = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

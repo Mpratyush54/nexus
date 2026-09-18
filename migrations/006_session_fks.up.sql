@@ -23,15 +23,43 @@
 -- event log, episode arcs, and tasks outlive their session; session deletes
 -- must not cascade into history. NULLs stay allowed (all three columns are
 -- nullable: cross-session episodes, session-less tasks/events).
+--
+-- Idempotency (issue #107): each ALTER is guarded by a pg_constraint
+-- existence check, so re-runs and partial runs are safe no-ops instead of
+-- fatal "constraint already exists" crashes.
 
-ALTER TABLE events
-    ADD CONSTRAINT fk_events_session
-    FOREIGN KEY (session_id) REFERENCES sessions(id);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_events_session'
+    ) THEN
+        ALTER TABLE events
+            ADD CONSTRAINT fk_events_session
+            FOREIGN KEY (session_id) REFERENCES sessions(id);
+    END IF;
+END
+$$;
 
-ALTER TABLE episodes
-    ADD CONSTRAINT fk_episodes_session
-    FOREIGN KEY (session_id) REFERENCES sessions(id);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_episodes_session'
+    ) THEN
+        ALTER TABLE episodes
+            ADD CONSTRAINT fk_episodes_session
+            FOREIGN KEY (session_id) REFERENCES sessions(id);
+    END IF;
+END
+$$;
 
-ALTER TABLE tasks
-    ADD CONSTRAINT fk_tasks_session
-    FOREIGN KEY (session_id) REFERENCES sessions(id);
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'fk_tasks_session'
+    ) THEN
+        ALTER TABLE tasks
+            ADD CONSTRAINT fk_tasks_session
+            FOREIGN KEY (session_id) REFERENCES sessions(id);
+    END IF;
+END
+$$;

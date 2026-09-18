@@ -69,16 +69,16 @@ const (
 // content — content stays in memory_items tagged with branch_id (Postgres)
 // or in the MemStore overlay bucket (in-memory).
 type MemoryBranch struct {
-	ID              string     `json:"id"`
-	ProjectID       string     `json:"project_id"`
-	Name            string     `json:"name"`
-	OwnerID         string     `json:"owner_id,omitempty"`
-	ParentBranchID  string     `json:"parent_branch_id,omitempty"`
-	ForkedAtEventID int64      `json:"forked_at_event_id,omitempty"`
-	Visibility      string     `json:"visibility"` // private | shared
-	CreatedAt       time.Time  `json:"created_at"`
-	ArchivedAt      *time.Time `json:"archived_at,omitempty"`      // nil = active (migration 007)
-	PotentiallyStale bool      `json:"potentially_stale,omitempty"` // persisted DetectStale signal (migration 007)
+	ID               string     `json:"id"`
+	ProjectID        string     `json:"project_id"`
+	Name             string     `json:"name"`
+	OwnerID          string     `json:"owner_id,omitempty"`
+	ParentBranchID   string     `json:"parent_branch_id,omitempty"`
+	ForkedAtEventID  int64      `json:"forked_at_event_id,omitempty"`
+	Visibility       string     `json:"visibility"` // private | shared
+	CreatedAt        time.Time  `json:"created_at"`
+	ArchivedAt       *time.Time `json:"archived_at,omitempty"`       // nil = active (migration 007)
+	PotentiallyStale bool       `json:"potentially_stale,omitempty"` // persisted DetectStale signal (migration 007)
 }
 
 // BranchStore is the branching surface. Both MemStore (tests/local dev) and
@@ -104,6 +104,20 @@ type BranchStore interface {
 	// ResolveRead walks branch -> parent -> main and returns the first
 	// match for key (CONFIRMED/PROPOSED only, latest write wins per level).
 	ResolveRead(ctx context.Context, branchID, key string) (*MemoryItem, error)
+	// ListBranchItems returns the branch's OWN rows only (latest write per
+	// key, CONFIRMED/PROPOSED only, sorted by key). CoW reminder: fork
+	// copies zero rows, so a fresh child lists empty until WriteToBranch is
+	// called — inherited parent/main-line keys are NOT included (use
+	// ResolveRead per key for the effective view).
+	ListBranchItems(ctx context.Context, branchID string) ([]*MemoryItem, error)
+	// CopyItemsToBranch copies the source branch's latest-per-key items onto
+	// the target as fresh PROPOSED rows (new ids, parents untouched).
+	// Returns the copied row count. Unknown branch id -> ErrNotFound.
+	CopyItemsToBranch(ctx context.Context, fromBranchID, toBranchID string) (int64, error)
+	// SetWorkspaceBranch persists the workspace-scoped active branch pointer
+	// (the checkout mutation for issue #104). Blank branch -> input error,
+	// unknown workspace id -> ErrNotFound.
+	SetWorkspaceBranch(ctx context.Context, workspaceID, branch string) error
 }
 
 // Compile-time guarantees.
@@ -386,6 +400,75 @@ func (s *MemStore) ResolveRead(_ context.Context, branchID, key string) (*Memory
 	return best, nil
 }
 
+// ListBranchItems returns the branch overlay's latest write per key
+// (CONFIRMED/PROPOSED only, sorted by key). Main-line memories and parent
+// overlays are NOT included — this enumerates what was written ON the
+// branch, which is exactly the snapshot diff/merge compare.
+func (s *MemStore) ListBranchItems(_ context.Context, branchID string) ([]*MemoryItem, error) {
+	b := branchBucket(s)
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if _, err := memBranchChain(b, branchID); err != nil {
+		return nil, err
+	}
+	ov := b.overlays[branchID]
+	out := make([]*MemoryItem, 0, len(ov))
+	for _, m := range ov {
+		if !visibleStatus(m.Status) {
+			continue
+		}
+		out = append(out, m)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+// CopyItemsToBranch copies the source overlay's items onto the target as
+// fresh PROPOSED rows (new ids via WriteToBranch). The source overlay is
+// snapshotted first so the per-write locking in WriteToBranch cannot
+// deadlock against the bucket mutex.
+func (s *MemStore) CopyItemsToBranch(ctx context.Context, fromBranchID, toBranchID string) (int64, error) {
+	src, err := s.ListBranchItems(ctx, fromBranchID)
+	if err != nil {
+		return 0, err
+	}
+	b := branchBucket(s)
+	b.mu.RLock()
+	_, terr := memBranchChain(b, toBranchID)
+	b.mu.RUnlock()
+	if terr != nil {
+		return 0, terr
+	}
+	var n int64
+	for _, m := range src {
+		cp := *m
+		cp.ID = ""
+		cp.Status = "PROPOSED"
+		if err := s.WriteToBranch(ctx, toBranchID, &cp); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// SetWorkspaceBranch persists the workspace-scoped active branch pointer.
+// Unknown workspace id -> ErrNotFound; blank branch -> input error (the
+// server maps "is required" to 400 via isInputError parity).
+func (s *MemStore) SetWorkspaceBranch(_ context.Context, workspaceID, branch string) error {
+	if strings.TrimSpace(branch) == "" {
+		return fmt.Errorf("branch is required")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ws, ok := s.workspaces[workspaceID]
+	if !ok {
+		return ErrNotFound
+	}
+	ws.Branch = strings.TrimSpace(branch)
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // PostgresStore backend — memory_branches table + branch_id column.
 // ---------------------------------------------------------------------------
@@ -633,4 +716,84 @@ func (s *PostgresStore) ResolveRead(ctx context.Context, branchID, key string) (
 		return nil, err
 	}
 	return s.GetMemoryItem(ctx, itemID)
+}
+
+// ListBranchItems returns the branch's own rows: latest write per key
+// (CONFIRMED/PROPOSED only, sorted by key). The branch must exist
+// (pgBranchChain -> ErrNotFound). History rows accumulate in Postgres
+// (unlike the MemStore overlay map), so ORDER BY updated_at DESC + Go-side
+// key dedupe keeps the first (latest) row per key.
+func (s *PostgresStore) ListBranchItems(ctx context.Context, branchID string) ([]*MemoryItem, error) {
+	if _, err := s.pgBranchChain(ctx, branchID); err != nil {
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT `+memoryColumns+` FROM memory_items
+		  WHERE branch_id = $1::uuid AND status IN ('CONFIRMED','PROPOSED')
+		  ORDER BY updated_at DESC`, branchID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	seen := make(map[string]bool)
+	var out []*MemoryItem
+	for rows.Next() {
+		m, err := scanMemoryItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		if seen[m.Key] {
+			continue
+		}
+		seen[m.Key] = true
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	return out, nil
+}
+
+// CopyItemsToBranch copies the source branch's latest-per-key items onto
+// the target as fresh PROPOSED rows via WriteToBranch (new ids, UUID-cast
+// INSERT, parents untouched). Returns the copied row count.
+func (s *PostgresStore) CopyItemsToBranch(ctx context.Context, fromBranchID, toBranchID string) (int64, error) {
+	src, err := s.ListBranchItems(ctx, fromBranchID)
+	if err != nil {
+		return 0, err
+	}
+	if _, err := s.pgBranchChain(ctx, toBranchID); err != nil {
+		return 0, err
+	}
+	var n int64
+	for _, m := range src {
+		cp := *m
+		cp.ID = ""
+		cp.Status = "PROPOSED"
+		if err := s.WriteToBranch(ctx, toBranchID, &cp); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}
+
+// SetWorkspaceBranch persists the workspace-scoped active branch pointer.
+// Blank branch -> input error; zero rows updated -> ErrNotFound.
+func (s *PostgresStore) SetWorkspaceBranch(ctx context.Context, workspaceID, branch string) error {
+	if strings.TrimSpace(branch) == "" {
+		return fmt.Errorf("branch is required")
+	}
+	tag, err := s.pool.Exec(ctx,
+		`UPDATE workspaces SET branch = $2, last_seen = now()
+		  WHERE id = $1::uuid`,
+		workspaceID, strings.TrimSpace(branch))
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }

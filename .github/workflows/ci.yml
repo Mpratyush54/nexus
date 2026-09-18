@@ -94,3 +94,92 @@ jobs:
 
       - name: Full suite with live DB (applies migrations via RunMigrations)
         run: go test -count=1 ./...
+
+  # Job 4: race detector COMBINED with a real Postgres (issue #129). The
+  # test-race job SKIPs live-DB tests and the postgres job runs without
+  # -race, so neither exercises the strongest signal (data races under a
+  # live pool + LISTEN/NOTIFY). Narrow scope keeps it fast: store + server
+  # packages own all live-DB code paths.
+  postgres-race:
+    name: go test -race vs Postgres (store+server)
+    runs-on: ubuntu-latest
+    needs: build
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nexus_test
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    env:
+      TEST_POSTGRES_DSN: postgres://postgres:postgres@localhost:5432/nexus_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Race suite with live DB
+        run: go test -race -count=1 ./internal/store/... ./internal/server/... ./cmd/server/...
+
+  # Job 5: deploy artifacts (issue #129). Dockerfiles and Terraform rotted
+  # undetected before (wrong compose path, distroless shell, :80 gaps).
+  # No credentials needed: image builds only, terraform validate only.
+  deploy:
+    name: docker builds + terraform validate + web check
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build server image
+        run: docker build -f deploy/Dockerfile.server -t central-server:ci .
+
+      - name: Build daemon image
+        run: docker build -f deploy/Dockerfile.daemon -t workspace-daemon:ci .
+
+      - name: Compose build smoke (catches wrong dockerfile paths, #126)
+        run: docker compose -f deploy/docker-compose.yml build
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.x"
+
+      - name: Terraform fmt check
+        working-directory: infra/terraform
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate (no credentials needed)
+        working-directory: infra/terraform
+        run: terraform init -backend=false && terraform validate
+
+      - name: Web JS syntax check (no npm, no bundler)
+        run: node --check web/app.js
+
+      - name: migrate.sh lint (bash syntax + shellcheck when available)
+        shell: bash
+        run: |
+          bash -n deploy/migrate.sh
+          if command -v shellcheck >/dev/null 2>&1; then
+            shellcheck -S warning deploy/migrate.sh
+          else
+            echo "shellcheck not installed; bash -n only"
+          fi
+
+      - name: Down-migrations must not ship in the server image (#128)
+        shell: bash
+        run: |
+          if docker run --rm --entrypoint sh central-server:ci -c "ls /migrations/*.down.sql" 2>/dev/null; then
+            echo "FAIL: *.down.sql baked into server image"
+            exit 1
+          fi
+          echo "ok: no *.down.sql in image"

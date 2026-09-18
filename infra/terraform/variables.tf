@@ -20,15 +20,33 @@ variable "vpc_id" {
 }
 
 variable "subnet_ids" {
-  description = "Private subnets for Aurora + Fargate. Empty means 'use the default VPC subnets'. Set explicitly when vpc_id is custom."
+  description = "Legacy: subnets for everything. Prefer public_subnet_ids + private_subnet_ids (issue #45); when those are empty this backfills both."
   type        = list(string)
   default     = []
 }
 
 variable "public_subnet_ids" {
-  description = "Public subnets for the internet-facing ALB (issue #45: an ALB on private subnets cannot receive traffic). Empty means 'same as subnet_ids' — correct for the default VPC (whose subnets are public) but MUST be set explicitly for custom VPCs with private app subnets."
+  description = "Public subnets for the ALB (issue #45). Empty falls back to subnet_ids / default-VPC subnets."
   type        = list(string)
   default     = []
+}
+
+variable "private_subnet_ids" {
+  description = "Private subnets for Fargate tasks + Aurora (issue #45). Empty falls back to subnet_ids / default-VPC subnets."
+  type        = list(string)
+  default     = []
+}
+
+variable "private_route_table_ids" {
+  description = "Private route tables to associate with the S3 Gateway endpoint (issue #128). Empty creates the endpoint unattached."
+  type        = list(string)
+  default     = []
+}
+
+variable "aurora_engine_version" {
+  description = "Pinned Aurora PostgreSQL version (issue #127). Bare major ('16') is rejected — use a full version. Upgrade path in deploy/rds-notes.md."
+  type        = string
+  default     = "16.6"
 }
 
 variable "aurora_min_acu" {
@@ -50,9 +68,21 @@ variable "db_name" {
 }
 
 variable "db_username" {
-  description = "Master username (password is generated into Secrets Manager)."
+  description = "Master username (password is RDS-managed into Secrets Manager; the app never uses this — see app_username)."
   type        = string
   default     = "central"
+}
+
+variable "app_username" {
+  description = "Dedicated app DB user (issue #127). Bootstrapped once from the master (CREATE USER + GRANT, see deploy/rds-notes.md); its password is the db-app secret."
+  type        = string
+  default     = "central_app"
+}
+
+variable "skip_final_snapshot" {
+  description = "Skip the final Aurora snapshot on destroy (issue #127). false (default) is safe; true for ephemeral stacks."
+  type        = bool
+  default     = false
 }
 
 variable "server_cpu" {
@@ -80,9 +110,14 @@ variable "server_port" {
 }
 
 variable "server_image" {
-  description = "ECR image URI for the server (built from Dockerfile.server; pushed by CI)."
+  description = "ECR image URI for the server (built from Dockerfile.server; pushed by CI). Empty by default: terraform plan with the placeholder is rejected so nobody deploys central-memory-server:latest by accident (issue #126). CI injects ACCOUNT.dkr.ecr.REGION:SHA."
   type        = string
-  default     = "central-memory-server:latest"
+  default     = ""
+
+  validation {
+    condition     = var.server_image != "" && can(regex("^.+\\.dkr\\.ecr\\..+\\.amazonaws\\.com/", var.server_image))
+    error_message = "server_image must be a full ECR URI (ACCOUNT.dkr.ecr.REGION.amazonaws.com/repo:tag); CI injects it. The old central-memory-server:latest default is not pullable."
+  }
 }
 
 variable "api_domain" {

@@ -104,6 +104,14 @@ type Config struct {
 	// Budgets resolves the seed budget for AgentName
 	// (*store.AgentRegistry in production). Nil skips registry lookup.
 	Budgets BudgetResolver
+	// Embed selects the embedding backend for memory_write (issue #76).
+	// Nil selects HashEmbed (deterministic stdlib interim, 1536-dim).
+	// Production substitutes an LLM embedder with the same shape.
+	Embed EmbedFunc
+	// FileAccessLog, when set, receives (op, workspace-relative path, byte
+	// count) for every successful file_read/file_write (issue #96): the
+	// audit seam mirroring the daemon interceptor events. Nil disables.
+	FileAccessLog func(op, path string, size int)
 }
 
 // Server is a JSON-RPC 2.0 MCP server. It is safe for concurrent use;

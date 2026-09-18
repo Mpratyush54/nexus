@@ -10,7 +10,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func testDaemon(t *testing.T) *Daemon {
@@ -66,11 +68,11 @@ func TestAuthUnauthorized(t *testing.T) {
 
 func TestFileReadTraversalReturns403(t *testing.T) {
 	d := testDaemon(t)
-	paths := []string{"../../etc/passwd", `..\..\Windows\System32\drivers\etc\hosts`, "a.txt:stream"}
-	if runtime.GOOS != "windows" {
-		paths = append(paths, "/etc/passwd")
+	paths := []string{"../../etc/passwd", "a.txt:stream"}
+	if runtime.GOOS == "windows" {
+		paths = append(paths, `..\..\Windows\System32\drivers\etc\hosts`, `C:\Windows\System32\drivers\etc\hosts`)
 	} else {
-		paths = append(paths, `C:\Windows\System32\drivers\etc\hosts`)
+		paths = append(paths, "/etc/passwd")
 	}
 	for _, p := range paths {
 		w := doReq(d, "POST", "/file/read", `{"path":`+jsonStr(p)+`}`, "test-token-123")
@@ -626,5 +628,204 @@ func TestWorkspaceIDRoundTrip0600(t *testing.T) {
 		if st.Mode().Perm()&0o077 != 0 {
 			t.Fatalf("workspace file too permissive: %o", st.Mode().Perm())
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Heartbeat recovery tests (issue #106).
+//
+// StartHeartbeat must (a) Register when starting unregistered instead of
+// 404-looping heartbeats, (b) wait on a backoff-scaled timer rather than a
+// fixed ticker, and re-register when a heartbeat reports unknown
+// registration. All use httptest servers and small injected intervals — no
+// wall-clock sleeps at HeartbeatInterval scale.
+// ---------------------------------------------------------------------------
+
+func TestStartHeartbeatRegistersWhenUnregistered(t *testing.T) {
+	var registers atomic.Int64
+	var beats atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/projects/resolve":
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "proj-1"})
+		case "/workspaces/register":
+			registers.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "ws-hb-1"})
+		case "/workspaces/heartbeat":
+			beats.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "ws-hb-1"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	d.ServerURL = srv.URL
+	d.UserID = "user-1"
+	if got := d.getWorkspaceID(); got != "" {
+		t.Fatalf("fresh daemon workspace id = %q, want empty", got)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.StartHeartbeat(ctx, "", 20*time.Millisecond)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for beats.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if registers.Load() == 0 {
+		t.Fatal("StartHeartbeat without workspace ID never called Register")
+	}
+	if beats.Load() == 0 {
+		t.Fatal("StartHeartbeat never heartbeated after registering")
+	}
+	if got := d.getWorkspaceID(); got != "ws-hb-1" {
+		t.Fatalf("workspace id = %q, want ws-hb-1", got)
+	}
+}
+
+func TestStartHeartbeatReregistersOn404(t *testing.T) {
+	var registers atomic.Int64
+	var okBeats atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/projects/resolve":
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "proj-1"})
+		case "/workspaces/register":
+			registers.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "ws-fresh"})
+		case "/workspaces/heartbeat":
+			var req struct {
+				WorkspaceID string `json:"workspace_id"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			if req.WorkspaceID != "ws-fresh" {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"workspace not found"}`))
+				return
+			}
+			okBeats.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "ws-fresh"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	d.ServerURL = srv.URL
+	d.UserID = "user-1"
+	d.WorkspaceID = "ws-stale" // stale registration the server no longer knows
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.StartHeartbeat(ctx, "", 20*time.Millisecond)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for okBeats.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	if registers.Load() == 0 {
+		t.Fatal("StartHeartbeat on 404 heartbeat never re-registered")
+	}
+	if okBeats.Load() == 0 {
+		t.Fatal("StartHeartbeat never heartbeated successfully after re-register")
+	}
+	if got := d.getWorkspaceID(); got != "ws-fresh" {
+		t.Fatalf("workspace id = %q, want ws-fresh", got)
+	}
+}
+
+func TestHeartbeatDelayScalesWithInterval(t *testing.T) {
+	// Production scale is unchanged.
+	if got := heartbeatDelay(0, 2); got != heartbeatBackoff(2) {
+		t.Fatalf("heartbeatDelay(0, 2) = %v, want %v", got, heartbeatBackoff(2))
+	}
+	if got := heartbeatDelay(HeartbeatInterval, 3); got != heartbeatBackoff(3) {
+		t.Fatalf("heartbeatDelay(HeartbeatInterval, 3) = %v, want %v", got, heartbeatBackoff(3))
+	}
+	// Small injected base: first failure retries on the base, then doubles.
+	base := 20 * time.Millisecond
+	if got := heartbeatDelay(base, 0); got != base {
+		t.Fatalf("heartbeatDelay(base, 0) = %v, want %v", got, base)
+	}
+	if got := heartbeatDelay(base, 1); got != base {
+		t.Fatalf("heartbeatDelay(base, 1) = %v, want %v", got, base)
+	}
+	if got := heartbeatDelay(base, 2); got != 2*base {
+		t.Fatalf("heartbeatDelay(base, 2) = %v, want %v", got, 2*base)
+	}
+	prev := heartbeatDelay(base, 2)
+	for i := 3; i < 10; i++ {
+		got := heartbeatDelay(base, i)
+		if got < prev {
+			t.Fatalf("heartbeatDelay(base, %d) = %v < %v", i, got, prev)
+		}
+		if got > maxHeartbeatBackoff {
+			t.Fatalf("heartbeatDelay(base, %d) = %v exceeds cap %v", i, got, maxHeartbeatBackoff)
+		}
+		prev = got
+	}
+}
+
+func TestStartHeartbeatBacksOffOnRepeatedFailures(t *testing.T) {
+	var attempts atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	d, err := NewDaemon(t.TempDir(), "test-token-123")
+	if err != nil {
+		t.Fatalf("NewDaemon: %v", err)
+	}
+	d.ServerURL = srv.URL
+	d.UserID = "user-1"
+	d.WorkspaceID = "ws-x" // registered, so beats hit the failing server
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.StartHeartbeat(ctx, "", 20*time.Millisecond)
+	}()
+	<-done
+
+	got := attempts.Load()
+	if got < 2 {
+		t.Fatalf("attempts = %d, want >= 2 (retries must continue)", got)
+	}
+	// Fixed 20ms ticker would fire ~16 times in 300ms; backoff
+	// (20,20,40,80,160...) fires ~5-6 times. Generous cap keeps this
+	// deterministic without wall-clock sleeps at HeartbeatInterval scale.
+	if got > 10 {
+		t.Fatalf("attempts = %d, want <= 10 (backoff must slow retries)", got)
 	}
 }

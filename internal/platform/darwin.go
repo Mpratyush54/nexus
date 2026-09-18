@@ -17,7 +17,7 @@ func init() { registerBackend("darwin", func() Service { return darwinService{} 
 // loaded with launchctl bootstrap/bootout. Stdlib only (os/exec).
 type darwinService struct {
 	// label and agentsDir are overridable for tests.
-	label    string
+	label     string
 	agentsDir string
 }
 
@@ -74,7 +74,15 @@ func (s darwinService) Uninstall() error {
 	if err != nil {
 		return err
 	}
-	_ = exec.Command("launchctl", "bootout", "gui/"+uid(), path).Run()
+	// Issue #111: propagate bootout failures (a stuck job must not be
+	// reported as removed). "No such process / not found" means already
+	// unloaded and is not a failure.
+	if out, err := exec.Command("launchctl", "bootout", "gui/"+uid(), path).CombinedOutput(); err != nil {
+		lower := strings.ToLower(string(out))
+		if !(strings.Contains(lower, "no such process") || strings.Contains(lower, "not found") || strings.Contains(lower, "does not exist") || strings.Contains(lower, "could not find")) {
+			return fmt.Errorf("platform: launchctl bootout: %w: %s", err, strings.TrimSpace(string(out)))
+		}
+	}
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("platform: remove launchd plist: %w", err)
 	}

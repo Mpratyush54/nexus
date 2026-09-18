@@ -169,6 +169,47 @@ func TestAppendListEvents(t *testing.T) {
 	}
 }
 
+func TestSearchMemoryNullProjectOrgOnly(t *testing.T) {
+	ctx := context.Background()
+	s := NewMemStore()
+	proj, _ := s.ResolveProject(ctx, "", "", "search-proj")
+
+	seed := []*MemoryItem{
+		{Key: "org/global", Content: "Org-wide deployment policy statement here.",
+			Level: "organization", Status: "CONFIRMED"}, // NULL project org
+		{Key: "leak/personal", Content: "Alice personal preference statement here.",
+			Level: "personal", Status: "CONFIRMED", UserID: "u_alice"}, // NULL project personal
+		{Key: "leak/session", Content: "Orphaned session-scoped note kept here now.",
+			Level: "session", Status: "CONFIRMED", SessionID: "sess_orphan"},
+		{ProjectID: proj.ID, Key: "proj/fact", Content: "Project-local framework fact here now.",
+			Level: "project", Status: "CONFIRMED"},
+	}
+	for _, m := range seed {
+		if err := s.CreateMemoryItem(ctx, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := s.SearchMemory(ctx, proj.ID, "", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := map[string]bool{}
+	for _, m := range got {
+		keys[m.Key] = true
+	}
+	for _, want := range []string{"org/global", "proj/fact"} {
+		if !keys[want] {
+			t.Errorf("SearchMemory missing %q (got %v)", want, keys)
+		}
+	}
+	for _, leak := range []string{"leak/personal", "leak/session"} {
+		if keys[leak] {
+			t.Errorf("SearchMemory leaked NULL-project %q across projects", leak)
+		}
+	}
+}
+
 func TestSubscribeReceivesAppends(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -52,6 +52,8 @@ func main() {
 		runErr = runEpisode(ctx, cfg, rest[1:], os.Stdout)
 	case "doctor":
 		runErr = runDoctor(ctx, cfg, rest[1:], os.Stdout)
+	case "migrate":
+		runErr = runMigrate(ctx, cfg, rest[1:], os.Stdout)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	case "version", "--version":
@@ -197,6 +199,7 @@ Commands:
   episode list [-p ID] [--limit N]
   episode search [-p ID] "<error or query>"
   doctor                          probe server, daemon, and git
+  migrate [--vault PATH] [--dry-run]   import legacy vault (see also: mem mcp local-mode)
 
 Global flags (env fallbacks: NEXUS_SERVER, NEXUS_TOKEN, NEXUS_DAEMON, NEXUS_PROJECT):
   --server URL   central server base URL (default http://localhost:8080)

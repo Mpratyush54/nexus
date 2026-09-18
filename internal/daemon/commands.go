@@ -15,6 +15,106 @@ import (
 	"time"
 )
 
+// allowedGitSubcommands is the read-only git surface required by Nexus
+// (issue #91): status/diff/log inspection plus narrowly defined read-only
+// plumbing. Everything else (config, remote, hooks/helpers, write paths
+// like add/commit/push/pull/fetch/clone/init/checkout/reset) is rejected.
+var allowedGitSubcommands = map[string]bool{
+	"status":    true,
+	"diff":      true,
+	"log":       true,
+	"show":      true,
+	"rev-parse": true,
+	"branch":    true,
+	"tag":       true,
+	"ls-files":  true,
+	"grep":      true,
+	"blame":     true,
+	"version":   true,
+	"help":      true,
+}
+
+// allowedGitFlags are the only bare `git <flag>` forms permitted (no
+// subcommand, e.g. `git --version`). All other dash-forms are rejected so
+// `--upload-pack`, `--exec-path`, etc. cannot smuggle helpers.
+var allowedGitFlags = map[string]bool{
+	"--version": true,
+	"--help":    true,
+	"-v":        true,
+	"-h":        true,
+}
+
+// isAllowedGit reports whether a git argv is within the read-only allowlist.
+// It rejects config overrides, external-program hooks, remotes, and write
+// subcommands (issue #91 adversarial surface).
+func isAllowedGit(rest []string) bool {
+	if len(rest) == 0 {
+		return true // bare `git` prints help; no effect
+	}
+	first := rest[0]
+	if strings.HasPrefix(first, "-") {
+		// Bare flag form: allow only the safe set; reject everything
+		// else including -c/--config/--upload-pack/--exec.
+		if allowedGitFlags[first] {
+			// No further args permitted on flag form (e.g. `git --version
+			// --upload-pack=x` is rejected below anyway).
+			for _, a := range rest[1:] {
+				if isDangerousGitFlag(a) {
+					return false
+				}
+			}
+			return true
+		}
+		return false
+	}
+	if !allowedGitSubcommands[first] {
+		return false
+	}
+	for _, a := range rest[1:] {
+		if strings.ContainsRune(a, 0) {
+			return false
+		}
+		if isDangerousGitFlag(a) {
+			return false
+		}
+	}
+	return true
+}
+
+// isDangerousGitFlag rejects options that alter configuration or invoke
+// external programs, plus credential/remote helpers and file-writing
+// redirects (--output) that could land outside the workspace.
+func isDangerousGitFlag(a string) bool {
+	low := strings.ToLower(a)
+	switch {
+	case low == "-c" || strings.HasPrefix(low, "-c"):
+		return true
+	case strings.HasPrefix(low, "--config"):
+		return true
+	case strings.HasPrefix(low, "--upload-pack"):
+		return true
+	case strings.HasPrefix(low, "--receive-pack"):
+		return true
+	case strings.HasPrefix(low, "--exec"):
+		return true
+	case strings.HasPrefix(low, "--uploadarchive"):
+		return true
+	case strings.HasPrefix(low, "--output"):
+		return true
+	case strings.Contains(low, "credential.helper"):
+		return true
+	case strings.Contains(low, "core.hooks"):
+		return true
+	case strings.Contains(low, "core.fsmonitor"):
+		return true
+	case strings.Contains(low, "core.sshcommand"):
+		return true
+	case strings.Contains(low, "protocol.ext.allow"):
+		return true
+	}
+	return false
+}
+
 // CommandTimeout bounds every allowlisted command (60s, per Phase 1.3).
 const CommandTimeout = 60 * time.Second
 
@@ -41,7 +141,9 @@ func baseName(argv0 string) string {
 
 // IsAllowed reports whether argv matches the v1 allowlist:
 //
-//	git [...]              (any git subcommand; no shell is involved)
+//	git <read-only>        (status/diff/log/show/rev-parse/branch/tag/
+//	                       ls-files/grep/blame/version/help + --version/--help;
+//	                       config/remote/hooks/write subcommands rejected)
 //	go test [...]          (exactly "test" as first go arg)
 //	npm test [...]         (exactly "test" as first npm arg)
 //	pytest [...]           (bare pytest binary)
@@ -65,7 +167,7 @@ func IsAllowed(argv []string) bool {
 	rest := argv[1:]
 	switch base {
 	case "git":
-		return true
+		return isAllowedGit(rest)
 	case "go", "cargo":
 		return len(rest) >= 1 && rest[0] == "test"
 	case "npm":
@@ -79,6 +181,10 @@ func IsAllowed(argv []string) bool {
 }
 
 // RunCommand executes an allowlisted command in root with a 60s timeout.
+// Binaries are pinned to their absolute PATH resolution (issue #118 PATH
+// hijack): argv[0] must be a bare name and is resolved via exec.LookPath,
+// then executed by absolute path so a cwd-planted or PATH-shadowed binary
+// cannot be smuggled in.
 func RunCommand(root string, argv []string) (CommandResult, error) {
 	res := CommandResult{}
 	if len(argv) == 0 {
@@ -90,9 +196,14 @@ func RunCommand(root string, argv []string) (CommandResult, error) {
 	res.Command = argv[0]
 	res.Args = append([]string(nil), argv[1:]...)
 
+	// Pin the binary: resolve once via PATH, then exec the absolute path.
+	bin, err := exec.LookPath(argv[0])
+	if err != nil {
+		return res, err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd := exec.CommandContext(ctx, bin, argv[1:]...)
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
