@@ -173,11 +173,16 @@ func (s *Server) emitSteer(sessionID, eventType string, payload map[string]any) 
 // steering event type drive the InterruptManager state machine and fan out
 // through the SteerEmitter, exactly like the HTTP steer routes. Non-steering
 // event types return handled=false so the hub broadcasts them normally.
+//
+// Cross-run binding (issue #134): the target runID must equal the sender's
+// subscribed session — otherwise a client in session A could Interrupt /
+// Steer / Resume session B by naming its run_id. Unsubscribed clients
+// (no session) cannot steer at all.
 func (s *Server) routeSteerAction(clientID, userID, eventType string, payload map[string]any) (bool, error) {
 	if !steering.IsSteeringEvent(eventType) {
 		return false, nil
 	}
-	m, _ := s.getSteer()
+	m, hub := s.getSteer()
 	if m == nil {
 		return true, errors.New("steering not configured")
 	}
@@ -191,7 +196,15 @@ func (s *Server) routeSteerAction(clientID, userID, eventType string, payload ma
 	if strings.TrimSpace(runID) == "" {
 		return true, errors.New("run_id is required for steering actions")
 	}
-	_ = clientID
+	var clientSession string
+	if hub != nil {
+		if c := hub.Get(clientID); c != nil {
+			clientSession = c.SessionID
+		}
+	}
+	if strings.TrimSpace(clientSession) == "" || runID != clientSession {
+		return true, errors.New("run_id does not match the subscribed session")
+	}
 	cp := make(map[string]any, len(payload)+2)
 	for k, v := range payload {
 		cp[k] = v

@@ -34,6 +34,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -322,9 +323,28 @@ type branchLoader struct {
 }
 
 func (l branchLoader) Keys(ctx context.Context, projectID string) ([]string, error) {
-	items, err := l.store.SearchMemory(ctx, projectID, "", nil, MaxSearchLimit)
+	// Grow-until-stable (issue #134): SearchMemory has no offset, and a
+	// fixed cap silently truncates diff/merge for projects with more keys
+	// than the cap. Double the limit while pages come back full; stop at
+	// the first short page (complete universe) or the hard cap.
+	const maxKeysLimit = 65536
+	items, err := l.store.SearchMemory(ctx, projectID, "", nil, 512)
 	if err != nil {
 		return nil, err
+	}
+	for limit := 1024; len(items) >= limit/2 && limit <= maxKeysLimit; limit *= 2 {
+		next, err := l.store.SearchMemory(ctx, projectID, "", nil, limit)
+		if err != nil {
+			return nil, err
+		}
+		if len(next) == len(items) {
+			items = next
+			break
+		}
+		items = next
+		if len(items) < limit {
+			break
+		}
 	}
 	seen := make(map[string]struct{}, len(items))
 	keys := make([]string, 0, len(items))
@@ -379,16 +399,20 @@ func (s *Server) branchBaseSnapshot(ctx context.Context, projectID string, sourc
 
 // applyMergeResult writes merged/deleted keys onto the target branch via
 // WriteToBranch (issue #97: ListBranchContents + apply merge result).
+// Per-key errors are aggregated, not fail-fast (issue #134): a single bad
+// row must not leave a half-merged target silently — the caller reports
+// which keys landed via the merged response plus the error.
 func (s *Server) applyMergeResult(ctx context.Context, targetID string, result branches.MergeResult) error {
 	bs, ok := s.branchStore()
 	if !ok {
 		return errors.New("branches are not supported by this store")
 	}
+	var errs []error
 	for _, m := range result.Merged {
 		if err := bs.WriteToBranch(ctx, targetID, &store.MemoryItem{
 			Key: m.Key, Content: m.Content, Status: m.Status,
 		}); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("write %s: %w", m.Key, err))
 		}
 	}
 	// Deletions propagate as SUPERSEDED tombstones with empty content so
@@ -398,10 +422,10 @@ func (s *Server) applyMergeResult(ctx context.Context, targetID string, result b
 		if err := bs.WriteToBranch(ctx, targetID, &store.MemoryItem{
 			Key: key, Content: "", Status: store.StatusSuperseded,
 		}); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("tombstone %s: %w", key, err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (s *Server) handleBranchCreate(w http.ResponseWriter, r *http.Request) {
@@ -674,14 +698,22 @@ func (s *Server) handleBranchMerge(w http.ResponseWriter, r *http.Request) {
 	if projectID == "" {
 		projectID = source.ProjectID
 	}
-	// 3-way merge over real snapshots (issue #97): base is the source's
-	// parent snapshot (fork point approximation), falling back to the
-	// target snapshot when the parent cannot be read. The result is applied
-	// to the target via WriteToBranch so rows are actually copied.
-	baseSnap, err := s.branchBaseSnapshot(r.Context(), projectID, source)
-	if err != nil {
-		baseSnap = nil
+	// Same-project enforcement (issue #134): resolve-by-ID bypasses the
+	// project-scoped name lookup, so verify explicitly — otherwise merges
+	// write across projects.
+	if source.ProjectID != target.ProjectID {
+		writeError(w, http.StatusBadRequest, "source and target branches belong to different projects")
+		return
 	}
+	if source.ProjectID != projectID || target.ProjectID != projectID {
+		writeError(w, http.StatusBadRequest, "branches do not belong to the requested project")
+		return
+	}
+	// 3-way merge over real snapshots (issue #97): base is the source's
+	// parent snapshot (fork point approximation). When the parent cannot
+	// be read, fall back to the target snapshot (documented 2-way merge:
+	// source-only additions apply) instead of an empty base — an empty
+	// base would misread every shared key as a source addition (issue #134).
 	srcSnap, err := s.branchSnapshot(r.Context(), projectID, source.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read source branch: "+err.Error())
@@ -691,6 +723,10 @@ func (s *Server) handleBranchMerge(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read target branch: "+err.Error())
 		return
+	}
+	baseSnap, err := s.branchBaseSnapshot(r.Context(), projectID, source)
+	if err != nil {
+		baseSnap = tgtSnap
 	}
 	result := branches.Merge(baseSnap, srcSnap, tgtSnap)
 	if err := s.applyMergeResult(r.Context(), target.ID, result); err != nil {
