@@ -156,7 +156,7 @@ func (s *Server) handleWorkspaceRegister(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "machine_id and path are required")
 		return
 	}
-	ws.ID = "" // server assigns the ID; client must not set it
+	ws.ID = ""                 // server assigns the ID; client must not set it
 	ws.UserID = authSubject(r) // attribution is the authenticated user (issue #141)
 	if err := s.Store.RegisterWorkspace(r.Context(), &ws); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not register workspace: "+err.Error())

@@ -87,10 +87,10 @@ type jwtHeader struct {
 }
 
 type jwtPayload struct {
-	Sub string `json:"sub"`
+	Sub  string `json:"sub"`
 	Name string `json:"name,omitempty"`
-	Exp int64  `json:"exp"`
-	Iat int64  `json:"iat"`
+	Exp  int64  `json:"exp"`
+	Iat  int64  `json:"iat"`
 }
 
 // MaxTokenTTL caps issued lifetimes (issue #133): unbounded TTLs mint
@@ -144,7 +144,7 @@ func (a *Authenticator) GenerateUser(userID, username string, ttl time.Duration)
 	now := time.Now().UTC()
 	headerJSON, _ := json.Marshal(jwtHeader{Alg: "HS256", Typ: "JWT"})
 	payloadJSON, _ := json.Marshal(jwtPayload{
-		Sub: strings.TrimSpace(userID),
+		Sub:  strings.TrimSpace(userID),
 		Name: strings.TrimSpace(username),
 		Exp:  now.Add(ttl).Unix(),
 		Iat:  now.Unix(),
