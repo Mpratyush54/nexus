@@ -25,6 +25,9 @@ func (s *Server) handleMemoryPromote(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
 		return
 	}
+	if !s.authorizeMemory(w, r, id) {
+		return
+	}
 	ss, ok := s.sessionStore()
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "session promotion not supported by configured store")

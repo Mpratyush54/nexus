@@ -30,8 +30,6 @@ package store
 import (
 	"context"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // IsOnlineAt reports whether a workspace seen at lastSeen is online at now:
@@ -115,37 +113,57 @@ func (s *PostgresStore) SetDesignatedProcessor(ctx context.Context, id string, d
 // ElectDesignatedProcessor elects the project's Memory Processor: the
 // online workspace with the most-recent heartbeat becomes the single
 // designated processor and every other flag in the project is cleared.
+//
+// Atomicity (issue #142): revoke + grant run as ONE UPDATE statement, so
+// concurrent electors cannot interleave a clear between another's
+// clear-and-grant (the old two-statement form left a zero-designatee
+// window on crash and let two electors crown different winners). The
+// winner subselect is deterministic (last_seen DESC, id tie-break), so
+// concurrent electors converge on the same row. No online workspace ->
+// ErrNotFound (stale designations are still revoked: a project with nobody
+// online must not keep a corpse designatee).
 func (s *PostgresStore) ElectDesignatedProcessor(ctx context.Context, projectID string) (*Workspace, error) {
 	if projectID == "" {
 		return nil, ErrNotFound
 	}
-	if _, err := s.pool.Exec(ctx,
-		`UPDATE workspaces
-		 SET is_designated_processor = false
-		 WHERE project_id = $1::uuid AND is_designated_processor`,
-		projectID); err != nil {
-		return nil, err
-	}
-	w, err := scanWorkspace(s.pool.QueryRow(ctx,
-		`UPDATE workspaces
-		 SET is_designated_processor = true
-		 WHERE id = (
+	rows, err := s.pool.Query(ctx,
+		`UPDATE workspaces AS w
+		 SET is_designated_processor = (w.id = sel.id)
+		 FROM (
 		   SELECT id FROM workspaces
 		   WHERE project_id = $1::uuid
 		     AND is_online
 		     AND last_seen > now() - make_interval(secs => $2)
 		   ORDER BY last_seen DESC, id
 		   LIMIT 1
-		 )
-		 RETURNING `+workspaceColumns,
-		projectID, offlineSeconds()))
+		 ) AS sel
+		 WHERE w.project_id = $1::uuid
+		   AND (w.is_designated_processor OR w.id = sel.id)
+		 RETURNING w.id, w.project_id, w.user_id, w.machine_id, w.path,
+			w.branch, w.commit_sha, w.is_dirty, w.is_online, w.is_designated_processor,
+			w.last_seen, w.daemon_url, w.created_at`,
+		projectID, offlineSeconds())
 	if err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, ErrNotFound
-		}
 		return nil, err
 	}
-	return w, nil
+	defer rows.Close()
+	var winner *Workspace
+	for rows.Next() {
+		w, err := scanWorkspace(rows)
+		if err != nil {
+			return nil, err
+		}
+		if w.IsDesignatedProcessor {
+			winner = w
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if winner == nil {
+		return nil, ErrNotFound
+	}
+	return winner, nil
 }
 
 // ReassignStaleDesignated revokes the Memory Processor role (and the online

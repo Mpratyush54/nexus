@@ -9,14 +9,25 @@
 | **Platform** | Cross-platform (Windows, macOS, Linux) | Daemon is Go, naturally portable; platform-specific bits behind interface |
 | **Memory Processor location** | User's device, background goroutine in daemon | Zero server-side LLM cost; user supplies own API keys; data stays local |
 | **Memory Processor consistency** | Designated processor (project owner's daemon) for v1 | Eliminates multi-device divergence; other daemons consume only |
-| **Agent model for v1** | Pull-only (Claude/OpenCode via MCP) | Materializer deferred to Phase 4 |
+| **Agent model for v1** | Pull + push (MCP live + materializer files) | Materializer shipped early (Phase 4 code live; see #138) |
 | **Branching strategy** | Copy-on-write | Cheaper, matches git mental model, supports blame-style lineage |
 | **Event store engine** | Postgres append-only table + LISTEN/NOTIFY | No Kafka until real throughput pressure |
 | **Project identity priority** | Remote repo URL → git root commit → folder name fallback | Already implemented in [project.go](file:///d:/central-memory/internal/project/project.go) |
-| **Backup/vault system** | Dropped | Product is git + Postgres based; robocopy/restic/vault/azure all removed |
-| **Memory search** | Vector search (pgvector) from day 1 + full-text fallback | Memory system exists to feed LLMs; keyword matching is too weak |
-| **Memory extraction** | 4-layer passive — transcript harvesting (backbone) + tool interception + instruction file watching + piggyback hints | Agents won't call `memory_write`; conversations on disk are the richest source; no MCP sampling (disrupts user) |
+| **Backup/vault system** | Dropped (vault shim retained for Phase 1b migration import only) | Product is git + Postgres based; robocopy/restic/vault/azure all removed |
+| **Memory search** | Vector search (pgvector) from day 1 + keyword fallback (ILIKE + token overlap, not Postgres FTS) | Memory system exists to feed LLMs; keyword matching is too weak |
+| **Memory extraction** | 4-layer passive — transcript harvesting (backbone) + tool interception + instruction file watching + piggyback hints | Agents won't call `memory_write`; conversations on disk are the richest source; no MCP sampling (disrupts user). SQLite/vscdb sources are liveness-only without the sqlite3 CLI (see ADR-033); file watching polls (no fsnotify) |
 | **Memory levels** | 5 tiers: Organization → Project → Personal → Session → Ephemeral | Different knowledge has different lifetimes and scopes |
+| **Server auth** | stdlib HMAC-SHA256 JWT + PBKDF2 password login (migration 011) | No golang-jwt dependency; passwords verify against users.password_hash (see #133) |
+
+> [!NOTE]
+> **Drift log (issue #138)**: this plan is the v1 blueprint; where code
+> deliberately differs, the decision rows above (not the prose below) are
+> authoritative. Known deltas: §1.1 level CHECK now 5 tiers (migration 009);
+> §1.9 dependency list (fsnotify, nhooyr/websocket, golang-jwt) intentionally
+> unadopted — stdlib polling/WS/HMAC instead (ADRs 013/033); S3 cold-writer
+> deferred (no AWS SDK in go.mod); migrations 006–011 extend the original
+> 001–005 list (session FKs, branch upkeep, processor election, ephemeral,
+> session expiry, password hash).
 
 ---
 
@@ -199,7 +210,8 @@ CREATE TABLE memory_items (
 
     -- Classification
     level           TEXT NOT NULL DEFAULT 'project'
-        CHECK (level IN ('organization', 'project', 'personal', 'session')),
+        CHECK (level IN ('organization', 'project', 'personal', 'session', 'ephemeral')),
+        -- 5th tier added by migration 009 (was 4 tiers at v1 blueprint time)
     scope           TEXT NOT NULL DEFAULT 'fact'
         CHECK (scope IN ('fact', 'preference', 'decision', 'constraint', 'pattern', 'episode_summary')),
 
@@ -569,10 +581,14 @@ Minimal for Phase 1:
 ```
 github.com/jackc/pgx/v5          # Postgres driver (pgvector support built-in)
 github.com/pgvector/pgvector-go   # vector type for Go
-nhooyr.io/websocket               # WebSocket (cross-platform, stdlib-compatible)
-github.com/golang-jwt/jwt/v5      # JWT auth
-github.com/fsnotify/fsnotify      # File watching (cross-platform)
 ```
+
+> [!NOTE]
+> The blueprint also listed `nhooyr.io/websocket`, `golang-jwt/jwt/v5`,
+> and `fsnotify` — all intentionally unadopted (stdlib `net/http` WS,
+> stdlib HMAC-SHA256 JWT + PBKDF2 login, stdlib polling watcher instead;
+> see drift log above and ADRs 013/033). `go.mod` stays at pgx +
+> pgvector-go.
 
 ### Exit Criterion
 

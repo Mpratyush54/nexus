@@ -365,8 +365,9 @@ function memoryCard(item) {
 }
 
 // Best-effort confirmation flow (plan §2.8). The server implements
-// POST /memory/:id/confirm|reject|promote (routes_extra.go + promote.go);
-// failures still fall back to optimistic UI + a WS "action" hint.
+// POST /memory/:id/confirm|reject|promote (routes_extra.go + promote.go).
+// UI state flips ONLY on success (issue #145): flipping on failure left
+// the dashboard diverged from the server with only a hint as evidence.
 async function memoryAction(item, act, node) {
   const map = { confirm: 'confirm', reject: 'reject', promote: 'promote' };
   const endpoint = '/memory/' + encodeURIComponent(item.id) + '/' + map[act];
@@ -374,7 +375,8 @@ async function memoryAction(item, act, node) {
     await rest(endpoint, { method: 'POST', headers: authHeaders(), body: JSON.stringify({}) });
   } catch (e) {
     const hint = node.querySelector('.muted');
-    if (hint) hint.textContent = endpoint + ' failed (' + e.message + ') — optimistic only';
+    if (hint) hint.textContent = endpoint + ' failed (' + e.message + ') — not applied';
+    return;
   }
   if (act === 'confirm') item.status = 'CONFIRMED';
   if (act === 'reject') item.status = 'REJECTED';
@@ -383,7 +385,7 @@ async function memoryAction(item, act, node) {
     try {
       state.ws.send(JSON.stringify({
         type: 'action',
-        event_type: act === 'reject' ? 'MEMORY_REJECTED' : 'MEMORY_CONFIRMED',
+        event_type: act === 'reject' ? 'MEMORY_REJECTED' : act === 'promote' ? 'MEMORY_PROMOTED' : 'MEMORY_CONFIRMED',
         payload: { id: item.id, key: item.key },
       }));
     } catch {}
@@ -470,7 +472,9 @@ async function runSearch() {
   if (!pid) { els.memSearchCount.textContent = '(set a project ID first)'; return; }
   const [mem, eps] = await Promise.all([
     rest('/memory/search?project_id=' + encodeURIComponent(pid) + '&q=' + encodeURIComponent(q) + '&limit=20', { headers: authHeaders() }).catch((e) => ({ error: e.message })),
-    rest('/episodes/search?project_id=' + encodeURIComponent(pid) + '&q=' + encodeURIComponent(q) + '&limit=20', { headers: authHeaders() }).catch((e) => ({ error: e.message })),
+    // error_pattern enables the server's exact-match path (issue #136);
+    // q covers the narrative fallback. Both fire from one box.
+    rest('/episodes/search?project_id=' + encodeURIComponent(pid) + '&q=' + encodeURIComponent(q) + '&error_pattern=' + encodeURIComponent(q) + '&limit=20', { headers: authHeaders() }).catch((e) => ({ error: e.message })),
   ]);
   els.memSearchResults.innerHTML = '';
   els.epSearchResults.innerHTML = '';

@@ -13,7 +13,7 @@ import (
 	"central-memory/internal/store"
 )
 
-func mustPromoteSessionMemory(t *testing.T, s *Server) string {
+func mustPromoteSessionMemory(t *testing.T, s *Server, tok string) string {
 	t.Helper()
 	ctx := context.Background()
 	ss, ok := s.Store.(store.SessionStore)
@@ -24,6 +24,7 @@ func mustPromoteSessionMemory(t *testing.T, s *Server) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ensureMembership(t, s, tok, p.ID)
 	sess := &store.Session{ProjectID: p.ID, Title: "S1", CreatedBy: "u_alice"}
 	if err := ss.CreateSession(ctx, sess); err != nil {
 		t.Fatal(err)
@@ -39,7 +40,7 @@ func mustPromoteSessionMemory(t *testing.T, s *Server) string {
 func TestMemoryPromoteHappyPath(t *testing.T) {
 	s := newTestServer()
 	tok := loginAs(t, s, "alice")
-	id := mustPromoteSessionMemory(t, s)
+	id := mustPromoteSessionMemory(t, s, tok)
 	rec := doJSON(t, s, http.MethodPost, "/memory/"+id+"/promote", tok, map[string]any{})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("promote status = %d, body = %s", rec.Code, rec.Body.String())
@@ -56,7 +57,7 @@ func TestMemoryPromoteHappyPath(t *testing.T) {
 func TestMemoryPromoteNonSessionIs409(t *testing.T) {
 	s := newTestServer()
 	tok := loginAs(t, s, "alice")
-	id := mustPromoteSessionMemory(t, s)
+	id := mustPromoteSessionMemory(t, s, tok)
 	if rec := doJSON(t, s, http.MethodPost, "/memory/"+id+"/promote", tok, map[string]any{}); rec.Code != http.StatusOK {
 		t.Fatalf("first promote status = %d, body = %s", rec.Code, rec.Body.String())
 	}

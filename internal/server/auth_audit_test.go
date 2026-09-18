@@ -284,8 +284,8 @@ func TestAuditAuthLoginNoUsersCheck(t *testing.T) {
 		Token string `json:"token"`
 	}
 	decodeBody(t, rec, &out)
-	if sub, err := s.Auth.Validate(out.Token); err != nil || sub != "alice" {
-		t.Fatalf("login token sub = %q, err = %v", sub, err)
+	if sub, username, err := s.Auth.ValidateClaims(out.Token); err != nil || sub != "user-alice" || username != "alice" {
+		t.Fatalf("login token sub = %q username = %q, err = %v", sub, username, err)
 	}
 }
 

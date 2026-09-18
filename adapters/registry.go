@@ -44,9 +44,20 @@ func (g genericAdapter) roots() []string {
 func (g genericAdapter) Discover() ([]Artifact, error) {
 	home, _ := os.UserHomeDir()
 	var out []Artifact
+	var errs []error
 	for _, r := range g.roots() {
-		_ = filepath.Walk(r, func(p string, info os.FileInfo, err error) error {
-			if err != nil || info.IsDir() {
+		// Missing roots stay non-fatal (agent dirs that were never
+		// created); anything else aggregates (issue #137: previously
+		// every error was swallowed and Discover always returned nil).
+		if err := filepath.Walk(r, func(p string, info os.FileInfo, err error) error {
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				errs = append(errs, fmt.Errorf("walk %s: %w", p, err))
+				return nil
+			}
+			if info.IsDir() {
 				return nil
 			}
 			if ClassifyPath(p) != Backup {
@@ -54,9 +65,11 @@ func (g genericAdapter) Discover() ([]Artifact, error) {
 			}
 			out = append(out, Artifact{Agent: g.name, Kind: kindOf(p), NativePath: p, Project: ProjectOf(p, home), Was: ProjectWas(p, home)})
 			return nil
-		})
+		}); err != nil && !os.IsNotExist(err) {
+			errs = append(errs, fmt.Errorf("walk root %s: %w", r, err))
+		}
 	}
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
 func (g genericAdapter) Classify(a Artifact) Classification { return ClassifyPath(a.NativePath) }

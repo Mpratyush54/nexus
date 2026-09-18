@@ -47,6 +47,7 @@ func TestSearchResetsDecayClock(t *testing.T) {
 		t.Fatal(err)
 	}
 	tok := loginAs(t, s, "alice")
+	ensureMembership(t, s, tok, p.ID)
 	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+p.ID+"&q=deploy+migrations", tok, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("search status = %d, body = %s", rec.Code, rec.Body.String())

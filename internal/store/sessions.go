@@ -54,6 +54,47 @@ type SessionParticipant struct {
 	LeftAt    time.Time `json:"left_at,omitempty"`
 }
 
+// IsProjectMember reports whether userID may access projectID (issue #141):
+// a workspace on the project, the project's creator, or an active
+// participant in one of its sessions. Empty inputs are never members.
+func (s *MemStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(projectID) == "" {
+		return false, nil
+	}
+	s.mu.RLock()
+	for _, ws := range s.workspaces {
+		if ws != nil && ws.UserID == userID && ws.ProjectID == projectID {
+			s.mu.RUnlock()
+			return true, nil
+		}
+	}
+	creator := ""
+	if p, ok := s.projects[projectID]; ok && p != nil {
+		creator = p.CreatedBy
+	}
+	s.mu.RUnlock()
+	if creator != "" && creator == userID {
+		return true, nil
+	}
+	b := memSessionsOf(s)
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for _, sess := range b.sessions {
+		if sess == nil || sess.ProjectID != projectID {
+			continue
+		}
+		if sess.CreatedBy == userID {
+			return true, nil
+		}
+		for _, part := range b.participants[sess.ID] {
+			if part != nil && part.UserID == userID && part.LeftAt.IsZero() {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // PromotionCandidate is a session-level key observed in enough distinct
 // sessions to propose promotion to project scope.
 type PromotionCandidate struct {
@@ -732,6 +773,25 @@ func (s *PostgresStore) ListSessionVisibleMemories(ctx context.Context, sessionI
 		return nil, err
 	}
 	return applySessionOverride(own, inherited), nil
+}
+
+// IsProjectMember reports whether userID may access projectID (issue #141):
+// workspace on the project, project creator, or active session participant.
+// Malformed UUIDs fail closed with an error (never silent membership).
+func (s *PostgresStore) IsProjectMember(ctx context.Context, userID, projectID string) (bool, error) {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(projectID) == "" {
+		return false, nil
+	}
+	var member bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM workspaces WHERE user_id = $1::uuid AND project_id = $2::uuid)
+		    OR EXISTS(SELECT 1 FROM projects WHERE id = $2::uuid AND created_by = $1::uuid)
+		    OR EXISTS(SELECT 1 FROM session_participants p JOIN sessions s ON s.id = p.session_id
+		              WHERE p.user_id = $1::uuid AND s.project_id = $2::uuid AND p.left_at IS NULL)`,
+		userID, projectID).Scan(&member); err != nil {
+		return false, fmt.Errorf("store: membership check: %w", err)
+	}
+	return member, nil
 }
 
 // PromotionCandidates returns session-level keys seen in >= minSessions

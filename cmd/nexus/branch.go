@@ -36,6 +36,9 @@ func parseBranchArgs(args []string) (branchOptions, error) {
 	if o.Sub == "fork" {
 		fs.StringVar(&o.From, "from", "main", "source branch to fork from")
 	}
+	if o.Sub == "diff" {
+		fs.StringVar(&o.From, "from", "main", "source branch to diff from")
+	}
 
 	switch o.Sub {
 	case "list":
@@ -143,8 +146,14 @@ func runBranch(ctx context.Context, cfg Config, args []string, stdout io.Writer)
 		fmt.Fprintf(stdout, "forked branch %s from %s\n", o.Name, o.From)
 		return nil
 	case "checkout":
+		// project_id scopes same-named branches (server 400s/ambiguates
+		// without it — issue #136); omit only when unknown.
+		path := "/branches/" + url.PathEscape(o.Name) + "/checkout"
+		if project != "" {
+			path += "?project_id=" + url.QueryEscape(project)
+		}
 		var out map[string]any
-		err := c.postJSON(ctx, "/branches/"+url.PathEscape(o.Name)+"/checkout", map[string]any{}, &out)
+		err := c.postJSON(ctx, path, map[string]any{}, &out)
 		if err != nil {
 			return notImplementedFor("branch checkout", err)
 		}
@@ -158,6 +167,9 @@ func runBranch(ctx context.Context, cfg Config, args []string, stdout io.Writer)
 		if project != "" {
 			q.Set("project_id", project)
 		}
+		// Server shape is source+target+project_id (issue #136): --from
+		// supplies the source (default main), the positional is the target.
+		q.Set("source", firstNonEmpty(o.From, "main"))
 		if o.Name != "" {
 			q.Set("target", o.Name)
 		}

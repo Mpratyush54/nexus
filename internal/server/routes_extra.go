@@ -97,17 +97,48 @@ func isInputError(err error) bool {
 		strings.Contains(msg, "must be")
 }
 
-// authSubject returns the JWT subject stashed by requireAuth.
+// authSubject returns the JWT subject stashed by requireAuth: the canonical
+// user UUID (issue #140) for Postgres ownership columns.
 func authSubject(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-Auth-Subject"))
 }
 
+// authUsername returns the display username claim stashed by requireAuth
+// ("" for legacy tokens minted before the name claim existed).
+func authUsername(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Auth-User"))
+}
+
 // --- sessions ---
+
+// authorizeSession resolves a session and enforces project membership on
+// its project (issue #141): session IDs are not authorization scope. It
+// returns the session for handlers that need it. Unknown sessions 404;
+// non-members 403.
+func (s *Server) authorizeSession(w http.ResponseWriter, r *http.Request, sessionID string) (*store.Session, bool) {
+	ss, ok := s.sessionStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "sessions are not supported by this store")
+		return nil, false
+	}
+	sess, err := ss.GetSession(r.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "session not found")
+			return nil, false
+		}
+		writeError(w, http.StatusInternalServerError, "could not load session: "+err.Error())
+		return nil, false
+	}
+	if !s.authorizeProject(w, r, sess.ProjectID) {
+		return nil, false
+	}
+	return sess, true
+}
 
 func (s *Server) handleSessionList(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
-	if projectID == "" {
-		writeError(w, http.StatusBadRequest, "project_id query parameter is required")
+	if !s.authorizeProject(w, r, projectID) {
 		return
 	}
 	ss, ok := s.sessionStore()
@@ -142,19 +173,20 @@ func (s *Server) handleSessionCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "project_id is required")
 		return
 	}
+	if !s.authorizeProject(w, r, req.ProjectID) {
+		return
+	}
 	ss, ok := s.sessionStore()
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "sessions are not supported by this store")
 		return
 	}
-	createdBy := strings.TrimSpace(req.CreatedBy)
-	if createdBy == "" {
-		createdBy = authSubject(r)
-	}
+	// Attribution is the authenticated user (issue #141): a client-supplied
+	// created_by would let anyone forge session ownership.
 	sess := &store.Session{
 		ProjectID: strings.TrimSpace(req.ProjectID),
 		Title:     strings.TrimSpace(req.Title),
-		CreatedBy: createdBy,
+		CreatedBy: authSubject(r),
 	}
 	if err := ss.CreateSession(r.Context(), sess); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -187,18 +219,19 @@ func (s *Server) handleSessionJoin(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if _, ok := s.authorizeSession(w, r, id); !ok {
+		return
+	}
 	ss, ok := s.sessionStore()
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "sessions are not supported by this store")
 		return
 	}
-	// The CLI joins with an empty body {}; attribute the join to the
-	// authenticated subject so the membership row is never anonymous.
-	userID := strings.TrimSpace(req.UserID)
+	// Joins are self-attribution only (issue #141): a client-supplied
+	// user_id would let anyone forge membership rows for other users.
+	// Agents join via agent_id, which the daemon owns.
+	userID := authSubject(r)
 	agentID := strings.TrimSpace(req.AgentID)
-	if userID == "" && agentID == "" {
-		userID = authSubject(r)
-	}
 	p, err := ss.JoinSession(r.Context(), id, userID, agentID, req.Role)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -231,16 +264,17 @@ func (s *Server) handleSessionLeave(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if _, ok := s.authorizeSession(w, r, id); !ok {
+		return
+	}
 	ss, ok := s.sessionStore()
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "sessions are not supported by this store")
 		return
 	}
-	userID := strings.TrimSpace(req.UserID)
+	// Self-leave only (issue #141): callers cannot remove other users.
+	userID := authSubject(r)
 	agentID := strings.TrimSpace(req.AgentID)
-	if userID == "" && agentID == "" {
-		userID = authSubject(r)
-	}
 	if err := ss.LeaveSession(r.Context(), id, userID, agentID); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "session or membership not found")
@@ -256,8 +290,7 @@ func (s *Server) handleSessionLeave(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBranchList(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
-	if projectID == "" {
-		writeError(w, http.StatusBadRequest, "project_id query parameter is required")
+	if !s.authorizeProject(w, r, projectID) {
 		return
 	}
 	bs, ok := s.branchStore()
@@ -443,6 +476,9 @@ func (s *Server) handleBranchCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "project_id is required")
 		return
 	}
+	if !s.authorizeProject(w, r, projectID) {
+		return
+	}
 	bs, ok := s.branchStore()
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "branches are not supported by this store")
@@ -480,10 +516,8 @@ func (s *Server) handleBranchCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		parentID = parent.ID
 	}
-	owner := strings.TrimSpace(req.OwnerID)
-	if owner == "" {
-		owner = authSubject(r)
-	}
+	// Ownership is the authenticated user (issue #141).
+	owner := authSubject(r)
 	child, err := bs.ForkBranch(r.Context(), parentID, name, owner, req.Visibility, 0)
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -539,8 +573,12 @@ func (s *Server) handleBranchCheckout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Prefer an ID lookup (IDs are unambiguous across projects); fall back
-	// to a name lookup scoped by ?project_id=.
+	// to a name lookup scoped by ?project_id=. Either way the resolved
+	// branch's project is authorized (issue #141).
 	if br, err := bs.GetBranch(r.Context(), name); err == nil {
+		if !s.authorizeProject(w, r, br.ProjectID) {
+			return
+		}
 		s.setActiveBranch(br.ProjectID, br.ID)
 		writeJSON(w, http.StatusOK, br)
 		return
@@ -548,6 +586,9 @@ func (s *Server) handleBranchCheckout(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
 	if projectID == "" {
 		writeError(w, http.StatusNotFound, "branch "+name+" not found (pass ?project_id= to resolve by name)")
+		return
+	}
+	if !s.authorizeProject(w, r, projectID) {
 		return
 	}
 	branches, err := bs.ListBranches(r.Context(), projectID)
@@ -567,8 +608,7 @@ func (s *Server) handleBranchCheckout(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBranchDiff(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	projectID := strings.TrimSpace(q.Get("project_id"))
-	if projectID == "" {
-		writeError(w, http.StatusBadRequest, "project_id query parameter is required")
+	if !s.authorizeProject(w, r, projectID) {
 		return
 	}
 	bs, ok := s.branchStore()
@@ -709,6 +749,9 @@ func (s *Server) handleBranchMerge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "branches do not belong to the requested project")
 		return
 	}
+	if !s.authorizeProject(w, r, projectID) {
+		return
+	}
 	// 3-way merge over real snapshots (issue #97): base is the source's
 	// parent snapshot (fork point approximation). When the parent cannot
 	// be read, fall back to the target snapshot (documented 2-way merge:
@@ -754,10 +797,28 @@ type memoryDecisionRequest struct {
 	RejectedBy  string `json:"rejected_by"`
 }
 
+// authorizeMemory resolves a memory and enforces membership on its project
+// (issue #141): memory IDs are not authorization scope.
+func (s *Server) authorizeMemory(w http.ResponseWriter, r *http.Request, id string) bool {
+	item, err := s.Store.GetMemoryItem(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "memory not found")
+			return false
+		}
+		writeError(w, http.StatusInternalServerError, "could not load memory: "+err.Error())
+		return false
+	}
+	return s.authorizeProject(w, r, item.ProjectID)
+}
+
 func (s *Server) handleMemoryConfirm(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
+		return
+	}
+	if !s.authorizeMemory(w, r, id) {
 		return
 	}
 	var req memoryDecisionRequest
@@ -794,6 +855,9 @@ func (s *Server) handleMemoryReject(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "memory id path parameter is required")
+		return
+	}
+	if !s.authorizeMemory(w, r, id) {
 		return
 	}
 	var req memoryDecisionRequest
@@ -842,6 +906,19 @@ func (s *Server) handleEpisodeResolve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "episode id path parameter is required")
 		return
 	}
+	// Object → project authorization (issue #141) before mutation.
+	ep, err := s.Store.GetEpisode(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "episode not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "could not load episode: "+err.Error())
+		return
+	}
+	if !s.authorizeProject(w, r, ep.ProjectID) {
+		return
+	}
 	var req episodeResolveRequest
 	if !decodeJSON(w, r, &req) {
 		return
@@ -858,7 +935,7 @@ func (s *Server) handleEpisodeResolve(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not resolve episode: "+err.Error())
 		return
 	}
-	ep, err := s.Store.GetEpisode(r.Context(), id)
+	ep, err = s.Store.GetEpisode(r.Context(), id)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "RESOLVED"})
 		return

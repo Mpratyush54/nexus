@@ -28,9 +28,27 @@ if [ -z "${DATABASE_URL:-}" ]; then
   if [ -n "${DB_HOST:-}" ] && [ -n "${DB_NAME:-}" ] && [ -n "${DB_USER:-}" ]; then
     DB_PORT="${DB_PORT:-5432}"
     DB_SSLMODE="${DB_SSLMODE:-require}"
-    # NOTE: user/password are URL-encoded minimally (special chars in generated
-    # secrets are limited to -_ by secrets.tf override_special).
-    DATABASE_URL="postgres://${DB_USER}:${DB_PASSWORD:-}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=${DB_SSLMODE}"
+    # URL-encode user/password (issue #145): reserved characters in
+    # operator-supplied credentials used to break the DSN (the old code
+    # relied on secrets.tf charset limits, which do not cover manual
+    # secrets). Subshell keeps LC_ALL=C byte semantics local to encoding.
+    urlencode() (
+      LC_ALL=C
+      str=$1
+      out=
+      while [ -n "$str" ]; do
+        c=$(printf '%.1s' "$str")
+        str=${str#?}
+        case $c in
+          [A-Za-z0-9_.~-]) out=$out$c ;;
+          *) out=$out$(printf '%%%02X' "'$c") ;;
+        esac
+      done
+      printf '%s' "$out"
+    )
+    ENC_USER=$(urlencode "$DB_USER")
+    ENC_PASSWORD=$(urlencode "${DB_PASSWORD:-}")
+    DATABASE_URL="postgres://${ENC_USER}:${ENC_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=${DB_SSLMODE}"
     export DATABASE_URL
     echo "migrate.sh: assembled DATABASE_URL from DB_* parts (sslmode=${DB_SSLMODE})." >&2
   else
@@ -56,7 +74,13 @@ esac
 
 MIGRATIONS_DIR="${MIGRATIONS_DIR:-/migrations}"
 
-# Apply *.up.sql files in lexical order with psql (single transaction each).
+# Apply *.up.sql files in lexical order with psql, one transaction per
+# file (--single-transaction, issue #136: a bare -f commit is autocommit
+# per statement, so a mid-file failure used to leave a half-applied
+# migration). NOTE: this runner has no version table — the Go runner
+# (internal/store RunMigrations + schema_migrations + advisory lock) is
+# authoritative; this script is the container-boot convenience path. Do not
+# run both concurrently against one database.
 # 001 enables pgcrypto + pgvector, so the Aurora master must pre-provision
 # extension privilege (CREATE EXTENSION needs rds_superuser or equivalent —
 # see deploy/rds-notes.md) before first boot.
@@ -67,7 +91,7 @@ if command -v psql >/dev/null 2>&1; then
       [ -e "$f" ] || break
       matched=1
       echo "migrate.sh: applying $f"
-      psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+      psql "$DATABASE_URL" -v ON_ERROR_STOP=1 --single-transaction -f "$f"
     done
     if [ "$matched" = "0" ]; then
       echo "migrate.sh: WARNING: no *.up.sql in $MIGRATIONS_DIR; skipping." >&2

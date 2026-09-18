@@ -240,19 +240,29 @@ func TestAuditXMLEscaping(t *testing.T) {
 	if strings.Contains(out.XML, `<b>bold</b>`) {
 		t.Error("content HTML leaked unescaped")
 	}
-	for _, raw := range []string{`k<"&'>`, `<b>bold</b>`, `src <here>`} {
-		_ = raw
+	// Output must parse as XML (issue #139): malformed output used to pass
+	// on Contains checks alone.
+	var parsed struct {
+		XMLName xml.Name `xml:"project_memory"`
+		Session struct {
+			Items []struct {
+				Key     string `xml:"key,attr"`
+				Content string `xml:",chardata"`
+			} `xml:"item"`
+		} `xml:"session"`
 	}
-	// Output must parse as XML (wrap check via encoding/xml).
-	wrapped := `<root>` + strings.Replace(out.XML[strings.Index(out.XML, ">")+1:], `</project_memory>`, `</root>`, 1)
-	// Simpler structural check: project_memory root present and item escaped.
-	if !strings.Contains(out.XML, "&lt;") || !strings.Contains(out.XML, "&amp;") {
-		t.Error("expected &lt;/&amp; escapes in output")
+	if err := xml.Unmarshal([]byte(out.XML), &parsed); err != nil {
+		t.Fatalf("output does not parse as XML: %v\n%s", err, out.XML)
 	}
-	var v any
-	_ = v
-	_ = xml.EscapeText
-	_ = wrapped
+	if len(parsed.Session.Items) != 1 {
+		t.Fatalf("parsed session items = %d, want 1", len(parsed.Session.Items))
+	}
+	got := strings.TrimSpace(parsed.Session.Items[0].Content)
+	// The renderer appends the context snippet in parentheses; what matters
+	// is the user content survived escaping and parses back intact.
+	if !strings.Contains(got, `<b>bold</b> & "quoted"`) {
+		t.Errorf("parsed content lost escaping round-trip: %q", got)
+	}
 }
 
 func TestAuditRenderDatesAndAttribution(t *testing.T) {

@@ -86,15 +86,10 @@ type LLMProvider struct {
 }
 
 // Extract implements Provider: throttled per project, heuristic fallback on
-// any failure or skip.
+// any failure or skip. Backend resolution runs BEFORE the throttle check
+// (issue #145): heuristic-fallback batches must not burn the 5-min network
+// quota they never use.
 func (p LLMProvider) Extract(ctx context.Context, project string, events []Event, existing []MemoryRecord) ([]Proposal, error) {
-	th := p.Throttle
-	if th == nil {
-		th = sharedLLMThrottle
-	}
-	if !th.allow(project) {
-		return HeuristicProvider{}.Extract(ctx, project, events, existing)
-	}
 	backend := strings.ToLower(strings.TrimSpace(p.Backend))
 	if backend == "" {
 		b, ok := ProviderKeyFromEnv()
@@ -102,6 +97,18 @@ func (p LLMProvider) Extract(ctx context.Context, project string, events []Event
 			return HeuristicProvider{}.Extract(ctx, project, events, existing)
 		}
 		backend = b
+	}
+	switch backend {
+	case "ollama", "openai", "anthropic":
+	default:
+		return HeuristicProvider{}.Extract(ctx, project, events, existing)
+	}
+	th := p.Throttle
+	if th == nil {
+		th = sharedLLMThrottle
+	}
+	if !th.allow(project) {
+		return HeuristicProvider{}.Extract(ctx, project, events, existing)
 	}
 	prompt := BuildExtractionPrompt(project, existing, events)
 	var proposals []Proposal
@@ -113,8 +120,6 @@ func (p LLMProvider) Extract(ctx context.Context, project string, events []Event
 		proposals, err = p.callOpenAI(ctx, prompt)
 	case "anthropic":
 		proposals, err = p.callAnthropic(ctx, prompt)
-	default:
-		return HeuristicProvider{}.Extract(ctx, project, events, existing)
 	}
 	if err != nil || len(proposals) == 0 {
 		// Network/parse failure: heuristic fallback keeps extraction alive.

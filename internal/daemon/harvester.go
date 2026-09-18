@@ -59,12 +59,6 @@ const (
 	EventSessionComplete EventType = "SESSION_TRANSCRIPT_COMPLETE"
 )
 
-// EventInstructionFileChanged is Layer 3's event type. Its canonical home is
-// watcher.go; it is declared here only so the package keeps building while
-// watcher.go's in-flight refactor lands. Once watcher.go declares it, delete
-// this alias.
-const EventInstructionFileChanged EventType = "INSTRUCTION_FILE_CHANGED"
-
 // Transcript formats supported by the harvester.
 const (
 	FormatJSONL  = "jsonl"

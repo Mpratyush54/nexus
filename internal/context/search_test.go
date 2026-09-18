@@ -80,8 +80,8 @@ func TestHybridSearchTagBoost(t *testing.T) {
 
 func TestHybridSearchSkipsRejected(t *testing.T) {
 	now := time.Now().UTC()
-	bad := &store.MemoryItem{Key: "bad", Content: "rejected memory item", Level: "project", Status: "REJECTED", Embedding: []float32{1, 0}}
-	good := &store.MemoryItem{Key: "good", Content: "confirmed memory item", Level: "project", Status: "CONFIRMED", Embedding: []float32{1, 0}}
+	bad := &store.MemoryItem{Key: "bad", Content: "rejected memory item", Level: "project", Status: "REJECTED", Confidence: 1.0, Embedding: []float32{1, 0}}
+	good := &store.MemoryItem{Key: "good", Content: "confirmed memory item", Level: "project", Status: "CONFIRMED", Confidence: 1.0, Embedding: []float32{1, 0}}
 	got := HybridSearch([]float32{1, 0}, nil, "", "", []*store.MemoryItem{bad, good}, now, 10)
 	if len(got) != 1 || got[0].Item.Key != "good" {
 		t.Fatalf("REJECTED item served: %+v", got)
@@ -90,8 +90,8 @@ func TestHybridSearchSkipsRejected(t *testing.T) {
 
 func TestHybridSearchTextFallback(t *testing.T) {
 	now := time.Now().UTC()
-	a := &store.MemoryItem{Key: "a", Content: "postgres connection pooling tunables", Level: "project", Status: "CONFIRMED"}
-	b := &store.MemoryItem{Key: "b", Content: "frontend button color palette", Level: "project", Status: "CONFIRMED"}
+	a := &store.MemoryItem{Key: "a", Content: "postgres connection pooling tunables", Level: "project", Status: "CONFIRMED", Confidence: 1.0}
+	b := &store.MemoryItem{Key: "b", Content: "frontend button color palette", Level: "project", Status: "CONFIRMED", Confidence: 1.0}
 	got := HybridSearch(nil, nil, "", "postgres pooling", []*store.MemoryItem{b, a}, now, 10)
 	if len(got) != 2 || got[0].Item.Key != "a" {
 		t.Fatalf("text fallback ranking wrong: %+v", got)

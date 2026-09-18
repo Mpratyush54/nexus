@@ -79,7 +79,8 @@ func TestSearchMemoryHandlerVectorPath(t *testing.T) {
 	stub := &vectorStub{Store: store.NewMemStore(), items: []*store.MemoryItem{{ID: "m1", Key: "k"}}}
 	s := NewServer(stub)
 	tok := loginAs(t, s, "alice")
-	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id=p1&embedding=["+vec1536Raw()+"]", tok, nil)
+	projectID := resolveTestProject(t, s, tok, "vec-proj")
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&embedding=["+vec1536Raw()+"]", tok, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("vector search status = %d, body = %s", rec.Code, rec.Body.String())
 	}
@@ -94,7 +95,8 @@ func TestSearchMemoryHandlerVectorPath(t *testing.T) {
 func TestSearchMemoryHandlerVectorUnsupportedStore400(t *testing.T) {
 	s := newTestServer() // MemStore: text only
 	tok := loginAs(t, s, "alice")
-	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id=p1&embedding=["+vec1536Raw()+"]", tok, nil)
+	projectID := resolveTestProject(t, s, tok, "vec-unsupported-proj")
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&embedding=["+vec1536Raw()+"]", tok, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("unsupported vector store status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -103,7 +105,8 @@ func TestSearchMemoryHandlerVectorUnsupportedStore400(t *testing.T) {
 func TestSearchMemoryHandlerShortVector400(t *testing.T) {
 	s := newTestServer()
 	tok := loginAs(t, s, "alice")
-	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id=p1&embedding=[0.1,0.2]", tok, nil)
+	projectID := resolveTestProject(t, s, tok, "vec-short-proj")
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&embedding=[0.1,0.2]", tok, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("short vector status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -112,7 +115,8 @@ func TestSearchMemoryHandlerShortVector400(t *testing.T) {
 func TestSearchMemoryHandlerBadEmbedding400(t *testing.T) {
 	s := newTestServer()
 	tok := loginAs(t, s, "alice")
-	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id=p1&embedding=abc", tok, nil)
+	projectID := resolveTestProject(t, s, tok, "vec-bad-proj")
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&embedding=abc", tok, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad embedding status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}

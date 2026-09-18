@@ -104,6 +104,7 @@ func TestAuditRoutesSearchLimitValidation(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/projects/resolve", token, map[string]string{"folder_name": "limit-proj"})
 	var project store.Project
 	decodeBody(t, rec, &project)
+	ensureMembership(t, s, token, project.ID)
 
 	badLimits := []string{"0", "-5", "-1", "abc", "1.5"}
 	for _, lim := range badLimits {
@@ -128,6 +129,7 @@ func TestAuditRoutesLargeLimitClamped(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/projects/resolve", token, map[string]string{"folder_name": "large-limit-proj"})
 	var project store.Project
 	decodeBody(t, rec, &project)
+	ensureMembership(t, s, token, project.ID)
 
 	rec = doJSON(t, s, http.MethodPost, "/memory", token, map[string]any{
 		"project_id": project.ID,
@@ -171,6 +173,7 @@ func TestAuditRoutesRejectNativePersist(t *testing.T) {
 	rec := doJSON(t, s, http.MethodPost, "/projects/resolve", token, map[string]string{"folder_name": "reject-audit-proj"})
 	var project store.Project
 	decodeBody(t, rec, &project)
+	ensureMembership(t, s, token, project.ID)
 
 	rec = doJSON(t, s, http.MethodPost, "/memory", token, map[string]any{
 		"project_id": project.ID,

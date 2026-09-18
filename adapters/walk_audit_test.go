@@ -12,7 +12,7 @@ import (
 func clearAuditResolveCache(t *testing.T) {
 	t.Helper()
 	resolveCache.Lock()
-	resolveCache.m = map[string][2]string{}
+	resolveCache.m = map[string]resolveEntry{}
 	resolveCache.Unlock()
 }
 
@@ -249,27 +249,43 @@ func TestAuditBasenameLeafUniqueVsAmbiguous(t *testing.T) {
 	}
 }
 
-// REGRESSION (actual behavior): resolve() caches by path only, with no
-// invalidation on content change, so a later file edit is invisible.
-// BUG tracked in #109: cache needs invalidation by mtime/size.
-// This test pins the CURRENT stale result (second == first == "global").
+// FIXED (#109, #139): resolve() keys the cache on path + file
+// size/mtime, so a later file edit invalidates and re-resolves instead of
+// serving the stale attribution forever.
 func TestAuditResolveCacheStalenessKnownBug(t *testing.T) {
 	clearAuditResolveCache(t)
 	home := t.TempDir()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "sess.jsonl")
-	// First resolution: no cwd -> global, cached.
 	_ = os.WriteFile(p, []byte(`{"no": "cwd here"}`), 0o644)
 	first := ProjectOf(p, home)
+	resolveCache.Lock()
+	fp1, ok := resolveCache.m[p]
+	resolveCache.Unlock()
+	if !ok {
+		t.Fatal("expected a cache entry after resolve")
+	}
+	// Rewrite with different content (size/mtime change): the entry must
+	// be recomputed, not served stale.
+	_ = os.WriteFile(p, []byte(`{"cwd": "D:\\stale-cache-proj-xyz", "extra": "change the bytes"}`), 0o644)
+	second := ProjectOf(p, home)
+	resolveCache.Lock()
+	fp2, ok := resolveCache.m[p]
+	resolveCache.Unlock()
+	if !ok {
+		t.Fatal("expected a cache entry after re-resolve")
+	}
+	if fp1 == fp2 {
+		t.Errorf("cache entry not refreshed after content change: %+v", fp2)
+	}
+	// And the served value equals a fresh uncached computation.
+	clearAuditResolveCache(t)
+	fresh := ProjectOf(p, home)
+	if second != fresh {
+		t.Errorf("re-resolve = %q, fresh = %q (stale content served)", second, fresh)
+	}
 	if first != "global" {
 		t.Fatalf("setup: ProjectOf(no cwd) = %q, want global", first)
-	}
-	// Add a cwd pointing at a D:\ path; a fresh resolve would return the
-	// D:\ first-segment fallback, but the cache still returns the old value.
-	_ = os.WriteFile(p, []byte(`{"cwd": "D:\\stale-cache-proj-xyz"}`), 0o644)
-	second := ProjectOf(p, home)
-	if second != "global" {
-		t.Errorf("expected pinned stale behavior second=%q, want %q (BUG #109: stale cache)", second, "global")
 	}
 }
 

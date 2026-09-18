@@ -11,16 +11,18 @@ import (
 )
 
 // episodeItemJSON mirrors the wire shape of store.Episode without importing
-// server internals.
+// server internals. error_patterns unmarshals (issue #136: the old
+// json:"-" tag silently dropped server pattern data, hiding it from tables).
 type episodeItemJSON struct {
-	ID           string   `json:"id"`
-	Title        string   `json:"title"`
-	EpisodeType  string   `json:"episode_type"`
-	Status       string   `json:"status"`
-	Trigger      string   `json:"trigger"`
-	RootCause    string   `json:"root_cause"`
-	Resolution   string   `json:"resolution"`
-	ErrorPattern []string `json:"-"`
+	ID            string   `json:"id"`
+	Title         string   `json:"title"`
+	EpisodeType   string   `json:"episode_type"`
+	Status        string   `json:"status"`
+	Trigger       string   `json:"trigger"`
+	RootCause     string   `json:"root_cause"`
+	Resolution    string   `json:"resolution"`
+	Investigation string   `json:"investigation"`
+	ErrorPattern  []string `json:"error_patterns"`
 }
 
 type episodeSearchResponse struct {
@@ -127,12 +129,16 @@ func runEpisode(ctx context.Context, cfg Config, args []string, stdout io.Writer
 	}
 	rows := make([][]string, 0, len(items))
 	for _, ep := range items {
+		cause := firstNonEmpty(ep.RootCause, ep.Trigger)
+		if len(ep.ErrorPattern) > 0 {
+			cause = strings.Join(ep.ErrorPattern, ", ")
+		}
 		rows = append(rows, []string{
 			ep.ID, ep.EpisodeType, ep.Status,
 			truncate(ep.Title, 60),
-			truncate(firstNonEmpty(ep.RootCause, ep.Trigger), 60),
+			truncate(cause, 60),
 		})
 	}
-	printTable(stdout, []string{"ID", "TYPE", "STATUS", "TITLE", "CAUSE/TRIGGER"}, rows)
+	printTable(stdout, []string{"ID", "TYPE", "STATUS", "TITLE", "CAUSE/PATTERNS"}, rows)
 	return nil
 }

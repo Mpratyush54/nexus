@@ -993,7 +993,20 @@ func (d *Daemon) handleGitDiff(w http.ResponseWriter, r *http.Request) {
 			Ref string `json:"ref"`
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "unreadable request body")
+			return
+		}
+		// Malformed JSON is a client bug (issue #145): fall back to the
+		// query ref only when the body is EMPTY; garbage bodies 400
+		// instead of silently diffing the wrong ref.
+		if len(bytes.TrimSpace(body)) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				writeErr(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+				return
+			}
+		}
 		if req.Ref != "" {
 			ref = req.Ref
 		}

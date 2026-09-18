@@ -88,7 +88,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "user authentication not configured")
 		return
 	}
-	_, hash, err := s.Users.GetPasswordHash(r.Context(), username)
+	userID, hash, err := s.Users.GetPasswordHash(r.Context(), username)
 	if err != nil {
 		// Unknown user and lookup failure alike: 401, no enumeration.
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
@@ -102,7 +102,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
-	token, err := s.Auth.Generate(username, DefaultTokenTTL)
+	// Canonical identity (issue #140): sub is the user UUID for Postgres
+	// ownership columns; the username rides as the display claim.
+	token, err := s.Auth.GenerateUser(userID, username, DefaultTokenTTL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not issue token")
 		return
@@ -110,6 +112,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":    token,
 		"username": username,
+		"user_id":  userID,
 	})
 }
 
@@ -153,7 +156,8 @@ func (s *Server) handleWorkspaceRegister(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusBadRequest, "machine_id and path are required")
 		return
 	}
-	ws.ID = "" // server assigns the ID; client must not set it
+	ws.ID = ""                 // server assigns the ID; client must not set it
+	ws.UserID = authSubject(r) // attribution is the authenticated user (issue #141)
 	if err := s.Store.RegisterWorkspace(r.Context(), &ws); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not register workspace: "+err.Error())
 		return
@@ -190,8 +194,7 @@ func (s *Server) handleWorkspaceHeartbeat(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleWorkspaceActive(w http.ResponseWriter, r *http.Request) {
 	projectID := r.PathValue("projectId")
-	if strings.TrimSpace(projectID) == "" {
-		writeError(w, http.StatusBadRequest, "projectId path parameter is required")
+	if !s.authorizeProject(w, r, projectID) {
 		return
 	}
 	ws, err := s.Store.GetActiveWorkspace(r.Context(), projectID)
@@ -232,6 +235,9 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
+	if !s.authorizeProject(w, r, item.ProjectID) {
+		return
+	}
 	if ok, reason := s.quotaAllowed(len(item.Content)); !ok {
 		writeError(w, http.StatusTooManyRequests, "quota exceeded: "+reason)
 		return
@@ -247,8 +253,7 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	projectID := strings.TrimSpace(q.Get("project_id"))
-	if projectID == "" {
-		writeError(w, http.StatusBadRequest, "project_id query parameter is required")
+	if !s.authorizeProject(w, r, projectID) {
 		return
 	}
 	// NOTE(search): MemStore does keyword fallback only. The Postgres store
@@ -331,6 +336,9 @@ func (s *Server) handleEpisodeCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 		return
 	}
+	if !s.authorizeProject(w, r, ep.ProjectID) {
+		return
+	}
 	if ok, reason := s.quotaAllowed(len(ep.Title) + len(ep.Trigger)); !ok {
 		writeError(w, http.StatusTooManyRequests, "quota exceeded: "+reason)
 		return
@@ -346,8 +354,7 @@ func (s *Server) handleEpisodeCreate(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEpisodeSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	projectID := strings.TrimSpace(q.Get("project_id"))
-	if projectID == "" {
-		writeError(w, http.StatusBadRequest, "project_id query parameter is required")
+	if !s.authorizeProject(w, r, projectID) {
 		return
 	}
 	limit := clampSearchLimit(q.Get("limit"), w)

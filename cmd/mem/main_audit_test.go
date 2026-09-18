@@ -144,9 +144,9 @@ func TestAuditMemEpisodeDTOFieldFidelity(t *testing.T) {
 	}
 }
 
-// TODO(dto-drop): episodeDTO silently drops Investigation and SessionID
-// (plus CreatedBy/ResolvedBy/OpenedAt/ResolvedAt). Same data-loss shape as
-// memoryDTO — lock in current behavior until the DTO is widened.
+// DTO fidelity (issues #116, #136): episodeDTO now carries Investigation,
+// SessionID, and Embedding, so episodes differing in those fields map to
+// DIFFERENT DTOs — the old silent drop is closed.
 func TestAuditMemEpisodeDTODropsInvestigationSessionID(t *testing.T) {
 	base := &store.Episode{
 		ID: "ep_x", ProjectID: "p", Title: "Auth timeout on WebSocket upgrade",
@@ -159,8 +159,11 @@ func TestAuditMemEpisodeDTODropsInvestigationSessionID(t *testing.T) {
 	b.Investigation = "entirely different notes"
 	b.SessionID = "sess_B"
 	da, db := episodeDTO(&a), episodeDTO(&b)
-	if !reflect.DeepEqual(da, db) {
-		t.Fatalf("expected identical DTOs when only dropped fields differ:\n%+v\n%+v", da, db)
+	if reflect.DeepEqual(da, db) {
+		t.Fatal("DTOs should differ when Investigation/SessionID differ")
+	}
+	if da.Investigation != "traced to handshake deadline" || db.SessionID != "sess_B" {
+		t.Fatalf("Investigation/SessionID lost: %+v vs %+v", da, db)
 	}
 }
 

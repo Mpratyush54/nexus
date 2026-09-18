@@ -95,7 +95,10 @@ func Roots() []string { return projectRoots() }
 
 // LeafDir maps a project ID ("a/b" or "a") to its absolute directory under
 // the first project root. Absolute inputs are cleaned and returned as-is.
-// Empty or "global" map to "" (no directory).
+// Empty or "global" map to "" (no directory). The fallback root is
+// platform-appropriate (issue #137): home, then the Windows legacy drive
+// ONLY on Windows — never a D:\ path on other platforms ("" when nothing
+// resolves, so callers skip instead of joining garbage).
 func LeafDir(leaf string) string {
 	if leaf == "" || leaf == "global" {
 		return ""
@@ -104,13 +107,16 @@ func LeafDir(leaf string) string {
 		return filepath.Clean(leaf)
 	}
 	roots := projectRoots()
-	root := defaultWindowsRoot
+	root := ""
 	if len(roots) > 0 && strings.TrimSpace(roots[0]) != "" {
 		root = roots[0]
-	} else if runtime.GOOS != "windows" {
-		if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-			root = home
-		}
+	} else if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		root = home
+	} else if runtime.GOOS == "windows" {
+		root = defaultWindowsRoot
+	}
+	if root == "" {
+		return ""
 	}
 	return filepath.Join(root, filepath.FromSlash(leaf))
 }

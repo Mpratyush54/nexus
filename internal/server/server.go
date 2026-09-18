@@ -19,6 +19,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,6 +110,28 @@ func (s *Server) quotaAllowed(chars int) (bool, string) {
 	return s.quota.allowN(estimateIngestTokens(chars))
 }
 
+// authorizeProject enforces the project-membership boundary (issue #141):
+// every project-scoped route must pass through here. Empty project is a
+// 400; store errors fail closed (500, never fail-open); non-members get
+// 403. Object-ID routes resolve object → project first, then call this.
+func (s *Server) authorizeProject(w http.ResponseWriter, r *http.Request, projectID string) bool {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		writeError(w, http.StatusBadRequest, "project_id is required")
+		return false
+	}
+	ok, err := s.Store.IsProjectMember(r.Context(), authSubject(r), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not check project membership")
+		return false
+	}
+	if !ok {
+		writeError(w, http.StatusForbidden, "not a member of this project")
+		return false
+	}
+	return true
+}
+
 // Handler returns the request-logging middleware chain around the mux.
 func (s *Server) Handler() http.Handler {
 	return s.withLogging(s.Mux)
@@ -196,9 +219,13 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 // requireAuth enforces the JWT stub on protected routes. /auth/login and
 // /healthz are registered without this wrapper. On failure it returns 401
 // with the standard error envelope.
+//
+// Identity (issue #140): X-Auth-Subject carries the canonical user UUID
+// (login mints sub=users.id) for Postgres UUID columns; X-Auth-User
+// carries the display username for logs and UI.
 func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		sub, err := s.Auth.bearerSubject(r.Header.Get("Authorization"))
+		sub, username, err := s.Auth.bearerIdentity(r.Header.Get("Authorization"))
 		if err != nil {
 			if err == ErrExpiredToken {
 				writeError(w, http.StatusUnauthorized, "token expired")
@@ -208,6 +235,7 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		r.Header.Set("X-Auth-Subject", sub)
+		r.Header.Set("X-Auth-User", username)
 		next(w, r)
 	}
 }

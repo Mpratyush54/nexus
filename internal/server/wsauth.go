@@ -42,8 +42,10 @@ func (h *Hub) authorize(userID, projectID, sessionID string) error {
 }
 
 // NewStoreAuthorizer builds an authorizer over the store: project must
-// exist; session (when given) must exist, belong to the project, and either
-// be active with the user as participant or have been created by the user.
+// exist AND the user must be a project member (issue #141 — existence
+// alone is selection, not authorization); session (when given) must
+// exist, belong to the project, and either be active with the user as
+// participant or have been created by the user.
 // Unknown users/sessions fail closed.
 func NewStoreAuthorizer(st store.Store) WSAuthorizer {
 	return func(userID, projectID, sessionID string) error {
@@ -52,6 +54,9 @@ func NewStoreAuthorizer(st store.Store) WSAuthorizer {
 		}
 		ctx := context.Background()
 		if _, err := st.GetProject(ctx, projectID); err != nil {
+			return errWSForbidden
+		}
+		if member, err := st.IsProjectMember(ctx, userID, projectID); err != nil || !member {
 			return errWSForbidden
 		}
 		if strings.TrimSpace(sessionID) == "" {
