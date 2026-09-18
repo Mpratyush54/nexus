@@ -167,8 +167,7 @@ func (ms *memShare) toShare() *MemoryShare {
 }
 
 // MemberRole returns the recorded or inferred role for a project member
-// (used by memory sharing role-match, issue #164). Prefer GetMemberRole
-// for RBAC checks (issue #163).
+// (used by memory share-role matching; RBAC writes go through RoleStore).
 func (s *MemStore) MemberRole(projectID, userID string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -183,6 +182,7 @@ func (s *MemStore) memberRoleLocked(projectID, userID string) string {
 		return RoleOwner
 	}
 	if s.members[projectID][userID] {
+		// Legacy bool grants map to EDITOR (MEMBER → EDITOR in migration 013).
 		return RoleEditor
 	}
 	return ""

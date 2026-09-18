@@ -925,14 +925,18 @@ func (s *Server) viewerHasMemoryShare(r *http.Request, item *store.MemoryItem, s
 	}
 	role := ""
 	if item.ProjectID != "" {
-		if p, err := s.Store.GetProject(r.Context(), item.ProjectID); err == nil && p != nil && p.CreatedBy == subject {
+		if rs, ok := s.Store.(store.RoleStore); ok {
+			if rname, err := rs.GetMemberRole(r.Context(), subject, item.ProjectID); err == nil {
+				role = rname
+			}
+		} else if p, err := s.Store.GetProject(r.Context(), item.ProjectID); err == nil && p != nil && p.CreatedBy == subject {
 			role = "OWNER"
 		} else if ms, ok := s.Store.(*store.MemStore); ok {
 			role = ms.MemberRole(item.ProjectID, subject)
 		} else if members, err := s.Store.ListMembers(r.Context(), item.ProjectID); err == nil {
 			for _, m := range members {
 				if m == subject {
-					role = "MEMBER"
+					role = "EDITOR"
 					break
 				}
 			}
