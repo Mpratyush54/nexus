@@ -26,8 +26,8 @@ import (
 // ---------------------------------------------------------------------------
 
 // MemoryLevel is the lifetime/scope tier of a memory item.
-// Resolution order (lower overrides higher): SESSION > PERSONAL > PROJECT >
-// ORGANIZATION (plan §1.6).
+// Resolution order (lower overrides higher): EPHEMERAL > SESSION > PERSONAL >
+// PROJECT > ORGANIZATION (plan §1.6; ephemeral works at plan §1.1's fifth tier).
 type MemoryLevel string
 
 const (
@@ -35,6 +35,10 @@ const (
 	LevelProject      MemoryLevel = "project"
 	LevelPersonal     MemoryLevel = "personal"
 	LevelSession      MemoryLevel = "session"
+	// LevelEphemeral is assigned explicitly by producers for working memory
+	// that must never outlive its session. Heuristic classification never
+	// emits it (ClassifyLevel defaults to SESSION when unsure).
+	LevelEphemeral MemoryLevel = "ephemeral"
 )
 
 // MemoryScope is the kind of knowledge a memory item carries (plan §2.6).

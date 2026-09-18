@@ -29,7 +29,7 @@ type MemoryItem struct {
 	Key            string
 	Content        string
 	ContextSnippet string
-	Level          string // organization | project | personal | session
+	Level          string // organization | project | personal | session | ephemeral
 	Scope          string // fact | preference | decision | constraint | pattern | episode_summary
 	Tags           []string
 	Confidence     float32
@@ -400,7 +400,7 @@ func buildContextXMLBudgeted(project, branch string, items []*MemoryItem, budget
 		units []string
 	}
 	var sections []section
-	for _, lvl := range []string{"organization", "project", "personal", "session"} {
+	for _, lvl := range []string{"organization", "project", "personal", "session", "ephemeral"} {
 		mems := groups[lvl]
 		if len(mems) == 0 {
 			continue
@@ -466,6 +466,7 @@ var validScopes = map[string]bool{
 
 var validLevels = map[string]bool{
 	"organization": true, "project": true, "personal": true, "session": true,
+	"ephemeral": true,
 }
 
 type memoryWriteArgs struct {
@@ -502,7 +503,7 @@ func (s *Server) handleMemoryWrite(ctx context.Context, raw json.RawMessage) (an
 		level = "project"
 	}
 	if !validLevels[strings.ToLower(level)] {
-		return nil, invalidParams("invalid level %q: want organization|project|personal|session", a.Level)
+		return nil, invalidParams("invalid level %q: want organization|project|personal|session|ephemeral", a.Level)
 	}
 	projectID := a.ProjectID
 	if projectID == "" {
