@@ -264,7 +264,10 @@ func (a *Authenticator) keyID() string {
 // ---------------------------------------------------------------------------
 
 // pbkdf2Iterations is the OWASP-2023 minimum for PBKDF2-HMAC-SHA256.
-const pbkdf2Iterations = 210_000
+// A var (not const) so tests can lower the cost without waiting out real
+// hashing latency (issue #157: slow verifies refill the login rate bucket
+// and make throttling tests flaky). Production must never lower it.
+var pbkdf2Iterations = 210_000
 
 const pbkdf2SaltBytes = 32
 

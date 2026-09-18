@@ -56,6 +56,11 @@ type Daemon struct {
 	// ServerURL is the central server base URL (optional; used by
 	// Register/StartHeartbeat when set).
 	ServerURL string
+	// ServerToken is the JWT bearer token for central-server calls
+	// (issue #155). postJSON attaches it as Authorization: Bearer.
+	// Empty means unauthenticated (local-only servers / tests); calls
+	// requiring auth will 401.
+	ServerToken string
 	// MachineID identifies this machine (os.Hostname, "unknown" fallback).
 	MachineID string
 	// UserID identifies the owning user for registration. Empty means
@@ -569,6 +574,9 @@ func (d *Daemon) postJSON(ctx context.Context, base, path string, payload any, o
 		return fmt.Errorf("daemon: %s request: %w", path, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	if tok := strings.TrimSpace(d.ServerToken); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
 	client := d.client
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second}

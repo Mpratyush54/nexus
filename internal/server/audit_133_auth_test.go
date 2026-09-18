@@ -44,6 +44,13 @@ func TestAlgConfusionRejected(t *testing.T) {
 }
 
 func TestLoginRateLimited(t *testing.T) {
+	// Fast hashing for determinism (issue #157): real PBKDF2 latency
+	// (~1s/verify on slow CI) refills the 1/s bucket between attempts,
+	// so throttling never trips. The production iteration count is
+	// covered by TestPasswordHashRoundTrip below.
+	old := pbkdf2Iterations
+	pbkdf2Iterations = 1000
+	defer func() { pbkdf2Iterations = old }()
 	s := newTestServer()
 	s.Auth = NewAuthenticator([]byte("ratelimit-key-0123456789abcdef"))
 	users := newFakeUsers()

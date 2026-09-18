@@ -226,9 +226,11 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "key is required")
 		return
 	}
-	// Mirrors the CHECK constraint in migrations/001_initial.up.sql (20–2000 chars).
-	if n := len(strings.TrimSpace(item.Content)); n < 20 || n > 2000 {
-		writeError(w, http.StatusBadRequest, "content must be 20-2000 characters")
+	// Length in runes, matching the store CHECK (length() counts UTF-8
+	// characters) and ValidateMemoryContent — byte counts reject valid
+	// multi-byte content and accept short-but-wide content (issue #153).
+	if err := store.ValidateMemoryContent(strings.TrimSpace(item.Content)); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if !s.eventAllowed("memory:" + strings.TrimSpace(item.ProjectID)) {
