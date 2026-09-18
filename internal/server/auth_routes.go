@@ -252,11 +252,11 @@ func (s *Server) handleAuthTokensCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"token":  raw, // shown once
-		"id":     tok.ID,
-		"name":   tok.Name,
-		"prefix": tok.Prefix,
-		"scopes": tok.Scopes,
+		"token":      raw, // shown once
+		"id":         tok.ID,
+		"name":       tok.Name,
+		"prefix":     tok.Prefix,
+		"scopes":     tok.Scopes,
 		"created_at": tok.CreatedAt.Format(time.RFC3339Nano),
 	})
 }
