@@ -15,6 +15,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -23,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	memctx "central-memory/internal/context"
 	"central-memory/internal/store"
 )
 
@@ -77,6 +79,11 @@ type Server struct {
 	// handoffs stores in-flight handoff packages (issue #82).
 	handoffMu sync.Mutex
 	handoffs  map[string]*handoffRecord
+
+	// Embedder generates vectors for POST /memory and GET /memory/search
+	// when the client omits a precomputed embedding (issue #165). Nil
+	// selects EmbedderFromEnv at first use (hash fallback by default).
+	Embedder memctx.Embedder
 }
 
 // NewServer wires routes onto a fresh stdlib ServeMux.
@@ -114,6 +121,25 @@ func (s *Server) quotaAllowed(chars int) (bool, string) {
 		s.quota = newQuotaGate()
 	}
 	return s.quota.allowN(estimateIngestTokens(chars))
+}
+
+// resolveEmbedder returns the server's embedding backend (issue #165).
+// Nil Embedder lazily binds EmbedderFromEnv (hash by default).
+func (s *Server) resolveEmbedder() memctx.Embedder {
+	if s != nil && s.Embedder != nil {
+		return s.Embedder
+	}
+	return memctx.EmbedderFromEnv()
+}
+
+// embedText generates a 1536-dim vector for text; provider failures fall
+// back to HashEmbed inside NewEmbedder.
+func (s *Server) embedText(ctx context.Context, text string) []float32 {
+	vec, err := s.resolveEmbedder()(ctx, text)
+	if err != nil || len(vec) != memctx.EmbedDims {
+		return memctx.HashEmbed(text)
+	}
+	return vec
 }
 
 // authorizeProject enforces the project-membership boundary (issue #141):

@@ -19,7 +19,7 @@ import (
 const memoryColumns = `id, project_id, user_id, session_id, org_id,
 	"key", content, context_snippet, level, scope, embedding::text,
 	tags, confidence, status, source, source_event_id,
-	proposed_by, confirmed_by, superseded_by,
+	proposed_by, confirmed_by, superseded_by, visibility,
 	use_count, last_used_at, created_at, updated_at`
 
 func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
@@ -29,11 +29,12 @@ func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
 	var embeddingText *string
 	var sourceEventID *int64
 	var proposedBy, confirmedBy, supersededBy *string
+	var visibility *string
 	var lastUsedAt *time.Time
 	if err := row.Scan(&m.ID, &projectID, &userID, &sessionID, &orgID,
 		&m.Key, &m.Content, &contextSnippet, &m.Level, &m.Scope, &embeddingText,
 		&m.Tags, &m.Confidence, &m.Status, &source, &sourceEventID,
-		&proposedBy, &confirmedBy, &supersededBy,
+		&proposedBy, &confirmedBy, &supersededBy, &visibility,
 		&m.UseCount, &lastUsedAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -67,6 +68,11 @@ func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
 	if supersededBy != nil {
 		m.SupersededBy = *supersededBy
 	}
+	if visibility != nil && *visibility != "" {
+		m.Visibility = *visibility
+	} else {
+		m.Visibility = VisibilityProject
+	}
 	if lastUsedAt != nil {
 		m.LastUsedAt = *lastUsedAt
 	}
@@ -96,21 +102,27 @@ func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) 
 	if len(item.Tags) == 0 {
 		item.Tags = []string{}
 	}
+	if item.Visibility == "" {
+		item.Visibility = VisibilityProject
+	} else {
+		item.Visibility = NormalizeVisibility(item.Visibility)
+	}
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO memory_items
 			(project_id, user_id, session_id, org_id, "key", content,
 			 context_snippet, level, scope, embedding, tags, confidence,
-			 status, source, source_event_id, proposed_by)
+			 status, source, source_event_id, proposed_by, visibility)
 		 VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6,
 		         NULLIF($7,''), $8, $9, $10::vector, $11, $12,
-		         $13, NULLIF($14,''), $15, $16::uuid)
+		         $13, NULLIF($14,''), $15, $16::uuid, $17)
 		 RETURNING id, created_at, updated_at`,
 		nullText(item.ProjectID), nullText(item.UserID),
 		nullText(item.SessionID), nullText(item.OrgID),
 		item.Key, item.Content, item.ContextSnippet,
 		item.Level, item.Scope, encodeEmbedding(item.Embedding),
 		item.Tags, item.Confidence, item.Status, item.Source,
-		nullEventID(item.SourceEventID), nullText(item.ProposedBy))
+		nullEventID(item.SourceEventID), nullText(item.ProposedBy),
+		item.Visibility)
 	return row.Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
 }
 
@@ -121,14 +133,40 @@ func nullEventID(id int64) any {
 	return id
 }
 
-// GetMemoryItem fetches one memory by id.
+// GetMemoryItem fetches one memory by id. When WithViewer is set on ctx,
+// visibility rules apply and inaccessible rows surface as ErrNotFound.
 func (s *PostgresStore) GetMemoryItem(ctx context.Context, id string) (*MemoryItem, error) {
 	m, err := scanMemoryItem(s.pool.QueryRow(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items WHERE id = $1::uuid`, id))
 	if err == pgx.ErrNoRows {
 		return nil, ErrNotFound
 	}
-	return m, err
+	if err != nil {
+		return nil, err
+	}
+	viewerID := ViewerFrom(ctx)
+	if viewerID == "" {
+		return m, nil
+	}
+	isMember := false
+	if m.ProjectID != "" {
+		ok, merr := s.IsProjectMember(ctx, viewerID, m.ProjectID)
+		if merr != nil {
+			return nil, merr
+		}
+		isMember = ok
+	}
+	hasShare := false
+	if NormalizeVisibility(m.Visibility) == VisibilityShared {
+		hasShare, err = s.hasMemoryShare(ctx, m.ID, viewerID, m.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !CanViewMemory(m, viewerID, isMember, hasShare) {
+		return nil, ErrNotFound
+	}
+	return m, nil
 }
 
 // ConfirmMemory flips PROPOSED -> CONFIRMED and records who confirmed
@@ -160,10 +198,14 @@ func (s *PostgresStore) ConfirmMemory(ctx context.Context, id string, confirmedB
 // Scope isolation (issue #102): NULL-project rows match only when
 // explicitly organization-level. Personal/session rows with a NULL
 // project_id never leak across projects.
+//
+// Sharing visibility (issue #164): WithViewer filters private/shared rows;
+// empty viewer returns project+public only.
 func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error) {
 	if limit <= 0 {
 		limit = 20
 	}
+	viewerID := ViewerFrom(ctx)
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items
 		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
@@ -173,18 +215,48 @@ func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, quer
 		    AND ($3::text[] IS NULL OR tags && $3)
 		  ORDER BY confidence DESC, created_at DESC
 		  LIMIT $4`,
-		nullText(projectID), query, nilTextArray(tags), limit)
+		nullText(projectID), query, nilTextArray(tags), limit*4) // over-fetch before visibility filter
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
+	isMember := false
+	if viewerID != "" {
+		ok, merr := s.IsProjectMember(ctx, viewerID, projectID)
+		if merr != nil {
+			return nil, merr
+		}
+		isMember = ok
+	}
+
 	var out []*MemoryItem
 	for rows.Next() {
 		m, err := scanMemoryItem(rows)
 		if err != nil {
 			return nil, err
 		}
+		if viewerID == "" {
+			vis := NormalizeVisibility(m.Visibility)
+			if vis != VisibilityProject && vis != VisibilityPublic {
+				continue
+			}
+		} else {
+			hasShare := false
+			if NormalizeVisibility(m.Visibility) == VisibilityShared {
+				hasShare, err = s.hasMemoryShare(ctx, m.ID, viewerID, m.ProjectID)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if !CanViewMemory(m, viewerID, isMember, hasShare) {
+				continue
+			}
+		}
 		out = append(out, m)
+		if len(out) >= limit {
+			break
+		}
 	}
 	return out, rows.Err()
 }
