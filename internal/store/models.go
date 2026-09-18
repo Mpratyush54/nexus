@@ -20,8 +20,27 @@ type Project struct {
 	RootCommit   string    `json:"root_commit,omitempty"`
 	FolderName   string    `json:"folder_name"`
 	DisplayName  string    `json:"display_name,omitempty"`
+	OrgID        string    `json:"org_id,omitempty"`
 	CreatedBy    string    `json:"created_by,omitempty"`
 	CreatedAt    time.Time `json:"created_at"`
+}
+
+// Organization is a team above projects (issue #168 / Phase 8).
+type Organization struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	Slug      string    `json:"slug,omitempty"`
+	CreatedBy string    `json:"created_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// OrganizationMember is one user's role on an organization.
+type OrganizationMember struct {
+	OrgID     string    `json:"org_id"`
+	UserID    string    `json:"user_id"`
+	Role      string    `json:"role"` // ADMIN | MEMBER
+	GrantedBy string    `json:"granted_by,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // Workspace represents an active machine checkout of a project.

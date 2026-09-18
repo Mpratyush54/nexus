@@ -60,10 +60,11 @@ type Store interface {
 	Subscribe(ctx context.Context, projectID string) (<-chan *Event, func(), error)
 
 	// IsProjectMember reports whether userID may access projectID (issues
-	// #141, #149): the project creator or an explicit project_members
-	// grant. Workspace registration requires membership; it never creates
-	// it. The server enforces this on every project-scoped route (403);
-	// object routes resolve object → project first.
+	// #141, #149, #168): the project creator, an explicit project_members
+	// grant, or an ADMIN of the project's organization. Workspace
+	// registration requires membership; it never creates it. The server
+	// enforces this on every project-scoped route (403); object routes
+	// resolve object → project first.
 	IsProjectMember(ctx context.Context, userID, projectID string) (bool, error)
 
 	// ClaimProject records userID as the project creator iff none is set
@@ -96,6 +97,8 @@ type MemStore struct {
 	members     map[string]map[string]bool         // projectID -> granted userIDs (issue #149)
 	memberRoles map[string]map[string]string       // projectID -> userID -> role name (issue #163/#164)
 	roles       map[string]map[string]*ProjectRole // projectID -> roleID -> custom role (issue #163)
+	orgs        map[string]*Organization
+	orgMembers  map[string]map[string]string // orgID -> userID -> role (issue #168)
 	memories    map[string]*MemoryItem
 	versions    map[string][]*MemoryVersion // memoryID -> ordered version snapshots (issue #162)
 	shares      map[string]*memShare        // shareID -> grant (issue #164)
@@ -123,6 +126,8 @@ func NewMemStore() *MemStore {
 		members:     make(map[string]map[string]bool),
 		memberRoles: make(map[string]map[string]string),
 		roles:       make(map[string]map[string]*ProjectRole),
+		orgs:        make(map[string]*Organization),
+		orgMembers:  make(map[string]map[string]string),
 		memories:    make(map[string]*MemoryItem),
 		versions:    make(map[string][]*MemoryVersion),
 		shares:      make(map[string]*memShare),
