@@ -1,0 +1,24 @@
+-- Migration 011_auth_password — password hashes for real login (issue #133).
+--
+-- /auth/login minted a token for ANY non-empty username+password (no user
+-- lookup, no password check): anyone with network access could impersonate
+-- any user. This adds the storage for PBKDF2-SHA256 hashes
+-- (format: pbkdf2-sha256$iterations$b64salt$b64hash, see
+-- internal/server/auth.go HashPassword); verification lives in the server.
+--
+-- NULL = no password set (login 401s with "password not set" until an
+-- operator sets one). Bootstrap runbook for a fresh database:
+--
+--   1. Create the user row (username must be unique):
+--        INSERT INTO users (username, email) VALUES ('alice', 'alice@example.com')
+--        RETURNING id;
+--   2. Generate a hash with the nexus CLI (no plaintext ever stored):
+--        nexus users hash-password
+--      (prompts on stdin, prints the pbkdf2-sha256$... string)
+--   3. Store it:
+--        UPDATE users SET password_hash = '<output of step 2>' WHERE username = 'alice';
+--
+-- Forward-only step 11 of N; rollback in 011_auth_password.down.sql.
+-- Idempotent: ADD COLUMN IF NOT EXISTS.
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS password_hash TEXT;

@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,6 +36,38 @@ func loginAs(t *testing.T, s *Server, subject string) string {
 		t.Fatalf("Generate token: %v", err)
 	}
 	return token
+}
+
+// fakeUsers is an in-memory UserLookup for login tests.
+type fakeUsers struct {
+	hashes map[string]string // username -> password hash ("" = unset)
+	ids    map[string]string
+	err    error
+}
+
+func newFakeUsers() *fakeUsers {
+	return &fakeUsers{hashes: map[string]string{}, ids: map[string]string{}}
+}
+
+func (f *fakeUsers) add(t *testing.T, username, password string) {
+	t.Helper()
+	h, err := HashPassword(password)
+	if err != nil {
+		t.Fatalf("HashPassword: %v", err)
+	}
+	f.hashes[username] = h
+	f.ids[username] = "user-" + username
+}
+
+func (f *fakeUsers) GetPasswordHash(_ context.Context, username string) (string, string, error) {
+	if f.err != nil {
+		return "", "", f.err
+	}
+	h, ok := f.hashes[username]
+	if !ok {
+		return "", "", errors.New("no such user")
+	}
+	return f.ids[username], h, nil
 }
 
 // doJSON performs a JSON request against the server handler.
@@ -71,6 +105,9 @@ func decodeBody(t *testing.T, rec *httptest.ResponseRecorder, dst any) {
 func TestLoginIssuesValidToken(t *testing.T) {
 	s := newTestServer()
 	s.Auth = NewAuthenticator([]byte("test-only-key-0123456789abcdef"))
+	users := newFakeUsers()
+	users.add(t, "alice", "secret")
+	s.Users = users
 	rec := doJSON(t, s, http.MethodPost, "/auth/login", "", map[string]string{
 		"username": "alice",
 		"password": "secret",

@@ -9,15 +9,20 @@
 package server
 
 import (
+	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
+
+	"central-memory/internal/store"
 )
 
 // TODO(jwt-v5): replace this stub with github.com/golang-jwt/jwt/v5.
@@ -87,18 +92,28 @@ type jwtPayload struct {
 	Iat int64  `json:"iat"`
 }
 
+// MaxTokenTTL caps issued lifetimes (issue #133): unbounded TTLs mint
+// effectively immortal tokens.
+const MaxTokenTTL = 30 * 24 * time.Hour
+
 // Generate mints a token for subject with the given TTL.
 func (a *Authenticator) Generate(subject string, ttl time.Duration) (string, error) {
-	if subject == "" {
+	if strings.TrimSpace(subject) == "" {
 		return "", errors.New("subject must not be empty")
 	}
 	if len(a.key) == 0 {
 		return "", errors.New("authenticator has no key configured")
 	}
+	// NOTE: Generate honors an explicitly non-positive ttl (already-expired
+	// token) for tests and revocation flows; only the unbounded top end
+	// is clamped. Production callers (handleLogin) pass DefaultTokenTTL.
+	if ttl > MaxTokenTTL {
+		ttl = MaxTokenTTL
+	}
 	now := time.Now().UTC()
 	headerJSON, _ := json.Marshal(jwtHeader{Alg: "HS256", Typ: "JWT"})
 	payloadJSON, _ := json.Marshal(jwtPayload{
-		Sub: subject,
+		Sub: strings.TrimSpace(subject),
 		Exp: now.Add(ttl).Unix(),
 		Iat: now.Unix(),
 	})
@@ -112,9 +127,24 @@ func (a *Authenticator) Generate(subject string, ttl time.Duration) (string, err
 }
 
 // Validate checks the signature and expiry of token and returns the subject.
+// Fail-closed (issue #133): an unconfigured (empty-key) authenticator
+// rejects everything — otherwise attacker self-signed tokens verify
+// against the empty key. The header's alg is pinned to HS256 so
+// alg-confusion (e.g. alg:none) cannot downgrade verification.
 func (a *Authenticator) Validate(token string) (string, error) {
+	if len(a.key) == 0 {
+		return "", ErrInvalidToken
+	}
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
+		return "", ErrInvalidToken
+	}
+	var header jwtHeader
+	if headerJSON, err := b64.DecodeString(parts[0]); err != nil {
+		return "", ErrInvalidToken
+	} else if err := json.Unmarshal(headerJSON, &header); err != nil {
+		return "", ErrInvalidToken
+	} else if header.Alg != "HS256" {
 		return "", ErrInvalidToken
 	}
 	signingInput := parts[0] + "." + parts[1]
@@ -169,4 +199,111 @@ func (a *Authenticator) bearerSubject(header string) (string, error) {
 func (a *Authenticator) keyID() string {
 	sum := sha256.Sum256(a.key)
 	return fmt.Sprintf("hmac-sha256:%x", sum[:4])
+}
+
+// ---------------------------------------------------------------------------
+// Password hashing (issue #133): PBKDF2-SHA256, stdlib only.
+// ---------------------------------------------------------------------------
+
+// pbkdf2Iterations is the OWASP-2023 minimum for PBKDF2-HMAC-SHA256.
+const pbkdf2Iterations = 210_000
+
+const pbkdf2SaltBytes = 32
+
+// HashPassword hashes plaintext with a random salt. Format:
+// pbkdf2-sha256$<iterations>$<base64-salt>$<base64-derived-key>.
+func HashPassword(plaintext string) (string, error) {
+	if plaintext == "" {
+		return "", errors.New("password must not be empty")
+	}
+	salt := make([]byte, pbkdf2SaltBytes)
+	if _, err := rand.Read(salt); err != nil {
+		return "", fmt.Errorf("password salt: %w", err)
+	}
+	dk := pbkdf2SHA256([]byte(plaintext), salt, pbkdf2Iterations, sha256.Size)
+	return fmt.Sprintf("pbkdf2-sha256$%d$%s$%s",
+		pbkdf2Iterations,
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(dk)), nil
+}
+
+// VerifyPassword reports whether plaintext matches the stored hash.
+// Unknown formats and malformed hashes fail closed (false, no error swell:
+// callers map false to 401 without distinguishing reasons).
+func VerifyPassword(plaintext, hash string) bool {
+	parts := strings.Split(hash, "$")
+	if len(parts) != 4 || parts[0] != "pbkdf2-sha256" {
+		return false
+	}
+	iter, err := strconv.Atoi(parts[1])
+	if err != nil || iter <= 0 || iter > 10_000_000 {
+		return false
+	}
+	salt, err := base64.RawStdEncoding.DecodeString(parts[2])
+	if err != nil || len(salt) == 0 {
+		return false
+	}
+	want, err := base64.RawStdEncoding.DecodeString(parts[3])
+	if err != nil || len(want) == 0 {
+		return false
+	}
+	got := pbkdf2SHA256([]byte(plaintext), salt, iter, len(want))
+	return hmac.Equal(got, want)
+}
+
+// pbkdf2SHA256 is PBKDF2 with HMAC-SHA256 (RFC 2898), stdlib-only so go.mod
+// gains no bcrypt dependency for a single use.
+func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
+	hLen := sha256.Size
+	blocks := (keyLen + hLen - 1) / hLen
+	dk := make([]byte, 0, blocks*hLen)
+	var counter [4]byte
+	for b := 1; b <= blocks; b++ {
+		counter[0] = byte(b >> 24)
+		counter[1] = byte(b >> 16)
+		counter[2] = byte(b >> 8)
+		counter[3] = byte(b)
+		mac := hmac.New(sha256.New, password)
+		mac.Write(salt)
+		mac.Write(counter[:])
+		u := mac.Sum(nil)
+		t := make([]byte, len(u))
+		copy(t, u)
+		for i := 1; i < iter; i++ {
+			mac = hmac.New(sha256.New, password)
+			mac.Write(u)
+			u = mac.Sum(nil)
+			for j := range t {
+				t[j] ^= u[j]
+			}
+		}
+		dk = append(dk, t...)
+	}
+	return dk[:keyLen]
+}
+
+// UserLookup resolves a username to its login identity for handleLogin.
+// Production wires store.UserStore (see GetPasswordHash below); tests wire
+// fakes. A nil Users on Server means authentication is unconfigured and
+// login fails closed with 503.
+type UserLookup interface {
+	GetPasswordHash(ctx context.Context, username string) (userID, hash string, err error)
+}
+
+// storeUserLookup adapts *store.UserStore to UserLookup.
+type storeUserLookup struct {
+	users *store.UserStore
+}
+
+// NewUserLookup wires a store.UserStore (over any DBTX: pool, tx, fake)
+// as the server's login user source.
+func NewUserLookup(users *store.UserStore) UserLookup {
+	return &storeUserLookup{users: users}
+}
+
+func (l *storeUserLookup) GetPasswordHash(ctx context.Context, username string) (string, string, error) {
+	if l == nil || l.users == nil {
+		return "", "", errors.New("user store not configured")
+	}
+	return l.users.GetPasswordHash(ctx, username)
 }
