@@ -357,8 +357,11 @@ func run() error {
 			log.Print("server: migrations dir missing, skipping Go-runner migrations (migrate.sh path)")
 		}
 		srv.Store = pg
-		srv.Users = server.NewUserLookup(store.NewUserStore(pg.DB()))
-		log.Print("server: postgres store + user login wired")
+		users := store.NewUserStore(pg.DB())
+		srv.Users = server.NewUserLookup(users)
+		srv.Accounts = users
+		srv.Tokens = store.NewAPITokenStore(pg.DB())
+		log.Print("server: postgres store + user login + api tokens wired")
 	}
 	// Lifecycle tick (issue #119 box 4): no-op-idle on stubStore (it
 	// supports no sweep seams); starts sweeping once the Postgres adapter
