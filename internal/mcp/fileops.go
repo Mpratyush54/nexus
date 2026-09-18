@@ -115,6 +115,11 @@ func checkContained(rootAbs, candidate string) error {
 // root and returns the absolute target, rejecting traversal, ADS streams,
 // NUL bytes, and symlink escapes (same contract as daemon.SecureJoin).
 func secureJoin(root, unsafePath string) (string, error) {
+	// Empty root would resolve to the process CWD (issue #135): fail
+	// closed instead of sandboxing tool I/O to wherever the server runs.
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("%w: empty workspace root", ErrTraversal)
+	}
 	if strings.ContainsRune(unsafePath, 0) {
 		return "", fmt.Errorf("%w: NUL byte", ErrTraversal)
 	}

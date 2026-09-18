@@ -360,17 +360,42 @@ func (m *Materializer) Render(t Target, items []*store.MemoryItem) string {
 	return RenderMarkdown(sorted, t.Budget)
 }
 
-// Regenerate fetches confirmed memories once and rewrites every target.
+// Regenerate fetches CONFIRMED memories and rewrites every target.
+// Only CONFIRMED rows materialize (issue #135): PROPOSED rows are
+// unreviewed and must never reach push files. The fetch grows until a
+// short page (SearchMemory has no offset) so large projects are not
+// silently truncated at a fixed cap.
 func (m *Materializer) Regenerate(ctx context.Context) error {
 	if m.Source == nil {
 		return nil
 	}
-	items, err := m.Source.SearchMemory(ctx, m.ProjectID, "", nil, 200)
+	const maxFetchLimit = 65536
+	items, err := m.Source.SearchMemory(ctx, m.ProjectID, "", nil, 512)
 	if err != nil {
 		return err
 	}
+	for limit := 1024; len(items) >= limit/2 && limit <= maxFetchLimit; limit *= 2 {
+		next, err := m.Source.SearchMemory(ctx, m.ProjectID, "", nil, limit)
+		if err != nil {
+			return err
+		}
+		if len(next) == len(items) {
+			items = next
+			break
+		}
+		items = next
+		if len(items) < limit {
+			break
+		}
+	}
+	confirmed := make([]*store.MemoryItem, 0, len(items))
+	for _, it := range items {
+		if it != nil && it.Status == store.StatusConfirmed {
+			confirmed = append(confirmed, it)
+		}
+	}
 	for _, t := range m.Targets {
-		generated := m.Render(t, items)
+		generated := m.Render(t, confirmed)
 		var existing string
 		if m.Read != nil {
 			existing, _ = m.Read(t.FilePath) // missing file -> create fresh
