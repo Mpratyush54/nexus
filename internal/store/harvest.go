@@ -54,11 +54,29 @@ type HarvestJob struct {
 	FinishedAt    *time.Time    `json:"finished_at,omitempty"`
 }
 
-// SanitizeUTF8 strips invalid UTF-8 so Postgres TEXT/JSONB inserts never
-// fail with SQLSTATE 22021. Truncation must go through TruncateUTF8 — a
-// raw s[:n] cut mid-rune recreates invalid sequences (e.g. 0xe2 0xe2 0x80).
+// SanitizeUTF8 strips nulls and invalid UTF-8 so Postgres TEXT/JSONB inserts
+// never fail with SQLSTATE 22021. Prefer DecodeRune over ToValidUTF8 alone so
+// overlong / broken lead bytes (e.g. 0xe2 0xe2 0x80) cannot survive.
 func SanitizeUTF8(s string) string {
-	return strings.ToValidUTF8(s, "")
+	if s == "" {
+		return ""
+	}
+	s = strings.ReplaceAll(s, "\x00", "")
+	if utf8.ValidString(s) {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 {
+			i++
+			continue
+		}
+		b.WriteRune(r)
+		i += size
+	}
+	return b.String()
 }
 
 // TruncateUTF8 caps byte length without splitting a multi-byte rune.

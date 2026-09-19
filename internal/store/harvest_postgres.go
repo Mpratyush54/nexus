@@ -67,7 +67,7 @@ func (q *PostgresHarvestQueue) EnqueueHarvestJob(ctx context.Context, projectID,
 		VALUES ($1::uuid, $2, 'queued', $3, $4::jsonb, $5, $6)
 		ON CONFLICT (project_id, dedupe_key) DO NOTHING
 		RETURNING id::text, status, created_at, updated_at`,
-		projectID, dedupe, source, string(raw), preview, len(cleaned),
+		projectID, dedupe, source, raw, preview, len(cleaned),
 	).Scan(&id, &status, &createdAt, &updatedAt)
 	if err == nil {
 		return &HarvestJob{

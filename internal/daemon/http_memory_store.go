@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // HTTPMemoryStore uploads processor proposals to the central server
@@ -239,9 +240,39 @@ func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]
 	if len(turns) == 0 {
 		return "queued", nil, nil
 	}
+	// Sanitize before marshal so broken transcript bytes never hit the API
+	// as raw JSON (and so local last_proposal_error stays readable).
+	clean := make([]map[string]string, 0, len(turns))
+	for _, t := range turns {
+		c := strings.ToValidUTF8(strings.TrimSpace(t["content"]), "")
+		c = strings.ReplaceAll(c, "\x00", "")
+		if c == "" {
+			continue
+		}
+		if len(c) > 4000 {
+			c = c[:4000]
+			for len(c) > 0 && !utf8.ValidString(c) {
+				c = c[:len(c)-1]
+			}
+		}
+		row := map[string]string{
+			"speaker": strings.ToValidUTF8(strings.TrimSpace(t["speaker"]), ""),
+			"content": c,
+		}
+		if sid := strings.ToValidUTF8(strings.TrimSpace(t["session_id"]), ""); sid != "" {
+			row["session_id"] = sid
+		}
+		if ts := strings.ToValidUTF8(strings.TrimSpace(t["timestamp"]), ""); ts != "" {
+			row["timestamp"] = ts
+		}
+		clean = append(clean, row)
+	}
+	if len(clean) == 0 {
+		return "queued", nil, nil
+	}
 	body := map[string]any{
 		"project_id": projectID,
-		"turns":      turns,
+		"turns":      clean,
 		"source":     "daemon:harvester",
 	}
 	raw, err := json.Marshal(body)
@@ -314,6 +345,12 @@ func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]
 			Key: it.Key, Content: it.Content, Level: MemoryLevel(it.Level),
 			Scope: MemoryScope(it.Scope), Confidence: it.Confidence, Source: it.Source,
 		})
+		s.mu.Lock()
+		s.local = append(s.local, MemoryRecord{
+			Key: it.Key, Content: it.Content, Level: MemoryLevel(it.Level),
+			Scope: MemoryScope(it.Scope),
+		})
+		s.mu.Unlock()
 	}
 	return provider, proposals, nil
 }
