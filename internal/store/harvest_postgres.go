@@ -122,6 +122,14 @@ func (q *PostgresHarvestQueue) ClaimNextHarvestJob(ctx context.Context) (*Harves
 	}
 	defer tx.Rollback(ctx)
 
+	// Reclaim jobs stuck in processing (crashed worker / hung OpenRouter).
+	_, _ = tx.Exec(ctx, `
+		UPDATE harvest_jobs
+		SET status = 'queued', started_at = NULL, updated_at = now(),
+		    error = 'requeued: processing timed out'
+		WHERE status = 'processing'
+		  AND started_at < now() - interval '3 minutes'`)
+
 	row := tx.QueryRow(ctx, `
 		WITH next AS (
 			SELECT id FROM harvest_jobs
@@ -131,7 +139,7 @@ func (q *PostgresHarvestQueue) ClaimNextHarvestJob(ctx context.Context) (*Harves
 			LIMIT 1
 		)
 		UPDATE harvest_jobs j
-		SET status = 'processing', started_at = now(), updated_at = now()
+		SET status = 'processing', started_at = now(), updated_at = now(), error = ''
 		FROM next
 		WHERE j.id = next.id
 		RETURNING j.id::text, j.project_id::text, j.dedupe_key, j.status, COALESCE(j.source,''), j.turns,

@@ -93,7 +93,9 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 		})
 	}
 	existing := s.harvestExisting(ctx, job.ProjectID)
-	result, err := svc.ExtractLLMOnly(ctx, job.ProjectID, turns, existing)
+	jobCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	result, err := svc.ExtractLLMOnly(jobCtx, job.ProjectID, turns, existing)
 	if err != nil {
 		_ = s.Harvest.FinishHarvestJob(ctx, job.ID, store.HarvestFailed, extract.ProviderOpenRouter, err.Error(), 0)
 		return
