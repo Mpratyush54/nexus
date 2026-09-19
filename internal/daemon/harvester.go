@@ -301,9 +301,12 @@ func ResolveSources() []TranscriptSource {
 		{Agent: "cursor", Dirs: []string{
 			filepath.Join(appData, "Cursor", "User", "workspaceStorage"),
 			filepath.Join(home, ".cursor", "chats"),
-			filepath.Join(home, ".cursor", "ai-tracking"),
 			codeWS,
-		}, Format: FormatSQLite, CwdMatch: true},
+		}, Format: FormatSQLite},
+		// Cursor AI code-tracking DB — machine-global, no project slug in path
+		{Agent: "cursor", Dirs: []string{
+			filepath.Join(home, ".cursor", "ai-tracking"),
+		}, Format: FormatSQLite, Global: true},
 		// Codex CLI / Desktop — date-sharded rollouts (CODEX_HOME override)
 		{Agent: "codex", Dirs: []string{
 			filepath.Join(codexHome, "sessions"),
@@ -1358,7 +1361,7 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 		if adapters.ClassifyPath(p) == adapters.Never {
 			return nil
 		}
-		if !h.MatchesTranscript(p, src.CwdMatch) {
+		if !src.Global && !h.MatchesTranscript(p, src.CwdMatch) {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(p))
