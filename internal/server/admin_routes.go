@@ -315,7 +315,7 @@ func (s *Server) handleAdminReleasePublish(w http.ResponseWriter, r *http.Reques
 	}
 	rel.PublishedBy = authSubject(r)
 	if store.NormalizeReleaseApp(rel.App) == "" {
-		writeError(w, http.StatusBadRequest, "app must be api, pwa, cli, or daemon")
+		writeError(w, http.StatusBadRequest, "app must be api, pwa, cli, daemon, or desktop")
 		return
 	}
 	if strings.TrimSpace(rel.Version) == "" {

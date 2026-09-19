@@ -72,6 +72,12 @@ jobs:
           LDFLAGS="-s -w -X central-memory/internal/buildinfo.Version=${VER} -X central-memory/internal/buildinfo.Commit=${GITHUB_SHA} -X central-memory/internal/buildinfo.BuiltAt=${{ steps.meta.outputs.built_at }} -X main.defaultServerURL=${API_URL}"
           go build -trimpath -ldflags "$LDFLAGS" -o "dist/nexus-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus
           go build -trimpath -ldflags "$LDFLAGS" -o "dist/nexus-daemon-${GOOS}-${GOARCH}${EXT}" ./cmd/daemon
+          if [ "$GOOS" = "windows" ]; then
+            go build -trimpath -ldflags "$LDFLAGS -H windowsgui" -o "dist/nexus-desktop-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus-desktop
+          fi
+          if [ "$GOOS" = "windows" ] && [ "$GOARCH" = "amd64" ]; then
+            cp scripts/install-windows.ps1 dist/install-windows.ps1
+          fi
 
       - name: Upload dist
         uses: actions/upload-artifact@v4

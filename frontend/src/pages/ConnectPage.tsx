@@ -37,7 +37,7 @@ import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 
 const INSTALL_PS1 =
-  'irm https://central-memory-releases.s3.ap-south-1.amazonaws.com/cli/0.1.0/install-windows.ps1 | iex'
+  'irm https://central-memory-releases.s3.ap-south-1.amazonaws.com/desktop/latest/install-windows.ps1 | iex'
 
 const MEM_PATH_WIN = String.raw`%LOCALAPPDATA%\Nexus\bin\mem.exe`
 

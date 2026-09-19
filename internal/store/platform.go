@@ -63,7 +63,7 @@ type PlatformStore interface {
 
 func NormalizeReleaseApp(app string) string {
 	switch strings.ToLower(strings.TrimSpace(app)) {
-	case buildinfo.AppAPI, buildinfo.AppPWA, buildinfo.AppCLI, buildinfo.AppDaemon:
+	case buildinfo.AppAPI, buildinfo.AppPWA, buildinfo.AppCLI, buildinfo.AppDaemon, buildinfo.AppDesktop:
 		return strings.ToLower(strings.TrimSpace(app))
 	default:
 		return ""

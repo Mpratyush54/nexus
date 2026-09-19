@@ -18,7 +18,7 @@ import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 import type { ReleaseArtifact } from '@/api/platform'
 
-const APPS = ['api', 'pwa', 'cli', 'daemon'] as const
+const APPS = ['api', 'pwa', 'cli', 'daemon', 'desktop'] as const
 
 export function AdminPage() {
   const { push } = useToast()

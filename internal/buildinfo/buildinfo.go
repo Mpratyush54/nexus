@@ -13,10 +13,11 @@ var BuiltAt = "unknown"
 
 // App names used in the release registry.
 const (
-	AppAPI    = "api"
-	AppPWA    = "pwa"
-	AppCLI    = "cli"
-	AppDaemon = "daemon"
+	AppAPI     = "api"
+	AppPWA     = "pwa"
+	AppCLI     = "cli"
+	AppDaemon  = "daemon"
+	AppDesktop = "desktop"
 )
 
 // Info is the JSON shape for GET /version and GET /healthz.

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"central-memory/internal/authbrowser"
+	"central-memory/internal/buildinfo"
 	"central-memory/internal/config"
 
 	"github.com/gogpu/systray"
@@ -31,6 +32,13 @@ var defaultServerURL = "https://api-nexus.pratyushes.dev"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	release, ok := acquireSingleInstance()
+	if !ok {
+		// Second launch: keep the existing tray instance; do not spawn another.
+		log.Println("Nexus Desktop is already running in the system tray")
+		return
+	}
+	defer release()
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}
@@ -117,6 +125,25 @@ func run() error {
 		go pickWorkspaceFolder(tray, &mu, &daemonProc, refreshStatus)
 	})
 	menu.AddSeparator()
+	menu.Add("Check for updates…", func() {
+		go checkAndApplyUpdate(tray)
+	})
+	menu.Add("Install Start Menu + Startup shortcuts", func() {
+		go func() {
+			if err := installAppShortcuts(); err != nil {
+				tray.ShowNotification("Nexus", err.Error())
+				return
+			}
+			tray.ShowNotification("Nexus", "Shortcuts installed — Start Menu → Programs → Nexus")
+		}()
+	})
+	verLabel := "Version: " + strings.TrimPrefix(buildinfo.Version, "v")
+	if buildinfo.Version == "" || buildinfo.Version == "dev" {
+		verLabel = "Version: dev"
+	}
+	vi := menu.Add(verLabel, nil)
+	vi.SetDisabled(true)
+	menu.AddSeparator()
 	menu.Add("Quit Nexus Desktop", func() {
 		mu.Lock()
 		if daemonProc != nil {
@@ -145,10 +172,20 @@ func run() error {
 
 	refreshStatus()
 	tray.ShowNotification("Nexus", "Nexus is running in the system tray")
+	_ = installAppShortcuts() // best-effort; also available from the menu
 	go func() {
 		for {
 			time.Sleep(8 * time.Second)
 			refreshStatus()
+		}
+	}()
+	go func() {
+		time.Sleep(15 * time.Second)
+		silentUpdateCheck(tray)
+		t := time.NewTicker(6 * time.Hour)
+		defer t.Stop()
+		for range t.C {
+			silentUpdateCheck(tray)
 		}
 	}()
 
@@ -158,6 +195,38 @@ func run() error {
 
 	tray.Show()
 	return tray.Run()
+}
+
+func checkAndApplyUpdate(tray *systray.SystemTray) {
+	tray.ShowNotification("Nexus", "Checking for updates…")
+	m, err := fetchDesktopManifest(nil)
+	if err != nil {
+		tray.ShowNotification("Nexus", "Update check failed: "+err.Error())
+		return
+	}
+	if !versionNewer(m.Version, buildinfo.Version) {
+		tray.ShowNotification("Nexus", "Up to date ("+buildinfo.Version+")")
+		return
+	}
+	tray.ShowNotification("Nexus", "Updating to "+m.Version+"…")
+	if err := applyDesktopUpdate(m); err != nil {
+		tray.ShowNotification("Nexus", "Update failed: "+err.Error())
+		return
+	}
+	tray.ShowNotification("Nexus", "Update downloaded — restarting…")
+	time.Sleep(800 * time.Millisecond)
+	os.Exit(0)
+}
+
+func silentUpdateCheck(tray *systray.SystemTray) {
+	m, err := fetchDesktopManifest(nil)
+	if err != nil || m == nil {
+		return
+	}
+	if !versionNewer(m.Version, buildinfo.Version) {
+		return
+	}
+	tray.ShowNotification("Nexus", "Update "+m.Version+" available — tray menu → Check for updates")
 }
 
 func daemonOnline() bool {
