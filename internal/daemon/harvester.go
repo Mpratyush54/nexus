@@ -86,6 +86,9 @@ type TranscriptSource struct {
 	// or hashed global stores). When true, scanDir peeks the file for a
 	// cwd/workdir hint and matches that against the workspace.
 	CwdMatch bool
+	// Global: always include files under Dirs (machine-wide stores with no
+	// per-project path segment, e.g. Cursor ai-tracking.db).
+	Global bool
 }
 
 // Turn is a single parsed dialogue turn.
