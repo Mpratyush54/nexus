@@ -213,7 +213,11 @@ export const daemonApi = {
 
   /** Force an immediate transcript scan (Connect “Scan now”). */
   harvestScanNow(proxyUrl: string) {
-    return this.bridgeFetch<HarvestStatus>(proxyUrl, '/local/harvest', { method: 'POST' })
+    // Full walks (Cursor + OpenCode DB) routinely exceed the default 4s bridge timeout.
+    return this.bridgeFetch<HarvestStatus>(proxyUrl, '/local/harvest', {
+      method: 'POST',
+      signal: AbortSignal.timeout(120_000),
+    })
   },
 
   gitStatus(proxyUrl: string, signal?: AbortSignal) {

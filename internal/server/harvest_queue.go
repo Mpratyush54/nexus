@@ -187,6 +187,9 @@ type harvestEnqueueRequest struct {
 	ProjectID string              `json:"project_id"`
 	Turns     []store.HarvestTurn `json:"turns"`
 	Source    string              `json:"source,omitempty"`
+	// Existing is ignored — older daemons still send it; DisallowUnknownFields
+	// would 400 and break harvest until every desktop is upgraded.
+	Existing json.RawMessage `json:"existing,omitempty"`
 }
 
 func (s *Server) handleMemoryHarvestEnqueue(w http.ResponseWriter, r *http.Request) {
