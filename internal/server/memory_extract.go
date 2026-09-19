@@ -48,16 +48,16 @@ func (s *Server) persistExtractProposal(r *http.Request, projectID string, p ext
 	if err := store.ValidateMemoryContent(content); err != nil {
 		return nil, err
 	}
-	level := strings.ToLower(strings.TrimSpace(p.Level))
+	level := extract.NormalizeLevel(p.Level, content)
+	if level == "session" {
+		level = "project"
+	}
 	switch level {
 	case "organization", "project", "personal":
 	default:
 		level = "project"
 	}
-	scope := strings.ToLower(strings.TrimSpace(p.Scope))
-	if scope == "" {
-		scope = "fact"
-	}
+	scope := extract.NormalizeScope(p.Scope, content)
 	source := strings.TrimSpace(p.Source)
 	if source == "" {
 		if provider == extract.ProviderOpenRouter {
