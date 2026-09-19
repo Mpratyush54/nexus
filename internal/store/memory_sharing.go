@@ -274,16 +274,33 @@ func (s *MemStore) UnshareMemory(ctx context.Context, memoryID, userID string) e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ensureShares()
-	if _, ok := s.memories[memoryID]; !ok {
+	item, ok := s.memories[memoryID]
+	if !ok {
 		return fmt.Errorf("store: memory %s: %w", memoryID, ErrNotFound)
 	}
+	found := false
 	for id, sh := range s.shares {
 		if sh.MemoryID == memoryID && sh.SharedWithUserID == userID {
 			delete(s.shares, id)
-			return nil
+			found = true
+			break
 		}
 	}
-	return fmt.Errorf("store: share %s/%s: %w", memoryID, userID, ErrNotFound)
+	if !found {
+		return fmt.Errorf("store: share %s/%s: %w", memoryID, userID, ErrNotFound)
+	}
+	// If no grants remain, restore project visibility so teammates regain access.
+	remaining := 0
+	for _, sh := range s.shares {
+		if sh.MemoryID == memoryID {
+			remaining++
+		}
+	}
+	if remaining == 0 && NormalizeVisibility(item.Visibility) == VisibilityShared {
+		item.Visibility = VisibilityProject
+		item.UpdatedAt = time.Now().UTC()
+	}
+	return nil
 }
 
 // ListMemoryShares returns all grants for a memory.
@@ -445,6 +462,16 @@ func (s *PostgresStore) UnshareMemory(ctx context.Context, memoryID, userID stri
 		}
 		return fmt.Errorf("store: share %s/%s: %w", memoryID, userID, ErrNotFound)
 	}
+	// Restore project visibility when the last grant is removed so teammates
+	// are not stuck on creator-only "shared" with zero grants.
+	_, _ = s.pool.Exec(ctx, `
+		UPDATE memory_items
+		SET visibility = 'project', updated_at = now()
+		WHERE id = $1::uuid
+		  AND visibility = 'shared'
+		  AND NOT EXISTS (
+		    SELECT 1 FROM memory_shares WHERE memory_id = $1::uuid
+		  )`, memoryID)
 	return nil
 }
 

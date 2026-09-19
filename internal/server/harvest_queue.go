@@ -166,16 +166,17 @@ func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob
 	if err := store.ValidateMemoryContent(content); err != nil {
 		return nil, err
 	}
-	level := strings.ToLower(strings.TrimSpace(p.Level))
+	level := extract.NormalizeLevel(p.Level, content)
+	// Harvested chat is durable project memory — session is almost always wrong.
+	if level == "session" {
+		level = "project"
+	}
 	switch level {
 	case "organization", "project", "personal":
 	default:
 		level = "project"
 	}
-	scope := strings.ToLower(strings.TrimSpace(p.Scope))
-	if scope == "" {
-		scope = "fact"
-	}
+	scope := extract.NormalizeScope(p.Scope, content)
 	key := strings.TrimSpace(p.Key)
 	if key == "" {
 		key = extract.KeyFromContent(content)

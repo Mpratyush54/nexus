@@ -66,8 +66,11 @@ func (c *Client) Complete(ctx context.Context, prompt string) ([]Proposal, error
 		"models": defaultOpenRouterFallbacks,
 		"messages": []map[string]string{
 			{
-				"role":    "system",
-				"content": "You extract durable project memories. Prefer empty over junk. Reply with JSON only: {\"memories\":[{\"key\",\"content\",\"level\",\"scope\",\"confidence\",\"explicit\"}]}.",
+				"role": "system",
+				"content": "You extract durable project memories. Prefer empty over junk. " +
+					"level must be one of: organization, project, personal, session (default project). " +
+					"scope must be one of: fact, preference, decision, constraint, pattern, episode_summary. " +
+					"Reply with JSON only: {\"memories\":[{\"key\",\"content\",\"level\",\"scope\",\"confidence\",\"explicit\"}]}.",
 			},
 			{"role": "user", "content": prompt},
 		},
@@ -206,18 +209,8 @@ func llmToProposal(m llmMemory) (Proposal, bool) {
 	if isJunk(content) {
 		return Proposal{}, false
 	}
-	level := strings.ToLower(strings.TrimSpace(m.Level))
-	switch level {
-	case "organization", "project", "personal", "session":
-	default:
-		level = classifyLevel(content)
-	}
-	scope := strings.ToLower(strings.TrimSpace(m.Scope))
-	switch scope {
-	case "fact", "preference", "decision", "constraint", "pattern", "episode_summary":
-	default:
-		scope = classifyScope(content)
-	}
+	level := NormalizeLevel(m.Level, content)
+	scope := NormalizeScope(m.Scope, content)
 	conf := m.Confidence
 	if conf <= 0 || conf > 1 {
 		conf = 0.8

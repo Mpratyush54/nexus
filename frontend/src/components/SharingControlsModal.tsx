@@ -5,15 +5,17 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { memoryApi, type MemoryShare } from '@/api/memory'
 import { Button } from '@/components/ui/Button'
 import { useToast } from '@/components/ui/Toast'
+import { useMembers, useRoles } from '@/hooks/useTeam'
 import { queryKeys } from '@/lib/query-keys'
+import { useAuth } from '@/providers/AuthProvider'
 import type { MemoryItem, MemoryShareVisibility } from '@/types/api'
 import { ApiError } from '@/types/api'
 
 const VISIBILITY: Array<{ id: MemoryShareVisibility; label: string; blurb: string }> = [
-  { id: 'private', label: 'Private', blurb: 'Only you' },
-  { id: 'shared', label: 'Shared', blurb: 'Selected teammates' },
+  { id: 'private', label: 'Private', blurb: 'Only the creator' },
+  { id: 'shared', label: 'Shared', blurb: 'Creator + people/roles you grant below' },
   { id: 'project', label: 'Project', blurb: 'Everyone on this project' },
-  { id: 'public', label: 'Public', blurb: 'Org-wide read' },
+  { id: 'public', label: 'Public', blurb: 'Readable without a share grant (still project-scoped in search)' },
 ]
 
 type Props = {
@@ -25,7 +27,10 @@ type Props = {
 export function SharingControlsModal({ item, open, onClose }: Props) {
   const titleId = useId()
   const { push } = useToast()
+  const { user } = useAuth()
   const qc = useQueryClient()
+  const members = useMembers()
+  const roles = useRoles()
   const [visibility, setVisibility] = useState<MemoryShareVisibility>('project')
   const [userId, setUserId] = useState('')
   const [role, setRole] = useState('')
@@ -45,6 +50,14 @@ export function SharingControlsModal({ item, open, onClose }: Props) {
       setVisibility(vis)
     }
   }, [item])
+
+  // After grants load, if DB flipped to shared, keep the radio honest.
+  useEffect(() => {
+    if (!open || !shares.data) return
+    if (shares.data.length > 0 && visibility === 'project') {
+      setVisibility('shared')
+    }
+  }, [open, shares.data, visibility])
 
   useEffect(() => {
     if (!open) return
@@ -68,6 +81,13 @@ export function SharingControlsModal({ item, open, onClose }: Props) {
     void qc.invalidateQueries({ queryKey: queryKeys.memory.all })
   }
 
+  const memberLabel = (id: string) => {
+    if (user?.userId && id === user.userId) return `${user.username || 'you'} (you)`
+    const hit = (members.data ?? []).find((m) => m.user_id === id)
+    if (hit?.role) return `${id.slice(0, 8)}… · ${hit.role}`
+    return `${id.slice(0, 8)}…`
+  }
+
   const onApply = async () => {
     if (!item) return
     setBusy(true)
@@ -88,13 +108,15 @@ export function SharingControlsModal({ item, open, onClose }: Props) {
     const uid = userId.trim()
     const r = role.trim()
     if ((uid && r) || (!uid && !r)) {
-      push({ title: 'Provide a user id or a role, not both', tone: 'amber' })
+      push({ title: 'Pick a teammate or a role, not both', tone: 'amber' })
       return
     }
     setBusy(true)
     try {
       await memoryApi.share(item.id, uid ? { user_id: uid } : { role: r })
-      push({ title: 'Share granted', detail: uid || r, tone: 'teal' })
+      // Granting always flips the row to shared on the server.
+      setVisibility('shared')
+      push({ title: 'Share granted', detail: uid ? memberLabel(uid) : r, tone: 'teal' })
       setUserId('')
       setRole('')
       refresh(item.id)
@@ -112,6 +134,9 @@ export function SharingControlsModal({ item, open, onClose }: Props) {
       await memoryApi.unshare(item.id, share.shared_with_user_id)
       push({ title: 'Share revoked' })
       refresh(item.id)
+      // Server restores project when last grant is gone.
+      const left = (shares.data ?? []).filter((s) => s.id !== share.id)
+      if (left.length === 0) setVisibility('project')
     } catch (err) {
       fail('Could not unshare', err)
     } finally {
@@ -134,6 +159,8 @@ export function SharingControlsModal({ item, open, onClose }: Props) {
       setBusy(false)
     }
   }
+
+  const teammateOptions = (members.data ?? []).filter((m) => m.user_id !== user?.userId)
 
   return (
     <AnimatePresence>
@@ -164,6 +191,9 @@ export function SharingControlsModal({ item, open, onClose }: Props) {
                   Share memory
                 </h2>
                 <p className="mt-0.5 truncate font-mono text-xs text-muted">{item.key}</p>
+                <p className="mt-1 text-[11px] text-fg-dim">
+                  Level {item.level || '—'} · {item.scope || '—'} · visibility {visibility}
+                </p>
               </div>
               <button
                 type="button"
@@ -204,24 +234,51 @@ export function SharingControlsModal({ item, open, onClose }: Props) {
             </fieldset>
 
             <form onSubmit={onGrant} className="mt-4 grid gap-2">
-              <p className="text-xs text-fg-dim">Grant to a user or role</p>
-              <div className="flex gap-2">
-                <input
+              <p className="text-xs text-fg-dim">
+                Grant a teammate or role (switches visibility to Shared)
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <select
                   value={userId}
-                  onChange={(e) => setUserId(e.target.value)}
-                  placeholder="user id"
-                  className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-raised px-3 font-mono text-xs text-fg outline-none focus:border-amber"
-                />
-                <input
+                  onChange={(e) => {
+                    setUserId(e.target.value)
+                    if (e.target.value) setRole('')
+                  }}
+                  className="h-9 min-w-0 flex-1 rounded-lg border border-border bg-raised px-2 text-xs text-fg outline-none focus:border-amber"
+                >
+                  <option value="">Select teammate…</option>
+                  {teammateOptions.map((m) => (
+                    <option key={m.user_id} value={m.user_id}>
+                      {m.user_id.slice(0, 8)}…{m.role ? ` (${m.role})` : ''}
+                    </option>
+                  ))}
+                </select>
+                <select
                   value={role}
-                  onChange={(e) => setRole(e.target.value)}
-                  placeholder="role"
-                  className="h-9 w-24 rounded-lg border border-border bg-raised px-3 text-xs text-fg outline-none focus:border-amber"
-                />
-                <Button type="submit" size="sm" disabled={busy}>
+                  onChange={(e) => {
+                    setRole(e.target.value)
+                    if (e.target.value) setUserId('')
+                  }}
+                  className="h-9 w-36 rounded-lg border border-border bg-raised px-2 text-xs text-fg outline-none focus:border-amber"
+                >
+                  <option value="">Or role…</option>
+                  {(roles.data ?? []).map((r) => (
+                    <option key={r.id || r.name} value={r.name}>
+                      {r.name}
+                    </option>
+                  ))}
+                </select>
+                <Button type="submit" size="sm" disabled={busy || (!userId && !role)}>
                   Grant
                 </Button>
               </div>
+              {members.isLoading ? (
+                <p className="text-[11px] text-muted">Loading teammates…</p>
+              ) : teammateOptions.length === 0 ? (
+                <p className="text-[11px] text-muted">
+                  No other project members yet — invite people under Team first.
+                </p>
+              ) : null}
             </form>
 
             <ul className="mt-3 max-h-32 space-y-1 overflow-y-auto">
@@ -230,8 +287,10 @@ export function SharingControlsModal({ item, open, onClose }: Props) {
                   key={sh.id}
                   className="flex items-center justify-between gap-2 rounded-md border border-border px-2 py-1.5 text-xs"
                 >
-                  <span className="truncate font-mono text-fg">
-                    {sh.shared_with_user_id || sh.shared_with_role || 'grant'}
+                  <span className="truncate text-fg">
+                    {sh.shared_with_user_id
+                      ? memberLabel(sh.shared_with_user_id)
+                      : `role:${sh.shared_with_role || 'grant'}`}
                   </span>
                   {sh.shared_with_user_id ? (
                     <button
@@ -242,7 +301,9 @@ export function SharingControlsModal({ item, open, onClose }: Props) {
                     >
                       <Trash2 size={12} />
                     </button>
-                  ) : null}
+                  ) : (
+                    <span className="text-[10px] text-muted">role</span>
+                  )}
                 </li>
               ))}
               {shares.isLoading ? <li className="text-xs text-muted">Loading shares…</li> : null}

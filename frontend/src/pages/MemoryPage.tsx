@@ -23,7 +23,7 @@ import { formatRelative } from '@/utils/format'
 import { useProjectSummaries } from '@/hooks/useProjectSummaries'
 import { useProjects } from '@/hooks/useProjects'
 
-const LEVEL_FILTERS = ['', 'session', 'project', 'user', 'org'] as const
+const LEVEL_FILTERS = ['', 'project', 'personal', 'organization', 'session'] as const
 
 function projectLabelOf(p: { display_name?: string; folder_name?: string; id: string }) {
   return p.display_name || p.folder_name || `${p.id.slice(0, 8)}…`

@@ -123,7 +123,7 @@ func TestMemoryShareCopyAndSearchVisibility(t *testing.T) {
 		t.Fatalf("copied lifecycle=%+v", copied)
 	}
 
-	// Unshare.
+	// Unshare last grant → visibility restores to project so teammates regain access.
 	rec = doJSON(t, s, http.MethodDelete, "/memory/"+created.ID+"/share/bob", aliceTok, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("unshare: %d %s", rec.Code, rec.Body.String())
@@ -131,10 +131,17 @@ func TestMemoryShareCopyAndSearchVisibility(t *testing.T) {
 
 	rec = doJSON(t, s, http.MethodGet, "/memory/search?project_id="+proj.ID, bobTok, nil)
 	_ = json.Unmarshal(rec.Body.Bytes(), &search)
+	found = false
 	for _, it := range search.Items {
 		if it.ID == created.ID {
-			t.Fatal("bob must not see memory after unshare")
+			found = true
+			if it.Visibility != store.VisibilityProject {
+				t.Fatalf("after last unshare want project visibility, got %q", it.Visibility)
+			}
 		}
+	}
+	if !found {
+		t.Fatal("bob (project member) should see memory again after last grant revoked")
 	}
 }
 
