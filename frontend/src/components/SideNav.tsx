@@ -5,13 +5,13 @@ import {
   Building2,
   ChevronRight,
   Cable,
-  GitBranch,
   LayoutDashboard,
   Layers,
   Menu,
   MessageSquare,
   Search,
   Shield,
+  Split,
   Users,
   X,
 } from 'lucide-react'
@@ -32,7 +32,8 @@ const links = [
   { to: '/app/team', label: 'Team', icon: Users },
   { to: '/app/org', label: 'Org', icon: Building2 },
   { to: '/app/activity', label: 'Activity', icon: Activity },
-  { to: '/app/branches', label: 'Branches', icon: GitBranch },
+  // Memory CoW overlays — not git/GitHub (GitHub lives under Team).
+  { to: '/app/branches', label: 'Overlays', icon: Split },
   { to: '/app/connect', label: 'Desktop', icon: Cable },
 ] as const
 

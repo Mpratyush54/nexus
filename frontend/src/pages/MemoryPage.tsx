@@ -97,6 +97,11 @@ export function MemoryPage() {
 
   const proposed = filtered.filter((i) => i.status === 'PROPOSED')
   const rest = filtered.filter((i) => i.status !== 'PROPOSED')
+  // Only in-flight batches — done/failed leave this list; facts land in Library.
+  const incomingHarvest = useMemo(
+    () => (harvestQ.data ?? []).filter((j) => j.status === 'queued' || j.status === 'processing'),
+    [harvestQ.data],
+  )
 
   const onConfirm = (id: string, key: string) => {
     confirm.mutate(id, {
@@ -193,14 +198,17 @@ export function MemoryPage() {
         </GlassPanel>
       ) : null}
 
-      {(harvestQ.data?.length ?? 0) > 0 ? (
+      {incomingHarvest.length > 0 ? (
         <GlassPanel className="space-y-3 p-5">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-medium text-fg">Incoming harvest (raw)</h2>
-            <StatusPill tone="teal">{`${harvestQ.data!.length} batches`}</StatusPill>
+            <StatusPill tone="amber">{`${incomingHarvest.length} in flight`}</StatusPill>
           </div>
+          <p className="text-[11px] text-muted">
+            Finished batches leave this list — extracted facts appear under Library.
+          </p>
           <ul className="max-h-[28rem] space-y-2 overflow-auto text-sm">
-            {harvestQ.data!.slice(0, 20).map((job) => {
+            {incomingHarvest.slice(0, 20).map((job) => {
               const open = expandedHarvest === job.id
               const full = harvestFull[job.id]
               const body =
@@ -213,17 +221,7 @@ export function MemoryPage() {
                 <li key={job.id} className="rounded-lg border border-border bg-raised/40 px-3 py-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div className="flex flex-wrap items-center gap-2">
-                      <StatusPill
-                        tone={
-                          job.status === 'done'
-                            ? 'teal'
-                            : job.status === 'failed'
-                              ? 'danger'
-                              : 'amber'
-                        }
-                      >
-                        {job.status}
-                      </StatusPill>
+                      <StatusPill tone="amber">{job.status}</StatusPill>
                       <span className="text-[11px] text-muted">
                         {job.turn_count} turns
                         {job.result_count ? ` · ${job.result_count} memories` : ''}

@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { GitBranch, GitMerge } from 'lucide-react'
+import { GitMerge, Split } from 'lucide-react'
 import { useMemo, useState, type FormEvent } from 'react'
 import { normalizeDiff } from '@/api/branches'
 import { Button } from '@/components/ui/Button'
@@ -57,7 +57,7 @@ export function BranchesPage() {
       { name: n, from: from || 'main', visibility: 'shared' },
       {
         onSuccess: () => {
-          push({ title: 'Branch created', detail: n, tone: 'teal' })
+          push({ title: 'Overlay created', detail: n, tone: 'teal' })
           setName('')
           setTarget(n)
         },
@@ -78,18 +78,19 @@ export function BranchesPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">Branches</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-fg">Memory overlays</h1>
         <p className="mt-1 text-sm text-fg-dim">
-          Memory branch tree, side-by-side diffs, and merge.
+          Fork project memory into an overlay, diff, and merge back. This is not git or GitHub —
+          remotes live under Team.
         </p>
       </div>
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
         <GlassPanel className="space-y-4 p-5">
           <div className="flex items-center gap-2">
-            <GitBranch className="h-4 w-4 text-fg-dim" />
-            <h2 className="text-sm font-medium text-fg">Tree</h2>
-            <StatusPill>{`${tree.length} branches`}</StatusPill>
+            <Split className="h-4 w-4 text-fg-dim" />
+            <h2 className="text-sm font-medium text-fg">Overlay tree</h2>
+            <StatusPill>{`${tree.length} overlays`}</StatusPill>
           </div>
 
           <form onSubmit={onFork} className="space-y-2">
@@ -97,7 +98,7 @@ export function BranchesPage() {
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="new-branch"
+                placeholder="overlay-name"
                 className="h-9 min-w-[8rem] flex-1 rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber"
               />
               <select
@@ -112,7 +113,7 @@ export function BranchesPage() {
                 ))}
               </select>
               <Button type="submit" size="sm" disabled={create.isPending}>
-                Fork
+                Create overlay
               </Button>
             </div>
           </form>

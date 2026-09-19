@@ -30,6 +30,7 @@ export function useHarvestQueue() {
   const { projectId, isAuthenticated } = useAuth()
   const qc = useQueryClient()
   const prevResults = useRef(0)
+  const prevInFlight = useRef(0)
 
   const query = useQuery({
     queryKey: queryKeys.memory.harvest(projectId ?? ''),
@@ -42,15 +43,19 @@ export function useHarvestQueue() {
 
   useEffect(() => {
     prevResults.current = 0
+    prevInFlight.current = 0
   }, [projectId])
 
   useEffect(() => {
     const items = query.data ?? []
     const results = items.reduce((n, j) => n + (j.result_count ?? 0), 0)
-    if (results > prevResults.current) {
+    const inFlight = items.filter((j) => j.status === 'queued' || j.status === 'processing').length
+    // Refresh Library when new memories land or a batch leaves the in-flight queue.
+    if (results > prevResults.current || (prevInFlight.current > 0 && inFlight < prevInFlight.current)) {
       void qc.invalidateQueries({ queryKey: queryKeys.memory.all })
     }
     prevResults.current = results
+    prevInFlight.current = inFlight
   }, [query.data, qc])
 
   return query

@@ -99,7 +99,8 @@ export function AgentsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Agents</h1>
         <p className="mt-1 text-sm text-fg-dim">
-          Live MCP call log, HUD connections, and the permission matrix.
+          MCP tool permissions and live call log. Separate from Desktop setup (install / harvest) —
+          this page is for gating what connected agents may do.
         </p>
       </div>
 

@@ -67,7 +67,8 @@ export function SessionsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Sessions</h1>
         <p className="mt-1 text-sm text-fg-dim">
-          Handoff context between agents and steer live runs.
+          Optional multi-agent handoffs and live steer. Day-to-day harvest does not need a session —
+          Desktop auto-sync writes straight to Memory.
         </p>
       </div>
 
