@@ -22,14 +22,7 @@ func NewMemHarvestQueue() *MemHarvestQueue {
 func (q *MemHarvestQueue) EnqueueHarvestJob(_ context.Context, projectID, source string, turns []HarvestTurn) (*HarvestJob, bool, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	cleaned := make([]HarvestTurn, 0, len(turns))
-	for _, t := range turns {
-		c := strings.TrimSpace(t.Content)
-		if c == "" {
-			continue
-		}
-		cleaned = append(cleaned, t)
-	}
+	cleaned := CleanHarvestTurns(turns)
 	if len(cleaned) == 0 {
 		return nil, false, fmt.Errorf("harvest: no turns")
 	}
@@ -47,7 +40,7 @@ func (q *MemHarvestQueue) EnqueueHarvestJob(_ context.Context, projectID, source
 		ProjectID:  projectID,
 		DedupeKey:  dedupe,
 		Status:     HarvestQueued,
-		Source:     source,
+		Source:     SanitizeUTF8(strings.TrimSpace(source)),
 		Turns:      cleaned,
 		RawPreview: HarvestRawPreview(cleaned, 8000),
 		TurnCount:  len(cleaned),

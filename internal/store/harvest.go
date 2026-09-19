@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Harvest job statuses (queue → OpenRouter worker).
@@ -51,6 +52,26 @@ type HarvestJob struct {
 	UpdatedAt     time.Time     `json:"updated_at"`
 	StartedAt     *time.Time    `json:"started_at,omitempty"`
 	FinishedAt    *time.Time    `json:"finished_at,omitempty"`
+}
+
+// SanitizeUTF8 strips invalid UTF-8 so Postgres TEXT/JSONB inserts never
+// fail with SQLSTATE 22021. Truncation must go through TruncateUTF8 — a
+// raw s[:n] cut mid-rune recreates invalid sequences (e.g. 0xe2 0xe2 0x80).
+func SanitizeUTF8(s string) string {
+	return strings.ToValidUTF8(s, "")
+}
+
+// TruncateUTF8 caps byte length without splitting a multi-byte rune.
+func TruncateUTF8(s string, max int) string {
+	s = SanitizeUTF8(s)
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	s = s[:max]
+	for len(s) > 0 && !utf8.ValidString(s) {
+		s = s[:len(s)-1]
+	}
+	return s
 }
 
 // HarvestErrorTransient reports whether err text looks retryable (rate limits,
@@ -117,11 +138,11 @@ func HarvestRawPreview(turns []HarvestTurn, max int) string {
 	}
 	var b strings.Builder
 	for _, t := range turns {
-		c := strings.TrimSpace(t.Content)
+		c := strings.TrimSpace(SanitizeUTF8(t.Content))
 		if c == "" {
 			continue
 		}
-		sp := strings.TrimSpace(t.Speaker)
+		sp := strings.TrimSpace(SanitizeUTF8(t.Speaker))
 		if sp == "" {
 			sp = "?"
 		}
@@ -132,14 +153,37 @@ func HarvestRawPreview(turns []HarvestTurn, max int) string {
 		if b.Len()+len(line) > max {
 			remain := max - b.Len() - 1
 			if remain > 20 {
-				b.WriteString(line[:remain])
+				b.WriteString(TruncateUTF8(line, remain))
 				b.WriteString("…")
 			}
 			break
 		}
 		b.WriteString(line)
 	}
-	return b.String()
+	return SanitizeUTF8(b.String())
+}
+
+// CleanHarvestTurns normalizes speaker/content for Postgres-safe enqueue.
+func CleanHarvestTurns(turns []HarvestTurn) []HarvestTurn {
+	cleaned := make([]HarvestTurn, 0, len(turns))
+	for _, t := range turns {
+		c := strings.TrimSpace(SanitizeUTF8(t.Content))
+		if c == "" {
+			continue
+		}
+		c = TruncateUTF8(c, 8000)
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
+		cleaned = append(cleaned, HarvestTurn{
+			Speaker:   TruncateUTF8(SanitizeUTF8(strings.TrimSpace(t.Speaker)), 200),
+			Content:   c,
+			Timestamp: TruncateUTF8(SanitizeUTF8(strings.TrimSpace(t.Timestamp)), 64),
+			SessionID: TruncateUTF8(SanitizeUTF8(strings.TrimSpace(t.SessionID)), 200),
+		})
+	}
+	return cleaned
 }
 
 // MarshalHarvestTurns encodes turns for JSONB storage.

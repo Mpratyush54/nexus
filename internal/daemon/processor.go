@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -1095,6 +1096,11 @@ func eventsToExtractTurns(events []Event) []map[string]string {
 			}
 			if len(c) > 4000 {
 				c = c[:4000]
+				// Drop a partial trailing UTF-8 rune so Postgres never sees
+				// SQLSTATE 22021 (invalid byte sequence) on harvest enqueue.
+				for len(c) > 0 && !utf8.ValidString(c) {
+					c = c[:len(c)-1]
+				}
 			}
 			row := map[string]string{
 				"speaker": cand.Speaker,

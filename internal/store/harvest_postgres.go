@@ -44,27 +44,7 @@ func (q *PostgresHarvestQueue) EnqueueHarvestJob(ctx context.Context, projectID,
 	if projectID == "" {
 		return nil, false, fmt.Errorf("harvest: project_id required")
 	}
-	cleaned := make([]HarvestTurn, 0, len(turns))
-	for _, t := range turns {
-		c := strings.TrimSpace(t.Content)
-		if c == "" {
-			continue
-		}
-		c = strings.ToValidUTF8(c, "")
-		c = strings.TrimSpace(c)
-		if c == "" {
-			continue
-		}
-		if len(c) > 8000 {
-			c = c[:8000]
-		}
-		cleaned = append(cleaned, HarvestTurn{
-			Speaker:   strings.ToValidUTF8(strings.TrimSpace(t.Speaker), ""),
-			Content:   c,
-			Timestamp: strings.TrimSpace(t.Timestamp),
-			SessionID: strings.TrimSpace(t.SessionID),
-		})
-	}
+	cleaned := CleanHarvestTurns(turns)
 	if len(cleaned) == 0 {
 		return nil, false, fmt.Errorf("harvest: no turns")
 	}
@@ -74,7 +54,10 @@ func (q *PostgresHarvestQueue) EnqueueHarvestJob(ctx context.Context, projectID,
 	}
 	dedupe := HarvestDedupeKey(cleaned)
 	preview := HarvestRawPreview(cleaned, 8000)
-	source = strings.TrimSpace(source)
+	source = SanitizeUTF8(strings.TrimSpace(source))
+	if len(source) > 500 {
+		source = TruncateUTF8(source, 500)
+	}
 
 	var id string
 	var status string
