@@ -32,6 +32,7 @@ import {
 } from '@/hooks/useDaemon'
 import { useCreateSession, useSessions } from '@/hooks/useSessions'
 import { useMemorySearch } from '@/hooks/useMemory'
+import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
@@ -143,6 +144,7 @@ export function ConnectPage() {
   const git = useLocalGitStatus(bridgeUrl)
   const scanNow = useTriggerHarvestScan(bridgeUrl)
   const harvestedMemories = useMemorySearch('')
+  useFollowHarvestProject(harvest.data)
 
   const [mcpJson, setMcpJson] = useState<string | null>(null)
   const [mintedToken, setMintedToken] = useState<string | null>(null)

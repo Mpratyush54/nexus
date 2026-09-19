@@ -46,3 +46,8 @@ output "releases_bucket" {
   description = "S3 bucket for CLI/daemon/PWA versioned release artifacts (nexus update)."
   value       = aws_s3_bucket.releases.id
 }
+
+output "harvest_queue_url" {
+  description = "SQS queue URL for harvest OpenRouter jobs (HARVEST_QUEUE_URL)."
+  value       = aws_sqs_queue.harvest.url
+}

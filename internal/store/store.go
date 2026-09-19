@@ -194,6 +194,11 @@ func (s *MemStore) ResolveProject(ctx context.Context, canonicalURL, rootCommit,
 	defer s.mu.Unlock()
 
 	normURL := NormalizeGitURL(canonicalURL)
+	var err error
+	folderName, err = SanitizeProjectFolderName(normURL, rootCommit, folderName)
+	if err != nil {
+		return nil, err
+	}
 
 	// 1. Check canonical URL first
 	if normURL != "" {

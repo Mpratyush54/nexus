@@ -31,6 +31,7 @@ import (
 	"central-memory/internal/config"
 	"central-memory/internal/security"
 	"central-memory/internal/steering"
+	"central-memory/internal/store"
 )
 
 // HeartbeatInterval is the daemon -> server heartbeat period (30s).
@@ -666,6 +667,15 @@ func (d *Daemon) ResolveProjectIDForRoot(ctx context.Context) (string, error) {
 func (d *Daemon) resolveProjectID(ctx context.Context, base string) (string, error) {
 	origin, rootCommit := FingerprintOf(d.Root)
 	folder := filepath.Base(filepath.Clean(d.Root))
+	if home, err := os.UserHomeDir(); err == nil {
+		if strings.EqualFold(filepath.Clean(d.Root), filepath.Clean(home)) ||
+			strings.EqualFold(folder, filepath.Base(home)) && origin == "" {
+			return "", fmt.Errorf("daemon: workspace root %q looks like your home folder — pick a project directory (tray → Set workspace folder)", d.Root)
+		}
+	}
+	if !store.ValidProjectFolderName(folder) && strings.TrimSpace(origin) == "" && strings.TrimSpace(rootCommit) == "" {
+		return "", fmt.Errorf("daemon: refusing to register project from folder name %q — set a real workspace folder", folder)
+	}
 	var out struct {
 		ID string `json:"id"`
 	}

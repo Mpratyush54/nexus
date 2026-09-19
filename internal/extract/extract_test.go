@@ -56,7 +56,7 @@ func TestExtractOpenRouterSuccess(t *testing.T) {
 	}
 }
 
-func TestExtractOpenRouterEmptyFallsBackToDurableHeuristic(t *testing.T) {
+func TestExtractOpenRouterEmptyDoesNotHeuristicWhenKeySet(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{
@@ -74,15 +74,15 @@ func TestExtractOpenRouterEmptyFallsBackToDurableHeuristic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Provider != ProviderHeuristic {
-		t.Fatalf("provider = %q want heuristic for empty LLM + durable turn", res.Provider)
+	if res.Provider != ProviderOpenRouter {
+		t.Fatalf("provider = %q want openrouter", res.Provider)
 	}
-	if len(res.Proposals) != 1 {
-		t.Fatalf("want durable heuristic proposal, got %+v", res.Proposals)
+	if len(res.Proposals) != 0 {
+		t.Fatalf("want empty proposals (no heuristic), got %+v", res.Proposals)
 	}
 }
 
-func TestExtractFallsBackHeuristicOnLLMFailure(t *testing.T) {
+func TestExtractNoHeuristicOnLLMFailureWhenKeySet(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "boom", http.StatusBadGateway)
 	}))
@@ -96,11 +96,14 @@ func TestExtractFallsBackHeuristicOnLLMFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Provider != ProviderHeuristic {
-		t.Fatalf("provider = %q want heuristic", res.Provider)
+	if res.Provider != ProviderOpenRouter {
+		t.Fatalf("provider = %q want openrouter", res.Provider)
 	}
-	if len(res.Proposals) != 1 {
-		t.Fatalf("expected heuristic proposal, got %+v", res.Proposals)
+	if res.LLMError == "" {
+		t.Fatal("expected llm_error")
+	}
+	if len(res.Proposals) != 0 {
+		t.Fatalf("want no heuristic scrap, got %+v", res.Proposals)
 	}
 }
 
@@ -126,6 +129,11 @@ func TestExtractThrottleSkipsSecondLLMCall(t *testing.T) {
 	_, _ = svc.Extract(context.Background(), "p1", turn, nil)
 	if calls != 1 {
 		t.Fatalf("LLM calls = %d want 1 (throttled)", calls)
+	}
+	res, _ := svc.Extract(context.Background(), "p1", turn, nil)
+	if res.Provider != "throttled" && len(res.Proposals) != 0 {
+		// After markLLM, further calls must not invent heuristic scrap.
+		t.Fatalf("throttled extract should be empty, got provider=%q n=%d", res.Provider, len(res.Proposals))
 	}
 }
 

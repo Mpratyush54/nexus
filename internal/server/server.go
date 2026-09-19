@@ -93,6 +93,12 @@ type Server struct {
 	// for POST /memory/extract. Nil selects extract.NewService(ConfigFromEnv).
 	Extractor *extract.Service
 
+	// Harvest is the raw-turn queue (DB + optional SQS). When set,
+	// POST /memory/extract enqueues instead of sync heuristic scrap.
+	Harvest store.HarvestQueue
+	// HarvestSQS optionally notifies SQS when a job is enqueued.
+	HarvestSQS harvestSQSNotifier
+
 	// PushClient is the HTTP client used for Web Push delivery. Nil uses
 	// http.DefaultClient; tests inject an httptest client.
 	PushClient *http.Client

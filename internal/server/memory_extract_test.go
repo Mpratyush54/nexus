@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"central-memory/internal/extract"
+	"central-memory/internal/store"
 )
 
 func TestMemoryExtractHeuristicCreatesProposed(t *testing.T) {
@@ -124,7 +125,7 @@ func TestMemoryExtractRequiresAuth(t *testing.T) {
 	}
 }
 
-func TestMemoryExtractThrottleFallsBack(t *testing.T) {
+func TestMemoryExtractThrottleSkipsHeuristic(t *testing.T) {
 	calls := 0
 	or := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls++
@@ -155,16 +156,52 @@ func TestMemoryExtractThrottleFallsBack(t *testing.T) {
 	_ = doJSON(t, s, http.MethodPost, "/memory/extract", tok, body)
 	rec := doJSON(t, s, http.MethodPost, "/memory/extract", tok, body)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("second extract status = %d", rec.Code)
+		t.Fatalf("second extract status = %d body=%s", rec.Code, rec.Body.String())
 	}
 	if calls != 1 {
 		t.Fatalf("openrouter calls = %d want 1", calls)
 	}
 	var out struct {
 		Provider string `json:"provider"`
+		Count    int    `json:"count"`
 	}
 	decodeBody(t, rec, &out)
-	if out.Provider != extract.ProviderHeuristic {
-		t.Fatalf("second call provider = %q want heuristic", out.Provider)
+	if out.Count != 0 {
+		t.Fatalf("throttled call must not emit heuristic scrap, got count=%d provider=%q", out.Count, out.Provider)
+	}
+}
+
+func TestMemoryHarvestEnqueueShowsRaw(t *testing.T) {
+	s := newTestServer()
+	s.Harvest = store.NewMemHarvestQueue()
+	tok := loginAs(t, s, "alice")
+	pid := resolveTestProject(t, s, tok, "harvest-raw")
+	rec := doJSON(t, s, http.MethodPost, "/memory/harvest", tok, map[string]any{
+		"project_id": pid,
+		"source":     "test",
+		"turns": []map[string]string{
+			{"speaker": "user", "content": "We decided the harvest queue should show raw turns in the portal immediately."},
+		},
+	})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Created bool `json:"created"`
+		Job     struct {
+			Status     string `json:"status"`
+			RawPreview string `json:"raw_preview"`
+		} `json:"job"`
+	}
+	decodeBody(t, rec, &out)
+	if !out.Created || out.Job.Status != "queued" {
+		t.Fatalf("unexpected: %+v", out)
+	}
+	if !strings.Contains(out.Job.RawPreview, "harvest queue") {
+		t.Fatalf("raw_preview = %q", out.Job.RawPreview)
+	}
+	list := doJSON(t, s, http.MethodGet, "/memory/harvest?project_id="+pid, tok, nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d", list.Code)
 	}
 }

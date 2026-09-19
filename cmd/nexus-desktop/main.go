@@ -36,6 +36,7 @@ var defaultServerURL = "https://api-nexus.pratyushes.dev"
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	setupDesktopLog()
+	detachFromParentConsole()
 	release, ok := acquireSingleInstance()
 	if !ok {
 		// Second launch: keep the existing tray instance; do not spawn another.
@@ -208,7 +209,11 @@ func run() error {
 	}()
 
 	if file, _ := config.LoadFile(); strings.TrimSpace(file.Token) != "" {
-		go func() { _ = ensureDaemon(&mu, &daemonProc) }()
+		go func() {
+			if err := ensureDaemon(&mu, &daemonProc); err != nil {
+				log.Printf("ensureDaemon: %v", err)
+			}
+		}()
 	}
 
 	log.Println("tray message loop starting")
@@ -266,6 +271,9 @@ func ensureDaemon(mu *sync.Mutex, proc **os.Process) error {
 		return err
 	}
 	root := resolveWorkspaceRoot()
+	if root == "" {
+		return fmt.Errorf("no workspace folder set — use tray → Set workspace folder (do not rely on the terminal's current directory)")
+	}
 	file, _ := config.LoadFile()
 	server := firstNonEmpty(file.ServerURL, config.ResolveServerURL(defaultServerURL))
 	args := []string{"-root", root, "-server", server}
@@ -278,6 +286,7 @@ func ensureDaemon(mu *sync.Mutex, proc **os.Process) error {
 	cmd := exec.Command(bin, args...)
 	cmd.Stdout = nil
 	cmd.Stderr = nil
+	configureDaemonCmd(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -303,10 +312,14 @@ func resolveWorkspaceRoot() string {
 		}
 	}
 	if v := strings.TrimSpace(os.Getenv("NEXUS_WORKSPACE")); v != "" {
-		return v
+		if st, err := os.Stat(v); err == nil && st.IsDir() {
+			return v
+		}
 	}
-	root, _ := os.Getwd()
-	return root
+	// Never fall back to Getwd(): Start Menu / terminal cwd is often the user
+	// profile or a drive root and would mint junk portal projects
+	// ("\", "Pratyush Mishra", etc.).
+	return ""
 }
 
 func pickWorkspaceFolder(tray *systray.SystemTray, mu *sync.Mutex, proc **os.Process, refresh func()) {

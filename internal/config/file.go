@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -33,6 +34,8 @@ func LoadFile() (File, error) {
 		}
 		return File{}, err
 	}
+	// PowerShell Set-Content -Encoding UTF8 writes a BOM that encoding/json rejects.
+	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
 	var cfg File
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return File{}, fmt.Errorf("config: parse %s: %w", path, err)

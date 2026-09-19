@@ -111,6 +111,11 @@ func (s *Service) allowLLM(project string) bool {
 	return true
 }
 
+// AllowLLM reports whether an OpenRouter call is permitted for project now.
+func (s *Service) AllowLLM(project string) bool {
+	return s.allowLLM(project)
+}
+
 func (s *Service) markLLM(project string) {
 	if s == nil {
 		return

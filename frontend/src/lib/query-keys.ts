@@ -4,6 +4,7 @@ export const queryKeys = {
     all: ['memory'] as const,
     search: (projectId: string, q: string, level = '') =>
       ['memory', 'search', projectId, q, level] as const,
+    harvest: (projectId: string) => ['memory', 'harvest', projectId] as const,
     history: (id: string) => ['memory', 'history', id] as const,
     shares: (id: string) => ['memory', 'shares', id] as const,
   },

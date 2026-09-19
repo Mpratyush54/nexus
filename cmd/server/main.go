@@ -381,7 +381,10 @@ func run() error {
 		srv.Users = server.NewUserLookup(users)
 		srv.Accounts = users
 		srv.Tokens = store.NewAPITokenStore(pg.DB())
-		log.Print("server: postgres store + user login + api tokens wired")
+		srv.Harvest = store.NewPostgresHarvestQueue(pg.Pool())
+		srv.HarvestSQS = server.NewSQSHarvestNotifierFromEnv()
+		srv.StartHarvestWorker(ctx)
+		log.Print("server: postgres store + user login + api tokens + harvest queue wired")
 	}
 	// Lifecycle tick (issue #119 box 4): no-op-idle on stubStore (it
 	// supports no sweep seams); starts sweeping once the Postgres adapter

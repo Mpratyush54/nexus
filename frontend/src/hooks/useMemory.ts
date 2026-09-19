@@ -24,6 +24,19 @@ export function useMemorySearch(q = '', level = '') {
   })
 }
 
+/** Raw harvest jobs (queued / processing / done) for the active project. */
+export function useHarvestQueue() {
+  const { projectId, isAuthenticated } = useAuth()
+  return useQuery({
+    queryKey: queryKeys.memory.harvest(projectId ?? ''),
+    enabled: isAuthenticated && Boolean(projectId),
+    queryFn: ({ signal }) => memoryApi.harvestQueue(projectId!, signal),
+    select: (data) => data.items ?? [],
+    refetchInterval: 4_000,
+    retry: false,
+  })
+}
+
 export function useConfirmMemory() {
   const qc = useQueryClient()
   return useMutation({

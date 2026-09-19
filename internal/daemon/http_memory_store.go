@@ -221,9 +221,9 @@ func (s *HTTPMemoryStore) PrefetchExisting(ctx context.Context) error {
 	return nil
 }
 
-// ExtractRemote posts conversation turns to POST /memory/extract so the
-// central server (OpenRouter key) creates PROPOSED memories. Returns the
-// provider name and proposals mirrored into the local dedup cache.
+// ExtractRemote posts conversation turns to POST /memory/extract.
+// The server enqueues raw turns for OpenRouter (202 + job); legacy sync
+// responses with items are still accepted.
 func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]string) (provider string, proposals []Proposal, err error) {
 	if s == nil {
 		return "", nil, fmt.Errorf("daemon: http memory store is nil")
@@ -232,33 +232,17 @@ func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]
 	projectID := s.ProjectID
 	base := s.Base
 	token := s.Token
-	existing := append([]MemoryRecord(nil), s.local...)
 	s.mu.Unlock()
 	if base == "" || projectID == "" {
 		return "", nil, fmt.Errorf("daemon: http memory store missing server or project_id")
 	}
 	if len(turns) == 0 {
-		return "heuristic", nil, nil
-	}
-	existPayload := make([]map[string]string, 0, len(existing))
-	for _, e := range existing {
-		if strings.TrimSpace(e.Content) == "" {
-			continue
-		}
-		existPayload = append(existPayload, map[string]string{
-			"level":   string(e.Level),
-			"scope":   string(e.Scope),
-			"content": e.Content,
-		})
-		if len(existPayload) >= 30 {
-			break
-		}
+		return "queued", nil, nil
 	}
 	body := map[string]any{
 		"project_id": projectID,
 		"turns":      turns,
 		"source":     "daemon:harvester",
-		"existing":   existPayload,
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -290,6 +274,23 @@ func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]
 		}
 		return "", nil, fmt.Errorf("daemon: memory extract: %s", msg)
 	}
+	// Queue path: { job, created, queued }
+	var queued struct {
+		Created bool `json:"created"`
+		Queued  bool `json:"queued"`
+		Job     *struct {
+			ID     string `json:"id"`
+			Status string `json:"status"`
+		} `json:"job"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(rawResp, &queued); err == nil && queued.Job != nil {
+		label := "queued"
+		if !queued.Created {
+			label = "duplicate"
+		}
+		return label, nil, nil
+	}
 	var out struct {
 		Provider string `json:"provider"`
 		Items    []struct {
@@ -302,36 +303,17 @@ func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]
 		} `json:"items"`
 	}
 	if err := json.Unmarshal(rawResp, &out); err != nil {
-		return "", nil, fmt.Errorf("daemon: memory extract decode: %w", err)
-	}
-	now := time.Now().UTC()
-	for _, it := range out.Items {
-		p := Proposal{
-			Key:        it.Key,
-			Content:    it.Content,
-			Level:      MemoryLevel(it.Level),
-			Scope:      MemoryScope(it.Scope),
-			Confidence: it.Confidence,
-			Source:     it.Source,
-			ProposedAt: now,
-		}
-		proposals = append(proposals, p)
-		s.mu.Lock()
-		s.local = append(s.local, MemoryRecord{
-			Key:        it.Key,
-			Content:    it.Content,
-			Level:      MemoryLevel(it.Level),
-			Scope:      MemoryScope(it.Scope),
-			Confidence: it.Confidence,
-		})
-		if len(s.local) > 500 {
-			s.local = s.local[len(s.local)-400:]
-		}
-		s.mu.Unlock()
+		return "queued", nil, nil
 	}
 	provider = out.Provider
 	if provider == "" {
-		provider = "heuristic"
+		provider = "openrouter"
+	}
+	for _, it := range out.Items {
+		proposals = append(proposals, Proposal{
+			Key: it.Key, Content: it.Content, Level: MemoryLevel(it.Level),
+			Scope: MemoryScope(it.Scope), Confidence: it.Confidence, Source: it.Source,
+		})
 	}
 	return provider, proposals, nil
 }

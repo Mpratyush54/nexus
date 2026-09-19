@@ -9,11 +9,11 @@ import (
 	"central-memory/internal/store"
 )
 
-// extractRequest is the daemon → server harvest payload.
+// extractRequest is the daemon → server harvest payload (legacy sync path).
 type extractRequest struct {
-	ProjectID string          `json:"project_id"`
-	Turns     []extract.Turn  `json:"turns"`
-	Source    string          `json:"source,omitempty"`
+	ProjectID string             `json:"project_id"`
+	Turns     []extract.Turn     `json:"turns"`
+	Source    string             `json:"source,omitempty"`
 	Existing  []extract.Existing `json:"existing,omitempty"`
 }
 
@@ -22,80 +22,6 @@ func (s *Server) resolveExtractor() *extract.Service {
 		return s.Extractor
 	}
 	return extract.NewService(extract.ConfigFromEnv())
-}
-
-// handleMemoryExtract runs server-side OpenRouter (or heuristic) extraction
-// and persists PROPOSED memories. The OpenRouter key never leaves the server.
-func (s *Server) handleMemoryExtract(w http.ResponseWriter, r *http.Request) {
-	var req extractRequest
-	if !decodeJSON(w, r, &req) {
-		return
-	}
-	projectID := strings.TrimSpace(req.ProjectID)
-	if projectID == "" {
-		writeError(w, http.StatusBadRequest, "project_id is required")
-		return
-	}
-	if !s.authorizePermission(w, r, projectID, store.PermMemoryWrite) {
-		return
-	}
-	turns := extract.CapTurns(req.Turns)
-	if len(turns) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"items":    []*store.MemoryItem{},
-			"count":    0,
-			"provider": extract.ProviderHeuristic,
-		})
-		return
-	}
-
-	totalChars := 0
-	for _, t := range turns {
-		totalChars += len(t.Content)
-	}
-	ownerType, ownerID := s.billingOwnerForProject(r.Context(), projectID)
-	if !s.enforcePlanDimension(w, r, ownerType, ownerID, "memories") {
-		return
-	}
-	if !s.eventAllowed("memory-extract:" + projectID) {
-		writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
-		return
-	}
-	if ok, reason := s.quotaAllowed(totalChars); !ok {
-		writeError(w, http.StatusTooManyRequests, "quota exceeded: "+reason)
-		return
-	}
-
-	existing := req.Existing
-	if len(existing) == 0 {
-		existing = s.extractExistingHints(r, projectID)
-	}
-
-	svc := s.resolveExtractor()
-	result, err := svc.Extract(r.Context(), projectID, turns, existing)
-	if err != nil {
-		writeError(w, http.StatusBadGateway, "extraction failed: "+err.Error())
-		return
-	}
-	if result.LLMError != "" {
-		s.Log.Printf("memory extract: openrouter failed for %s: %s (falling back to heuristic)", projectID, result.LLMError)
-	}
-
-	srcHint := strings.TrimSpace(req.Source)
-	created := make([]*store.MemoryItem, 0, len(result.Proposals))
-	for _, p := range result.Proposals {
-		item, cerr := s.persistExtractProposal(r, projectID, p, srcHint, result.Provider)
-		if cerr != nil {
-			continue
-		}
-		created = append(created, item)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"items":     created,
-		"count":     len(created),
-		"provider":  result.Provider,
-		"llm_error": result.LLMError,
-	})
 }
 
 func (s *Server) extractExistingHints(r *http.Request, projectID string) []extract.Existing {
@@ -126,7 +52,6 @@ func (s *Server) persistExtractProposal(r *http.Request, projectID string, p ext
 	switch level {
 	case "organization", "project", "personal":
 	default:
-		// Harvested chats have no portal session_id — avoid session rows.
 		level = "project"
 	}
 	scope := strings.ToLower(strings.TrimSpace(p.Scope))

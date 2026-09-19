@@ -202,6 +202,8 @@ resource "aws_ecs_task_definition" "server" {
       { name = "DB_SSLMODE", value = "require" },
       { name = "MIGRATIONS_DIR", value = "/migrations" },
       { name = "OPENROUTER_MODEL", value = "nvidia/nemotron-3.5-lightning:free" },
+      { name = "HARVEST_QUEUE_URL", value = aws_sqs_queue.harvest.url },
+      { name = "AWS_REGION", value = var.region },
     ]
     # Secrets Manager refs — resolved by ECS at launch, never in git/env files.
     # Discrete DB_* parts (assembled into an identical DSN by migrate.sh and

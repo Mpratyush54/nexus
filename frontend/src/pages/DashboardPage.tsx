@@ -24,6 +24,7 @@ import {
 } from '@/hooks/useDaemon'
 import { useCurrentProject } from '@/hooks/useProjects'
 import { useProjectSummaries } from '@/hooks/useProjectSummaries'
+import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
 import { useAuth } from '@/providers/AuthProvider'
 import { formatRelative } from '@/utils/format'
 
@@ -56,6 +57,7 @@ export function DashboardPage() {
   const harvest = useLocalHarvest(bridgeUrl)
   const scanNow = useTriggerHarvestScan(bridgeUrl)
   const { push } = useToast()
+  useFollowHarvestProject(harvest.data)
 
   const m = dash.data?.metrics
   const hs = harvest.data
@@ -67,6 +69,7 @@ export function DashboardPage() {
       : hs?.project_id
         ? 'matched'
         : 'unknown'
+  const harvestProjectRow = (summaries.data ?? []).find((s) => s.project.id === hs?.project_id)
 
   const memoryItems = memories.data ?? []
   const proposed = memoryItems.filter((x) => x.status === 'PROPOSED').slice(0, 8)
@@ -107,6 +110,27 @@ export function DashboardPage() {
           <ProjectSwitcher compact />
         </div>
       </div>
+
+      {harvestTarget === 'mismatch' && hs?.project_id ? (
+        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/40 p-4">
+          <div>
+            <p className="text-sm text-fg">
+              Desktop is uploading memories to{' '}
+              <span className="font-medium">
+                {harvestProjectRow ? projectLabelOf(harvestProjectRow.project) : 'another project'}
+              </span>
+              , not the one selected here ({projectLabel}).
+            </p>
+            <p className="mt-1 text-xs text-fg-dim">
+              Folder <span className="font-mono">central-memory</span> often maps to git remote{' '}
+              <span className="font-mono">nexus</span> — switch to see live harvest.
+            </p>
+          </div>
+          <Button type="button" size="sm" onClick={() => setProjectId(hs.project_id!)}>
+            Show harvest project
+          </Button>
+        </GlassPanel>
+      ) : null}
 
       {richer ? (
         <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/30 p-4">

@@ -9,7 +9,13 @@ import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useToast } from '@/components/ui/Toast'
-import { useConfirmMemory, useMemorySearch, useRejectMemory } from '@/hooks/useMemory'
+import { useConfirmMemory, useHarvestQueue, useMemorySearch, useRejectMemory } from '@/hooks/useMemory'
+import {
+  useLocalDaemonAutodetect,
+  useLocalHarvest,
+  useLocalWorkspaceView,
+} from '@/hooks/useDaemon'
+import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError, type MemoryItem } from '@/types/api'
 import { formatRelative } from '@/utils/format'
@@ -19,11 +25,20 @@ const LEVEL_FILTERS = ['', 'session', 'project', 'user', 'org'] as const
 export function MemoryPage() {
   const { projectId } = useAuth()
   const { push } = useToast()
+  const local = useLocalDaemonAutodetect()
+  const serverView = useLocalWorkspaceView()
+  const bridgeUrl =
+    local.data?.baseUrl ||
+    local.data?.status.proxy_url ||
+    serverView.data?.proxy_url ||
+    undefined
+  useFollowHarvestProject(useLocalHarvest(bridgeUrl).data)
   const [q, setQ] = useState('')
   const [level, setLevel] = useState('')
   const [tagFilter, setTagFilter] = useState<string | null>(null)
   const deferredQ = useDeferredValue(q)
   const search = useMemorySearch(deferredQ, level)
+  const harvestQ = useHarvestQueue()
   const confirm = useConfirmMemory()
   const reject = useRejectMemory()
 
@@ -78,8 +93,8 @@ export function MemoryPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-fg">Memory</h1>
           <p className="mt-1 max-w-xl text-sm text-fg-dim">
-            Durable project facts and decisions — not a chat transcript. Confirm useful
-            proposals; reject the rest. Full conversations live under Sessions / Connect.
+            Incoming harvest shows raw chat batches while OpenRouter extracts durable facts.
+            Finished rows land here as confirmed memories — not PROPOSED scrap.
             {!projectId ? ' Select a project to load memories.' : null}
           </p>
           <div className="mt-3 max-w-xs">
@@ -98,6 +113,45 @@ export function MemoryPage() {
           </Button>
         </div>
       </div>
+
+      {(harvestQ.data?.length ?? 0) > 0 ? (
+        <GlassPanel className="space-y-3 p-5">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-medium text-fg">Incoming harvest (raw)</h2>
+            <StatusPill tone="teal">{`${harvestQ.data!.length} batches`}</StatusPill>
+          </div>
+          <ul className="max-h-64 space-y-2 overflow-auto text-sm">
+            {harvestQ.data!.slice(0, 12).map((job) => (
+              <li key={job.id} className="rounded-lg border border-border bg-raised/40 px-3 py-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <StatusPill
+                    tone={
+                      job.status === 'done'
+                        ? 'teal'
+                        : job.status === 'failed'
+                          ? 'danger'
+                          : job.status === 'processing'
+                            ? 'amber'
+                            : 'amber'
+                    }
+                  >
+                    {job.status}
+                  </StatusPill>
+                  <span className="text-[11px] text-muted">
+                    {job.turn_count} turns
+                    {job.result_count ? ` · ${job.result_count} memories` : ''}
+                    {job.provider ? ` · ${job.provider}` : ''}
+                  </span>
+                </div>
+                <pre className="mt-1.5 whitespace-pre-wrap font-sans text-xs text-fg-dim">
+                  {job.raw_preview || '(empty)'}
+                </pre>
+                {job.error ? <p className="mt-1 text-[11px] text-danger">{job.error}</p> : null}
+              </li>
+            ))}
+          </ul>
+        </GlassPanel>
+      ) : null}
 
       <div className="flex flex-wrap items-end gap-3">
         <label className="block min-w-[12rem] flex-1 max-w-md">

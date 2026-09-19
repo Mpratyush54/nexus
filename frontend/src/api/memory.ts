@@ -18,6 +18,20 @@ export type MemorySearchParams = {
   limit?: number
 }
 
+export type HarvestJob = {
+  id: string
+  project_id: string
+  status: string
+  raw_preview: string
+  turn_count: number
+  result_count: number
+  provider?: string
+  error?: string
+  source?: string
+  created_at: string
+  updated_at: string
+}
+
 /** Soft-fail helper: 404 means the Phase-2 edit/history API is not wired yet. */
 async function gracefulNotFound<T>(fn: () => Promise<T>): Promise<T | null> {
   try {
@@ -37,6 +51,12 @@ export const memoryApi = {
     if (params.limit) qs.set('limit', String(params.limit))
     if (params.tags?.length) qs.set('tags', params.tags.join(','))
     return apiRequest<ListResponse<MemoryItem>>(`/memory/search?${qs}`, { signal })
+  },
+
+  /** Raw harvest queue (turns waiting for / processed by OpenRouter). */
+  harvestQueue(projectId: string, signal?: AbortSignal) {
+    const qs = new URLSearchParams({ project_id: projectId })
+    return apiRequest<{ items: HarvestJob[]; count: number }>(`/memory/harvest?${qs}`, { signal })
   },
 
   confirm(id: string) {

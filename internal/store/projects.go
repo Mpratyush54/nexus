@@ -53,6 +53,10 @@ func scanProject(row pgx.Row) (*Project, error) {
 // returns the canonical row instead of a raw unique-violation.
 func (s *PostgresStore) ResolveProject(ctx context.Context, canonicalURL, rootCommit, folderName string) (*Project, error) {
 	normURL := NormalizeGitURL(canonicalURL)
+	folderName, err := SanitizeProjectFolderName(normURL, rootCommit, folderName)
+	if err != nil {
+		return nil, err
+	}
 
 	if p, err := s.lookupProject(ctx, normURL, rootCommit, folderName); err != nil {
 		return nil, err
