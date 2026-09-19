@@ -44,11 +44,16 @@ func (q *PostgresHarvestQueue) EnqueueHarvestJob(ctx context.Context, projectID,
 		if c == "" {
 			continue
 		}
+		c = strings.ToValidUTF8(c, "")
+		c = strings.TrimSpace(c)
+		if c == "" {
+			continue
+		}
 		if len(c) > 8000 {
 			c = c[:8000]
 		}
 		cleaned = append(cleaned, HarvestTurn{
-			Speaker:   strings.TrimSpace(t.Speaker),
+			Speaker:   strings.ToValidUTF8(strings.TrimSpace(t.Speaker), ""),
 			Content:   c,
 			Timestamp: strings.TrimSpace(t.Timestamp),
 		})
