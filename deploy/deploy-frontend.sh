@@ -1,10 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Live site (Cloudflare → S3) uses the domain bucket. The account-id bucket is a
-# staging/mirror only — deploying there alone leaves nexus.pratyushes.dev stale.
-BUCKET="${FRONTEND_S3_BUCKET:-nexus.pratyushes.dev}"
-echo "==> Target S3 Bucket: $BUCKET"
+# CI role can write the account-id mirror bucket. Cloudflare serves the domain
+# bucket (nexus.pratyushes.dev). Sync the mirror always; best-effort mirror→live.
+BUCKET="${FRONTEND_S3_BUCKET:-central-memory-frontend-833291393451}"
+LIVE_BUCKET="${FRONTEND_LIVE_S3_BUCKET:-nexus.pratyushes.dev}"
+echo "==> Target S3 Bucket: $BUCKET (live mirror: $LIVE_BUCKET)"
+
+sync_bucket() {
+  local target="$1"
+  echo "==> Syncing frontend assets to s3://${target}..."
+  aws s3 sync frontend/dist "s3://${target}" --delete \
+    --cache-control "public,max-age=31536000,immutable" \
+    --exclude "index.html" --exclude "sw.js" --exclude "manifest.webmanifest"
+
+  aws s3 cp frontend/dist/index.html "s3://${target}/index.html" \
+    --cache-control "public,max-age=60" --content-type "text/html"
+
+  aws s3 cp frontend/dist/sw.js "s3://${target}/sw.js" \
+    --cache-control "public,max-age=60" --content-type "application/javascript"
+
+  aws s3 cp frontend/dist/manifest.webmanifest "s3://${target}/manifest.webmanifest" \
+    --cache-control "public,max-age=60" --content-type "application/manifest+json"
+
+  aws s3 website "s3://${target}" --index-document index.html --error-document index.html 2>/dev/null || true
+}
 
 if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
   echo "Creating S3 bucket $BUCKET in ${AWS_REGION}..."
@@ -14,8 +34,6 @@ fi
 
 aws s3api put-public-access-block --bucket "$BUCKET" \
   --public-access-block-configuration "BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false" 2>/dev/null || true
-
-aws s3 website "s3://${BUCKET}" --index-document index.html --error-document index.html 2>/dev/null || true
 
 cat <<POLICY > /tmp/bucket-policy.json
 {
@@ -33,19 +51,23 @@ cat <<POLICY > /tmp/bucket-policy.json
 POLICY
 aws s3api put-bucket-policy --bucket "$BUCKET" --policy file:///tmp/bucket-policy.json || true
 
-echo "==> Syncing frontend assets to S3..."
-aws s3 sync frontend/dist "s3://${BUCKET}" --delete \
-  --cache-control "public,max-age=31536000,immutable" \
-  --exclude "index.html" --exclude "sw.js" --exclude "manifest.webmanifest"
+sync_bucket "$BUCKET"
 
-aws s3 cp frontend/dist/index.html "s3://${BUCKET}/index.html" \
-  --cache-control "public,max-age=60" --content-type "text/html"
-
-aws s3 cp frontend/dist/sw.js "s3://${BUCKET}/sw.js" \
-  --cache-control "public,max-age=60" --content-type "application/javascript"
-
-aws s3 cp frontend/dist/manifest.webmanifest "s3://${BUCKET}/manifest.webmanifest" \
-  --cache-control "public,max-age=60" --content-type "application/manifest+json"
+if [ "$LIVE_BUCKET" != "$BUCKET" ]; then
+  set +e
+  aws s3api head-bucket --bucket "$LIVE_BUCKET" >/dev/null 2>&1
+  live_ok=$?
+  if [ "$live_ok" -eq 0 ]; then
+    sync_bucket "$LIVE_BUCKET"
+    live_ok=$?
+  fi
+  set -e
+  if [ "$live_ok" -eq 0 ]; then
+    echo "==> Live bucket ${LIVE_BUCKET} updated"
+  else
+    echo "==> WARNING: could not sync live bucket ${LIVE_BUCKET} (grant CI role s3 access); mirror ${BUCKET} is current"
+  fi
+fi
 
 echo "==> Resolving CloudFront distribution..."
 DIST_ID="${FRONTEND_CLOUDFRONT_ID:-}"
@@ -116,6 +138,7 @@ fi
 
 echo "=========================================================="
 echo "S3 Bucket: $BUCKET"
+echo "Live Bucket: $LIVE_BUCKET"
 echo "S3 Website Endpoint: http://${BUCKET}.s3-website.${AWS_REGION}.amazonaws.com"
 if [ -n "$CF_DOMAIN" ]; then
   echo "CloudFront Distribution: $DIST_ID"
