@@ -28,8 +28,13 @@ func (s *Service) Extract(ctx context.Context, project string, turns []Turn, exi
 		props, err := client.Complete(ctx, prompt)
 		if err == nil {
 			s.markLLM(project)
-			// Successful LLM call wins even when empty — prefer "nothing
-			// durable" over heuristic re-scraping the same turns as junk.
+			if len(props) == 0 {
+				// Free models sometimes return empty even for clear decisions;
+				// keep durable heuristic hits so we do not drop real facts.
+				if h := Heuristic(project, turns, existing); len(h) > 0 {
+					return Result{Proposals: h, Provider: ProviderHeuristic}, nil
+				}
+			}
 			return Result{Proposals: props, Provider: ProviderOpenRouter}, nil
 		}
 		llmErr = err.Error()

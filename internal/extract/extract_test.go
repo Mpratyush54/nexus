@@ -56,7 +56,7 @@ func TestExtractOpenRouterSuccess(t *testing.T) {
 	}
 }
 
-func TestExtractOpenRouterEmptyIsNotHeuristic(t *testing.T) {
+func TestExtractOpenRouterEmptyFallsBackToDurableHeuristic(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"choices": []map[string]any{
@@ -74,11 +74,11 @@ func TestExtractOpenRouterEmptyIsNotHeuristic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Provider != ProviderOpenRouter {
-		t.Fatalf("provider = %q want openrouter (empty LLM must not fall back)", res.Provider)
+	if res.Provider != ProviderHeuristic {
+		t.Fatalf("provider = %q want heuristic for empty LLM + durable turn", res.Provider)
 	}
-	if len(res.Proposals) != 0 {
-		t.Fatalf("want empty proposals, got %+v", res.Proposals)
+	if len(res.Proposals) != 1 {
+		t.Fatalf("want durable heuristic proposal, got %+v", res.Proposals)
 	}
 }
 
