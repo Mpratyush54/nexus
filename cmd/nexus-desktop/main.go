@@ -28,10 +28,14 @@ import (
 //go:embed icon.png
 var iconPNG []byte
 
+//go:embed icon-dark.png
+var iconDarkPNG []byte
+
 var defaultServerURL = "https://api-nexus.pratyushes.dev"
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	setupDesktopLog()
 	release, ok := acquireSingleInstance()
 	if !ok {
 		// Second launch: keep the existing tray instance; do not spawn another.
@@ -42,6 +46,16 @@ func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func setupDesktopLog() {
+	dir := filepath.Join(os.Getenv("LOCALAPPDATA"), "Nexus", "logs")
+	_ = os.MkdirAll(dir, 0o755)
+	f, err := os.OpenFile(filepath.Join(dir, "desktop.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return
+	}
+	log.SetOutput(f)
 }
 
 func run() error {
@@ -156,6 +170,7 @@ func run() error {
 	})
 
 	tray.SetIcon(iconPNG).
+		SetDarkModeIcon(iconDarkPNG).
 		SetTooltip("Nexus").
 		SetMenu(menu).
 		OnClick(func() {
@@ -170,9 +185,12 @@ func run() error {
 			_ = authbrowser.OpenBrowser(config.ResolveAppURL() + "/app/dashboard")
 		})
 
+	// Show() must run before notifications — otherwise Shell_NotifyIcon fails
+	// and Windows may never surface the icon.
+	tray.Show()
 	refreshStatus()
-	tray.ShowNotification("Nexus", "Nexus is running in the system tray")
-	_ = installAppShortcuts() // best-effort; also available from the menu
+	tray.ShowNotification("Nexus", "Nexus is running in the system tray — click ^ if the icon is hidden")
+	go func() { _ = installAppShortcuts() }()
 	go func() {
 		for {
 			time.Sleep(8 * time.Second)
@@ -193,7 +211,7 @@ func run() error {
 		go func() { _ = ensureDaemon(&mu, &daemonProc) }()
 	}
 
-	tray.Show()
+	log.Println("tray message loop starting")
 	return tray.Run()
 }
 
