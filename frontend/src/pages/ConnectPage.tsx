@@ -100,7 +100,7 @@ export function ConnectPage() {
   const harvest = useLocalHarvest(bridgeUrl)
   const git = useLocalGitStatus(bridgeUrl)
   const scanNow = useTriggerHarvestScan(bridgeUrl)
-  const harvestedMemories = useMemorySearch('processor')
+  const harvestedMemories = useMemorySearch('')
 
   const [mcpJson, setMcpJson] = useState<string | null>(null)
   const [mintedToken, setMintedToken] = useState<string | null>(null)
@@ -404,10 +404,14 @@ export function ConnectPage() {
 
         <div>
           <p className="mb-2 text-xs font-medium text-fg">Harnesses</p>
+          <p className="mb-2 text-[11px] text-muted">
+            Only transcripts that match this folder ({folder || hs?.root || 'bound root'}) count.
+            Claude/Codex sessions for other D: projects stay at 0 until you bind that folder.
+          </p>
           <div className="flex flex-wrap gap-1.5">
             {(hs?.agents?.length ? hs.agents : []).map((a) => (
               <span
-                key={a.name}
+                key={`${a.name}-${a.format}`}
                 className={[
                   'inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px]',
                   a.active
@@ -417,15 +421,40 @@ export function ConnectPage() {
                 title={`${a.format}${a.cwd_match ? ' · cwd-match' : ''} · ${a.dirs} dirs`}
               >
                 <span className={a.active ? 'text-teal' : ''}>{a.name}</span>
+                <span className="font-mono text-muted">{a.format}</span>
                 {a.files_seen > 0 ? (
-                  <span className="font-mono text-muted">{a.files_seen}</span>
-                ) : null}
+                  <span className="font-mono text-fg">{a.files_seen}</span>
+                ) : (
+                  <span className="font-mono text-muted">0</span>
+                )}
               </span>
             ))}
             {!hs?.agents?.length && !harvestOnline ? (
               <span className="text-xs text-muted">Online daemon will list Claude, Cursor, Codex, OpenCode, …</span>
             ) : null}
           </div>
+        </div>
+
+        <div>
+          <p className="mb-2 text-xs font-medium text-fg">Matched JSONL / SQLite</p>
+          <ul className="max-h-48 space-y-1 overflow-auto rounded-lg border border-border bg-raised/30 p-2 font-mono text-[11px]">
+            {(hs?.files ?? []).map((f) => (
+              <li key={f.path} className="flex gap-2 text-fg-dim">
+                <span className="shrink-0 text-amber">{f.agent}</span>
+                <span className="shrink-0 text-muted">{f.format}</span>
+                <span className="min-w-0 truncate text-fg" title={f.path}>
+                  {f.name}
+                </span>
+              </li>
+            ))}
+            {!hs?.files?.length ? (
+              <li className="px-1 py-3 text-muted">
+                No files matched this workspace yet. Cursor chats for this folder appear as
+                <span className="text-fg"> *.jsonl</span> under agent-transcripts; SQLite is
+                tracked for liveness (row text needs sqlite extract).
+              </li>
+            ) : null}
+          </ul>
         </div>
 
         <div className="grid gap-4 lg:grid-cols-2">

@@ -60,6 +60,13 @@ export type HarvestLogLine = {
   detail?: string
 }
 
+export type HarvestFileHit = {
+  agent: string
+  format: string
+  path: string
+  name: string
+}
+
 export type HarvestStatus = {
   ok?: boolean
   running?: boolean
@@ -81,6 +88,7 @@ export type HarvestStatus = {
   last_proposal_error?: string
   last_event_at?: string
   agents?: HarvestAgentStat[]
+  files?: HarvestFileHit[]
   recent?: HarvestLogLine[]
   message?: string
 }

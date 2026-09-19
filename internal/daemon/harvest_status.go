@@ -48,6 +48,7 @@ type HarvestStatus struct {
 	LastProposalErr string             `json:"last_proposal_error,omitempty"`
 	LastEventAt     string             `json:"last_event_at,omitempty"`
 	Agents          []HarvestAgentStat `json:"agents"`
+	Files           []HarvestFileHit   `json:"files,omitempty"`
 	Recent          []HarvestLogLine   `json:"recent"`
 	Message         string             `json:"message,omitempty"`
 }
@@ -270,6 +271,7 @@ func (r *Runtime) HarvestSnapshot() HarvestStatus {
 		st.TrackedFiles = hs.TrackedFiles
 		st.ActiveSessions = hs.ActiveSessions
 		seen = hs.AgentFiles
+		st.Files = hs.RecentFiles
 	}
 	st.Agents = sourceAgentStats(seen)
 

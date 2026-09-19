@@ -128,6 +128,16 @@ type Harvester struct {
 	lastScanTurns int
 	lastScanErr   string
 	agentFiles    map[string]int // agent -> files touched in last scan
+	// recentFiles: matched transcript paths from the latest scan (portal list).
+	recentFiles []HarvestFileHit
+}
+
+// HarvestFileHit is one jsonl/sqlite path matched to this workspace.
+type HarvestFileHit struct {
+	Agent  string `json:"agent"`
+	Format string `json:"format"`
+	Path   string `json:"path"`
+	Name   string `json:"name"`
 }
 
 // fileMeta tracks SQLite/vscdb files we cannot parse without a driver.
@@ -291,8 +301,9 @@ func ResolveSources() []TranscriptSource {
 		{Agent: "cursor", Dirs: []string{
 			filepath.Join(appData, "Cursor", "User", "workspaceStorage"),
 			filepath.Join(home, ".cursor", "chats"),
+			filepath.Join(home, ".cursor", "ai-tracking"),
 			codeWS,
-		}, Format: FormatSQLite},
+		}, Format: FormatSQLite, CwdMatch: true},
 		// Codex CLI / Desktop — date-sharded rollouts (CODEX_HOME override)
 		{Agent: "codex", Dirs: []string{
 			filepath.Join(codexHome, "sessions"),
@@ -1236,6 +1247,7 @@ type HarvesterStats struct {
 	TrackedFiles   int
 	ActiveSessions int
 	AgentFiles     map[string]int
+	RecentFiles    []HarvestFileHit
 }
 
 // Stats returns portal telemetry (safe under the harvester lock).
@@ -1252,6 +1264,7 @@ func (h *Harvester) Stats() HarvesterStats {
 		TrackedFiles:   len(h.offsets) + len(h.sqlite),
 		ActiveSessions: len(h.lastActive) - len(h.completed),
 		AgentFiles:     make(map[string]int, len(h.agentFiles)),
+		RecentFiles:    append([]HarvestFileHit(nil), h.recentFiles...),
 	}
 	if out.ActiveSessions < 0 {
 		out.ActiveSessions = 0
@@ -1277,16 +1290,21 @@ func (h *Harvester) ScanAndTail() error {
 // ScanAndTailCounted is ScanAndTail with file/turn counts for the portal.
 func (h *Harvester) ScanAndTailCounted() (files, turns int, err error) {
 	agentFiles := map[string]int{}
+	var hits []HarvestFileHit
 	var firstErr error
 	for _, src := range h.Sources {
 		for _, dir := range src.Dirs {
-			n, t, e := h.scanDirCounted(src, dir, agentFiles)
+			n, t, found, e := h.scanDirCounted(src, dir, agentFiles)
 			files += n
 			turns += t
+			hits = append(hits, found...)
 			if e != nil && firstErr == nil {
 				firstErr = e
 			}
 		}
+	}
+	if len(hits) > 40 {
+		hits = hits[:40]
 	}
 	h.mu.Lock()
 	h.lastScanAt = h.now().UTC()
@@ -1298,18 +1316,19 @@ func (h *Harvester) ScanAndTailCounted() (files, turns int, err error) {
 		h.lastScanErr = ""
 	}
 	h.agentFiles = agentFiles
+	h.recentFiles = hits
 	h.mu.Unlock()
 	return files, turns, firstErr
 }
 
 func (h *Harvester) scanDir(src TranscriptSource, dir string) error {
-	_, _, err := h.scanDirCounted(src, dir, nil)
+	_, _, _, err := h.scanDirCounted(src, dir, nil)
 	return err
 }
 
-func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles map[string]int) (files, turns int, err error) {
+func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles map[string]int) (files, turns int, hits []HarvestFileHit, err error) {
 	if dir == "" {
-		return 0, 0, nil
+		return 0, 0, nil, nil
 	}
 	visited := 0
 	walkErr := filepath.Walk(dir, func(p string, info os.FileInfo, walkErr error) error {
@@ -1343,6 +1362,12 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(p))
+		hit := HarvestFileHit{
+			Agent:  src.Agent,
+			Format: src.Format,
+			Path:   p,
+			Name:   filepath.Base(p),
+		}
 		switch src.Format {
 		case FormatJSONL:
 			if ext != ".jsonl" {
@@ -1354,6 +1379,7 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 			got, _ := h.TailFile(p)
 			files++
 			turns += len(got)
+			hits = append(hits, hit)
 			if agentFiles != nil {
 				agentFiles[src.Agent]++
 			}
@@ -1367,6 +1393,7 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 			got, _ := h.TailFile(p)
 			files++
 			turns += len(got)
+			hits = append(hits, hit)
 			if agentFiles != nil {
 				agentFiles[src.Agent]++
 			}
@@ -1379,13 +1406,14 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 			h.mu.Unlock()
 			_ = h.TrackSQLite(p, info)
 			files++
+			hits = append(hits, hit)
 			if agentFiles != nil {
 				agentFiles[src.Agent]++
 			}
 		}
 		return nil
 	})
-	return files, turns, walkErr
+	return files, turns, hits, walkErr
 }
 
 // Start runs the poll loop (ScanAndTail + CheckIdle every PollInterval)
