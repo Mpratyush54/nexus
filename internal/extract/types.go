@@ -107,8 +107,19 @@ func (s *Service) allowLLM(project string) bool {
 	if last, ok := s.last[project]; ok && cur.Sub(last) < ThrottleWindow {
 		return false
 	}
-	s.last[project] = cur
 	return true
+}
+
+func (s *Service) markLLM(project string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.last == nil {
+		s.last = map[string]time.Time{}
+	}
+	s.last[project] = s.now()
 }
 
 // CapTurns truncates a turn batch to MaxTurns / MaxBatchChars.

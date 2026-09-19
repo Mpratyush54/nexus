@@ -12,7 +12,16 @@ import (
 )
 
 const defaultOpenRouterBase = "https://openrouter.ai/api/v1"
-const defaultOpenRouterModel = "openrouter/free"
+// openrouter/free can route to safety-only models that return non-JSON.
+// Prefer an instruct-capable free model; callers can override via OPENROUTER_MODEL.
+const defaultOpenRouterModel = "nvidia/nemotron-3.5-lightning:free"
+
+// defaultOpenRouterFallbacks are tried when the primary model is unavailable.
+var defaultOpenRouterFallbacks = []string{
+	"liquid/lfm-2.5-2.6b:free",
+	"google/gemma-4-31b-it:free",
+	"qwen/qwen3.8-27b:free",
+}
 
 // Client calls OpenRouter's OpenAI-compatible chat completions API.
 type Client struct {
@@ -53,7 +62,8 @@ func (c *Client) Complete(ctx context.Context, prompt string) ([]Proposal, error
 		return nil, fmt.Errorf("extract: openrouter api key missing")
 	}
 	body, _ := json.Marshal(map[string]any{
-		"model": c.model(),
+		"model":  c.model(),
+		"models": defaultOpenRouterFallbacks,
 		"messages": []map[string]string{
 			{
 				"role":    "system",

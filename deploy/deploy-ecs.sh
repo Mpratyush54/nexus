@@ -49,7 +49,7 @@ jq --arg img "$IMAGE" \
       {name: "PUBLIC_APP_URL", value: $app},
       {name: "GITHUB_OAUTH_REDIRECT", value: $redir},
       {name: "GITHUB_CLIENT_ID", value: $cid},
-      {name: "OPENROUTER_MODEL", value: "openrouter/free"}
+      {name: "OPENROUTER_MODEL", value: "nvidia/nemotron-3.5-lightning:free"}
     ] |
     .containerDefinitions[0].secrets = [
       (.containerDefinitions[0].secrets // [] | .[] | select(.name != "GITHUB_CLIENT_SECRET" and .name != "OPENROUTER_API_KEY")),

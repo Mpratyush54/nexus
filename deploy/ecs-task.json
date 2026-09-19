@@ -31,7 +31,7 @@
         { "name": "PORT", "value": "8080" },
         { "name": "DB_SSLMODE", "value": "require" },
         { "name": "MIGRATIONS_DIR", "value": "/migrations" },
-        { "name": "OPENROUTER_MODEL", "value": "openrouter/free" }
+        { "name": "OPENROUTER_MODEL", "value": "nvidia/nemotron-3.5-lightning:free" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",

@@ -19,7 +19,7 @@
 //	CENTRAL_EMBEDDING_MODEL             default text-embedding-3-small
 //	CENTRAL_EMBEDDING_ENDPOINT          optional OpenAI base or Ollama embeddings URL
 //	OPENROUTER_API_KEY                  server-side memory extraction (never sent to clients)
-//	OPENROUTER_MODEL                    default openrouter/free
+//	OPENROUTER_MODEL                    default nvidia/nemotron-3.5-lightning:free
 //	OPENROUTER_BASE_URL                 optional OpenRouter API base
 //	OPENROUTER_HTTP_REFERER / OPENROUTER_APP_TITLE  optional OpenRouter headers
 //

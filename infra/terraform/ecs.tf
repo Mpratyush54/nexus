@@ -201,7 +201,7 @@ resource "aws_ecs_task_definition" "server" {
       { name = "PORT", value = tostring(var.server_port) },
       { name = "DB_SSLMODE", value = "require" },
       { name = "MIGRATIONS_DIR", value = "/migrations" },
-      { name = "OPENROUTER_MODEL", value = "openrouter/free" },
+      { name = "OPENROUTER_MODEL", value = "nvidia/nemotron-3.5-lightning:free" },
     ]
     # Secrets Manager refs — resolved by ECS at launch, never in git/env files.
     # Discrete DB_* parts (assembled into an identical DSN by migrate.sh and
