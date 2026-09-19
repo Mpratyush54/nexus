@@ -15,7 +15,7 @@ import {
   useRemoveOrgMember,
   useSetOrgMemberRole,
 } from '@/hooks/useOrgs'
-import { useBillingPlans, useOrgBilling, useSetOrgPlan } from '@/hooks/useBilling'
+import { useBillingPlans, useOrgBilling } from '@/hooks/useBilling'
 import { PlanGrid } from '@/components/PlanGrid'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
@@ -61,7 +61,6 @@ export function OrgPage() {
   const createProject = useCreateOrgProject(selected)
   const plans = useBillingPlans()
   const orgBilling = useOrgBilling(selected)
-  const setOrgPlan = useSetOrgPlan(selected)
 
   const myRole = useMemo(() => {
     const uid = user?.userId
@@ -229,28 +228,16 @@ export function OrgPage() {
                 <div>
                   <h3 className="text-sm font-medium text-fg">Plan</h3>
                   <p className="mt-1 text-xs text-fg-dim">
-                    This org’s subscription. Admins can switch plans now; a payment provider can
-                    attach later.
+                    Org subscription. Paid upgrades stay disabled until checkout is available.
+                    Platform admins can still assign plans from Admin.
                   </p>
                 </div>
                 {plans.data ? (
                   <PlanGrid
                     plans={plans.data}
                     current={orgBilling.data}
-                    canChange={isAdmin}
-                    pending={setOrgPlan.isPending}
-                    onSelect={(planId) =>
-                      setOrgPlan.mutate(planId, {
-                        onSuccess: (snap) =>
-                          push({ title: 'Org plan updated', detail: snap.plan.name, tone: 'teal' }),
-                        onError: (err) =>
-                          push({
-                            title: 'Plan change failed',
-                            detail: err instanceof ApiError ? err.message : 'Unknown error',
-                            tone: 'danger',
-                          }),
-                      })
-                    }
+                    canChange={false}
+                    allowPaidUpgrade={false}
                   />
                 ) : (
                   <p className="text-sm text-muted">Loading plans…</p>

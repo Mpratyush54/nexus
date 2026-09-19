@@ -47,12 +47,22 @@ func TestBillingPlansPublicAndPersonalUpgrade(t *testing.T) {
 	}
 
 	rec = doJSON(t, s, http.MethodPost, "/billing/subscription", alice, map[string]any{"plan_id": "pro"})
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("self-serve upgrade = %d %s (want 402 until checkout)", rec.Code, rec.Body.String())
+	}
+
+	t.Setenv("PLATFORM_ADMIN_USERNAMES", "alice")
+	rec = doJSON(t, s, http.MethodPut, "/admin/subscriptions", alice, map[string]any{
+		"owner_type": "user",
+		"owner_id":   "alice",
+		"plan_id":    "pro",
+	})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("upgrade = %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("admin upgrade = %d %s", rec.Code, rec.Body.String())
 	}
 	decodeBody(t, rec, &snap)
 	if snap.Plan.ID != "pro" {
-		t.Fatalf("upgraded = %+v", snap)
+		t.Fatalf("admin upgraded = %+v", snap)
 	}
 }
 
@@ -80,15 +90,24 @@ func TestBillingOrgPlanAndLimit(t *testing.T) {
 	}
 
 	rec = doJSON(t, s, http.MethodPost, "/billing/subscription", alice, map[string]any{"plan_id": "pro"})
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("self-serve upgrade = %d %s (want 402)", rec.Code, rec.Body.String())
+	}
+
+	t.Setenv("PLATFORM_ADMIN_USERNAMES", "alice")
+	rec = doJSON(t, s, http.MethodPut, "/admin/subscriptions", alice, map[string]any{
+		"owner_type": "user",
+		"owner_id":   "alice",
+		"plan_id":    "pro",
+	})
 	if rec.Code != http.StatusOK {
-		t.Fatalf("upgrade user = %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("admin upgrade user = %d %s", rec.Code, rec.Body.String())
 	}
 	rec = doJSON(t, s, http.MethodPost, "/orgs", alice, map[string]any{"name": "Beta"})
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("second org on pro = %d %s", rec.Code, rec.Body.String())
 	}
 
-	t.Setenv("PLATFORM_ADMIN_USERNAMES", "alice")
 	rec = doJSON(t, s, http.MethodPut, "/admin/subscriptions", alice, map[string]any{
 		"owner_type": "org",
 		"owner_id":   org.ID,

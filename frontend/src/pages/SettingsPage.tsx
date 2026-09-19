@@ -19,7 +19,7 @@ import { subscribeWebPush } from '@/lib/pwa'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 import { useAuth } from '@/providers/AuthProvider'
-import { useBillingPlans, useMyBilling, useSetMyPlan } from '@/hooks/useBilling'
+import { useBillingPlans, useMyBilling } from '@/hooks/useBilling'
 
 export function SettingsPage() {
   const { push } = useToast()
@@ -31,7 +31,6 @@ export function SettingsPage() {
   const revokeToken = useRevokeToken()
   const plans = useBillingPlans()
   const billing = useMyBilling()
-  const setPlan = useSetMyPlan()
 
   const [email, setEmail] = useState('')
   const [tokenName, setTokenName] = useState('')
@@ -290,27 +289,16 @@ export function SettingsPage() {
         <div>
           <h2 className="text-sm font-medium text-fg">Plan</h2>
           <p className="mt-1 text-xs text-fg-dim">
-            Personal subscription. Checkout will use Stripe when configured; switching plans is live
-            now.
+            Personal subscription. You are on the free plan for now — paid upgrades open when
+            checkout ships.
           </p>
         </div>
         {plans.data ? (
           <PlanGrid
             plans={plans.data}
             current={billing.data}
-            pending={setPlan.isPending}
-            onSelect={(planId) =>
-              setPlan.mutate(planId, {
-                onSuccess: (snap) =>
-                  push({ title: 'Plan updated', detail: snap.plan.name, tone: 'teal' }),
-                onError: (err) =>
-                  push({
-                    title: 'Plan change failed',
-                    detail: err instanceof ApiError ? err.message : 'Unknown error',
-                    tone: 'danger',
-                  }),
-              })
-            }
+            canChange={false}
+            allowPaidUpgrade={false}
           />
         ) : (
           <p className="text-sm text-muted">Loading plans…</p>

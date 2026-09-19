@@ -366,5 +366,21 @@ func (l *storeUserLookup) GetPasswordHash(ctx context.Context, username string) 
 	if l == nil || l.users == nil {
 		return "", "", errors.New("user store not configured")
 	}
-	return l.users.GetPasswordHash(ctx, username)
+	id, hash, err := l.users.GetPasswordHash(ctx, username)
+	if err == nil {
+		return id, hash, nil
+	}
+	// Allow email-as-login when the identifier looks like an address.
+	if !strings.Contains(username, "@") {
+		return "", "", err
+	}
+	u, emailErr := l.users.GetByEmail(ctx, username)
+	if emailErr != nil {
+		return "", "", err
+	}
+	hash, hashErr := l.users.GetPasswordHashByID(ctx, u.ID)
+	if hashErr != nil {
+		return "", "", err
+	}
+	return u.ID, hash, nil
 }

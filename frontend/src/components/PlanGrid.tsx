@@ -12,7 +12,13 @@ type Props = {
   current?: BillingSnapshot | null
   onSelect?: (planId: string) => void
   pending?: boolean
+  /** When false, hide switch/upgrade actions entirely. */
   canChange?: boolean
+  /**
+   * When false (default), paid plans cannot be self-selected — checkout is not wired.
+   * Free ↔ free switches still allowed if canChange is true.
+   */
+  allowPaidUpgrade?: boolean
   highlight?: string
 }
 
@@ -20,13 +26,25 @@ function usageLine(label: string, used: number, cap: number) {
   return `${label} ${used}/${cap <= 0 ? '∞' : cap}`
 }
 
-export function PlanGrid({ plans, current, onSelect, pending, canChange = true, highlight }: Props) {
+export function PlanGrid({
+  plans,
+  current,
+  onSelect,
+  pending,
+  canChange = true,
+  allowPaidUpgrade = false,
+  highlight,
+}: Props) {
   const activeId = current?.plan.id ?? highlight
 
   return (
     <div className="grid gap-3 md:grid-cols-3">
       {plans.map((plan) => {
         const active = plan.id === activeId
+        const paid = plan.price_cents > 0
+        const canSelect = Boolean(canChange && onSelect && !active)
+        const blockedPaid = canSelect && paid && !allowPaidUpgrade
+
         return (
           <div
             key={plan.id}
@@ -57,13 +75,17 @@ export function PlanGrid({ plans, current, onSelect, pending, canChange = true, 
                 {usageLine('seats', current.usage.members, plan.limits.members)}
               </p>
             ) : null}
-            {canChange && onSelect && !active ? (
+            {blockedPaid ? (
+              <p className="mt-4 text-[11px] leading-relaxed text-muted">
+                Checkout coming soon — paid upgrades are disabled until payment is wired.
+              </p>
+            ) : canSelect ? (
               <Button
                 type="button"
                 size="sm"
                 className="mt-4"
                 disabled={pending}
-                onClick={() => onSelect(plan.id)}
+                onClick={() => onSelect?.(plan.id)}
               >
                 {plan.price_cents > (current?.plan.price_cents ?? 0) ? 'Upgrade' : 'Switch'}
               </Button>

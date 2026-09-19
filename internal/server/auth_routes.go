@@ -46,6 +46,10 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
+	if email == "" || !looksLikeEmail(email) {
+		writeError(w, http.StatusBadRequest, "a valid email is required")
+		return
+	}
 	if len(password) < 8 {
 		writeError(w, http.StatusBadRequest, "password must be at least 8 characters")
 		return
@@ -318,4 +322,17 @@ func hashAPITokenSecret(raw string) string {
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func looksLikeEmail(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || !strings.Contains(value, "@") {
+		return false
+	}
+	at := strings.LastIndex(value, "@")
+	if at <= 0 || at == len(value)-1 {
+		return false
+	}
+	domain := value[at+1:]
+	return strings.Contains(domain, ".")
 }

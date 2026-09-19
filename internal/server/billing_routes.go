@@ -62,7 +62,7 @@ func (s *Server) handleBillingMeSet(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	s.applyBillingPlan(w, r, store.OwnerUser, authSubject(r), req.PlanID)
+	s.applyBillingPlan(w, r, store.OwnerUser, authSubject(r), req.PlanID, false)
 }
 
 func (s *Server) handleOrgBillingGet(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +90,7 @@ func (s *Server) handleOrgBillingSet(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	s.applyBillingPlan(w, r, store.OwnerOrg, id, req.PlanID)
+	s.applyBillingPlan(w, r, store.OwnerOrg, id, req.PlanID, false)
 }
 
 func (s *Server) handleAdminSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -119,13 +119,28 @@ func (s *Server) handleAdminSubscriptionPut(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadRequest, "owner_id and plan_id are required")
 		return
 	}
-	s.applyBillingPlan(w, r, req.OwnerType, req.OwnerID, req.PlanID)
+	s.applyBillingPlan(w, r, req.OwnerType, req.OwnerID, req.PlanID, true)
 }
 
-func (s *Server) applyBillingPlan(w http.ResponseWriter, r *http.Request, ownerType, ownerID, planID string) {
+func (s *Server) applyBillingPlan(w http.ResponseWriter, r *http.Request, ownerType, ownerID, planID string, allowPaid bool) {
 	bs, ok := s.billingStore()
 	if !ok {
 		writeError(w, http.StatusNotImplemented, "billing not supported by configured store")
+		return
+	}
+	planID = strings.TrimSpace(planID)
+	plan, err := bs.GetPlan(r.Context(), planID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, err.Error())
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// Self-serve paid upgrades stay closed until checkout (Stripe) is wired.
+	if plan != nil && plan.PriceCents > 0 && !allowPaid {
+		writeError(w, http.StatusPaymentRequired, "paid upgrades are not available yet — checkout coming soon")
 		return
 	}
 	sub, err := bs.SetSubscriptionPlan(r.Context(), ownerType, ownerID, planID, authSubject(r))

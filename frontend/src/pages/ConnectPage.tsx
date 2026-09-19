@@ -99,7 +99,7 @@ export function ConnectPage() {
         label: 'Auto-harvest',
         done: Boolean(hs?.running && hs.designated),
         hint: hs?.running
-          ? `${hs.last_scan_files ?? 0} files · ${hs.proposals_saved ?? 0} uploaded`
+          ? `${hs.last_scan_files ?? 0} files · ${hs.last_scan_turns ?? 0} new turns · ${hs.turns_emitted ?? 0} lifetime`
           : 'Waiting for daemon harvest pipeline',
       },
       {
@@ -223,9 +223,11 @@ export function ConnectPage() {
                     : 'Start Nexus Desktop to stream scan status here')}
               </p>
               <p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted">
-                Harvest does <span className="text-fg-dim">not</span> upload full chat logs. It
-                extracts durable facts into PROPOSED memories so another agent can fork context.
-                Matched files ≠ memories yet — extraction must succeed (see proposal errors below).
+                Harvest does <span className="text-fg-dim">not</span> re-upload whole chat files every
+                scan. It tails only <span className="text-fg-dim">new</span> turns since the last
+                offset, then queues them for OpenRouter → Library. A scan like{' '}
+                <span className="font-mono text-fg-dim">44 / 0</span> means 44 files checked and no
+                new lines — already caught up, not “skipped.”
               </p>
             </div>
           </div>
@@ -242,8 +244,14 @@ export function ConnectPage() {
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {[
             { label: 'Last scan', value: shortTime(hs?.last_scan_at) },
-            { label: 'Files / turns', value: `${hs?.last_scan_files ?? 0} / ${hs?.last_scan_turns ?? 0}` },
-            { label: 'Uploaded', value: String(hs?.proposals_saved ?? 0) },
+            {
+              label: 'Files · new turns',
+              value: `${hs?.last_scan_files ?? 0} · ${hs?.last_scan_turns ?? 0}`,
+            },
+            {
+              label: 'Turns emitted',
+              value: String(hs?.turns_emitted ?? 0),
+            },
             { label: 'Active harnesses', value: String(activeAgents) },
           ].map((c) => (
             <div key={c.label} className="rounded-lg border border-border bg-raised/40 px-3 py-2.5">

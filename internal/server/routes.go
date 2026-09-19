@@ -194,14 +194,14 @@ func clientIP(r *http.Request) string {
 // a JWT (issue #133). Unknown users, unset passwords, and mismatches all
 // 401 with the same message (no oracle for username enumeration). Without
 // a configured Users source the endpoint fails closed with 503. Attempts
-// are rate-limited per source IP.
+// are rate-limited per source IP. The username field also accepts email.
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req loginRequest
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	username := strings.TrimSpace(req.Username)
-	if username == "" || strings.TrimSpace(req.Password) == "" {
+	login := strings.TrimSpace(req.Username)
+	if login == "" || strings.TrimSpace(req.Password) == "" {
 		writeError(w, http.StatusBadRequest, "username and password are required")
 		return
 	}
@@ -216,7 +216,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "user authentication not configured")
 		return
 	}
-	userID, hash, err := s.Users.GetPasswordHash(r.Context(), username)
+	userID, hash, err := s.Users.GetPasswordHash(r.Context(), login)
 	if err != nil {
 		// Unknown user and lookup failure alike: 401, no enumeration.
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
@@ -230,16 +230,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
+	// Prefer the canonical username for the display claim (email login).
+	displayName := login
+	if s.Accounts != nil {
+		if u, uerr := s.Accounts.GetByID(r.Context(), userID); uerr == nil && u != nil && strings.TrimSpace(u.Username) != "" {
+			displayName = u.Username
+		}
+	}
 	// Canonical identity (issue #140): sub is the user UUID for Postgres
 	// ownership columns; the username rides as the display claim.
-	token, err := s.Auth.GenerateUser(userID, username, DefaultTokenTTL)
+	token, err := s.Auth.GenerateUser(userID, displayName, DefaultTokenTTL)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not issue token")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"token":    token,
-		"username": username,
+		"username": displayName,
 		"user_id":  userID,
 	})
 }

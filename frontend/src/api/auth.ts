@@ -9,7 +9,7 @@ export type LoginInput = {
 export type SignupInput = {
   username: string
   password: string
-  email?: string
+  email: string
 }
 
 export type UserProfile = {

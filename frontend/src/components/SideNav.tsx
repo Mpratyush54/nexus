@@ -255,6 +255,10 @@ export function MobileNav({ onOpenCommand }: Props) {
                 <kbd className="app-search-kbd">⌘K</kbd>
               </button>
 
+              <div className="mt-3 px-0.5">
+                <ProjectSwitcher />
+              </div>
+
               <NavLinks onNavigate={() => setOpen(false)} />
               <Presence />
               <ProfileCard />
