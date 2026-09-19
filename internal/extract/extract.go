@@ -25,10 +25,13 @@ func (s *Service) Extract(ctx context.Context, project string, turns []Turn, exi
 		client := s.client()
 		prompt := BuildPrompt(project, existing, turns)
 		props, err := client.Complete(ctx, prompt)
-		if err == nil && len(props) > 0 {
+		if err == nil {
+			// Successful LLM call wins even when empty — prefer "nothing
+			// durable" over heuristic re-scraping the same turns as junk.
 			return Result{Proposals: props, Provider: ProviderOpenRouter}, nil
 		}
-		// fall through to heuristic
+		// Network/parse failure: heuristic fallback keeps extraction alive.
+		_ = err
 	}
 
 	props := Heuristic(project, turns, existing)

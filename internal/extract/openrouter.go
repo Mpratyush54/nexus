@@ -62,6 +62,7 @@ func (c *Client) Complete(ctx context.Context, prompt string) ([]Proposal, error
 			{"role": "user", "content": prompt},
 		},
 		"temperature": 0.1,
+		"response_format": map[string]string{"type": "json_object"},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
@@ -140,6 +141,7 @@ type llmMemory struct {
 }
 
 func parseProposals(data []byte) []Proposal {
+	data = extractJSONPayload(data)
 	var wrapped struct {
 		Memories []llmMemory `json:"memories"`
 	}
@@ -161,6 +163,29 @@ func parseProposals(data []byte) []Proposal {
 		}
 	}
 	return out
+}
+
+// extractJSONPayload finds the first JSON object/array in model output.
+func extractJSONPayload(data []byte) []byte {
+	s := strings.TrimSpace(string(data))
+	if s == "" {
+		return data
+	}
+	if (strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}")) ||
+		(strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]")) {
+		return []byte(s)
+	}
+	if i := strings.Index(s, "{"); i >= 0 {
+		if j := strings.LastIndex(s, "}"); j > i {
+			return []byte(s[i : j+1])
+		}
+	}
+	if i := strings.Index(s, "["); i >= 0 {
+		if j := strings.LastIndex(s, "]"); j > i {
+			return []byte(s[i : j+1])
+		}
+	}
+	return data
 }
 
 func llmToProposal(m llmMemory) (Proposal, bool) {
