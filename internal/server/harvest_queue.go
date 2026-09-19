@@ -251,6 +251,10 @@ func (s *Server) handleMemoryHarvestList(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusServiceUnavailable, "harvest queue not configured")
 		return
 	}
+	if jobID := strings.TrimSpace(r.URL.Query().Get("job_id")); jobID != "" {
+		s.handleMemoryHarvestGetByID(w, r, jobID)
+		return
+	}
 	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
 	if projectID == "" {
 		writeError(w, http.StatusBadRequest, "project_id is required")
@@ -282,16 +286,7 @@ func (s *Server) handleMemoryHarvestList(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items), "full": full})
 }
 
-func (s *Server) handleMemoryHarvestGet(w http.ResponseWriter, r *http.Request) {
-	if s.Harvest == nil {
-		writeError(w, http.StatusServiceUnavailable, "harvest queue not configured")
-		return
-	}
-	id := strings.TrimSpace(r.PathValue("id"))
-	if id == "" {
-		writeError(w, http.StatusBadRequest, "id is required")
-		return
-	}
+func (s *Server) handleMemoryHarvestGetByID(w http.ResponseWriter, r *http.Request, id string) {
 	job, err := s.Harvest.GetHarvestJob(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "harvest job not found")
@@ -301,6 +296,15 @@ func (s *Server) handleMemoryHarvestGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) handleMemoryHarvestGet(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	s.handleMemoryHarvestGetByID(w, r, id)
 }
 
 // handleMemoryExtract enqueues onto the harvest queue when available.
