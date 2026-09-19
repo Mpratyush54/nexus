@@ -130,7 +130,9 @@ export function DashboardPage() {
               <h2 className="text-sm font-medium text-fg">
                 {proposed.length ? 'Needs review' : 'Project memories'}
               </h2>
-              {proposed.length ? <StatusPill tone="amber">{proposed.length} proposed</StatusPill> : null}
+              {proposed.length ? (
+                <StatusPill tone="amber">{`${proposed.length} proposed`}</StatusPill>
+              ) : null}
             </div>
             <Link to="/app/memory" className="text-xs text-ember hover:underline">
               Open Memory →

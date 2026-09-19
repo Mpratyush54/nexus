@@ -64,6 +64,9 @@ func (stubStore) ResolveProject(ctx context.Context, canonicalURL, rootCommit, f
 func (stubStore) GetProject(ctx context.Context, id string) (*store.Project, error) {
 	return nil, errStorePending
 }
+func (stubStore) ListProjectsForUser(ctx context.Context, userID string) ([]*store.Project, error) {
+	return nil, errStorePending
+}
 func (stubStore) RegisterWorkspace(ctx context.Context, ws *store.Workspace) error {
 	return errStorePending
 }
