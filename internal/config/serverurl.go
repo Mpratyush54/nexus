@@ -4,7 +4,6 @@
 package config
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,11 +16,6 @@ const ConfigFileName = "config.json"
 // ConfigDirName is the directory under os.UserConfigDir (or ~/.config)
 // that holds config.json.
 const ConfigDirName = "central-memory"
-
-// fileConfig is the on-disk shape of ~/.config/central-memory/config.json.
-type fileConfig struct {
-	ServerURL string `json:"server_url"`
-}
 
 // ResolveServerURL implements tiers 2–4 of the ServerURL cascade:
 //
@@ -45,16 +39,8 @@ func ResolveServerURL(compileDefault string) string {
 // ServerURLFromConfig reads server_url from the local config file.
 // Missing/unreadable/malformed files are treated as unset ("").
 func ServerURLFromConfig() string {
-	path, err := ConfigPath()
-	if err != nil || path == "" {
-		return ""
-	}
-	raw, err := os.ReadFile(path)
+	cfg, err := LoadFile()
 	if err != nil {
-		return ""
-	}
-	var cfg fileConfig
-	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return ""
 	}
 	return strings.TrimSpace(cfg.ServerURL)

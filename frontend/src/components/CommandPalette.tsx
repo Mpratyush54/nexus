@@ -1,56 +1,21 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Activity, Bell, Bot, Building2, GitBranch, LayoutDashboard, MessageSquare, Search, Settings, Shield, Users } from 'lucide-react'
+import { Activity, Bell, Bot, Building2, Cable, GitBranch, LayoutDashboard, MessageSquare, Search, Settings, Shield, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
 const items = [
-  { id: 'dashboard', label: 'Dashboard', hint: 'Metrics and activity graph', icon: LayoutDashboard, to: '/app/dashboard' },
+  { id: 'dashboard', label: 'Home', hint: 'Project memories, scanner, pulse', icon: LayoutDashboard, to: '/app/dashboard' },
   { id: 'memory', label: 'Memory', hint: 'Review queue & editor', icon: Search, to: '/app/memory' },
   { id: 'agents', label: 'Agents', hint: 'MCP activity & permissions', icon: Bot, to: '/app/agents' },
   { id: 'team', label: 'Team', hint: 'Members, roles, GitHub', icon: Users, to: '/app/team' },
   { id: 'org', label: 'Org', hint: 'Organizations, projects, billing', icon: Building2, to: '/app/org' },
-  {
-    id: 'branches',
-    label: 'Branches',
-    hint: 'Diff & merge overlay',
-    icon: GitBranch,
-    to: '/app/branches',
-  },
-  {
-    id: 'sessions',
-    label: 'Sessions',
-    hint: 'Handoffs and live presence',
-    icon: MessageSquare,
-    to: '/app/sessions',
-  },
-  {
-    id: 'activity',
-    label: 'Activity',
-    hint: 'Project event log with filters',
-    icon: Activity,
-    to: '/app/activity',
-  },
-  {
-    id: 'notifications',
-    label: 'Notifications',
-    hint: 'Inbox, preferences, devices',
-    icon: Bell,
-    to: '/app/notifications',
-  },
-  {
-    id: 'admin',
-    label: 'Platform',
-    hint: 'Super Admin, versions, CLI releases',
-    icon: Shield,
-    to: '/app/admin',
-  },
-  {
-    id: 'settings',
-    label: 'Settings',
-    hint: 'Tokens, plan, export',
-    icon: Settings,
-    to: '/app/settings',
-  },
+  { id: 'branches', label: 'Branches', hint: 'Diff & merge overlay', icon: GitBranch, to: '/app/branches' },
+  { id: 'sessions', label: 'Sessions', hint: 'Handoffs and live presence', icon: MessageSquare, to: '/app/sessions' },
+  { id: 'activity', label: 'Activity', hint: 'Project event log with filters', icon: Activity, to: '/app/activity' },
+  { id: 'notifications', label: 'Notifications', hint: 'Inbox, preferences, devices', icon: Bell, to: '/app/notifications' },
+  { id: 'connect', label: 'Desktop setup', hint: 'Install, MCP, harvest diagnostics', icon: Cable, to: '/app/connect' },
+  { id: 'settings', label: 'Settings', hint: 'Tokens, plan, export', icon: Settings, to: '/app/settings' },
+  { id: 'admin', label: 'Platform', hint: 'Super Admin, versions, CLI releases', icon: Shield, to: '/app/admin' },
 ]
 
 type Props = {

@@ -19,6 +19,7 @@ package daemon
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 )
@@ -108,6 +109,20 @@ type Runtime struct {
 	// Poll intervals (<=0 selects defaults).
 	DesignationPoll time.Duration
 	DroppedLogEvery time.Duration
+
+	// Portal Connect telemetry (/local/harvest).
+	statsMu         sync.Mutex
+	turnsEmitted    int64
+	completions     int64
+	proposalsSaved  int64
+	proposalErrors  int64
+	lastProposalErr string
+	lastEventAt     time.Time
+	lastScanAt      time.Time
+	lastScanFiles   int
+	lastScanTurns   int
+	lastScanErr     string
+	recent          []HarvestLogLine
 }
 
 // NewRuntime builds the pipeline for daemon d. Harvester/Watcher/Processor
@@ -140,7 +155,17 @@ func NewRuntime(d *Daemon, project string, designation DesignationProvider) *Run
 	}
 	w := NewWatcherWithStore(d.Root, ExtendedWatchedTargets(), WatcherPollInterval, wEmit, d.getWorkspaceID(), hs)
 	w.SeedBaseline()
-	proc := NewProcessor(NewInMemoryStore(nil), 0, 0, false, AutoProvider())
+	// When authenticated to a central server, proposals upload to the portal
+	// (auto-sync). Otherwise keep an in-memory store for local-only runs.
+	var store MemoryStore = NewInMemoryStore(nil)
+	if strings.TrimSpace(d.ServerURL) != "" && strings.TrimSpace(d.ServerToken) != "" {
+		store = NewHTTPMemoryStore(d.ServerURL, d.ServerToken, project)
+	}
+	desigNow := false
+	if designation != nil {
+		desigNow = designation.IsDesignated()
+	}
+	proc := NewProcessor(store, 0, 0, desigNow, AutoProvider())
 	return &Runtime{
 		Daemon:          d,
 		Harvester:       h,
@@ -157,6 +182,30 @@ func NewRuntime(d *Daemon, project string, designation DesignationProvider) *Run
 // WorkspaceHashPath returns the watcher hash state file.
 func WorkspaceHashPath(root string) string {
 	return WorkspacePath(root) + ".hashes.json"
+}
+
+// SetServerProjectID points the runtime (and HTTP memory store) at the
+// server-resolved project UUID so harvested proposals land on the portal.
+func (r *Runtime) SetServerProjectID(id string) {
+	if r == nil {
+		return
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	r.ProjectID = id
+	if r.Processor != nil {
+		if hs, ok := r.Processor.Store.(*HTTPMemoryStore); ok {
+			hs.SetProjectID(id)
+			_ = hs.PrefetchExisting(context.Background())
+		}
+	}
+	if r.Materializer != nil {
+		// Materializer may hold a string ProjectID field via concrete type;
+		// best-effort: only HTTP store is required for portal sync.
+	}
+	log.Printf("daemon: harvest target project_id=%s", id)
 }
 
 // SyncDesignation polls the provider and gates the processor (fail-closed
@@ -251,15 +300,21 @@ func (r *Runtime) Start(ctx context.Context) {
 		if len(window) > 0 && r.Processor != nil {
 			evs := append([]ToolEvent(nil), window...)
 			window = window[:0]
-			if _, err := r.Processor.ProcessToolEvents(ctx, r.ProjectID, evs); err != nil {
+			if props, err := r.Processor.ProcessToolEvents(ctx, r.ProjectID, evs); err != nil {
 				log.Printf("daemon: episode process: %v", err)
+				r.noteProposals(0, err)
+			} else if len(props) > 0 {
+				r.noteProposals(len(props), nil)
 			}
 		}
 		if len(conv) > 0 && r.Processor != nil {
 			batch := append([]Event(nil), conv...)
 			conv = conv[:0]
-			if _, err := r.Processor.ProcessEvents(ctx, r.ProjectID, batch); err != nil {
+			if props, err := r.Processor.ProcessEvents(ctx, r.ProjectID, batch); err != nil {
 				log.Printf("daemon: conversation process: %v", err)
+				r.noteProposals(len(props), err)
+			} else if len(props) > 0 {
+				r.noteProposals(len(props), nil)
 			}
 		}
 	}
@@ -289,6 +344,7 @@ func (r *Runtime) Start(ctx context.Context) {
 				flush()
 			}
 		case ev := <-r.harvestCh:
+			r.noteHarvestEvent(ev)
 			conv = append(conv, ev)
 			if len(window)+len(conv) >= 50 {
 				flush()

@@ -1,4 +1,4 @@
-import { Navigate, Outlet, useLocation } from 'react-router-dom'
+import { Navigate, Outlet, useLocation, useSearchParams } from 'react-router-dom'
 import { useAuth } from '@/providers/AuthProvider'
 import { useNexusSocket } from '@/hooks/useNexusSocket'
 
@@ -16,8 +16,13 @@ export function ProtectedRoute() {
 
 export function GuestRoute() {
   const { isAuthenticated } = useAuth()
+  const [params] = useSearchParams()
+  const next = params.get('next')
   if (isAuthenticated) {
-    return <Navigate to="/app/dashboard" replace />
+    if (next && next.startsWith('/cli/')) {
+      return <Navigate to={next} replace />
+    }
+    return <Navigate to="/app/connect" replace />
   }
   return <Outlet />
 }

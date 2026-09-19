@@ -1,0 +1,17 @@
+---
+description: Sync important Cursor work into Nexus memory for this repo
+alwaysApply: true
+---
+
+# Nexus memory (this workspace)
+
+This folder is tracked by **Nexus** (central memory). Cursor chats are **not** auto-imported.
+
+When you learn durable facts about this project (decisions, architecture, how-to, bugs fixed, deploy notes):
+
+1. Prefer Nexus MCP tools if available: `memory_search` before answering from guesswork; `memory_write` for lasting facts.
+2. If MCP is unavailable, tell the user to run:
+   `nexus memory propose -k topic/key "the fact (20+ characters)"`
+3. Do not dump entire chat transcripts — store concise, reusable facts.
+
+Project identity is resolved from this git repo (folder `central-memory`). The web app may also show `nexus-default`; durable repo facts belong on the git project.

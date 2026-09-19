@@ -9,6 +9,7 @@ export const queryKeys = {
   },
   project: {
     current: ['project', 'current'] as const,
+    list: ['project', 'list'] as const,
   },
   workspace: {
     active: (projectId: string) => ['workspace', 'active', projectId] as const,
@@ -68,5 +69,8 @@ export const queryKeys = {
     gitLog: ['daemon', 'gitLog'] as const,
     local: (projectId: string) => ['daemon', 'local', projectId] as const,
     bridge: (proxyUrl: string) => ['daemon', 'bridge', proxyUrl] as const,
+    autodetect: ['daemon', 'autodetect'] as const,
+    harvest: (proxyUrl: string) => ['daemon', 'harvest', proxyUrl] as const,
+    gitLocal: (proxyUrl: string) => ['daemon', 'gitLocal', proxyUrl] as const,
   },
 }

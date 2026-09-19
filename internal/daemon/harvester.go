@@ -82,6 +82,10 @@ type TranscriptSource struct {
 	Agent  string   // e.g. "claude", "cursor", "opencode"
 	Dirs   []string // resolved absolute directories to scan
 	Format string   // FormatJSONL, FormatSQLite, FormatJSON
+	// CwdMatch: path will not contain the workspace folder (date-sharded
+	// or hashed global stores). When true, scanDir peeks the file for a
+	// cwd/workdir hint and matches that against the workspace.
+	CwdMatch bool
 }
 
 // Turn is a single parsed dialogue turn.
@@ -117,6 +121,13 @@ type Harvester struct {
 	// extractors holds per-agent SQLite row extractors (nil value or absent
 	// agent = built-in fallback, then liveness-only). Issue #33/#77.
 	extractors map[string]SQLiteExtractor
+
+	// Telemetry for the portal Connect page (/local/harvest).
+	lastScanAt    time.Time
+	lastScanFiles int
+	lastScanTurns int
+	lastScanErr   string
+	agentFiles    map[string]int // agent -> files touched in last scan
 }
 
 // fileMeta tracks SQLite/vscdb files we cannot parse without a driver.
@@ -178,6 +189,7 @@ func NewHarvesterWithPoll(workspaceRoot string, emitter EventEmitter, poll, idle
 		agents:       make(map[string]string),
 		batch:        make(map[string][]Turn),
 		extractors:   make(map[string]SQLiteExtractor),
+		agentFiles:   make(map[string]int),
 	}
 }
 
@@ -221,40 +233,135 @@ func (h *Harvester) emit(ev Event) {
 	}
 }
 
-// ResolveSources returns the agent transcript locations from
-// implementation-plan.md Phase 1.3. Agent names are cross-checked against
-// adapters.Registry() so the harvester stays in sync with the adapter set;
-// directories fall back to the hardcoded per-OS list because the registry
-// does not expose raw transcript dirs (only backup roots).
+// ResolveSources returns transcript roots for every local agent harness we
+// know how to read. Names are filtered against adapters.Registry() so the
+// harvester stays in sync with the adapter set; when the registry is empty
+// the full list is returned so a trimmed build still harvests.
+//
+// Coverage (JSONL unless noted):
+//
+//	claude, cursor (JSONL + SQLite liveness), opencode (JSONL + SQLite),
+//	codex, antigravity (SQLite), copilot (CLI JSONL + VS Code SQLite),
+//	windsurf (SQLite), gemini, grok, kimi, codeium, commandcode, cagent,
+//	zcode (JSONL + SQLite), deepseek, hermes (SQLite).
 func ResolveSources() []TranscriptSource {
 	home, _ := os.UserHomeDir()
 	appData := os.Getenv("APPDATA")
 	if appData == "" {
-		// Non-Windows roaming equivalent.
 		appData = filepath.Join(home, ".config")
 	}
+	localApp := os.Getenv("LOCALAPPDATA")
+	if localApp == "" {
+		localApp = filepath.Join(home, ".local", "share")
+	}
+	xdgData := os.Getenv("XDG_DATA_HOME")
+	if xdgData == "" {
+		xdgData = filepath.Join(home, ".local", "share")
+	}
+	xdgConfig := os.Getenv("XDG_CONFIG_HOME")
+	if xdgConfig == "" {
+		xdgConfig = filepath.Join(home, ".config")
+	}
 	codeWS := filepath.Join(appData, "Code", "User", "workspaceStorage")
-
-	hardcoded := []TranscriptSource{
-		{Agent: "claude", Dirs: []string{filepath.Join(home, ".claude", "projects")}, Format: FormatJSONL},
-		{Agent: "opencode", Dirs: []string{
-			filepath.Join(home, ".config", "opencode"),
-			filepath.Join(home, ".local", "share", "opencode"),
-		}, Format: FormatJSONL},
-		{Agent: "cursor", Dirs: []string{
-			filepath.Join(home, ".cursor"),
-			codeWS,
-		}, Format: FormatSQLite},
-		{Agent: "antigravity", Dirs: []string{
-			filepath.Join(appData, "Antigravity", "User", "workspaceStorage"),
-		}, Format: FormatSQLite},
-		{Agent: "copilot", Dirs: []string{codeWS}, Format: FormatSQLite},
+	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
+	if codexHome == "" {
+		codexHome = filepath.Join(home, ".codex")
 	}
 
-	// Reuse adapters pkg: keep only agents the registry knows about.
+	hardcoded := []TranscriptSource{
+		// Claude Code — per-project JSONL (~/.claude/projects/<encoded-cwd>/)
+		{Agent: "claude", Dirs: []string{filepath.Join(home, ".claude", "projects")}, Format: FormatJSONL},
+		// OpenCode — legacy JSON/JSONL dirs + modern opencode.db (SQLite)
+		{Agent: "opencode", Dirs: []string{
+			filepath.Join(xdgConfig, "opencode"),
+			filepath.Join(home, ".config", "opencode"),
+			filepath.Join(xdgData, "opencode"),
+			filepath.Join(home, ".local", "share", "opencode"),
+			filepath.Join(home, ".opencode"),
+		}, Format: FormatJSONL},
+		{Agent: "opencode", Dirs: []string{
+			filepath.Join(xdgData, "opencode"),
+			filepath.Join(home, ".local", "share", "opencode"),
+		}, Format: FormatSQLite, CwdMatch: true},
+		// Cursor Agent chats — append-only JSONL under projects/<slug>/agent-transcripts/
+		{Agent: "cursor", Dirs: []string{
+			filepath.Join(home, ".cursor", "projects"),
+		}, Format: FormatJSONL},
+		// Cursor / VS Code workspace DBs — liveness (ADR-033)
+		{Agent: "cursor", Dirs: []string{
+			filepath.Join(appData, "Cursor", "User", "workspaceStorage"),
+			filepath.Join(home, ".cursor", "chats"),
+			codeWS,
+		}, Format: FormatSQLite},
+		// Codex CLI / Desktop — date-sharded rollouts (CODEX_HOME override)
+		{Agent: "codex", Dirs: []string{
+			filepath.Join(codexHome, "sessions"),
+			filepath.Join(codexHome, "archived_sessions"),
+		}, Format: FormatJSONL, CwdMatch: true},
+		// Antigravity (VS Code fork) + home dot-dir
+		{Agent: "antigravity", Dirs: []string{
+			filepath.Join(appData, "Antigravity", "User", "workspaceStorage"),
+			filepath.Join(home, ".antigravity"),
+		}, Format: FormatSQLite},
+		// Copilot — VS Code workspace DB + Copilot CLI session-state JSONL
+		{Agent: "copilot", Dirs: []string{codeWS}, Format: FormatSQLite},
+		{Agent: "copilot", Dirs: []string{
+			filepath.Join(home, ".copilot", "session-state"),
+			filepath.Join(home, ".copilot"),
+		}, Format: FormatJSONL, CwdMatch: true},
+		// Windsurf — VS Code fork workspace storage
+		{Agent: "windsurf", Dirs: []string{
+			filepath.Join(appData, "Windsurf", "User", "workspaceStorage"),
+			filepath.Join(localApp, "Windsurf", "User", "workspaceStorage"),
+			filepath.Join(home, ".windsurf"),
+		}, Format: FormatSQLite},
+		// Gemini CLI — ~/.gemini/tmp/<project-hash>/chats/*.jsonl
+		{Agent: "gemini", Dirs: []string{
+			filepath.Join(home, ".gemini"),
+		}, Format: FormatJSONL, CwdMatch: true},
+		// Grok / Kimi / Codeium / CommandCode / Cagent — home agent dirs
+		{Agent: "grok", Dirs: []string{filepath.Join(home, ".grok")}, Format: FormatJSONL, CwdMatch: true},
+		{Agent: "kimi", Dirs: []string{filepath.Join(home, ".kimi-code"), filepath.Join(home, ".kimi")}, Format: FormatJSONL, CwdMatch: true},
+		{Agent: "codeium", Dirs: []string{filepath.Join(home, ".codeium")}, Format: FormatJSONL, CwdMatch: true},
+		{Agent: "commandcode", Dirs: []string{filepath.Join(home, ".commandcode")}, Format: FormatJSONL, CwdMatch: true},
+		{Agent: "cagent", Dirs: []string{filepath.Join(home, ".cagent")}, Format: FormatJSONL, CwdMatch: true},
+		// Z CLI (zcode) — agent transcript JSONL + authoritative SQLite
+		{Agent: "zcode", Dirs: []string{
+			filepath.Join(home, ".zcode", "cli", "agents"),
+			filepath.Join(home, ".zcode", "cli", "rollout"),
+			filepath.Join(home, ".zcode", "v2", "sessions"),
+			filepath.Join(home, ".zcode"),
+		}, Format: FormatJSONL, CwdMatch: true},
+		{Agent: "zcode", Dirs: []string{
+			filepath.Join(home, ".zcode", "cli", "db"),
+		}, Format: FormatSQLite, CwdMatch: true},
+		// DeepSeek CLI — XDG data + legacy ~/.deepseek-cli
+		{Agent: "deepseek", Dirs: []string{
+			filepath.Join(xdgData, "deepseek-cli"),
+			filepath.Join(home, ".local", "share", "deepseek-cli"),
+			filepath.Join(home, ".deepseek-cli"),
+			filepath.Join(home, ".deepseek"),
+		}, Format: FormatJSONL, CwdMatch: true},
+		{Agent: "deepseek", Dirs: []string{
+			filepath.Join(xdgData, "deepseek-cli"),
+			filepath.Join(home, ".local", "share", "deepseek-cli"),
+			filepath.Join(home, ".deepseek-cli"),
+		}, Format: FormatJSON, CwdMatch: true},
+		// Hermes — SQLite state (+ legacy JSON sessions)
+		{Agent: "hermes", Dirs: []string{
+			filepath.Join(home, ".hermes"),
+		}, Format: FormatSQLite, CwdMatch: true},
+		{Agent: "hermes", Dirs: []string{
+			filepath.Join(home, ".hermes", "sessions"),
+		}, Format: FormatJSONL, CwdMatch: true},
+	}
+
 	known := map[string]bool{}
 	for _, a := range adapters.Registry() {
 		known[a.Name()] = true
+	}
+	if len(known) == 0 {
+		return hardcoded
 	}
 	var out []TranscriptSource
 	for _, s := range hardcoded {
@@ -263,8 +370,6 @@ func ResolveSources() []TranscriptSource {
 		}
 	}
 	if len(out) == 0 {
-		// Registry unavailable/empty (e.g. trimmed build): fall back to the
-		// hardcoded list rather than harvesting nothing.
 		return hardcoded
 	}
 	return out
@@ -393,9 +498,10 @@ func (h *Harvester) MatchesWorkspace(path string) bool {
 		return true
 	}
 	// Fallback: exact path-segment match on the folder name (not substring).
+	// Cursor uses slugs like "d-central-memory" for folder "central-memory".
 	want := strings.ToLower(h.folderName)
 	for _, seg := range strings.FieldsFunc(low, func(r rune) bool { return r == '/' || r == '\\' }) {
-		if seg == want {
+		if seg == want || strings.HasSuffix(seg, "-"+want) || strings.Contains(seg, "-"+want+"-") {
 			return true
 		}
 		// Claude-style encoded dirs use "-" for "/" (e.g. "--home--user--proj"):
@@ -407,6 +513,98 @@ func (h *Harvester) MatchesWorkspace(path string) bool {
 		}
 	}
 	return false
+}
+
+// MatchesTranscript reports whether path belongs to this workspace. Path
+// segment matching comes first; for CwdMatch sources (Codex, Gemini, …)
+// we also peek the file header for a cwd/workdir that names this folder.
+func (h *Harvester) MatchesTranscript(path string, cwdMatch bool) bool {
+	if h.MatchesWorkspace(path) {
+		return true
+	}
+	if !cwdMatch {
+		return false
+	}
+	hint := PeekTranscriptCwd(path)
+	if hint == "" {
+		return false
+	}
+	if h.MatchesWorkspace(hint) {
+		return true
+	}
+	ws := strings.TrimSpace(h.workspace)
+	if ws != "" && strings.EqualFold(filepath.Clean(hint), filepath.Clean(ws)) {
+		return true
+	}
+	return false
+}
+
+// PeekTranscriptCwd reads the first ~64KiB of a transcript and returns a
+// workspace hint (cwd / working_directory / directory / workspace_path).
+// Used for global session stores whose on-disk path has no project folder.
+func PeekTranscriptCwd(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 64<<10)
+	n, _ := io.ReadFull(f, buf)
+	if n <= 0 {
+		return ""
+	}
+	sc := bufio.NewScanner(strings.NewReader(string(buf[:n])))
+	sc.Buffer(make([]byte, 4<<10), maxJSONLLineBytes)
+	lines := 0
+	for sc.Scan() {
+		lines++
+		if lines > 40 {
+			break
+		}
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(line), &m); err != nil {
+			// Non-JSONL (e.g. pretty JSON): fall through to whole-buffer scan below.
+			break
+		}
+		if cwd := extractCwdHint(m); cwd != "" {
+			return cwd
+		}
+	}
+	// Whole-buffer fallback for single-object JSON / torn first lines.
+	var m map[string]any
+	if err := json.Unmarshal(buf[:n], &m); err == nil {
+		if cwd := extractCwdHint(m); cwd != "" {
+			return cwd
+		}
+	}
+	return ""
+}
+
+func extractCwdHint(m map[string]any) string {
+	for _, k := range []string{
+		"cwd", "working_directory", "workingDirectory", "workdir",
+		"directory", "workspace", "workspace_path", "workspacePath",
+		"project_path", "projectPath", "repo_path", "repoPath",
+	} {
+		if s := strings.TrimSpace(strField(m, k)); s != "" {
+			return s
+		}
+	}
+	if p, ok := m["payload"].(map[string]any); ok {
+		if s := extractCwdHint(p); s != "" {
+			return s
+		}
+	}
+	if msg, ok := m["message"].(map[string]any); ok {
+		if s := extractCwdHint(msg); s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 // originTail extracts the repo tail from a git origin URL for matching
@@ -452,6 +650,9 @@ var noiseTypes = map[string]bool{
 	"file-history-snapshot": true, "queue-operation": true,
 	"background_task": true, "mcp_tool_call": true, "mcp_tool_result": true,
 	"thinking": true, "progress": true,
+	// Codex rollout envelope types (dialogue lives under payload).
+	"session_meta": true, "turn_context": true,
+	"token_count": true, "task_complete": true,
 }
 
 // maxJSONLLineBytes bounds a single JSONL line (issue #118): a 1MB
@@ -489,6 +690,8 @@ func ParseTurns(r io.Reader) ([]Turn, error) {
 
 // parseTurnLine parses one JSONL line. ok=false means "skip, not an error"
 // (noise, blank, or unparsable line — transcripts must never break tailing).
+// Tolerates Claude/Cursor nested message.content, OpenCode flats, and Codex
+// rollout envelopes ({type, payload:{role|message|content}}).
 func parseTurnLine(line []byte) (t Turn, ok bool) {
 	if len(strings.TrimSpace(string(line))) == 0 {
 		return Turn{}, false
@@ -497,8 +700,35 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 	if err := json.Unmarshal(line, &m); err != nil {
 		return Turn{}, false
 	}
-	if noiseTypes[strings.ToLower(strField(m, "type"))] {
+	typ := strings.ToLower(strField(m, "type"))
+	if noiseTypes[typ] {
 		return Turn{}, false
+	}
+	// Codex / OpenAI Responses-style: unwrap payload for dialogue fields.
+	if p, ok := m["payload"].(map[string]any); ok {
+		pt := strings.ToLower(strField(p, "type"))
+		switch typ {
+		case "response_item":
+			if pt != "" && pt != "message" && pt != "output_text" && pt != "input_text" {
+				if noiseTypes[pt] || pt == "function_call" || pt == "function_call_output" ||
+					pt == "reasoning" || pt == "custom_tool_call" {
+					return Turn{}, false
+				}
+			}
+			m = p
+		case "event_msg":
+			switch pt {
+			case "user_message", "agent_message", "assistant_message", "message":
+				m = p
+			default:
+				return Turn{}, false
+			}
+		default:
+			// Generic nested payload with role/content — prefer it.
+			if strField(p, "role") != "" || p["content"] != nil || strField(p, "message") != "" {
+				m = p
+			}
+		}
 	}
 	role := firstNonEmpty(
 		strField(m, "role"),
@@ -506,10 +736,25 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 		strField(m, "author"),
 		nestedStr(m, "message", "role"),
 	)
+	// Codex event_msg: type user_message / agent_message without role.
+	if role == "" {
+		switch strings.ToLower(strField(m, "type")) {
+		case "user_message", "user":
+			role = "user"
+		case "agent_message", "assistant_message", "assistant":
+			role = "assistant"
+		}
+	}
 	if r := strings.ToLower(role); r == "tool" || r == "function" {
 		return Turn{}, false
 	}
 	content := extractContent(m)
+	if content == "" {
+		// Codex event_msg often uses "message" as a plain string.
+		if s, _ := m["message"].(string); strings.TrimSpace(s) != "" {
+			content = s
+		}
+	}
 	if strings.TrimSpace(content) == "" {
 		return Turn{}, false
 	}
@@ -717,7 +962,19 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	}
 
 	h.mu.Lock()
-	off := h.offsets[path]
+	off, seen := h.offsets[path]
+	if !seen && st.Size() > 0 {
+		// First sighting: skip older history so a large Cursor transcript
+		// does not flood the portal on daemon start. Keep a recent tail
+		// (~256KiB) so in-progress chats still sync.
+		const keepTail = 256 << 10
+		if st.Size() > keepTail {
+			off = st.Size() - keepTail
+		} else {
+			off = 0
+		}
+		h.offsets[path] = off
+	}
 	if st.Size() < off {
 		off = 0 // truncated or rotated: re-read from the start
 	}
@@ -957,7 +1214,7 @@ const (
 	// maxWalkFiles caps files visited per ScanAndTail pass.
 	maxWalkFiles = 2000
 	// maxWalkDepth caps directory depth below each source dir.
-	maxWalkDepth = 6
+	maxWalkDepth = 8
 	// maxWalkFileBytes skips sqlite/jsonl files larger than 64MB.
 	maxWalkFileBytes = 64 << 20
 )
@@ -970,33 +1227,99 @@ var harvesterSkipDirs = map[string]bool{
 	"coverage": true, ".idea": true, ".vscode": true, "Library": true,
 }
 
+// HarvesterStats is a point-in-time view for /local/harvest.
+type HarvesterStats struct {
+	LastScanAt     string
+	LastScanFiles  int
+	LastScanTurns  int
+	LastScanError  string
+	TrackedFiles   int
+	ActiveSessions int
+	AgentFiles     map[string]int
+}
+
+// Stats returns portal telemetry (safe under the harvester lock).
+func (h *Harvester) Stats() HarvesterStats {
+	if h == nil {
+		return HarvesterStats{AgentFiles: map[string]int{}}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := HarvesterStats{
+		LastScanFiles:  h.lastScanFiles,
+		LastScanTurns:  h.lastScanTurns,
+		LastScanError:  h.lastScanErr,
+		TrackedFiles:   len(h.offsets) + len(h.sqlite),
+		ActiveSessions: len(h.lastActive) - len(h.completed),
+		AgentFiles:     make(map[string]int, len(h.agentFiles)),
+	}
+	if out.ActiveSessions < 0 {
+		out.ActiveSessions = 0
+	}
+	if !h.lastScanAt.IsZero() {
+		out.LastScanAt = h.lastScanAt.UTC().Format(time.RFC3339)
+	}
+	for k, v := range h.agentFiles {
+		out.AgentFiles[k] = v
+	}
+	return out
+}
+
 // ScanAndTail walks all sources, tailing jsonl/json transcripts and tracking
 // sqlite/vscdb files, restricted to this workspace. Files classified NEVER by
 // adapters.ClassifyPath (credentials, secrets) are never touched. Walks are
 // bounded (file count, depth, size, skip dirs) per issue #118.
 func (h *Harvester) ScanAndTail() error {
+	_, _, err := h.ScanAndTailCounted()
+	return err
+}
+
+// ScanAndTailCounted is ScanAndTail with file/turn counts for the portal.
+func (h *Harvester) ScanAndTailCounted() (files, turns int, err error) {
+	agentFiles := map[string]int{}
+	var firstErr error
 	for _, src := range h.Sources {
 		for _, dir := range src.Dirs {
-			_ = h.scanDir(src, dir)
+			n, t, e := h.scanDirCounted(src, dir, agentFiles)
+			files += n
+			turns += t
+			if e != nil && firstErr == nil {
+				firstErr = e
+			}
 		}
 	}
-	return nil
+	h.mu.Lock()
+	h.lastScanAt = h.now().UTC()
+	h.lastScanFiles = files
+	h.lastScanTurns = turns
+	if firstErr != nil {
+		h.lastScanErr = firstErr.Error()
+	} else {
+		h.lastScanErr = ""
+	}
+	h.agentFiles = agentFiles
+	h.mu.Unlock()
+	return files, turns, firstErr
 }
 
 func (h *Harvester) scanDir(src TranscriptSource, dir string) error {
+	_, _, err := h.scanDirCounted(src, dir, nil)
+	return err
+}
+
+func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles map[string]int) (files, turns int, err error) {
 	if dir == "" {
-		return nil
+		return 0, 0, nil
 	}
 	visited := 0
-	return filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
-		if err != nil {
+	walkErr := filepath.Walk(dir, func(p string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
 			return nil
 		}
 		if visited > maxWalkFiles {
 			return filepath.SkipDir
 		}
 		if info.IsDir() {
-			// Depth bound + skip rebuildables/tooling dirs.
 			rel, rerr := filepath.Rel(dir, p)
 			if rerr == nil && rel != "." {
 				depth := len(strings.Split(rel, string(filepath.Separator)))
@@ -1016,7 +1339,7 @@ func (h *Harvester) scanDir(src TranscriptSource, dir string) error {
 		if adapters.ClassifyPath(p) == adapters.Never {
 			return nil
 		}
-		if !h.MatchesWorkspace(p) {
+		if !h.MatchesTranscript(p, src.CwdMatch) {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(p))
@@ -1028,7 +1351,12 @@ func (h *Harvester) scanDir(src TranscriptSource, dir string) error {
 			h.mu.Lock()
 			h.agents[p] = src.Agent
 			h.mu.Unlock()
-			_, _ = h.TailFile(p)
+			got, _ := h.TailFile(p)
+			files++
+			turns += len(got)
+			if agentFiles != nil {
+				agentFiles[src.Agent]++
+			}
 		case FormatJSON:
 			if ext != ".json" {
 				return nil
@@ -1036,7 +1364,12 @@ func (h *Harvester) scanDir(src TranscriptSource, dir string) error {
 			h.mu.Lock()
 			h.agents[p] = src.Agent
 			h.mu.Unlock()
-			_, _ = h.TailFile(p)
+			got, _ := h.TailFile(p)
+			files++
+			turns += len(got)
+			if agentFiles != nil {
+				agentFiles[src.Agent]++
+			}
 		case FormatSQLite:
 			if ext != ".db" && ext != ".sqlite" && ext != ".sqlite3" && ext != ".vscdb" {
 				return nil
@@ -1045,9 +1378,14 @@ func (h *Harvester) scanDir(src TranscriptSource, dir string) error {
 			h.agents[p] = src.Agent
 			h.mu.Unlock()
 			_ = h.TrackSQLite(p, info)
+			files++
+			if agentFiles != nil {
+				agentFiles[src.Agent]++
+			}
 		}
 		return nil
 	})
+	return files, turns, walkErr
 }
 
 // Start runs the poll loop (ScanAndTail + CheckIdle every PollInterval)

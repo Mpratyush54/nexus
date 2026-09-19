@@ -9,7 +9,7 @@ import (
 )
 
 func TestAuditRegistryExpectedAgents(t *testing.T) {
-	want := []string{"claude", "opencode", "cursor", "codex", "antigravity", "copilot", "codeium", "kimi", "windsurf", "gemini", "grok", "commandcode", "cagent", "zcode"}
+	want := []string{"claude", "opencode", "cursor", "codex", "antigravity", "copilot", "codeium", "kimi", "windsurf", "gemini", "grok", "commandcode", "cagent", "zcode", "deepseek", "hermes"}
 	got := map[string]bool{}
 	for _, a := range Registry() {
 		got[a.Name()] = true

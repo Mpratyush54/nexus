@@ -39,9 +39,10 @@ var defaultServerURL = "https://api-nexus.pratyushes.dev"
 // config file, and compile-time default (tiers 2–4). Tier 1 is the
 // -server global flag applied in parseGlobalArgs.
 func defaultConfig() Config {
+	file, _ := config.LoadFile()
 	return Config{
 		ServerURL:   config.ResolveServerURL(defaultServerURL),
-		Token:       firstNonEmpty(os.Getenv("NEXUS_TOKEN"), os.Getenv("CENTRAL_MEMORY_TOKEN"), ""),
+		Token:       firstNonEmpty(os.Getenv("NEXUS_TOKEN"), os.Getenv("CENTRAL_MEMORY_TOKEN"), file.Token),
 		DaemonURL:   firstNonEmpty(os.Getenv("NEXUS_DAEMON"), "http://localhost:7171"),
 		DaemonToken: os.Getenv("NEXUS_DAEMON_TOKEN"),
 		ProjectID:   firstNonEmpty(os.Getenv("NEXUS_PROJECT"), ""),

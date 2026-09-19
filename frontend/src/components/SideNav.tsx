@@ -4,6 +4,7 @@ import {
   Bot,
   Building2,
   ChevronRight,
+  Cable,
   GitBranch,
   LayoutDashboard,
   Layers,
@@ -18,19 +19,21 @@ import { useMemo, useState } from 'react'
 import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { NotificationBell } from './NotificationBell'
 import { Button } from './ui/Button'
+import { ProjectSwitcher } from './ProjectSwitcher'
 import { useAuth } from '@/providers/AuthProvider'
 import { useMe } from '@/hooks/useAuthMutations'
 import { useProjectPresence } from '@/hooks/useTeam'
 
 const links = [
-  { to: '/app/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+  { to: '/app/dashboard', label: 'Home', icon: LayoutDashboard },
   { to: '/app/memory', label: 'Memory', icon: Layers },
   { to: '/app/agents', label: 'Agents', icon: Bot },
+  { to: '/app/sessions', label: 'Sessions', icon: MessageSquare },
   { to: '/app/team', label: 'Team', icon: Users },
   { to: '/app/org', label: 'Org', icon: Building2 },
-  { to: '/app/branches', label: 'Branches', icon: GitBranch },
-  { to: '/app/sessions', label: 'Sessions', icon: MessageSquare },
   { to: '/app/activity', label: 'Activity', icon: Activity },
+  { to: '/app/branches', label: 'Branches', icon: GitBranch },
+  { to: '/app/connect', label: 'Desktop', icon: Cable },
 ] as const
 
 const AVATAR_COLORS = ['#5c5346', '#4a5560', '#5a4a3a', '#3d5348', '#53485c', '#4a5340']
@@ -179,6 +182,10 @@ export function SideNav({ onOpenCommand }: Props) {
           <kbd className="app-search-kbd">⌘K</kbd>
         </button>
         <NotificationBell />
+      </div>
+
+      <div className="mt-3">
+        <ProjectSwitcher />
       </div>
 
       <NavLinks />

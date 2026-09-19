@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "nexus": {
+      "command": "C:\\Users\\Pratyush Mishra\\AppData\\Local\\Nexus\\bin\\mem.exe",
+      "args": ["mcp"],
+      "env": {
+        "NEXUS_SERVER": "https://api-nexus.pratyushes.dev",
+        "NEXUS_AGENT": "cursor",
+        "NEXUS_TOKEN": "PASTE_TOKEN_FROM_SETTINGS_OR_nexus_login"
+      }
+    }
+  }
+}

@@ -310,9 +310,9 @@ func (e errNoTarget) Error() string {
 }
 
 // Registry of adapters. Stateful tools (sessions on disk) get full
-// adapters. Pure API models (GLM, DeepSeek via TokenRouter, etc.) have no
-// local state — they are covered normalized-only via `mem run` (P4), which
-// logs transcripts into the vault the same way Normalize does.
+// adapters. Pure API models without a local transcript root still get an
+// adapter entry so Discover/harvester path lists stay complete; empty dirs
+// are simply no-ops at scan time.
 func Registry() []Adapter {
 	const fiftyMB = 50 << 20
 	codeWS := `${APPDATA}\Code\User\workspaceStorage`
@@ -328,12 +328,14 @@ func Registry() []Adapter {
 		genericAdapter{name: "copilot", agentDirs: []string{".copilot"}, projectDot: []string{".github"},
 			absRoots: []string{codeWS}, maxBytes: fiftyMB},
 		genericAdapter{name: "codeium", agentDirs: []string{".codeium"}, maxBytes: fiftyMB},
-		genericAdapter{name: "kimi", agentDirs: []string{".kimi-code"}, maxBytes: fiftyMB},
+		genericAdapter{name: "kimi", agentDirs: []string{".kimi-code", ".kimi"}, maxBytes: fiftyMB},
 		genericAdapter{name: "windsurf", agentDirs: []string{".windsurf"}, maxBytes: fiftyMB},
 		genericAdapter{name: "gemini", agentDirs: []string{".gemini"}, maxBytes: fiftyMB},
 		genericAdapter{name: "grok", agentDirs: []string{".grok"}, maxBytes: fiftyMB},
 		genericAdapter{name: "commandcode", agentDirs: []string{".commandcode"}, maxBytes: fiftyMB},
 		genericAdapter{name: "cagent", agentDirs: []string{".cagent"}, maxBytes: fiftyMB},
 		genericAdapter{name: "zcode", agentDirs: []string{".zcode"}, maxBytes: fiftyMB},
+		genericAdapter{name: "deepseek", agentDirs: []string{".deepseek-cli", ".deepseek", ".local" + string(filepath.Separator) + "share" + string(filepath.Separator) + "deepseek-cli"}, maxBytes: fiftyMB},
+		genericAdapter{name: "hermes", agentDirs: []string{".hermes"}, maxBytes: fiftyMB},
 	}
 }

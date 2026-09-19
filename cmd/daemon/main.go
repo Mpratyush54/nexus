@@ -70,14 +70,29 @@ func defaultPort() int {
 	return 7687
 }
 
-// designatedFromEnv reports whether this daemon may process now (issue #115
-// fail-closed default): $CENTRAL_DESIGNATED_PROCESSOR=1/true opts in.
-// The server elector (ReassignStaleDesignated + ElectDesignatedProcessor)
-// remains the source of truth when reachable; this flag is the local
-// operator override.
+// designatedFromEnv reports whether this daemon may process now (issue #115).
+// Explicit CENTRAL_DESIGNATED_PROCESSOR=1/true/yes opts in; 0/false/no opts out.
+// When unset, returns false here — main enables auto-sync when a server token
+// is configured on the process (flag/env), so leftover config files do not
+// flip designation in tests.
 func designatedFromEnv() bool {
 	v := strings.ToLower(strings.TrimSpace(os.Getenv("CENTRAL_DESIGNATED_PROCESSOR")))
-	return v == "1" || v == "true" || v == "yes"
+	switch v {
+	case "0", "false", "no", "off":
+		return false
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+func autoDesignated(serverToken string) bool {
+	if v := strings.TrimSpace(os.Getenv("CENTRAL_DESIGNATED_PROCESSOR")); v != "" {
+		return designatedFromEnv()
+	}
+	// Product default: harvest → portal when authenticated to a central server.
+	return strings.TrimSpace(serverToken) != ""
 }
 
 func run(args []string) error {
@@ -95,7 +110,8 @@ func run(args []string) error {
 	port := fs.Int("port", defaultPort(), "listen port")
 	// Tier 1 is the -server flag; its default is tiers 2–4 (env → config → compile).
 	serverURL := fs.String("server", config.ResolveServerURL(defaultServerURL), "central server base URL (empty = local-only mode, no register/heartbeat)")
-	serverToken := fs.String("server-token", os.Getenv("CENTRAL_SERVER_TOKEN"), "JWT bearer token for central-server calls (issue #155; required when the server has auth enabled)")
+	serverToken := fs.String("server-token", firstNonEmpty(os.Getenv("CENTRAL_SERVER_TOKEN"), config.ResolveToken()), "JWT bearer token for central-server calls")
+	userID := fs.String("user", firstNonEmpty(os.Getenv("CENTRAL_USER_ID"), config.ResolveUserID()), "user id (from nexus login / config)")
 	project := fs.String("project", strings.TrimSpace(os.Getenv("CENTRAL_PROJECT")), "project name for extraction (default: workspace folder base)")
 	proxyAddr := fs.String("proxy", daemon.ResolveProxyAddr(), "browser CORS proxy listen address (empty disables; env DAEMON_PROXY)")
 	if err := fs.Parse(args); err != nil {
@@ -123,6 +139,7 @@ func run(args []string) error {
 	}
 	d.ServerURL = strings.TrimSpace(*serverURL)
 	d.ServerToken = strings.TrimSpace(*serverToken)
+	d.UserID = strings.TrimSpace(*userID)
 
 	// Background extraction pipeline (issue #115): Harvester + Watcher +
 	// Processor with the interceptor sink wired at startup, designation
@@ -132,13 +149,10 @@ func run(args []string) error {
 	if proj == "" {
 		proj = filepath.Base(filepath.Clean(d.Root))
 	}
-	rt := daemon.NewRuntime(d, proj, daemon.NewStaticDesignation(designatedFromEnv()))
+	desig := daemon.NewStaticDesignation(autoDesignated(*serverToken))
+	rt := daemon.NewRuntime(d, proj, desig)
 	if rt != nil {
-		// Push-file Materializer (issue #81): daemon-backed sandbox I/O,
-		// DefaultTargets (.github/copilot-instructions.md, .cursorrules,
-		// .windsurfrules). Source/Bus are nil (server-backed memory fetch
-		// arrives with the central connection); Run stays alive and
-		// regenerates once a source is wired.
+		d.SetPipeline(rt)
 		rt.Materializer = &materializer.Materializer{
 			ProjectID: proj,
 			Targets:   materializer.DefaultTargets(),
@@ -155,6 +169,7 @@ func run(args []string) error {
 			},
 		}
 		go rt.Start(ctx)
+		log.Printf("daemon: auto-sync harvester started (designated=%v, cursor JSONL → portal)", desig.IsDesignated())
 	}
 
 	serveErr := make(chan error, 1)
@@ -175,12 +190,17 @@ func run(args []string) error {
 			}
 			proxyErr <- nil
 		}()
-		log.Printf("daemon: CORS proxy listening on %s (read-only /local/*)", pa)
+		log.Printf("daemon: status UI + CORS proxy on http://%s/ (login & connection status)", pa)
 	}
 
 	if d.ServerURL != "" {
 		if err := d.Register(ctx, d.ServerURL); err != nil {
 			log.Printf("daemon: initial register failed: %v", err)
+		} else if rt != nil {
+			// Prefer server UUID over folder basename for portal writes.
+			if pid, err := d.ResolveProjectIDForRoot(ctx); err == nil && pid != "" {
+				rt.SetServerProjectID(pid)
+			}
 		}
 		hbCtx, hbCancel := context.WithCancel(context.Background())
 		defer hbCancel()
@@ -222,4 +242,13 @@ func run(args []string) error {
 		return err
 	}
 	return nil
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }

@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { useToast } from '@/components/ui/Toast'
@@ -8,10 +8,12 @@ import { ApiError } from '@/types/api'
 
 export function LoginPage() {
   const navigate = useNavigate()
+  const [params] = useSearchParams()
   const { push } = useToast()
   const login = useLogin()
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const next = params.get('next')
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
@@ -20,7 +22,11 @@ export function LoginPage() {
       {
         onSuccess: () => {
           push({ title: 'Signed in', detail: `Welcome, ${username.trim()}` })
-          navigate('/app/dashboard')
+          if (next && (next.startsWith('/cli/') || next.startsWith('/app/'))) {
+            navigate(next, { replace: true })
+            return
+          }
+          navigate('/app/connect')
         },
         onError: (err) => {
           const message = err instanceof ApiError ? err.message : 'Login failed'
@@ -38,7 +44,11 @@ export function LoginPage() {
         </Link>
         <GlassPanel className="p-6 sm:p-7">
           <h1 className="text-xl font-semibold text-fg">Log in</h1>
-          <p className="mt-1 text-sm text-fg-dim">Continue to your project memory.</p>
+          <p className="mt-1 text-sm text-fg-dim">
+            {next?.startsWith('/cli/')
+              ? 'Sign in to connect the Nexus desktop app.'
+              : 'Continue to your project memory.'}
+          </p>
           <form onSubmit={onSubmit} className="mt-6 space-y-4">
             <label className="block">
               <span className="mb-1.5 block text-xs text-fg-dim">Username</span>
@@ -69,7 +79,10 @@ export function LoginPage() {
           </form>
           <p className="mt-5 text-center text-sm text-fg-dim">
             No account yet?{' '}
-            <Link to="/signup" className="text-ember hover:underline">
+            <Link
+              to={next ? `/signup?next=${encodeURIComponent(next)}` : '/signup'}
+              className="text-ember hover:underline"
+            >
               Sign up
             </Link>
           </p>

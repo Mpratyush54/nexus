@@ -4,6 +4,8 @@ import { ActivityPage } from '@/pages/ActivityPage'
 import { AdminPage } from '@/pages/AdminPage'
 import { AgentsPage } from '@/pages/AgentsPage'
 import { BranchesPage } from '@/pages/BranchesPage'
+import { CliAuthPage } from '@/pages/CliAuthPage'
+import { ConnectPage } from '@/pages/ConnectPage'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { LandingPage } from '@/pages/LandingPage'
 import { LoginPage } from '@/pages/LoginPage'
@@ -23,6 +25,7 @@ export default function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/" element={<LandingPage />} />
+          <Route path="/cli/auth" element={<CliAuthPage />} />
 
           <Route element={<GuestRoute />}>
             <Route path="/login" element={<LoginPage />} />
@@ -32,6 +35,7 @@ export default function App() {
           <Route element={<ProtectedRoute />}>
             <Route path="/app" element={<AppShell />}>
               <Route index element={<Navigate to="dashboard" replace />} />
+              <Route path="connect" element={<ConnectPage />} />
               <Route path="dashboard" element={<DashboardPage />} />
               <Route path="memory" element={<MemoryPage />} />
               <Route path="agents" element={<AgentsPage />} />

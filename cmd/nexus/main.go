@@ -50,6 +50,12 @@ func main() {
 		runErr = runEpisode(ctx, cfg, rest[1:], os.Stdout)
 	case "doctor":
 		runErr = runDoctor(ctx, cfg, rest[1:], os.Stdout)
+	case "login":
+		runErr = runLogin(ctx, cfg, rest[1:], os.Stdout)
+	case "logout":
+		runErr = runLogout(ctx, cfg, rest[1:], os.Stdout)
+	case "setup":
+		runErr = runSetup(ctx, cfg, rest[1:], os.Stdout)
 	case "migrate":
 		runErr = runMigrate(ctx, cfg, rest[1:], os.Stdout)
 	case "update":
@@ -191,6 +197,9 @@ Usage:
   nexus [--server URL] [--token TOK] [--daemon URL] [-p PROJECT] [--json] <command> [args]
 
 Commands:
+  login                           open browser to sign in (token callback)
+  logout                          clear saved credentials
+  setup                           login (if needed) + install daemon + start tray
   status                          server health (+ active workspace with -p)
   memory search [-p ID] [--level L] [--limit N] "<query>"
   memory propose -k KEY [-p ID] [--level L] "<fact>"
@@ -211,5 +220,9 @@ Global flags (env fallbacks: NEXUS_SERVER / CENTRAL_SERVER_URL, NEXUS_TOKEN, NEX
   --token TOK    bearer token (NEXUS_TOKEN / CENTRAL_MEMORY_TOKEN)
   --daemon URL   workspace daemon base URL (default http://localhost:7171)
   -p, --project  default project ID
-  --json         emit JSON instead of pretty tables`)
+  --json         emit JSON instead of pretty tables
+
+Desktop:
+  Nexus Desktop (tray) — Sign in with browser → nexus.pratyushes.dev → callback
+  Local status UI: http://127.0.0.1:7272/`)
 }

@@ -46,6 +46,26 @@ func TestCORSProxyHealthz(t *testing.T) {
 	}
 }
 
+func TestCORSProxyPrivateNetworkAccess(t *testing.T) {
+	d := testDaemon(t)
+	p := NewCORSProxy(d)
+	r := httptest.NewRequest(http.MethodOptions, "/local/status", nil)
+	r.Header.Set("Origin", "https://nexus.pratyushes.dev")
+	r.Header.Set("Access-Control-Request-Method", "GET")
+	r.Header.Set("Access-Control-Request-Private-Network", "true")
+	w := httptest.NewRecorder()
+	p.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("OPTIONS status = %d", w.Code)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Private-Network"); got != "true" {
+		t.Fatalf("Allow-Private-Network = %q, want true (Chrome PNA)", got)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "https://nexus.pratyushes.dev" {
+		t.Fatalf("CORS origin = %q", got)
+	}
+}
+
 func TestCORSProxyHealthzNoAuth(t *testing.T) {
 	d := testDaemon(t)
 	p := NewCORSProxy(d)

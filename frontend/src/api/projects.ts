@@ -1,5 +1,5 @@
 import { apiDownload, apiRequest } from '@/lib/api-client'
-import type { Project } from '@/types/api'
+import type { ListResponse, Project } from '@/types/api'
 
 export type ResolveProjectInput = {
   folder_name?: string
@@ -40,6 +40,10 @@ export type ForkResult = {
 }
 
 export const projectsApi = {
+  list() {
+    return apiRequest<ListResponse<Project>>('/projects')
+  },
+
   resolve(input: ResolveProjectInput) {
     return apiRequest<Project>('/projects/resolve', {
       method: 'POST',

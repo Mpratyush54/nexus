@@ -852,6 +852,8 @@ func (p *Processor) ProcessEvents(ctx context.Context, project string, events []
 	proposals = Deduplicate(proposals, p.Store.Existing())
 	proposals = applyCaps(proposals, p.Budget, p.BatchSize)
 	now := time.Now().UTC()
+	var firstErr error
+	saved := 0
 	for i := range proposals {
 		proposals[i].ConfirmAfter = ConfirmationDelay(proposals[i])
 		proposals[i].ProposedAt = now
@@ -860,9 +862,21 @@ func (p *Processor) ProcessEvents(ctx context.Context, project string, events []
 		proposals[i].Content = redact(proposals[i].Content)
 		if p.Store != nil {
 			if err := p.Store.Save(proposals[i]); err != nil {
-				return proposals[:i], err
+				// Keep uploading the rest of the batch — one bad row
+				// (e.g. transient 5xx) must not drop sibling proposals.
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
 			}
+			saved++
 		}
+	}
+	if firstErr != nil && saved == 0 {
+		return nil, firstErr
+	}
+	if firstErr != nil {
+		return proposals, firstErr
 	}
 	return proposals, nil
 }

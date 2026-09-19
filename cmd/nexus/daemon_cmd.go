@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 
+	"central-memory/internal/config"
 	"central-memory/internal/platform"
 )
 
@@ -35,14 +36,22 @@ func runDaemonCmd(cfg Config, args []string, stdout io.Writer) error {
 			return err
 		}
 		root, _ := os.Getwd()
-		dArgs := []string{"-root", root, "-server", cfg.ServerURL}
-		if cfg.Token != "" {
-			dArgs = append(dArgs, "-server-token", cfg.Token)
+		file, _ := config.LoadFile()
+		server := firstNonEmpty(cfg.ServerURL, file.ServerURL)
+		token := firstNonEmpty(cfg.Token, file.Token)
+		userID := firstNonEmpty(config.ResolveUserID(), file.UserID)
+		dArgs := []string{"-root", root, "-server", server}
+		if token != "" {
+			dArgs = append(dArgs, "-server-token", token)
+		}
+		if userID != "" {
+			dArgs = append(dArgs, "-user", userID)
 		}
 		if err := platform.Install(bin, dArgs); err != nil {
 			return err
 		}
 		fmt.Fprintf(stdout, "installed %s as a login service\n", bin)
+		fmt.Fprintln(stdout, "status UI: http://127.0.0.1:7272/")
 		return nil
 	default:
 		return fmt.Errorf("unknown daemon command %q (want install, uninstall, status)", args[0])
@@ -62,8 +71,18 @@ func resolveDaemonBinary() (string, error) {
 	if runtime.GOOS == "windows" {
 		ext = ".exe"
 	}
-	for _, name := range []string{"nexus-daemon" + ext, "workspace-daemon" + ext, "daemon" + ext} {
-		p := filepath.Join(dir, name)
+	candidates := []string{
+		filepath.Join(dir, "nexus-daemon"+ext),
+		filepath.Join(dir, "nexus-daemon-windows-amd64"+ext),
+		filepath.Join(dir, "workspace-daemon"+ext),
+		filepath.Join(dir, "daemon"+ext),
+	}
+	if binDir, err := nexusBinDir(); err == nil {
+		candidates = append([]string{
+			filepath.Join(binDir, "nexus-daemon"+ext),
+		}, candidates...)
+	}
+	for _, p := range candidates {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}

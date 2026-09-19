@@ -32,6 +32,9 @@ type Store interface {
 	// Projects
 	ResolveProject(ctx context.Context, canonicalURL, rootCommit, folderName string) (*Project, error)
 	GetProject(ctx context.Context, id string) (*Project, error)
+	// ListProjectsForUser returns projects the user may open (creator,
+	// explicit member, or ADMIN of the project's org).
+	ListProjectsForUser(ctx context.Context, userID string) ([]*Project, error)
 
 	// Workspaces
 	RegisterWorkspace(ctx context.Context, ws *Workspace) error
@@ -255,6 +258,41 @@ func (s *MemStore) GetProject(ctx context.Context, id string) (*Project, error) 
 		return nil, ErrNotFound
 	}
 	return cloneProject(p), nil
+}
+
+// ListProjectsForUser returns projects the user may open in the portal.
+func (s *MemStore) ListProjectsForUser(ctx context.Context, userID string) ([]*Project, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	uid := strings.TrimSpace(userID)
+	if uid == "" {
+		return nil, nil
+	}
+	var out []*Project
+	for _, p := range s.projects {
+		if p == nil {
+			continue
+		}
+		if p.CreatedBy == uid || s.members[p.ID][uid] {
+			out = append(out, cloneProject(p))
+			continue
+		}
+		if _, hasRole := s.memberRoles[p.ID][uid]; hasRole {
+			out = append(out, cloneProject(p))
+			continue
+		}
+		if p.OrgID != "" {
+			if role := s.orgMembers[p.OrgID][uid]; role == OrgRoleAdmin {
+				out = append(out, cloneProject(p))
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ai := strings.ToLower(firstNonEmpty(out[i].DisplayName, out[i].FolderName, out[i].ID))
+		aj := strings.ToLower(firstNonEmpty(out[j].DisplayName, out[j].FolderName, out[j].ID))
+		return ai < aj
+	})
+	return out, nil
 }
 
 func (s *MemStore) RegisterWorkspace(ctx context.Context, ws *Workspace) error {

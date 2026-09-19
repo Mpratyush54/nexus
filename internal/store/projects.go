@@ -8,6 +8,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -137,4 +138,39 @@ func (s *PostgresStore) GetProject(ctx context.Context, id string) (*Project, er
 		return nil, ErrNotFound
 	}
 	return p, err
+}
+
+// ListProjectsForUser returns projects the user may open (creator, member, or org ADMIN).
+func (s *PostgresStore) ListProjectsForUser(ctx context.Context, userID string) ([]*Project, error) {
+	uid := strings.TrimSpace(userID)
+	if uid == "" {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT DISTINCT `+projectColumns+`
+		FROM projects p
+		WHERE p.created_by::TEXT = $1
+		   OR EXISTS (
+		        SELECT 1 FROM project_members pm
+		        WHERE pm.project_id = p.id AND pm.user_id::TEXT = $1
+		   )
+		   OR EXISTS (
+		        SELECT 1 FROM organization_members om
+		        WHERE om.org_id = p.org_id AND om.user_id::TEXT = $1
+		          AND UPPER(om.role) = 'ADMIN'
+		   )
+		ORDER BY COALESCE(NULLIF(p.display_name,''), p.folder_name, p.id::TEXT)`, uid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Project
+	for rows.Next() {
+		p, err := scanProject(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
 }

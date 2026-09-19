@@ -20,6 +20,7 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("GET /healthz", s.handleHealth)
 
 	s.Mux.HandleFunc("POST /projects/resolve", s.requireAuth(s.handleProjectResolve))
+	s.Mux.HandleFunc("GET /projects", s.requireAuth(s.handleProjectList))
 	s.Mux.HandleFunc("GET /projects/{id}/members", s.requireAuth(s.handleMemberList))
 	s.Mux.HandleFunc("POST /projects/{id}/members", s.requireAuth(s.handleMemberGrant))
 	s.Mux.HandleFunc("DELETE /projects/{id}/members", s.requireAuth(s.handleMemberRevoke))
@@ -268,6 +269,22 @@ func (s *Server) handleProjectResolve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *Server) handleProjectList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	items, err := s.Store.ListProjectsForUser(r.Context(), authSubject(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list projects: "+err.Error())
+		return
+	}
+	if items == nil {
+		items = []*store.Project{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 }
 
 // --- workspaces ---

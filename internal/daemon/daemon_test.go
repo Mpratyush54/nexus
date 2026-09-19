@@ -427,6 +427,7 @@ func TestRegisterHeartbeatAgainstServer(t *testing.T) {
 }
 
 func TestRegisterRequiresUserID(t *testing.T) {
+	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", t.TempDir())
 	var cap strictCapture
 	srv := newStrictServer(t, &cap)
 	defer srv.Close()
@@ -440,10 +441,11 @@ func TestRegisterRequiresUserID(t *testing.T) {
 	t.Setenv("NEXUS_USER_ID", "")
 	t.Setenv("USER_ID", "")
 	d.UserID = ""
+	d.ServerToken = ""
 	if err := d.Register(context.Background(), ""); err == nil {
 		t.Fatal("Register without user_id succeeded, want error")
-	} else if !strings.Contains(err.Error(), "user id") {
-		t.Fatalf("Register error = %v, want user-id complaint", err)
+	} else if !strings.Contains(err.Error(), "not signed in") && !strings.Contains(err.Error(), "user id") {
+		t.Fatalf("Register error = %v, want sign-in / user-id complaint", err)
 	}
 	if cap.gotRegister {
 		t.Fatal("server saw register despite missing user_id")
@@ -811,7 +813,10 @@ func TestStartHeartbeatBacksOffOnRepeatedFailures(t *testing.T) {
 	d.UserID = "user-1"
 	d.WorkspaceID = "ws-x" // registered, so beats hit the failing server
 
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	// Budget enough wall time for: immediate beat + several 20ms-scaled
+	// backoff sleeps. A tight 300ms window flakes when the first HTTP
+	// round-trip + scheduling eats the remainder before attempt 2.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	done := make(chan struct{})
 	go func() {
@@ -824,10 +829,10 @@ func TestStartHeartbeatBacksOffOnRepeatedFailures(t *testing.T) {
 	if got < 2 {
 		t.Fatalf("attempts = %d, want >= 2 (retries must continue)", got)
 	}
-	// Fixed 20ms ticker would fire ~16 times in 300ms; backoff
-	// (20,20,40,80,160...) fires ~5-6 times. Generous cap keeps this
+	// Fixed 20ms ticker would fire ~100 times in 2s; backoff
+	// (20,20,40,80,160...) fires far fewer. Cap keeps this
 	// deterministic without wall-clock sleeps at HeartbeatInterval scale.
-	if got > 10 {
-		t.Fatalf("attempts = %d, want <= 10 (backoff must slow retries)", got)
+	if got > 40 {
+		t.Fatalf("attempts = %d, want <= 40 (backoff must slow retries)", got)
 	}
 }

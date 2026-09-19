@@ -162,6 +162,10 @@ func TestMatchesWorkspace(t *testing.T) {
 	if h.MatchesWorkspace(filepath.Join("some", "projects", "other-project", "abc.jsonl")) {
 		t.Fatal("other project's path must not match")
 	}
+	// Cursor slug: drive + folder (d-central-memory)
+	if !h.MatchesWorkspace(filepath.Join("Users", "x", ".cursor", "projects", "d-central-memory", "agent-transcripts", "a.jsonl")) {
+		t.Fatal("Cursor project slug d-central-memory should match folder central-memory")
+	}
 	empty := NewHarvester("", nil)
 	if !empty.MatchesWorkspace("/anything/at/all.jsonl") {
 		t.Fatal("empty workspace should match all (no filter)")
@@ -536,3 +540,93 @@ func TestHarvestSQLiteFakeExtractorEmitsTurns(t *testing.T) {
 		t.Fatalf("unregistered extractor must not be called, calls = %d", fake.ncalls())
 	}
 }
+
+func TestResolveSourcesCoversAllHarnesses(t *testing.T) {
+	want := map[string]bool{
+		"claude": true, "opencode": true, "cursor": true, "codex": true,
+		"antigravity": true, "copilot": true, "windsurf": true, "gemini": true,
+		"grok": true, "kimi": true, "codeium": true, "commandcode": true,
+		"cagent": true, "zcode": true, "deepseek": true, "hermes": true,
+	}
+	got := map[string]bool{}
+	cwd := map[string]bool{}
+	for _, s := range ResolveSources() {
+		got[s.Agent] = true
+		if s.CwdMatch {
+			cwd[s.Agent] = true
+		}
+		if len(s.Dirs) == 0 {
+			t.Errorf("%s: empty dirs", s.Agent)
+		}
+	}
+	for name := range want {
+		if !got[name] {
+			t.Errorf("ResolveSources missing agent %q", name)
+		}
+	}
+	for _, name := range []string{"codex", "gemini", "zcode", "deepseek", "hermes", "copilot"} {
+		if !cwd[name] {
+			t.Errorf("%s should use CwdMatch for global session stores", name)
+		}
+	}
+}
+
+func TestParseTurnsCodexRollout(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"type":"session_meta","payload":{"id":"s1","cwd":"D:\\central-memory"}}`,
+		`{"type":"turn_context","payload":{}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"We decided Codex rollouts must auto-harvest into Nexus portal memory."}]}}`,
+		`{"type":"event_msg","payload":{"type":"agent_message","message":"Agreed. Codex JSONL rollouts are parsed and posted as PROPOSED memories."}}`,
+		`{"type":"response_item","payload":{"type":"function_call","name":"shell"}}`,
+	}, "\n")
+	turns, err := ParseTurns(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 {
+		t.Fatalf("turns=%d want 2 (noise skipped), got %+v", len(turns), turns)
+	}
+	if turns[0].Speaker != "user" || !strings.Contains(turns[0].Content, "Codex rollouts") {
+		t.Fatalf("user turn: %+v", turns[0])
+	}
+	if turns[1].Speaker != "assistant" || !strings.Contains(turns[1].Content, "PROPOSED") {
+		t.Fatalf("assistant turn: %+v", turns[1])
+	}
+}
+
+func TestMatchesTranscriptCwdPeek(t *testing.T) {
+	dir := t.TempDir()
+	ws := filepath.Join(dir, "central-memory")
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Codex-style path: no folder name in the path.
+	sess := filepath.Join(dir, ".codex", "sessions", "2026", "09", "19")
+	if err := os.MkdirAll(sess, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(sess, "rollout-test.jsonl")
+	body := `{"type":"session_meta","payload":{"id":"abc","cwd":"` + strings.ReplaceAll(ws, `\`, `\\`) + `"}}` + "\n" +
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello from codex session for this workspace folder matching"}]}}` + "\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHarvester(ws, nil)
+	if h.MatchesWorkspace(p) {
+		t.Fatal("codex date path should not path-match without cwd peek")
+	}
+	if !h.MatchesTranscript(p, true) {
+		t.Fatal("MatchesTranscript with CwdMatch must accept cwd hint")
+	}
+	if h.MatchesTranscript(p, false) {
+		t.Fatal("without CwdMatch, date-sharded path must not match")
+	}
+	other := filepath.Join(sess, "other.jsonl")
+	if err := os.WriteFile(other, []byte("{\"type\":\"session_meta\",\"payload\":{\"cwd\":\"D:\\\\other-repo\"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if h.MatchesTranscript(other, true) {
+		t.Fatal("foreign cwd must not match")
+	}
+}
+

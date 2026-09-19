@@ -1,5 +1,8 @@
-*.exe
+﻿*.exe
 *.exe~
 *.dll
 *.so
 *.dylib
+.cursor/mcp.json
+.central-memory/
+dist/

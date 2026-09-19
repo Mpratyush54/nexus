@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"central-memory/internal/config"
 	"central-memory/internal/security"
 	"central-memory/internal/steering"
 )
@@ -88,6 +89,9 @@ type Daemon struct {
 	// discover the bridge via the central server instead of hardcoding
 	// :7272. Guarded by mu.
 	ProxyURL string
+	// pipeline is the optional Layer-2/3/4 Runtime (harvest → portal).
+	// Exposed to the Connect page via /local/harvest. Guarded by mu.
+	pipeline *Runtime
 
 	mux *http.ServeMux
 	srv *http.Server
@@ -487,7 +491,8 @@ func (d *Daemon) setWorkspaceID(id string) error {
 }
 
 // effectiveUserID resolves the owning user: the explicit UserID field first,
-// then CENTRAL_USER_ID / NEXUS_USER_ID / USER_ID from the environment.
+// then CENTRAL_USER_ID / NEXUS_USER_ID / USER_ID from the environment,
+// then the persisted config file (~/.config/central-memory/config.json).
 func (d *Daemon) effectiveUserID() string {
 	if strings.TrimSpace(d.UserID) != "" {
 		return strings.TrimSpace(d.UserID)
@@ -497,7 +502,43 @@ func (d *Daemon) effectiveUserID() string {
 			return v
 		}
 	}
-	return ""
+	return config.ResolveUserID()
+}
+
+// resolveUserIDFromServer calls GET /users/me with the daemon server token.
+func (d *Daemon) resolveUserIDFromServer(ctx context.Context, base string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		strings.TrimSuffix(base, "/")+"/users/me", nil)
+	if err != nil {
+		return "", err
+	}
+	if tok := strings.TrimSpace(d.ServerToken); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	}
+	client := d.client
+	if client == nil {
+		client = &http.Client{Timeout: 15 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+		return "", fmt.Errorf("users/me: %s", resp.Status)
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(out.ID) == "" {
+		return "", fmt.Errorf("users/me returned empty id")
+	}
+	_ = config.SaveFile(config.File{UserID: strings.TrimSpace(out.ID)})
+	return strings.TrimSpace(out.ID), nil
 }
 
 // DaemonURL advertises the reachable daemon address, derived from the bound
@@ -608,6 +649,16 @@ func (d *Daemon) postJSON(ctx context.Context, base, path string, payload any, o
 	return nil
 }
 
+// ResolveProjectIDForRoot resolves the server project UUID for this
+// daemon's workspace root (git fingerprint + folder name).
+func (d *Daemon) ResolveProjectIDForRoot(ctx context.Context) (string, error) {
+	base := strings.TrimSpace(d.ServerURL)
+	if base == "" {
+		return "", fmt.Errorf("daemon: no server URL")
+	}
+	return d.resolveProjectID(ctx, base)
+}
+
 // resolveProjectID POSTs /projects/resolve so Register can send the
 // server-required project_id. Identity uses the same inputs as
 // project fingerprinting (origin URL as canonical_url + root commit),
@@ -644,8 +695,14 @@ func (d *Daemon) Register(ctx context.Context, serverURL string) error {
 		return nil
 	}
 	userID := d.effectiveUserID()
+	if userID == "" && strings.TrimSpace(d.ServerToken) != "" {
+		if id, err := d.resolveUserIDFromServer(ctx, base); err == nil {
+			userID = id
+			d.UserID = id
+		}
+	}
 	if userID == "" {
-		return fmt.Errorf("daemon: user id is required (set Daemon.UserID or CENTRAL_USER_ID)")
+		return fmt.Errorf("daemon: not signed in — open http://127.0.0.1:7272/ or run: nexus login")
 	}
 	if strings.TrimSpace(d.MachineID) == "" {
 		return fmt.Errorf("daemon: machine id is required")

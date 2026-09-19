@@ -59,12 +59,18 @@ func (p *CORSProxy) Handler() http.Handler {
 	}
 
 	// Allowlisted read-only local endpoints (no bearer auth).
+	mux.HandleFunc("/", d.handleStatusPage)
 	mux.HandleFunc("/local/healthz", handleLocalHealthz)
 	mux.HandleFunc("/local/git/status", d.handleGitStatus)
 	mux.HandleFunc("/local/git/diff", d.handleGitDiff)
 	mux.HandleFunc("/local/git/log", d.handleGitLog)
 	mux.HandleFunc("/local/file/read", d.handleFileRead)
 	mux.HandleFunc("/local/workspace", d.handleLocalWorkspace)
+	mux.HandleFunc("/local/status", d.handleLocalStatus)
+	mux.HandleFunc("/local/harvest", d.handleLocalHarvest)
+	mux.HandleFunc("/local/browser-login", d.handleLocalBrowserLogin)
+	mux.HandleFunc("/local/login", d.handleLocalLogin) // legacy password form
+	mux.HandleFunc("/local/logout", d.handleLocalLogout)
 
 	// Explicitly block dangerous surfaces if a client probes them.
 	block := func(w http.ResponseWriter, r *http.Request) {
@@ -174,9 +180,12 @@ func withProxyCORS(next http.Handler) http.Handler {
 		if origin != "" && allowed[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Access-Control-Request-Private-Network")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Max-Age", "86400")
+			// Chrome Private Network Access: HTTPS public sites (nexus.pratyushes.dev)
+			// probing http://127.0.0.1 require this on the preflight response.
+			w.Header().Set("Access-Control-Allow-Private-Network", "true")
 		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
