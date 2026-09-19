@@ -146,19 +146,20 @@ func (s *PostgresStore) ListProjectsForUser(ctx context.Context, userID string) 
 	if uid == "" {
 		return nil, nil
 	}
+	// No SELECT DISTINCT + ORDER BY expression: Postgres requires ORDER BY
+	// exprs to appear in the distinct select list (42P10). Deduplicate via IN.
 	rows, err := s.pool.Query(ctx, `
-		SELECT DISTINCT `+projectColumns+`
+		SELECT `+projectColumns+`
 		FROM projects p
-		WHERE p.created_by::TEXT = $1
-		   OR EXISTS (
-		        SELECT 1 FROM project_members pm
-		        WHERE pm.project_id = p.id AND pm.user_id::TEXT = $1
-		   )
-		   OR EXISTS (
-		        SELECT 1 FROM organization_members om
-		        WHERE om.org_id = p.org_id AND om.user_id::TEXT = $1
-		          AND UPPER(om.role) = 'ADMIN'
-		   )
+		WHERE p.id IN (
+			SELECT p2.id FROM projects p2 WHERE p2.created_by::TEXT = $1
+			UNION
+			SELECT pm.project_id FROM project_members pm WHERE pm.user_id::TEXT = $1
+			UNION
+			SELECT p3.id FROM projects p3
+			INNER JOIN organization_members om ON om.org_id = p3.org_id
+			WHERE om.user_id::TEXT = $1 AND UPPER(om.role) = 'ADMIN'
+		)
 		ORDER BY COALESCE(NULLIF(p.display_name,''), p.folder_name, p.id::TEXT)`, uid)
 	if err != nil {
 		return nil, err
