@@ -36,9 +36,15 @@ echo "==> Ensuring harvest SQS queue exists..."
 QUEUE_NAME="${PROJECT:-central-memory}-harvest"
 QUEUE_URL=$(aws sqs get-queue-url --queue-name "$QUEUE_NAME" --query QueueUrl --output text 2>/dev/null || true)
 if [ -z "$QUEUE_URL" ] || [ "$QUEUE_URL" = "None" ]; then
-  QUEUE_URL=$(aws sqs create-queue --queue-name "$QUEUE_NAME" --attributes VisibilityTimeout=180,ReceiveMessageWaitTimeSeconds=10 --query QueueUrl --output text)
+  # Prefer create when the deploy role can; otherwise use the known production URL.
+  QUEUE_URL=$(aws sqs create-queue --queue-name "$QUEUE_NAME" --attributes VisibilityTimeout=180,ReceiveMessageWaitTimeSeconds=10 --query QueueUrl --output text 2>/dev/null || true)
 fi
-echo "Harvest queue: $QUEUE_URL"
+if [ -z "$QUEUE_URL" ] || [ "$QUEUE_URL" = "None" ]; then
+  QUEUE_URL="https://sqs.${AWS_REGION}.amazonaws.com/833291393451/${QUEUE_NAME}"
+  echo "Using fallback harvest queue URL (create/get not permitted for deploy role): $QUEUE_URL"
+else
+  echo "Harvest queue: $QUEUE_URL"
+fi
 
 echo "==> Preparing updated task definition JSON..."
 aws ecs describe-task-definition --task-definition "$CURRENT_TASK_DEF" | \
