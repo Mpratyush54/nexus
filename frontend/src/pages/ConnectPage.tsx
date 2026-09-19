@@ -345,6 +345,11 @@ export function ConnectPage() {
                     ? 'Reading agent transcripts from this machine…'
                     : 'Start Nexus Desktop to stream scan status here')}
               </p>
+              <p className="mt-1 max-w-xl text-[11px] leading-relaxed text-muted">
+                Harvest does <span className="text-fg-dim">not</span> upload full chat logs. It
+                extracts durable facts into PROPOSED memories so another agent can fork context.
+                Matched files ≠ memories yet — extraction must succeed (see proposal errors below).
+              </p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -460,8 +465,11 @@ export function ConnectPage() {
         <div>
           <p className="mb-2 text-xs font-medium text-fg">Harnesses</p>
           <p className="mb-2 text-[11px] text-muted">
-            Only transcripts that match this folder ({folder || hs?.root || 'bound root'}) count.
-            Claude/Codex sessions for other D: projects stay at 0 until you bind that folder.
+            Only transcripts for this folder ({folder || hs?.root || 'bound root'}) count.
+            Cursor uses <span className="font-mono">d-central-memory</span> JSONL; OpenCode /
+            Antigravity need cwd or workspace.json pointing here. SQLite harnesses are often
+            liveness-only until a row extractor is registered — expect 0 turns even when files
+            exist.
           </p>
           <div className="flex flex-wrap gap-1.5">
             {(hs?.agents?.length ? hs.agents : []).map((a) => (

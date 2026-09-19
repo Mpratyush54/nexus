@@ -33,8 +33,27 @@ func NewHTTPMemoryStore(base, token, projectID string) *HTTPMemoryStore {
 		Base:      strings.TrimSuffix(strings.TrimSpace(base), "/"),
 		Token:     strings.TrimSpace(token),
 		ProjectID: strings.TrimSpace(projectID),
-		HTTP:      &http.Client{Timeout: 20 * time.Second},
+		// Save/list stay snappy; ExtractRemote uses extractHTTPClient so
+		// OpenRouter round-trips are not killed by this 20s budget.
+		HTTP: &http.Client{Timeout: 20 * time.Second},
 	}
+}
+
+// extractHTTPTimeout budgets server-side OpenRouter extraction.
+const extractHTTPTimeout = 180 * time.Second
+
+// extractHTTPClient returns a client with at least extractHTTPTimeout so
+// LLM extract is not aborted by the store's short Save timeout.
+func extractHTTPClient(base *http.Client) *http.Client {
+	if base == nil {
+		return &http.Client{Timeout: extractHTTPTimeout}
+	}
+	if base.Timeout > 0 && base.Timeout < extractHTTPTimeout {
+		c := *base
+		c.Timeout = extractHTTPTimeout
+		return &c
+	}
+	return base
 }
 
 // SetProjectID updates the target project (call after Register resolves UUID).
@@ -254,10 +273,7 @@ func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	client := s.HTTP
-	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
-	}
+	client := extractHTTPClient(s.HTTP)
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", nil, fmt.Errorf("daemon: memory extract: %w", err)

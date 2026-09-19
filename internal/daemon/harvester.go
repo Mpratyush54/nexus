@@ -284,14 +284,15 @@ func ResolveSources() []TranscriptSource {
 	hardcoded := []TranscriptSource{
 		// Claude Code — per-project JSONL (~/.claude/projects/<encoded-cwd>/)
 		{Agent: "claude", Dirs: []string{filepath.Join(home, ".claude", "projects")}, Format: FormatJSONL},
-		// OpenCode — legacy JSON/JSONL dirs + modern opencode.db (SQLite)
+		// OpenCode — legacy JSON/JSONL dirs + modern opencode.db (SQLite).
+		// CwdMatch: session paths are global; project is inside the file/DB.
 		{Agent: "opencode", Dirs: []string{
 			filepath.Join(xdgConfig, "opencode"),
 			filepath.Join(home, ".config", "opencode"),
 			filepath.Join(xdgData, "opencode"),
 			filepath.Join(home, ".local", "share", "opencode"),
 			filepath.Join(home, ".opencode"),
-		}, Format: FormatJSONL},
+		}, Format: FormatJSONL, CwdMatch: true},
 		{Agent: "opencode", Dirs: []string{
 			filepath.Join(xdgData, "opencode"),
 			filepath.Join(home, ".local", "share", "opencode"),
@@ -315,11 +316,12 @@ func ResolveSources() []TranscriptSource {
 			filepath.Join(codexHome, "sessions"),
 			filepath.Join(codexHome, "archived_sessions"),
 		}, Format: FormatJSONL, CwdMatch: true},
-		// Antigravity (VS Code fork) + home dot-dir
+		// Antigravity (VS Code fork) — hash-dir workspaceStorage; match via
+		// workspace.json (adapters.ProjectOf) inside MatchesTranscript.
 		{Agent: "antigravity", Dirs: []string{
 			filepath.Join(appData, "Antigravity", "User", "workspaceStorage"),
 			filepath.Join(home, ".antigravity"),
-		}, Format: FormatSQLite},
+		}, Format: FormatSQLite, CwdMatch: true},
 		// Copilot — VS Code workspace DB + Copilot CLI session-state JSONL
 		{Agent: "copilot", Dirs: []string{codeWS}, Format: FormatSQLite},
 		{Agent: "copilot", Dirs: []string{
@@ -533,10 +535,14 @@ func (h *Harvester) MatchesWorkspace(path string) bool {
 }
 
 // MatchesTranscript reports whether path belongs to this workspace. Path
-// segment matching comes first; for CwdMatch sources (Codex, Gemini, …)
-// we also peek the file header for a cwd/workdir that names this folder.
+// segment matching comes first; then sibling workspace.json (Antigravity /
+// Cursor/VS Code hash dirs); then for CwdMatch sources we peek the file
+// header for a cwd that names this folder.
 func (h *Harvester) MatchesTranscript(path string, cwdMatch bool) bool {
 	if h.MatchesWorkspace(path) {
+		return true
+	}
+	if h.matchesWorkspaceJSON(path) {
 		return true
 	}
 	if !cwdMatch {
@@ -554,6 +560,70 @@ func (h *Harvester) MatchesTranscript(path string, cwdMatch bool) bool {
 		return true
 	}
 	return false
+}
+
+// matchesWorkspaceJSON attributes VS Code–style workspaceStorage/<hash>/…
+// paths via a nearby workspace.json (adapters.ProjectOf). Does not peek
+// transcript cwd — that remains gated by CwdMatch.
+func (h *Harvester) matchesWorkspaceJSON(path string) bool {
+	dir := filepath.Dir(path)
+	found := false
+	for i := 0; i < 4; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "workspace.json")); err == nil {
+			found = true
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	if !found {
+		return false
+	}
+	home, _ := os.UserHomeDir()
+	leaf := adapters.ProjectOf(path, home)
+	if leaf == "" || leaf == "global" {
+		return false
+	}
+	if h.MatchesWorkspace(leaf) || strings.EqualFold(leaf, h.folderName) {
+		return true
+	}
+	ws := strings.TrimSpace(h.workspace)
+	if ws == "" {
+		return false
+	}
+	return strings.EqualFold(filepath.Base(ws), leaf) ||
+		strings.Contains(strings.ToLower(ws), strings.ToLower(leaf))
+}
+
+// defaultKeepTail is how much of an unseen transcript we ingest on first
+// sight. 8 MiB covers multi-hour Cursor agent JSONL without replaying
+// entire historical archives on every daemon restart.
+const defaultKeepTail = 8 << 20
+
+// firstSightOffset picks the byte offset for a newly discovered transcript.
+// NEXUS_HARVEST_BACKFILL=all|1|true → 0 (full file). NEXUS_HARVEST_KEEP_TAIL
+// (bytes) overrides the default window size.
+func firstSightOffset(size int64) int64 {
+	if size <= 0 {
+		return 0
+	}
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("NEXUS_HARVEST_BACKFILL")))
+	if v == "1" || v == "true" || v == "all" || v == "full" {
+		return 0
+	}
+	keep := int64(defaultKeepTail)
+	if raw := strings.TrimSpace(os.Getenv("NEXUS_HARVEST_KEEP_TAIL")); raw != "" {
+		if n, err := strconv.ParseInt(raw, 10, 64); err == nil && n > 0 {
+			keep = n
+		}
+	}
+	if size > keep {
+		return size - keep
+	}
+	return 0
 }
 
 // PeekTranscriptCwd reads the first ~64KiB of a transcript and returns a
@@ -981,15 +1051,10 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	h.mu.Lock()
 	off, seen := h.offsets[path]
 	if !seen && st.Size() > 0 {
-		// First sighting: skip older history so a large Cursor transcript
-		// does not flood the portal on daemon start. Keep a recent tail
-		// (~256KiB) so in-progress chats still sync.
-		const keepTail = 256 << 10
-		if st.Size() > keepTail {
-			off = st.Size() - keepTail
-		} else {
-			off = 0
-		}
+		// First sighting: keep a large recent window so multi-hour chats
+		// are not discarded. Override with NEXUS_HARVEST_KEEP_TAIL (bytes)
+		// or NEXUS_HARVEST_BACKFILL=all|1 to read from offset 0.
+		off = firstSightOffset(st.Size())
 		h.offsets[path] = off
 	}
 	if st.Size() < off {
