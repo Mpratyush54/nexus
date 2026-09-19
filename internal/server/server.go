@@ -26,6 +26,7 @@ import (
 
 	memctx "central-memory/internal/context"
 	"central-memory/internal/extract"
+	"central-memory/internal/mcp"
 	"central-memory/internal/store"
 )
 
@@ -56,6 +57,10 @@ type Server struct {
 
 	// mcpAgentRates enforces per-agent calls/minute (issue #166).
 	mcpAgentRates *agentMinuteLimiter
+
+	// mcpCloudLimiter gates cloud /v1/agent/mcp tools/call rate limits.
+	mcpCloudLimiter *mcp.RateLimiter
+	mcpCloudOnce    sync.Once
 
 	// Users resolves login usernames to password hashes (issue #133).
 	// Nil means authentication is unconfigured and /auth/login fails
@@ -303,6 +308,9 @@ func (s *Server) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 		if id.TokenID != "" {
 			r.Header.Set("X-Auth-Token-ID", id.TokenID)
 		}
+		if id.AgentID != "" {
+			r.Header.Set("X-Auth-Agent-ID", id.AgentID)
+		}
 		next(w, r)
 	}
 }
@@ -311,6 +319,7 @@ type resolvedAuth struct {
 	Sub      string
 	Username string
 	TokenID  string
+	AgentID  string
 }
 
 func (s *Server) resolveBearer(r *http.Request) (resolvedAuth, error) {
@@ -351,7 +360,7 @@ func (s *Server) resolveAPIToken(r *http.Request, raw string) (resolvedAuth, err
 		}
 	}
 	_ = s.Tokens.TouchLastUsed(r.Context(), tok.ID)
-	return resolvedAuth{Sub: tok.UserID, Username: username, TokenID: tok.ID}, nil
+	return resolvedAuth{Sub: tok.UserID, Username: username, TokenID: tok.ID, AgentID: tok.AgentID}, nil
 }
 
 // corsAllowedOrigins lists browser origins allowed to call the API.

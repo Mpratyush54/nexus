@@ -62,6 +62,7 @@ func (q *PostgresHarvestQueue) EnqueueHarvestJob(ctx context.Context, projectID,
 			Speaker:   strings.ToValidUTF8(strings.TrimSpace(t.Speaker), ""),
 			Content:   c,
 			Timestamp: strings.TrimSpace(t.Timestamp),
+			SessionID: strings.TrimSpace(t.SessionID),
 		})
 	}
 	if len(cleaned) == 0 {

@@ -72,6 +72,46 @@ func (s *Service) ExtractLLMOnly(ctx context.Context, project string, turns []Tu
 	return Result{Proposals: props, Provider: ProviderOpenRouter}, nil
 }
 
+// CompressResult is one session episode_summary plus optional decision rows.
+type CompressResult struct {
+	Summary   string
+	Decisions []Proposal
+	Provider  string
+	LLMError  string
+	SessionID string
+}
+
+// ExtractSessionCompress produces one rich episode_summary + sharp decisions.
+func (s *Service) ExtractSessionCompress(ctx context.Context, project, sessionID string, turns []Turn, existing []Existing) (CompressResult, error) {
+	turns = CapCompressTurns(turns)
+	out := CompressResult{Provider: ProviderOpenRouter, SessionID: strings.TrimSpace(sessionID)}
+	if len(turns) == 0 {
+		return out, nil
+	}
+	if s == nil || strings.TrimSpace(s.Cfg.APIKey) == "" {
+		out.LLMError = "OPENROUTER_API_KEY unset"
+		return out, nil
+	}
+	if out.SessionID == "" {
+		out.SessionID = SessionIDFromTurns(turns)
+	}
+	project = strings.TrimSpace(project)
+	if project == "" {
+		project = "unknown"
+	}
+	client := s.client()
+	prompt := BuildCompressPrompt(project, out.SessionID, existing, turns)
+	summary, decisions, err := client.CompleteCompress(ctx, prompt)
+	if err != nil {
+		out.LLMError = err.Error()
+		return out, nil
+	}
+	s.markLLM(project + ":compress")
+	out.Summary = ClampMemoryContent(summary)
+	out.Decisions = decisions
+	return out, nil
+}
+
 func (s *Service) client() *Client {
 	if s != nil && s.Client != nil {
 		return s.Client

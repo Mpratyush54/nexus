@@ -33,8 +33,15 @@ export type ApiToken = {
   name: string
   token_prefix: string
   scopes: string[]
+  agent_id?: string
   created_at: string
   last_used_at?: string
+}
+
+export type CreateTokenInput = {
+  name: string
+  scopes?: string[]
+  agent_id?: string
 }
 
 export const authApi = {
@@ -77,13 +84,14 @@ export const authApi = {
     return apiRequest<{ items: ApiToken[]; count: number }>('/auth/tokens')
   },
 
-  createToken(body: { name: string; scopes?: string[] }) {
+  createToken(body: CreateTokenInput) {
     return apiRequest<{
       token: string
       id: string
       name: string
       prefix: string
       scopes: string[]
+      agent_id?: string
       created_at: string
     }>('/auth/tokens', { method: 'POST', body })
   },

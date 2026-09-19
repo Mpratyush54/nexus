@@ -96,7 +96,14 @@ export function MemoryPage() {
   }, [items, tagFilter])
 
   const proposed = filtered.filter((i) => i.status === 'PROPOSED')
-  const rest = filtered.filter((i) => i.status !== 'PROPOSED')
+  const rest = useMemo(() => {
+    const rows = filtered.filter((i) => i.status !== 'PROPOSED')
+    return [...rows].sort((a, b) => {
+      const ae = a.scope === 'episode_summary' ? 0 : 1
+      const be = b.scope === 'episode_summary' ? 0 : 1
+      return ae - be
+    })
+  }, [filtered])
   // Only in-flight batches — done/failed leave this list; facts land in Library.
   const incomingHarvest = useMemo(
     () => (harvestQ.data ?? []).filter((j) => j.status === 'queued' || j.status === 'processing'),
@@ -442,12 +449,13 @@ function MemoryCard({
   onShare?: () => void
   busy?: boolean
 }) {
-  const [expanded, setExpanded] = useState(false)
+  const [expanded, setExpanded] = useState(item.scope === 'episode_summary')
   const proposed = item.status === 'PROPOSED'
   const agent = item.proposed_by || item.source
+  const previewLimit = item.scope === 'episode_summary' ? 420 : 180
   const preview =
-    item.content.length > 180 && !expanded
-      ? `${item.content.slice(0, 180).trimEnd()}…`
+    item.content.length > previewLimit && !expanded
+      ? `${item.content.slice(0, previewLimit).trimEnd()}…`
       : item.content
 
   return (
@@ -466,6 +474,16 @@ function MemoryCard({
             {item.status.toLowerCase()}
           </StatusPill>
           <span className="font-mono text-[11px] text-muted">{item.level}</span>
+          {item.scope ? (
+            <span
+              className={[
+                'font-mono text-[11px]',
+                item.scope === 'episode_summary' ? 'text-amber' : 'text-muted',
+              ].join(' ')}
+            >
+              {item.scope}
+            </span>
+          ) : null}
           {agent ? (
             <span className="inline-flex items-center gap-1 text-[11px] text-muted">
               <Bot size={11} />
@@ -510,7 +528,7 @@ function MemoryCard({
           </p>
         </motion.div>
 
-        {item.content.length > 180 ? (
+        {item.content.length > previewLimit ? (
           <button
             type="button"
             className="mt-1 text-[11px] text-muted hover:text-fg"

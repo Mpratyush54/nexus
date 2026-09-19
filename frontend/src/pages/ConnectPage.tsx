@@ -3,7 +3,6 @@ import {
   Cable,
   Check,
   Copy,
-  Download,
   ExternalLink,
   HardDrive,
   MessageSquare,
@@ -11,17 +10,14 @@ import {
   Radio,
   RefreshCw,
   ScanSearch,
-  Sparkles,
 } from 'lucide-react'
 import { useMemo, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
-import { KNOWN_MCP_TOOLS } from '@/api/agents'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useToast } from '@/components/ui/Toast'
-import { useCreateToken } from '@/hooks/useAuthMutations'
-import { useMCPFeed, useUpsertAgent } from '@/hooks/useAgents'
+import { useMCPFeed } from '@/hooks/useAgents'
 import {
   useBindLocalWorkspace,
   useLocalDaemonAutodetect,
@@ -40,74 +36,10 @@ import { formatRelative } from '@/utils/format'
 const INSTALL_PS1 =
   'irm https://central-memory-releases.s3.ap-south-1.amazonaws.com/desktop/latest/install-windows.ps1 | iex'
 
-const MEM_PATH_WIN = String.raw`%LOCALAPPDATA%\Nexus\bin\mem.exe`
-
-type McpConfigMode = 'cloud' | 'local'
-
-function publicApiBase() {
-  const base = (import.meta.env.VITE_API_BASE as string | undefined) ?? ''
-  if (/^https?:\/\//i.test(base)) return base.replace(/\/$/, '')
-  return 'https://api-nexus.pratyushes.dev'
-}
-
 function folderFromPath(path?: string) {
   if (!path) return ''
   const parts = path.replace(/[/\\]+$/, '').split(/[/\\]/)
   return parts[parts.length - 1] || ''
-}
-
-/** Cloud MCP hits HTTPS /v1/agent/mcp — no local mem.exe path required. */
-function buildCloudMcpJson(token: string, projectId?: string | null) {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-  }
-  if (projectId) headers['X-Nexus-Project'] = projectId
-  return JSON.stringify(
-    {
-      mcpServers: {
-        nexus: {
-          url: `${publicApiBase()}/v1/agent/mcp`,
-          headers,
-        },
-      },
-    },
-    null,
-    2,
-  )
-}
-
-/** Local stdio MCP when Nexus Desktop / mem is installed on this machine. */
-function buildLocalMcpJson(token: string, agent = 'cursor', projectId?: string | null) {
-  const env: Record<string, string> = {
-    NEXUS_SERVER: publicApiBase(),
-    NEXUS_AGENT: agent,
-    NEXUS_TOKEN: token,
-  }
-  if (projectId) env.NEXUS_PROJECT = projectId
-  return JSON.stringify(
-    {
-      mcpServers: {
-        nexus: {
-          command: MEM_PATH_WIN,
-          args: ['mcp'],
-          env,
-        },
-      },
-    },
-    null,
-    2,
-  )
-}
-
-function buildMcpJson(
-  token: string,
-  mode: McpConfigMode,
-  agent = 'cursor',
-  projectId?: string | null,
-) {
-  return mode === 'local'
-    ? buildLocalMcpJson(token, agent, projectId)
-    : buildCloudMcpJson(token, projectId)
 }
 
 async function copyText(text: string) {
@@ -129,8 +61,6 @@ export function ConnectPage() {
   const local = useLocalDaemonAutodetect()
   const serverView = useLocalWorkspaceView()
   const bind = useBindLocalWorkspace()
-  const createToken = useCreateToken()
-  const upsertAgent = useUpsertAgent()
   const feed = useMCPFeed()
   const sessions = useSessions()
   const createSession = useCreateSession()
@@ -146,9 +76,6 @@ export function ConnectPage() {
   const harvestedMemories = useMemorySearch('')
   useFollowHarvestProject(harvest.data)
 
-  const [mcpJson, setMcpJson] = useState<string | null>(null)
-  const [mintedToken, setMintedToken] = useState<string | null>(null)
-  const [mcpMode, setMcpMode] = useState<McpConfigMode>('cloud')
   const [sessionTitle, setSessionTitle] = useState('Cursor work')
 
   const detected = local.data
@@ -178,8 +105,8 @@ export function ConnectPage() {
       {
         id: 'mcp',
         label: 'Editor MCP',
-        done: Boolean(mintedToken) || mcpCalls > 0,
-        hint: mcpCalls > 0 ? `${mcpCalls} recent tool call(s)` : 'Optional — explicit memory_write',
+        done: mcpCalls > 0,
+        hint: mcpCalls > 0 ? `${mcpCalls} recent tool call(s)` : 'Mint credentials on Agents',
       },
       {
         id: 'session',
@@ -188,48 +115,7 @@ export function ConnectPage() {
         hint: sessionCount > 0 ? `${sessionCount} session(s)` : 'Open a session to track work',
       },
     ]
-  }, [harvestOnline, hs, mintedToken, mcpCalls, sessionCount])
-
-  const rebuildMcpJson = (tok: string, mode: McpConfigMode) => {
-    setMcpJson(buildMcpJson(tok, mode, 'cursor', projectId))
-  }
-
-  const onMintMcp = () => {
-    createToken.mutate('Cursor MCP', {
-      onSuccess: (res) => {
-        const tok = res.token
-        setMintedToken(tok)
-        rebuildMcpJson(tok, mcpMode)
-        if (projectId) {
-          const tools: Record<string, boolean> = {}
-          for (const t of KNOWN_MCP_TOOLS) tools[t] = true
-          upsertAgent.mutate({
-            agentId: 'cursor',
-            input: { mode: 'full', rate_limit: 120, tools },
-          })
-        }
-        push({
-          title: 'MCP token ready',
-          detail:
-            mcpMode === 'cloud'
-              ? 'Cloud MCP — paste into .cursor/mcp.json (no mem.exe path). Reload Cursor.'
-              : 'Local MCP — requires Nexus Desktop. Paste into .cursor/mcp.json then reload.',
-          tone: 'teal',
-        })
-      },
-      onError: (err) =>
-        push({
-          title: 'Could not mint token',
-          detail: err instanceof ApiError ? err.message : 'Unknown error',
-          tone: 'danger',
-        }),
-    })
-  }
-
-  const onSelectMcpMode = (mode: McpConfigMode) => {
-    setMcpMode(mode)
-    if (mintedToken) rebuildMcpJson(mintedToken, mode)
-  }
+  }, [harvestOnline, hs, mcpCalls, sessionCount])
 
   const onBindFolder = () => {
     if (!folder) {
@@ -279,17 +165,6 @@ export function ConnectPage() {
           tone: 'danger',
         }),
     })
-  }
-
-  const downloadMcp = () => {
-    if (!mcpJson) return
-    const blob = new Blob([mcpJson], { type: 'application/json' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = 'mcp.json'
-    a.click()
-    URL.revokeObjectURL(url)
   }
 
   const gitBranch = git.data?.branch
@@ -606,79 +481,30 @@ export function ConnectPage() {
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-2">
               <Cable size={16} className="text-amber" />
-              <h2 className="text-sm font-medium text-fg">Connect MCP (optional)</h2>
+              <h2 className="text-sm font-medium text-fg">Editor MCP</h2>
             </div>
-            <StatusPill tone={mcpCalls > 0 ? 'teal' : mintedToken ? 'amber' : 'neutral'}>
-              {mcpCalls > 0 ? 'active' : mintedToken ? 'configured' : 'not connected'}
+            <StatusPill tone={mcpCalls > 0 ? 'teal' : 'neutral'}>
+              {mcpCalls > 0 ? 'active' : 'on Agents'}
             </StatusPill>
           </div>
 
           <p className="text-sm text-fg-dim">
-            MCP is for explicit <span className="font-mono text-xs">memory_write</span>. Prefer{' '}
-            <span className="text-fg">Cloud</span> (HTTPS{' '}
-            <span className="font-mono text-xs">/v1/agent/mcp</span>) so agents never hunt for{' '}
-            <span className="font-mono text-xs">mem.exe</span>. Use Local only when Nexus Desktop is
-            installed. Auto-harvest above does not need MCP.
+            MCP credentials are minted per agent on the{' '}
+            <Link to="/app/agents" className="text-ember hover:underline">
+              Agents
+            </Link>{' '}
+            page so Cursor and OpenCode get separate tokens and rate limits. This page is install,
+            bind, and harvest only.
           </p>
 
-          <div className="flex flex-wrap gap-2" role="group" aria-label="MCP config mode">
-            <Button
-              type="button"
-              size="sm"
-              variant={mcpMode === 'cloud' ? 'primary' : 'secondary'}
-              onClick={() => onSelectMcpMode('cloud')}
-            >
-              Cloud API
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant={mcpMode === 'local' ? 'primary' : 'secondary'}
-              onClick={() => onSelectMcpMode('local')}
-            >
-              Local desktop
-            </Button>
-          </div>
+          <Link
+            to="/app/agents"
+            className="inline-flex h-8 items-center justify-center gap-1.5 rounded-lg bg-accent px-3 text-xs font-medium text-ink hover:bg-white"
+          >
+            Open Agents <ExternalLink size={14} />
+          </Link>
 
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" size="sm" onClick={onMintMcp} disabled={createToken.isPending}>
-              <Sparkles size={14} />
-              {createToken.isPending ? 'Minting…' : 'Generate MCP config'}
-            </Button>
-            {mcpJson ? (
-              <>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  onClick={() =>
-                    void copyText(mcpJson).then(() => push({ title: 'Copied mcp.json' }))
-                  }
-                >
-                  <Copy size={14} /> Copy JSON
-                </Button>
-                <Button type="button" size="sm" variant="secondary" onClick={downloadMcp}>
-                  <Download size={14} /> Download
-                </Button>
-              </>
-            ) : null}
-          </div>
-
-          {mcpJson ? (
-            <>
-              <p className="text-xs text-muted">
-                {mcpMode === 'cloud'
-                  ? `Paste into .cursor/mcp.json · ${publicApiBase()}/v1/agent/mcp` +
-                    (projectId ? ` · project ${projectId.slice(0, 8)}…` : '')
-                  : 'Paste into .cursor/mcp.json · expands %LOCALAPPDATA% on Windows'}
-              </p>
-              <pre className="max-h-48 overflow-auto rounded-lg border border-border bg-raised/60 p-3 text-[11px] leading-relaxed text-fg-dim">
-                {mintedToken ? mcpJson.replaceAll(mintedToken, 'nxs_…REDACTED…') : mcpJson}
-              </pre>
-            </>
-          ) : (
-            <p className="text-xs text-muted">Signed in as {user?.username ?? 'you'}.</p>
-          )}
+          <p className="text-xs text-muted">Signed in as {user?.username ?? 'you'}.</p>
         </GlassPanel>
 
         <GlassPanel className="space-y-4 p-5">

@@ -226,8 +226,9 @@ func (s *Server) handleAuthTokensList(w http.ResponseWriter, r *http.Request) {
 }
 
 type createTokenRequest struct {
-	Name   string   `json:"name"`
-	Scopes []string `json:"scopes"`
+	Name    string   `json:"name"`
+	Scopes  []string `json:"scopes"`
+	AgentID string   `json:"agent_id"`
 }
 
 func (s *Server) handleAuthTokensCreate(w http.ResponseWriter, r *http.Request) {
@@ -244,6 +245,7 @@ func (s *Server) handleAuthTokensCreate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "name is required")
 		return
 	}
+	agentID := strings.TrimSpace(req.AgentID)
 	raw, prefix, hash, err := mintAPITokenSecret()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not mint token")
@@ -253,7 +255,7 @@ func (s *Server) handleAuthTokensCreate(w http.ResponseWriter, r *http.Request) 
 	if scopes == nil {
 		scopes = []string{}
 	}
-	tok, err := s.Tokens.Create(r.Context(), authSubject(r), name, prefix, hash, scopes)
+	tok, err := s.Tokens.Create(r.Context(), authSubject(r), name, prefix, hash, scopes, agentID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create token")
 		return
@@ -264,6 +266,7 @@ func (s *Server) handleAuthTokensCreate(w http.ResponseWriter, r *http.Request) 
 		"name":       tok.Name,
 		"prefix":     tok.Prefix,
 		"scopes":     tok.Scopes,
+		"agent_id":   tok.AgentID,
 		"created_at": tok.CreatedAt.Format(time.RFC3339Nano),
 	})
 }

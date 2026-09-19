@@ -128,10 +128,13 @@ func authSubject(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-Auth-Subject"))
 }
 
-// authUsername returns the display username claim stashed by requireAuth
-// ("" for legacy tokens minted before the name claim existed).
 func authUsername(r *http.Request) string {
 	return strings.TrimSpace(r.Header.Get("X-Auth-User"))
+}
+
+// authAgentID returns the API-token-bound agent id (empty for JWT / unbound tokens).
+func authAgentID(r *http.Request) string {
+	return strings.TrimSpace(r.Header.Get("X-Auth-Agent-ID"))
 }
 
 // --- sessions ---

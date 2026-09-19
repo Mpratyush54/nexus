@@ -56,22 +56,58 @@ func (c *Client) model() string {
 	return defaultOpenRouterModel
 }
 
+func (c *Client) compressModel() string {
+	if c != nil && strings.TrimSpace(c.Cfg.CompressModel) != "" {
+		return strings.TrimSpace(c.Cfg.CompressModel)
+	}
+	// Prefer a stronger paid instruct model when unset; falls back via models[].
+	if c != nil && strings.TrimSpace(c.Cfg.Model) != "" {
+		return strings.TrimSpace(c.Cfg.Model)
+	}
+	return "anthropic/claude-sonnet-4"
+}
+
 // Complete sends the extraction prompt and returns parsed proposals.
 func (c *Client) Complete(ctx context.Context, prompt string) ([]Proposal, error) {
+	content, err := c.chat(ctx, c.model(), defaultOpenRouterFallbacks,
+		"You extract durable project memories including decisions, actions, files touched, and outcomes. "+
+			"Prefer empty only when the batch is pure noise. "+
+			"level must be one of: organization, project, personal, session (default project). "+
+			"scope must be one of: fact, preference, decision, constraint, pattern, episode_summary. "+
+			"Reply with JSON only: {\"memories\":[{\"key\",\"content\",\"level\",\"scope\",\"confidence\",\"explicit\"}]}.",
+		prompt)
+	if err != nil {
+		return nil, err
+	}
+	return parseProposals([]byte(content)), nil
+}
+
+// CompleteCompress runs session-compress and returns summary + decision proposals.
+func (c *Client) CompleteCompress(ctx context.Context, prompt string) (summary string, decisions []Proposal, err error) {
+	content, err := c.chat(ctx, c.compressModel(), append([]string{c.model()}, defaultOpenRouterFallbacks...),
+		"You compress a coding chat session into one rich episode summary plus optional sharp decisions. "+
+			"Require actions (files/commands), outcomes, and decisions. Keep concrete nouns. "+
+			"Empty session_summary only if transcript is pure noise. "+
+			"Reply with JSON only: {\"session_summary\":\"...\",\"decisions\":[{\"key\",\"content\",\"level\",\"scope\",\"confidence\",\"explicit\"}]}.",
+		prompt)
+	if err != nil {
+		return "", nil, err
+	}
+	return parseCompressResult([]byte(content))
+}
+
+func (c *Client) chat(ctx context.Context, model string, fallbacks []string, system, prompt string) (string, error) {
 	if c == nil || strings.TrimSpace(c.Cfg.APIKey) == "" {
-		return nil, fmt.Errorf("extract: openrouter api key missing")
+		return "", fmt.Errorf("extract: openrouter api key missing")
+	}
+	if strings.TrimSpace(model) == "" {
+		model = defaultOpenRouterModel
 	}
 	body, _ := json.Marshal(map[string]any{
-		"model":  c.model(),
-		"models": defaultOpenRouterFallbacks,
+		"model":  model,
+		"models": fallbacks,
 		"messages": []map[string]string{
-			{
-				"role": "system",
-				"content": "You extract durable project memories. Prefer empty over junk. " +
-					"level must be one of: organization, project, personal, session (default project). " +
-					"scope must be one of: fact, preference, decision, constraint, pattern, episode_summary. " +
-					"Reply with JSON only: {\"memories\":[{\"key\",\"content\",\"level\",\"scope\",\"confidence\",\"explicit\"}]}.",
-			},
+			{"role": "system", "content": system},
 			{"role": "user", "content": prompt},
 		},
 		"temperature": 0.1,
@@ -79,7 +115,7 @@ func (c *Client) Complete(ctx context.Context, prompt string) ([]Proposal, error
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(c.Cfg.APIKey))
@@ -96,7 +132,7 @@ func (c *Client) Complete(ctx context.Context, prompt string) ([]Proposal, error
 
 	resp, err := c.httpClient().Do(req)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -105,13 +141,9 @@ func (c *Client) Complete(ctx context.Context, prompt string) ([]Proposal, error
 		if len(msg) > 300 {
 			msg = msg[:300]
 		}
-		return nil, fmt.Errorf("extract: openrouter %d: %s", resp.StatusCode, msg)
+		return "", fmt.Errorf("extract: openrouter %d: %s", resp.StatusCode, msg)
 	}
-	content, err := openAIMessageContent(raw)
-	if err != nil {
-		return nil, err
-	}
-	return parseProposals([]byte(content)), nil
+	return openAIMessageContent(raw)
 }
 
 func openAIMessageContent(raw []byte) (string, error) {
@@ -231,4 +263,48 @@ func llmToProposal(m llmMemory) (Proposal, bool) {
 		Explicit:   m.Explicit || isExplicit(content),
 		Source:     "processor:openrouter",
 	}, true
+}
+
+func parseCompressResult(data []byte) (summary string, decisions []Proposal, err error) {
+	data = extractJSONPayload(data)
+	var wrapped struct {
+		SessionSummary string      `json:"session_summary"`
+		Summary        string      `json:"summary"`
+		Decisions      []llmMemory `json:"decisions"`
+		Memories       []llmMemory `json:"memories"`
+	}
+	if err := json.Unmarshal(data, &wrapped); err != nil {
+		// Fall back to memories[]-only shape.
+		props := parseProposals(data)
+		return "", props, nil
+	}
+	summary = strings.TrimSpace(wrapped.SessionSummary)
+	if summary == "" {
+		summary = strings.TrimSpace(wrapped.Summary)
+	}
+	for _, m := range wrapped.Decisions {
+		if p, ok := llmToProposal(m); ok {
+			decisions = append(decisions, p)
+		}
+	}
+	if len(decisions) == 0 {
+		for _, m := range wrapped.Memories {
+			if p, ok := llmToProposal(m); ok {
+				decisions = append(decisions, p)
+			}
+		}
+	}
+	return summary, decisions, nil
+}
+
+// ClampMemoryContent truncates to the store content CHECK (20–2000).
+func ClampMemoryContent(content string) string {
+	content = strings.TrimSpace(content)
+	if len(content) <= 2000 {
+		return content
+	}
+	if len(content) > 1997 {
+		return content[:1997] + "…"
+	}
+	return content
 }

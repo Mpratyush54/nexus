@@ -13,6 +13,7 @@ type Turn struct {
 	Speaker   string `json:"speaker"`
 	Content   string `json:"content"`
 	Timestamp string `json:"timestamp,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // Existing is a known memory used for prompt dedup hints.
@@ -51,25 +52,31 @@ const (
 	MaxTurns       = 40
 	MaxBatchChars  = 12000
 	ThrottleWindow = 5 * time.Minute
+
+	// Session compress allows a fuller transcript window.
+	MaxCompressTurns = 120
+	MaxCompressChars = 48000
 )
 
 // Config holds OpenRouter settings (env or explicit).
 type Config struct {
-	APIKey      string
-	BaseURL     string // default https://openrouter.ai/api/v1
-	Model       string // default openrouter/free
-	HTTPReferer string
-	AppTitle    string
+	APIKey        string
+	BaseURL       string // default https://openrouter.ai/api/v1
+	Model         string // default instruct-capable free model
+	CompressModel string // optional stronger model for session compress
+	HTTPReferer   string
+	AppTitle      string
 }
 
 // ConfigFromEnv reads OPENROUTER_* variables.
 func ConfigFromEnv() Config {
 	return Config{
-		APIKey:      strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")),
-		BaseURL:     strings.TrimSpace(os.Getenv("OPENROUTER_BASE_URL")),
-		Model:       strings.TrimSpace(os.Getenv("OPENROUTER_MODEL")),
-		HTTPReferer: strings.TrimSpace(os.Getenv("OPENROUTER_HTTP_REFERER")),
-		AppTitle:    strings.TrimSpace(os.Getenv("OPENROUTER_APP_TITLE")),
+		APIKey:        strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY")),
+		BaseURL:       strings.TrimSpace(os.Getenv("OPENROUTER_BASE_URL")),
+		Model:         strings.TrimSpace(os.Getenv("OPENROUTER_MODEL")),
+		CompressModel: strings.TrimSpace(os.Getenv("OPENROUTER_COMPRESS_MODEL")),
+		HTTPReferer:   strings.TrimSpace(os.Getenv("OPENROUTER_HTTP_REFERER")),
+		AppTitle:      strings.TrimSpace(os.Getenv("OPENROUTER_APP_TITLE")),
 	}
 }
 
@@ -130,6 +137,15 @@ func (s *Service) markLLM(project string) {
 
 // CapTurns truncates a turn batch to MaxTurns / MaxBatchChars.
 func CapTurns(turns []Turn) []Turn {
+	return capTurnsLimit(turns, MaxTurns, MaxBatchChars)
+}
+
+// CapCompressTurns truncates for session-compress (larger window).
+func CapCompressTurns(turns []Turn) []Turn {
+	return capTurnsLimit(turns, MaxCompressTurns, MaxCompressChars)
+}
+
+func capTurnsLimit(turns []Turn, maxTurns, maxChars int) []Turn {
 	if len(turns) == 0 {
 		return nil
 	}
@@ -140,20 +156,31 @@ func CapTurns(turns []Turn) []Turn {
 		if c == "" {
 			continue
 		}
-		if len(out) >= MaxTurns {
+		if len(out) >= maxTurns {
 			break
 		}
-		if chars+len(c) > MaxBatchChars && len(out) > 0 {
+		if chars+len(c) > maxChars && len(out) > 0 {
 			break
 		}
 		out = append(out, Turn{
 			Speaker:   strings.TrimSpace(t.Speaker),
 			Content:   c,
 			Timestamp: t.Timestamp,
+			SessionID: strings.TrimSpace(t.SessionID),
 		})
 		chars += len(c)
 	}
 	return out
+}
+
+// SessionIDFromTurns returns the first non-empty session_id on the batch.
+func SessionIDFromTurns(turns []Turn) string {
+	for _, t := range turns {
+		if id := strings.TrimSpace(t.SessionID); id != "" {
+			return id
+		}
+	}
+	return ""
 }
 
 // KeyFromContent derives a short key from content (mirrors daemon heuristic).

@@ -1086,6 +1086,8 @@ func (p *Processor) ProcessEvents(ctx context.Context, project string, events []
 func eventsToExtractTurns(events []Event) []map[string]string {
 	var out []map[string]string
 	for _, ev := range events {
+		sid, _ := ev.Payload["session_id"].(string)
+		sid = strings.TrimSpace(sid)
 		for _, cand := range eventCandidates(ev) {
 			c := strings.TrimSpace(cand.Text)
 			if c == "" {
@@ -1094,11 +1096,15 @@ func eventsToExtractTurns(events []Event) []map[string]string {
 			if len(c) > 4000 {
 				c = c[:4000]
 			}
-			out = append(out, map[string]string{
+			row := map[string]string{
 				"speaker": cand.Speaker,
 				"content": c,
-			})
-			if len(out) >= 40 {
+			}
+			if sid != "" {
+				row["session_id"] = sid
+			}
+			out = append(out, row)
+			if len(out) >= 120 {
 				return out
 			}
 		}

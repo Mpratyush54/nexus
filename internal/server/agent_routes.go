@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"central-memory/internal/mcp"
 	"central-memory/internal/store"
 )
 
@@ -367,6 +368,17 @@ func (s *Server) mcpRateAllowed(scope string, callsPerMinute int) bool {
 		s.mcpAgentRates = newAgentMinuteLimiter()
 	}
 	return s.mcpAgentRates.allow(scope, callsPerMinute)
+}
+
+// agentMCPLimiter is the shared RateLimiter for cloud /v1/agent/mcp.
+func (s *Server) agentMCPLimiter() *mcp.RateLimiter {
+	if s == nil {
+		return mcp.NewRateLimiter()
+	}
+	s.mcpCloudOnce.Do(func() {
+		s.mcpCloudLimiter = mcp.NewRateLimiter()
+	})
+	return s.mcpCloudLimiter
 }
 
 // agentMinuteLimiter is a sliding 60s window counter keyed by agent scope.

@@ -1,4 +1,4 @@
-// API token persistence (issue #161 / migration 018).
+// API token persistence (issue #161 / migration 018 + 024 agent binding).
 package store
 
 import (
@@ -12,12 +12,14 @@ import (
 )
 
 // APIToken is a named, revocable credential owned by a user.
+// AgentID when set binds the token to an MCP agent identity (cursor, opencode, …).
 type APIToken struct {
 	ID         string     `json:"id"`
 	UserID     string     `json:"user_id"`
 	Name       string     `json:"name"`
 	Prefix     string     `json:"token_prefix"`
 	Scopes     []string   `json:"scopes"`
+	AgentID    string     `json:"agent_id,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	RevokedAt  *time.Time `json:"revoked_at,omitempty"`
@@ -34,12 +36,13 @@ func NewAPITokenStore(db DBTX) *APITokenStore {
 }
 
 const apiTokenColumns = `id::TEXT AS id, user_id::TEXT AS user_id, name, token_prefix, ` +
-	`COALESCE(scopes, '{}') AS scopes, created_at, last_used_at, revoked_at`
+	`COALESCE(scopes, '{}') AS scopes, COALESCE(agent_id, '') AS agent_id, ` +
+	`created_at, last_used_at, revoked_at`
 
 func scanAPIToken(row pgx.Row) (*APIToken, error) {
 	var t APIToken
 	if err := row.Scan(
-		&t.ID, &t.UserID, &t.Name, &t.Prefix, &t.Scopes,
+		&t.ID, &t.UserID, &t.Name, &t.Prefix, &t.Scopes, &t.AgentID,
 		&t.CreatedAt, &t.LastUsedAt, &t.RevokedAt,
 	); err != nil {
 		return nil, err
@@ -51,11 +54,13 @@ func scanAPIToken(row pgx.Row) (*APIToken, error) {
 }
 
 // Create inserts a hashed token row. tokenHash must already be hashed.
-func (s *APITokenStore) Create(ctx context.Context, userID, name, prefix, tokenHash string, scopes []string) (*APIToken, error) {
+// agentID may be empty for generic user tokens; set it for MCP-bound tokens.
+func (s *APITokenStore) Create(ctx context.Context, userID, name, prefix, tokenHash string, scopes []string, agentID string) (*APIToken, error) {
 	userID = strings.TrimSpace(userID)
 	name = strings.TrimSpace(name)
 	prefix = strings.TrimSpace(prefix)
 	tokenHash = strings.TrimSpace(tokenHash)
+	agentID = strings.TrimSpace(agentID)
 	if userID == "" || name == "" || prefix == "" || tokenHash == "" {
 		return nil, errors.New("store: user_id, name, prefix, and token_hash are required")
 	}
@@ -63,10 +68,10 @@ func (s *APITokenStore) Create(ctx context.Context, userID, name, prefix, tokenH
 		scopes = []string{}
 	}
 	t, err := scanAPIToken(s.db.QueryRow(ctx,
-		`INSERT INTO api_tokens (user_id, name, token_prefix, token_hash, scopes)
-		 VALUES ($1, $2, $3, $4, $5)
+		`INSERT INTO api_tokens (user_id, name, token_prefix, token_hash, scopes, agent_id)
+		 VALUES ($1, $2, $3, $4, $5, $6)
 		 RETURNING `+apiTokenColumns,
-		userID, name, prefix, tokenHash, scopes))
+		userID, name, prefix, tokenHash, scopes, agentID))
 	if err != nil {
 		return nil, fmt.Errorf("store: create api token: %w", err)
 	}

@@ -163,6 +163,21 @@ func (s *Server) handleAgentMemoryWrite(w http.ResponseWriter, r *http.Request) 
 	if !s.authorizePermission(w, r, projectID, store.PermMemoryWrite) {
 		return
 	}
+	agentID := authAgentID(r)
+	if agentID != "" {
+		if ps, ok := s.agentPermissionStore(); ok {
+			if perm, err := ps.GetAgentPermission(r.Context(), projectID, agentID); err == nil {
+				if err := store.CheckAgentToolAllowed(perm, "memory_write"); err != nil {
+					writeError(w, http.StatusForbidden, err.Error())
+					return
+				}
+				if perm.RateLimit > 0 && !s.mcpRateAllowed("mcp:"+projectID+":"+agentID, perm.RateLimit) {
+					writeError(w, http.StatusTooManyRequests, "agent rate limit exceeded")
+					return
+				}
+			}
+		}
+	}
 	level := strings.ToLower(strings.TrimSpace(req.Level))
 	switch level {
 	case "organization", "project", "personal":
@@ -173,6 +188,19 @@ func (s *Server) handleAgentMemoryWrite(w http.ResponseWriter, r *http.Request) 
 	if scope == "" {
 		scope = "fact"
 	}
+	src := "agent:api"
+	if agentID != "" {
+		src = "agent:" + agentID
+	}
+	status := store.StatusProposed
+	if agentID != "" {
+		if ps, ok := s.agentPermissionStore(); ok {
+			if perm, err := ps.GetAgentPermission(r.Context(), projectID, agentID); err == nil &&
+				perm != nil && perm.Mode == store.AgentModeFull {
+				status = store.StatusConfirmed
+			}
+		}
+	}
 	item := &store.MemoryItem{
 		ProjectID:  projectID,
 		Key:        key,
@@ -180,8 +208,8 @@ func (s *Server) handleAgentMemoryWrite(w http.ResponseWriter, r *http.Request) 
 		Level:      level,
 		Scope:      scope,
 		Tags:       req.Tags,
-		Status:     store.StatusProposed,
-		Source:     "agent:api",
+		Status:     status,
+		Source:     src,
 		ProposedBy: authSubject(r),
 		Confidence: 0.85,
 	}
@@ -289,11 +317,45 @@ func (s *Server) handleAgentMCP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	bound := authAgentID(r)
+	headerAgent := strings.TrimSpace(r.Header.Get("X-Nexus-Agent"))
+	agentName := bound
+	if agentName == "" {
+		agentName = firstNonEmpty(headerAgent, "agent-api")
+	} else if headerAgent != "" && !strings.EqualFold(headerAgent, bound) {
+		writeError(w, http.StatusForbidden, "X-Nexus-Agent does not match token-bound agent_id")
+		return
+	}
+
+	var access *mcp.AgentAccess
+	if projectID != "" && agentName != "" && agentName != "agent-api" {
+		if ps, ok := s.agentPermissionStore(); ok {
+			if perm, err := ps.GetAgentPermission(r.Context(), projectID, agentName); err == nil && perm != nil {
+				access = &mcp.AgentAccess{
+					AgentID:   perm.AgentID,
+					Mode:      perm.Mode,
+					RateLimit: perm.RateLimit,
+					Tools:     perm.Tools,
+				}
+			}
+		}
+		// Bound agents always get a gate even before Agents page saves a row.
+		if access == nil {
+			access = &mcp.AgentAccess{
+				AgentID:   agentName,
+				Mode:      mcp.ModeFull,
+				RateLimit: 60,
+			}
+		}
+	}
+
 	cfg := mcp.Config{
 		ProjectID:   projectID,
 		ProjectName: name,
-		AgentName:   firstNonEmpty(r.Header.Get("X-Nexus-Agent"), "agent-api"),
+		AgentName:   agentName,
 		Embedder:    s.resolveEmbedder(),
+		Access:      access,
+		RateLimiter: s.agentMCPLimiter(),
 	}
 	srv := mcp.NewServer(agentMCPStore{Store: s.Store}, cfg)
 	resp := srv.Handle(r.Context(), raw)

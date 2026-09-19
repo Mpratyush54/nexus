@@ -247,8 +247,11 @@ func (s *Server) checkAccess(tool string) error {
 		if key == "" {
 			key = "default"
 		}
+		if s.cfg.ProjectID != "" {
+			key = s.cfg.ProjectID + ":" + key
+		}
 		if !s.cfg.RateLimiter.Allow(key, access.RateLimit) {
-			return &PermissionError{Reason: fmt.Sprintf("rate limit exceeded for agent %q (%d/min)", key, access.RateLimit)}
+			return &PermissionError{Reason: fmt.Sprintf("rate limit exceeded for agent %q (%d/min)", access.AgentID, access.RateLimit)}
 		}
 	}
 	return nil

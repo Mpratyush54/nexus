@@ -1,12 +1,14 @@
 import { motion } from 'framer-motion'
-import { Bot, Plus, Trash2 } from 'lucide-react'
-import { useState, type FormEvent } from 'react'
+import { Bot, Copy, Download, Plus, Sparkles, Trash2 } from 'lucide-react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { KNOWN_MCP_TOOLS } from '@/api/agents'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useToast } from '@/components/ui/Toast'
 import { useAgents, useDeleteAgent, useMCPFeed, useUpsertAgent } from '@/hooks/useAgents'
+import { useCreateToken } from '@/hooks/useAuthMutations'
+import { buildMcpJson, type McpConfigMode } from '@/lib/mcp-config'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
@@ -17,6 +19,8 @@ const MODES = [
   { value: 'read_only', label: 'Read only' },
   { value: 'blocked', label: 'Blocked' },
 ] as const
+
+const SEEDED_AGENTS = ['cursor', 'opencode'] as const
 
 function defaultTools(): Record<string, boolean> {
   const tools: Record<string, boolean> = {}
@@ -39,6 +43,10 @@ function modeTone(mode: string): 'teal' | 'amber' | 'ember' | 'neutral' {
   }
 }
 
+async function copyText(text: string) {
+  await navigator.clipboard.writeText(text)
+}
+
 export function AgentsPage() {
   const { projectId } = useAuth()
   const { push } = useToast()
@@ -46,12 +54,46 @@ export function AgentsPage() {
   const upsert = useUpsertAgent()
   const remove = useDeleteAgent()
   const feed = useMCPFeed()
+  const createToken = useCreateToken()
 
   const [agentId, setAgentId] = useState('')
   const [mode, setMode] = useState('full')
   const [rate, setRate] = useState(60)
   const [tools, setTools] = useState<Record<string, boolean>>(defaultTools)
   const [editing, setEditing] = useState<string | null>(null)
+  const [mcpMode, setMcpMode] = useState<McpConfigMode>('cloud')
+  const [minted, setMinted] = useState<{ agentId: string; token: string; json: string } | null>(
+    null,
+  )
+  const [seeding, setSeeding] = useState(false)
+  const seededRef = useRef(false)
+
+  // Ensure Cursor + OpenCode exist so each can mint a bound MCP token.
+  useEffect(() => {
+    if (!projectId || agents.isLoading || seeding || seededRef.current) return
+    const existing = new Set((agents.data ?? []).map((a) => a.agent_id.toLowerCase()))
+    const missing = SEEDED_AGENTS.filter((id) => !existing.has(id))
+    if (missing.length === 0) {
+      seededRef.current = true
+      return
+    }
+    setSeeding(true)
+    void (async () => {
+      try {
+        for (const id of missing) {
+          await upsert.mutateAsync({
+            agentId: id,
+            input: { mode: 'full', rate_limit: 60, tools: defaultTools() },
+          })
+        }
+        seededRef.current = true
+      } catch {
+        // User can add manually; don't spam toasts on every load failure.
+      } finally {
+        setSeeding(false)
+      }
+    })()
+  }, [projectId, agents.isLoading, agents.data, seeding, upsert])
 
   const onSave = (e: FormEvent) => {
     e.preventDefault()
@@ -88,6 +130,43 @@ export function AgentsPage() {
     setTools({ ...defaultTools(), ...(a.tools ?? {}) })
   }
 
+  const onMintMcp = (id: string) => {
+    createToken.mutate(
+      { name: `${id} MCP`, agent_id: id },
+      {
+        onSuccess: (res) => {
+          const json = buildMcpJson(res.token, mcpMode, id, projectId)
+          setMinted({ agentId: id, token: res.token, json })
+          push({
+            title: `MCP token for ${id}`,
+            detail:
+              mcpMode === 'cloud'
+                ? 'Paste into the editor mcp.json (cloud URL). Reload the host.'
+                : 'Local MCP — requires Nexus Desktop. Paste mcp.json then reload.',
+            tone: 'teal',
+          })
+        },
+        onError: (err) =>
+          push({
+            title: 'Could not mint token',
+            detail: err instanceof ApiError ? err.message : 'Unknown error',
+            tone: 'danger',
+          }),
+      },
+    )
+  }
+
+  const downloadMcp = () => {
+    if (!minted) return
+    const blob = new Blob([minted.json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `mcp-${minted.agentId}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
   if (!projectId) {
     return (
       <div className="py-16 text-sm text-muted">Resolve a project first (sign in again if needed).</div>
@@ -99,8 +178,8 @@ export function AgentsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Agents</h1>
         <p className="mt-1 text-sm text-fg-dim">
-          MCP tool permissions and live call log. Separate from Desktop setup (install / harvest) —
-          this page is for gating what connected agents may do.
+          Identities, MCP credentials, modes, and rate limits. Mint a separate token per agent
+          (Cursor vs OpenCode) so limits stay independent. Desktop install / harvest lives on Connect.
         </p>
       </div>
 
@@ -133,6 +212,76 @@ export function AgentsPage() {
       </GlassPanel>
 
       <GlassPanel className="space-y-4 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-medium text-fg">Mint MCP config</h2>
+          <div className="flex flex-wrap gap-2" role="group" aria-label="MCP config mode">
+            <Button
+              type="button"
+              size="sm"
+              variant={mcpMode === 'cloud' ? 'primary' : 'secondary'}
+              onClick={() => {
+                setMcpMode('cloud')
+                if (minted) {
+                  setMinted({
+                    ...minted,
+                    json: buildMcpJson(minted.token, 'cloud', minted.agentId, projectId),
+                  })
+                }
+              }}
+            >
+              Cloud API
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={mcpMode === 'local' ? 'primary' : 'secondary'}
+              onClick={() => {
+                setMcpMode('local')
+                if (minted) {
+                  setMinted({
+                    ...minted,
+                    json: buildMcpJson(minted.token, 'local', minted.agentId, projectId),
+                  })
+                }
+              }}
+            >
+              Local desktop
+            </Button>
+          </div>
+        </div>
+        <p className="text-xs text-fg-dim">
+          Each mint binds the token to that agent id. Use <span className="font-mono">Mint MCP</span>{' '}
+          on a row below — Cursor and OpenCode stay on separate rate limits.
+        </p>
+        {minted ? (
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                onClick={() =>
+                  void copyText(minted.json).then(() => push({ title: 'Copied mcp.json' }))
+                }
+              >
+                <Copy className="h-3.5 w-3.5" /> Copy JSON
+              </Button>
+              <Button type="button" size="sm" variant="secondary" onClick={downloadMcp}>
+                <Download className="h-3.5 w-3.5" /> Download
+              </Button>
+            </div>
+            <p className="text-xs text-muted">
+              Bound agent <span className="font-mono text-teal">{minted.agentId}</span> · paste into
+              mcp.json then reload the host
+            </p>
+            <pre className="max-h-48 overflow-auto rounded-lg border border-border bg-raised/60 p-3 text-[11px] leading-relaxed text-fg-dim">
+              {minted.json.replaceAll(minted.token, 'nxs_…REDACTED…')}
+            </pre>
+          </div>
+        ) : null}
+      </GlassPanel>
+
+      <GlassPanel className="space-y-4 p-5">
         <h2 className="text-sm font-medium text-fg">
           {editing ? `Edit ${editing}` : 'Add agent'}
         </h2>
@@ -145,7 +294,7 @@ export function AgentsPage() {
                 onChange={(e) => setAgentId(e.target.value)}
                 disabled={Boolean(editing)}
                 required
-                placeholder="cursor / claude / custom"
+                placeholder="cursor / opencode / custom"
                 className="h-10 w-full rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber disabled:opacity-60"
               />
             </label>
@@ -261,7 +410,16 @@ export function AgentsPage() {
                   ))}
                 </div>
               </div>
-              <div className="flex gap-1">
+              <div className="flex flex-wrap gap-1">
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={() => onMintMcp(a.agent_id)}
+                  disabled={createToken.isPending}
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  Mint MCP
+                </Button>
                 <Button type="button" size="sm" variant="secondary" onClick={() => startEdit(a.agent_id)}>
                   Edit
                 </Button>
@@ -288,8 +446,8 @@ export function AgentsPage() {
             </GlassPanel>
           </motion.div>
         ))}
-        {agents.isLoading ? <p className="text-sm text-muted">Loading agents…</p> : null}
-        {!agents.isLoading && (agents.data ?? []).length === 0 ? (
+        {agents.isLoading || seeding ? <p className="text-sm text-muted">Loading agents…</p> : null}
+        {!agents.isLoading && !seeding && (agents.data ?? []).length === 0 ? (
           <p className="text-sm text-muted">No agents configured yet.</p>
         ) : null}
       </div>

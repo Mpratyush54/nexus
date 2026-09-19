@@ -90,35 +90,136 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 			Speaker:   t.Speaker,
 			Content:   t.Content,
 			Timestamp: t.Timestamp,
+			SessionID: t.SessionID,
 		})
 	}
+	sessionID := extract.SessionIDFromTurns(turns)
 	existing := s.harvestExisting(ctx, job.ProjectID)
-	jobCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	jobCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
 	defer cancel()
-	result, err := svc.ExtractLLMOnly(jobCtx, job.ProjectID, turns, existing)
-	if err != nil {
-		s.finishOrRetryHarvest(ctx, job, extract.ProviderOpenRouter, err.Error())
-		return
-	}
-	if result.LLMError != "" {
-		s.finishOrRetryHarvest(ctx, job, result.Provider, result.LLMError)
-		return
-	}
 
 	saved := 0
-	for _, p := range result.Proposals {
-		if _, err := s.persistHarvestMemory(ctx, job, p); err != nil {
-			if s.Log != nil {
-				s.Log.Printf("harvest worker: persist job=%s key=%q: %v", job.ID, p.Key, err)
-			}
-			continue
+	provider := extract.ProviderOpenRouter
+
+	if sessionID != "" {
+		result, err := svc.ExtractSessionCompress(jobCtx, job.ProjectID, sessionID, turns, existing)
+		if err != nil {
+			s.finishOrRetryHarvest(ctx, job, extract.ProviderOpenRouter, err.Error())
+			return
 		}
-		saved++
+		if result.LLMError != "" {
+			s.finishOrRetryHarvest(ctx, job, result.Provider, result.LLMError)
+			return
+		}
+		provider = result.Provider
+		if strings.TrimSpace(result.Summary) != "" {
+			if _, err := s.upsertSessionSummary(ctx, job, sessionID, result.Summary); err != nil {
+				if s.Log != nil {
+					s.Log.Printf("harvest worker: session summary job=%s: %v", job.ID, err)
+				}
+			} else {
+				saved++
+			}
+		}
+		for _, p := range result.Decisions {
+			if _, err := s.persistHarvestMemory(ctx, job, p); err != nil {
+				if s.Log != nil {
+					s.Log.Printf("harvest worker: persist job=%s key=%q: %v", job.ID, p.Key, err)
+				}
+				continue
+			}
+			saved++
+		}
+	} else {
+		result, err := svc.ExtractLLMOnly(jobCtx, job.ProjectID, turns, existing)
+		if err != nil {
+			s.finishOrRetryHarvest(ctx, job, extract.ProviderOpenRouter, err.Error())
+			return
+		}
+		if result.LLMError != "" {
+			s.finishOrRetryHarvest(ctx, job, result.Provider, result.LLMError)
+			return
+		}
+		provider = result.Provider
+		for _, p := range result.Proposals {
+			if _, err := s.persistHarvestMemory(ctx, job, p); err != nil {
+				if s.Log != nil {
+					s.Log.Printf("harvest worker: persist job=%s key=%q: %v", job.ID, p.Key, err)
+				}
+				continue
+			}
+			saved++
+		}
 	}
-	_ = s.Harvest.FinishHarvestJob(ctx, job.ID, store.HarvestDone, result.Provider, "", saved)
+
+	_ = s.Harvest.FinishHarvestJob(ctx, job.ID, store.HarvestDone, provider, "", saved)
 	if s.Log != nil {
-		s.Log.Printf("harvest worker: done job=%s provider=%s memories=%d", job.ID, result.Provider, saved)
+		s.Log.Printf("harvest worker: done job=%s provider=%s memories=%d session=%s", job.ID, provider, saved, sessionID)
 	}
+}
+
+func (s *Server) findMemoryByKey(ctx context.Context, projectID, key string) *store.MemoryItem {
+	if s.Store == nil || key == "" {
+		return nil
+	}
+	items, err := s.Store.SearchMemory(ctx, projectID, key, nil, 80)
+	if err != nil {
+		return nil
+	}
+	for _, it := range items {
+		if it != nil && it.Key == key {
+			return it
+		}
+	}
+	return nil
+}
+
+func (s *Server) upsertSessionSummary(ctx context.Context, job *store.HarvestJob, sessionID, summary string) (*store.MemoryItem, error) {
+	content := extract.ClampMemoryContent(summary)
+	if err := store.ValidateMemoryContent(content); err != nil {
+		return nil, err
+	}
+	key := "session/" + strings.TrimSpace(sessionID)
+	src := "harvest:openrouter:session-compress"
+	if job.Source != "" {
+		src = src + ":" + job.Source
+	}
+
+	if existing := s.findMemoryByKey(ctx, job.ProjectID, key); existing != nil {
+		if es, ok := s.memoryEditStore(); ok {
+			patch := store.MemoryPatch{Content: &content}
+			scope := "episode_summary"
+			level := "project"
+			patch.Scope = &scope
+			patch.Level = &level
+			item, err := es.UpdateMemory(ctx, existing.ID, patch, "harvest")
+			if err != nil {
+				return nil, err
+			}
+			s.notifyProjectActivity(job.ProjectID, "MEMORY_CONFIRMED", "/app/memory")
+			s.publishMemoryLifecycle(item, "MEMORY_CONFIRMED", "confirmed")
+			return item, nil
+		}
+	}
+
+	item := &store.MemoryItem{
+		ProjectID:  job.ProjectID,
+		Key:        key,
+		Content:    content,
+		Level:      "project",
+		Scope:      "episode_summary",
+		Confidence: 0.9,
+		Status:     store.StatusConfirmed,
+		Source:     src,
+		Tags:       []string{"session-compress", "session:" + sessionID},
+	}
+	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
+	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {
+		return nil, err
+	}
+	s.notifyProjectActivity(job.ProjectID, "MEMORY_CONFIRMED", "/app/memory")
+	s.publishMemoryLifecycle(item, "MEMORY_CONFIRMED", "confirmed")
+	return item, nil
 }
 
 func (s *Server) finishOrRetryHarvest(ctx context.Context, job *store.HarvestJob, provider, errMsg string) {

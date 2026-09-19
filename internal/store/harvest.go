@@ -23,6 +23,7 @@ type HarvestTurn struct {
 	Speaker   string `json:"speaker"`
 	Content   string `json:"content"`
 	Timestamp string `json:"timestamp,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // Harvest retry policy for transient provider failures (429, 5xx, timeout).

@@ -73,7 +73,12 @@ export function useTokens() {
 export function useCreateToken() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (name: string) => authApi.createToken({ name }),
+    mutationFn: (input: string | { name: string; agent_id?: string; scopes?: string[] }) => {
+      if (typeof input === 'string') {
+        return authApi.createToken({ name: input })
+      }
+      return authApi.createToken(input)
+    },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['auth', 'tokens'] })
     },
