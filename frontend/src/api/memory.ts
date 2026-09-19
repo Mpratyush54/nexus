@@ -65,7 +65,7 @@ export const memoryApi = {
   },
 
   harvestJob(id: string, signal?: AbortSignal) {
-    return apiRequest<HarvestJob>(`/memory/harvest/${id}`, { signal })
+    return apiRequest<HarvestJob>(`/memory/harvest-jobs/${id}`, { signal })
   },
 
   confirm(id: string) {

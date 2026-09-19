@@ -33,7 +33,8 @@ func (s *Server) registerRoutes() {
 	s.Mux.HandleFunc("POST /memory/extract", s.requireAuth(s.handleMemoryExtract))
 	s.Mux.HandleFunc("POST /memory/harvest", s.requireAuth(s.handleMemoryHarvestEnqueue))
 	s.Mux.HandleFunc("GET /memory/harvest", s.requireAuth(s.handleMemoryHarvestList))
-	s.Mux.HandleFunc("GET /memory/harvest/{id}", s.requireAuth(s.handleMemoryHarvestGet))
+	// Separate path so it does not conflict with GET /memory/{id}/history.
+	s.Mux.HandleFunc("GET /memory/harvest-jobs/{id}", s.requireAuth(s.handleMemoryHarvestGet))
 	s.Mux.HandleFunc("GET /memory/search", s.requireAuth(s.handleMemorySearch))
 
 	s.Mux.HandleFunc("POST /episodes", s.requireAuth(s.handleEpisodeCreate))
