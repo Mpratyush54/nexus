@@ -63,12 +63,43 @@ func (q *MemHarvestQueue) EnqueueHarvestJob(_ context.Context, projectID, source
 func (q *MemHarvestQueue) ClaimNextHarvestJob(_ context.Context) (*HarvestJob, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	now := time.Now().UTC()
+	// Reclaim stuck processing + transient failed (mirrors Postgres).
+	for _, id := range q.order {
+		j := q.jobs[id]
+		if j == nil {
+			continue
+		}
+		if j.Status == HarvestProcessing && j.StartedAt != nil && now.Sub(*j.StartedAt) > 3*time.Minute {
+			j.Status = HarvestQueued
+			j.StartedAt = nil
+			j.Error = "requeued: processing timed out"
+			j.UpdatedAt = now
+			at := now
+			j.NextAttemptAt = &at
+		}
+		if j.Status == HarvestFailed && j.AttemptCount < HarvestMaxAttempts &&
+			HarvestErrorTransient(j.Error) &&
+			j.FinishedAt != nil && now.Sub(*j.FinishedAt) < 48*time.Hour {
+			j.Status = HarvestQueued
+			j.StartedAt = nil
+			j.FinishedAt = nil
+			if j.AttemptCount < 1 {
+				j.AttemptCount = 1
+			}
+			at := now
+			j.NextAttemptAt = &at
+			j.UpdatedAt = now
+		}
+	}
 	for _, id := range q.order {
 		j := q.jobs[id]
 		if j == nil || j.Status != HarvestQueued {
 			continue
 		}
-		now := time.Now().UTC()
+		if j.NextAttemptAt != nil && j.NextAttemptAt.After(now) {
+			continue
+		}
 		j.Status = HarvestProcessing
 		j.StartedAt = &now
 		j.UpdatedAt = now
@@ -92,6 +123,27 @@ func (q *MemHarvestQueue) FinishHarvestJob(_ context.Context, id, status, provid
 	j.Error = errMsg
 	j.ResultCount = resultCount
 	j.FinishedAt = &now
+	j.UpdatedAt = now
+	j.NextAttemptAt = nil
+	return nil
+}
+
+func (q *MemHarvestQueue) RequeueHarvestJob(_ context.Context, id, provider, errMsg string, delay time.Duration) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	j := q.jobs[id]
+	if j == nil {
+		return fmt.Errorf("harvest: not found")
+	}
+	now := time.Now().UTC()
+	j.Status = HarvestQueued
+	j.Provider = provider
+	j.Error = errMsg
+	j.AttemptCount++
+	next := now.Add(delay)
+	j.NextAttemptAt = &next
+	j.StartedAt = nil
+	j.FinishedAt = nil
 	j.UpdatedAt = now
 	return nil
 }

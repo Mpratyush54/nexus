@@ -3,10 +3,9 @@ import { useAuth } from '@/providers/AuthProvider'
 import type { HarvestStatus } from '@/api/daemon'
 
 /**
- * When the local daemon is harvesting into a different project than the one
- * selected in the portal (common when folder is central-memory but git remote
- * resolves to nexus), switch the portal selection so Memory/Dashboard show
- * the rows that are actually being uploaded.
+ * When the local daemon targets a different project than the one selected in
+ * the portal (common when folder is central-memory but git remote resolves to
+ * nexus), switch so Memory/Dashboard show the rows that are actually uploaded.
  */
 export function useFollowHarvestProject(hs: HarvestStatus | undefined) {
   const { projectId, setProjectId } = useAuth()
@@ -14,7 +13,7 @@ export function useFollowHarvestProject(hs: HarvestStatus | undefined) {
 
   useEffect(() => {
     const target = hs?.project_id?.trim()
-    if (!target || !hs?.running) return
+    if (!target) return
     if (projectId === target) {
       switchedFor.current = target
       return
@@ -23,5 +22,5 @@ export function useFollowHarvestProject(hs: HarvestStatus | undefined) {
     if (switchedFor.current === target) return
     switchedFor.current = target
     setProjectId(target)
-  }, [hs?.project_id, hs?.running, projectId, setProjectId])
+  }, [hs?.project_id, projectId, setProjectId])
 }

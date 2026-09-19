@@ -25,24 +25,71 @@ type HarvestTurn struct {
 	Timestamp string `json:"timestamp,omitempty"`
 }
 
+// Harvest retry policy for transient provider failures (429, 5xx, timeout).
+const (
+	HarvestMaxAttempts = 8
+)
+
 // HarvestJob is a queued batch of turns visible in the portal while the
 // OpenRouter worker processes it.
 type HarvestJob struct {
-	ID          string        `json:"id"`
-	ProjectID   string        `json:"project_id"`
-	DedupeKey   string        `json:"dedupe_key"`
-	Status      string        `json:"status"`
-	Source      string        `json:"source,omitempty"`
-	Turns       []HarvestTurn `json:"turns,omitempty"`
-	RawPreview  string        `json:"raw_preview"`
-	TurnCount   int           `json:"turn_count"`
-	ResultCount int           `json:"result_count"`
-	Error       string        `json:"error,omitempty"`
-	Provider    string        `json:"provider,omitempty"`
-	CreatedAt   time.Time     `json:"created_at"`
-	UpdatedAt   time.Time     `json:"updated_at"`
-	StartedAt   *time.Time    `json:"started_at,omitempty"`
-	FinishedAt  *time.Time    `json:"finished_at,omitempty"`
+	ID            string        `json:"id"`
+	ProjectID     string        `json:"project_id"`
+	DedupeKey     string        `json:"dedupe_key"`
+	Status        string        `json:"status"`
+	Source        string        `json:"source,omitempty"`
+	Turns         []HarvestTurn `json:"turns,omitempty"`
+	RawPreview    string        `json:"raw_preview"`
+	TurnCount     int           `json:"turn_count"`
+	ResultCount   int           `json:"result_count"`
+	Error         string        `json:"error,omitempty"`
+	Provider      string        `json:"provider,omitempty"`
+	AttemptCount  int           `json:"attempt_count"`
+	NextAttemptAt *time.Time    `json:"next_attempt_at,omitempty"`
+	CreatedAt     time.Time     `json:"created_at"`
+	UpdatedAt     time.Time     `json:"updated_at"`
+	StartedAt     *time.Time    `json:"started_at,omitempty"`
+	FinishedAt    *time.Time    `json:"finished_at,omitempty"`
+}
+
+// HarvestErrorTransient reports whether err text looks retryable (rate limits,
+// timeouts, upstream 5xx). Permanent extract/parse failures return false.
+func HarvestErrorTransient(errMsg string) bool {
+	e := strings.ToLower(errMsg)
+	if e == "" {
+		return false
+	}
+	needles := []string{
+		"429", "rate limit", "throttle", "timeout", "timed out",
+		"502", "503", "504", "529", "overloaded", "temporarily",
+		"connection reset", "eof", "unavailable",
+	}
+	for _, n := range needles {
+		if strings.Contains(e, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// HarvestRetryDelay returns backoff after the given 1-based attempt number.
+func HarvestRetryDelay(attempt int) time.Duration {
+	switch {
+	case attempt <= 1:
+		return 30 * time.Second
+	case attempt == 2:
+		return 1 * time.Minute
+	case attempt == 3:
+		return 2 * time.Minute
+	case attempt == 4:
+		return 5 * time.Minute
+	case attempt == 5:
+		return 10 * time.Minute
+	case attempt == 6:
+		return 20 * time.Minute
+	default:
+		return 30 * time.Minute
+	}
 }
 
 // HarvestDedupeKey hashes normalized turn text for idempotent enqueue.
@@ -107,6 +154,9 @@ type HarvestQueue interface {
 	EnqueueHarvestJob(ctx context.Context, projectID, source string, turns []HarvestTurn) (job *HarvestJob, created bool, err error)
 	ClaimNextHarvestJob(ctx context.Context) (*HarvestJob, error)
 	FinishHarvestJob(ctx context.Context, id, status, provider, errMsg string, resultCount int) error
+	// RequeueHarvestJob marks a job queued again after a transient failure.
+	// attempt becomes previous+1; next run waits until now+delay.
+	RequeueHarvestJob(ctx context.Context, id, provider, errMsg string, delay time.Duration) error
 	ListHarvestJobs(ctx context.Context, projectID string, limit int) ([]*HarvestJob, error)
 	ListHarvestJobsOpt(ctx context.Context, projectID string, limit int, includeTurns bool) ([]*HarvestJob, error)
 	GetHarvestJob(ctx context.Context, id string) (*HarvestJob, error)

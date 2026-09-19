@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { memoryApi } from '@/api/memory'
 import { queryKeys } from '@/lib/query-keys'
@@ -27,7 +28,10 @@ export function useMemorySearch(q = '', level = '') {
 /** Raw harvest jobs (queued / processing / done) for the active project. */
 export function useHarvestQueue() {
   const { projectId, isAuthenticated } = useAuth()
-  return useQuery({
+  const qc = useQueryClient()
+  const prevResults = useRef(0)
+
+  const query = useQuery({
     queryKey: queryKeys.memory.harvest(projectId ?? ''),
     enabled: isAuthenticated && Boolean(projectId),
     queryFn: ({ signal }) => memoryApi.harvestQueue(projectId!, signal),
@@ -35,6 +39,21 @@ export function useHarvestQueue() {
     refetchInterval: 4_000,
     retry: false,
   })
+
+  useEffect(() => {
+    prevResults.current = 0
+  }, [projectId])
+
+  useEffect(() => {
+    const items = query.data ?? []
+    const results = items.reduce((n, j) => n + (j.result_count ?? 0), 0)
+    if (results > prevResults.current) {
+      void qc.invalidateQueries({ queryKey: queryKeys.memory.all })
+    }
+    prevResults.current = results
+  }, [query.data, qc])
+
+  return query
 }
 
 export function useConfirmMemory() {

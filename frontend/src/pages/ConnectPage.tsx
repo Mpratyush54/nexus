@@ -548,7 +548,12 @@ export function ConnectPage() {
             </div>
             <ul className="max-h-56 space-y-1.5 overflow-auto rounded-lg border border-border bg-raised/30 p-2 text-[11px]">
               {(harvestedMemories.data ?? [])
-                .filter((m) => (m.source || '').includes('processor') || (m.source || '').includes('daemon'))
+                .filter(
+                  (m) =>
+                    (m.source || '').includes('processor') ||
+                    (m.source || '').includes('daemon') ||
+                    (m.source || '').includes('harvest'),
+                )
                 .slice(0, 8)
                 .map((m) => (
                   <li key={m.id} className="border-b border-border/60 pb-1.5 last:border-0">
@@ -562,9 +567,12 @@ export function ConnectPage() {
                   </li>
                 ))}
               {!projectId ? (
-                <li className="px-1 py-3 text-muted">Link a project to see harvested PROPOSED rows.</li>
+                <li className="px-1 py-3 text-muted">Link a project to see harvested memories.</li>
               ) : !(harvestedMemories.data ?? []).some(
-                  (m) => (m.source || '').includes('processor') || (m.source || '').includes('daemon'),
+                  (m) =>
+                    (m.source || '').includes('processor') ||
+                    (m.source || '').includes('daemon') ||
+                    (m.source || '').includes('harvest'),
                 ) ? (
                 <li className="px-1 py-3 text-muted">No harvested memories yet — they appear after a scan finds chat turns.</li>
               ) : null}

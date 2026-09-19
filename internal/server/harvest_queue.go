@@ -97,20 +97,20 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 	defer cancel()
 	result, err := svc.ExtractLLMOnly(jobCtx, job.ProjectID, turns, existing)
 	if err != nil {
-		_ = s.Harvest.FinishHarvestJob(ctx, job.ID, store.HarvestFailed, extract.ProviderOpenRouter, err.Error(), 0)
+		s.finishOrRetryHarvest(ctx, job, extract.ProviderOpenRouter, err.Error())
 		return
 	}
 	if result.LLMError != "" {
-		_ = s.Harvest.FinishHarvestJob(ctx, job.ID, store.HarvestFailed, result.Provider, result.LLMError, 0)
-		if s.Log != nil {
-			s.Log.Printf("harvest worker: openrouter job=%s: %s", job.ID, result.LLMError)
-		}
+		s.finishOrRetryHarvest(ctx, job, result.Provider, result.LLMError)
 		return
 	}
 
 	saved := 0
 	for _, p := range result.Proposals {
 		if _, err := s.persistHarvestMemory(ctx, job, p); err != nil {
+			if s.Log != nil {
+				s.Log.Printf("harvest worker: persist job=%s key=%q: %v", job.ID, p.Key, err)
+			}
 			continue
 		}
 		saved++
@@ -118,6 +118,28 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 	_ = s.Harvest.FinishHarvestJob(ctx, job.ID, store.HarvestDone, result.Provider, "", saved)
 	if s.Log != nil {
 		s.Log.Printf("harvest worker: done job=%s provider=%s memories=%d", job.ID, result.Provider, saved)
+	}
+}
+
+func (s *Server) finishOrRetryHarvest(ctx context.Context, job *store.HarvestJob, provider, errMsg string) {
+	if job == nil {
+		return
+	}
+	attempts := job.AttemptCount
+	if store.HarvestErrorTransient(errMsg) && attempts < store.HarvestMaxAttempts {
+		delay := store.HarvestRetryDelay(attempts + 1)
+		if err := s.Harvest.RequeueHarvestJob(ctx, job.ID, provider, errMsg, delay); err != nil {
+			_ = s.Harvest.FinishHarvestJob(ctx, job.ID, store.HarvestFailed, provider, errMsg, 0)
+			return
+		}
+		if s.Log != nil {
+			s.Log.Printf("harvest worker: retry job=%s attempt=%d delay=%s: %s", job.ID, attempts+1, delay, errMsg)
+		}
+		return
+	}
+	_ = s.Harvest.FinishHarvestJob(ctx, job.ID, store.HarvestFailed, provider, errMsg, 0)
+	if s.Log != nil {
+		s.Log.Printf("harvest worker: failed job=%s: %s", job.ID, errMsg)
 	}
 }
 

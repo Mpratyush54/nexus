@@ -20,12 +20,20 @@ import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError, type MemoryItem } from '@/types/api'
 import { formatRelative } from '@/utils/format'
+import { useProjectSummaries } from '@/hooks/useProjectSummaries'
+import { useProjects } from '@/hooks/useProjects'
 
 const LEVEL_FILTERS = ['', 'session', 'project', 'user', 'org'] as const
 
+function projectLabelOf(p: { display_name?: string; folder_name?: string; id: string }) {
+  return p.display_name || p.folder_name || `${p.id.slice(0, 8)}…`
+}
+
 export function MemoryPage() {
-  const { projectId } = useAuth()
+  const { projectId, setProjectId } = useAuth()
   const { push } = useToast()
+  const projects = useProjects()
+  const summaries = useProjectSummaries()
   const local = useLocalDaemonAutodetect()
   const serverView = useLocalWorkspaceView()
   const bridgeUrl =
@@ -33,7 +41,8 @@ export function MemoryPage() {
     local.data?.status.proxy_url ||
     serverView.data?.proxy_url ||
     undefined
-  useFollowHarvestProject(useLocalHarvest(bridgeUrl).data)
+  const harvestStatus = useLocalHarvest(bridgeUrl).data
+  useFollowHarvestProject(harvestStatus)
   const [q, setQ] = useState('')
   const [level, setLevel] = useState('')
   const [tagFilter, setTagFilter] = useState<string | null>(null)
@@ -113,6 +122,15 @@ export function MemoryPage() {
     })
   }
 
+  const harvestTargetId = harvestStatus?.project_id?.trim()
+  const harvestMismatch = Boolean(harvestTargetId && projectId && harvestTargetId !== projectId)
+  const harvestProject = (projects.data ?? []).find((p) => p.id === harvestTargetId)
+  const richer = (summaries.data ?? []).find(
+    (s) =>
+      s.project.id !== projectId &&
+      s.metrics.memories > (filtered.length + 5),
+  )
+
   return (
     <div className="space-y-8">
       <div className="flex flex-wrap items-end justify-between gap-3">
@@ -139,6 +157,41 @@ export function MemoryPage() {
           </Button>
         </div>
       </div>
+
+      {harvestMismatch && harvestTargetId ? (
+        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/40 p-4">
+          <div>
+            <p className="text-sm text-fg">
+              Desktop is writing memories to{' '}
+              <span className="font-medium">
+                {harvestProject ? projectLabelOf(harvestProject) : 'another project'}
+              </span>
+              , not this Library.
+            </p>
+            <p className="mt-1 text-xs text-fg-dim">
+              Folder <span className="font-mono">central-memory</span> often maps to git remote{' '}
+              <span className="font-mono">nexus</span>.
+            </p>
+          </div>
+          <Button type="button" size="sm" onClick={() => setProjectId(harvestTargetId)}>
+            Show harvest project
+          </Button>
+        </GlassPanel>
+      ) : null}
+
+      {richer && !harvestMismatch ? (
+        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/30 p-4">
+          <div>
+            <p className="text-sm text-fg">
+              <span className="font-medium">{projectLabelOf(richer.project)}</span> has{' '}
+              {richer.metrics.memories} memories — more than this project.
+            </p>
+          </div>
+          <Button type="button" size="sm" onClick={() => setProjectId(richer.project.id)}>
+            Switch to {projectLabelOf(richer.project)}
+          </Button>
+        </GlassPanel>
+      ) : null}
 
       {(harvestQ.data?.length ?? 0) > 0 ? (
         <GlassPanel className="space-y-3 p-5">
