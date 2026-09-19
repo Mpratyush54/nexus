@@ -43,6 +43,7 @@ const (
 type Result struct {
 	Proposals []Proposal
 	Provider  string
+	LLMError  string // set when OpenRouter was attempted and failed
 }
 
 // Limits cap batch size for free-tier OpenRouter usage.

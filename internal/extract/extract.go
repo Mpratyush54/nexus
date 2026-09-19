@@ -20,6 +20,7 @@ func (s *Service) Extract(ctx context.Context, project string, turns []Turn, exi
 	if s != nil {
 		cfg = s.Cfg
 	}
+	var llmErr string
 	useLLM := strings.TrimSpace(cfg.APIKey) != "" && s.allowLLM(project)
 	if useLLM {
 		client := s.client()
@@ -31,12 +32,12 @@ func (s *Service) Extract(ctx context.Context, project string, turns []Turn, exi
 			// durable" over heuristic re-scraping the same turns as junk.
 			return Result{Proposals: props, Provider: ProviderOpenRouter}, nil
 		}
+		llmErr = err.Error()
 		// Network/parse failure: do not burn the throttle; heuristic fallback.
-		_ = err
 	}
 
 	props := Heuristic(project, turns, existing)
-	return Result{Proposals: props, Provider: ProviderHeuristic}, nil
+	return Result{Proposals: props, Provider: ProviderHeuristic, LLMError: llmErr}, nil
 }
 
 func (s *Service) client() *Client {

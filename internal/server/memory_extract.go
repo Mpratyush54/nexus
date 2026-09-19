@@ -77,6 +77,9 @@ func (s *Server) handleMemoryExtract(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "extraction failed: "+err.Error())
 		return
 	}
+	if result.LLMError != "" {
+		s.Log.Printf("memory extract: openrouter failed for %s: %s (falling back to heuristic)", projectID, result.LLMError)
+	}
 
 	srcHint := strings.TrimSpace(req.Source)
 	created := make([]*store.MemoryItem, 0, len(result.Proposals))
@@ -88,9 +91,10 @@ func (s *Server) handleMemoryExtract(w http.ResponseWriter, r *http.Request) {
 		created = append(created, item)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":    created,
-		"count":    len(created),
-		"provider": result.Provider,
+		"items":     created,
+		"count":     len(created),
+		"provider":  result.Provider,
+		"llm_error": result.LLMError,
 	})
 }
 
