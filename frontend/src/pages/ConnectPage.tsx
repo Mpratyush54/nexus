@@ -39,7 +39,15 @@ import { formatRelative } from '@/utils/format'
 const INSTALL_PS1 =
   'irm https://central-memory-releases.s3.ap-south-1.amazonaws.com/cli/0.1.0/install-windows.ps1 | iex'
 
-const MEM_PATH_WIN = String.raw`C:\Users\%USERNAME%\AppData\Local\Nexus\bin\mem.exe`
+const MEM_PATH_WIN = String.raw`%LOCALAPPDATA%\Nexus\bin\mem.exe`
+
+type McpConfigMode = 'cloud' | 'local'
+
+function publicApiBase() {
+  const base = (import.meta.env.VITE_API_BASE as string | undefined) ?? ''
+  if (/^https?:\/\//i.test(base)) return base.replace(/\/$/, '')
+  return 'https://api-nexus.pratyushes.dev'
+}
 
 function folderFromPath(path?: string) {
   if (!path) return ''
@@ -47,24 +55,58 @@ function folderFromPath(path?: string) {
   return parts[parts.length - 1] || ''
 }
 
-function buildMcpJson(token: string, agent = 'cursor') {
+/** Cloud MCP hits HTTPS /v1/agent/mcp — no local mem.exe path required. */
+function buildCloudMcpJson(token: string, projectId?: string | null) {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
+  }
+  if (projectId) headers['X-Nexus-Project'] = projectId
   return JSON.stringify(
     {
       mcpServers: {
         nexus: {
-          command: MEM_PATH_WIN.replace('%USERNAME%', 'YOUR_WINDOWS_USERNAME'),
-          args: ['mcp'],
-          env: {
-            NEXUS_SERVER: 'https://api-nexus.pratyushes.dev',
-            NEXUS_AGENT: agent,
-            NEXUS_TOKEN: token,
-          },
+          url: `${publicApiBase()}/v1/agent/mcp`,
+          headers,
         },
       },
     },
     null,
     2,
   )
+}
+
+/** Local stdio MCP when Nexus Desktop / mem is installed on this machine. */
+function buildLocalMcpJson(token: string, agent = 'cursor', projectId?: string | null) {
+  const env: Record<string, string> = {
+    NEXUS_SERVER: publicApiBase(),
+    NEXUS_AGENT: agent,
+    NEXUS_TOKEN: token,
+  }
+  if (projectId) env.NEXUS_PROJECT = projectId
+  return JSON.stringify(
+    {
+      mcpServers: {
+        nexus: {
+          command: MEM_PATH_WIN,
+          args: ['mcp'],
+          env,
+        },
+      },
+    },
+    null,
+    2,
+  )
+}
+
+function buildMcpJson(
+  token: string,
+  mode: McpConfigMode,
+  agent = 'cursor',
+  projectId?: string | null,
+) {
+  return mode === 'local'
+    ? buildLocalMcpJson(token, agent, projectId)
+    : buildCloudMcpJson(token, projectId)
 }
 
 async function copyText(text: string) {
@@ -104,6 +146,7 @@ export function ConnectPage() {
 
   const [mcpJson, setMcpJson] = useState<string | null>(null)
   const [mintedToken, setMintedToken] = useState<string | null>(null)
+  const [mcpMode, setMcpMode] = useState<McpConfigMode>('cloud')
   const [sessionTitle, setSessionTitle] = useState('Cursor work')
 
   const detected = local.data
@@ -145,12 +188,16 @@ export function ConnectPage() {
     ]
   }, [harvestOnline, hs, mintedToken, mcpCalls, sessionCount])
 
+  const rebuildMcpJson = (tok: string, mode: McpConfigMode) => {
+    setMcpJson(buildMcpJson(tok, mode, 'cursor', projectId))
+  }
+
   const onMintMcp = () => {
     createToken.mutate('Cursor MCP', {
       onSuccess: (res) => {
         const tok = res.token
         setMintedToken(tok)
-        setMcpJson(buildMcpJson(tok, 'cursor'))
+        rebuildMcpJson(tok, mcpMode)
         if (projectId) {
           const tools: Record<string, boolean> = {}
           for (const t of KNOWN_MCP_TOOLS) tools[t] = true
@@ -161,7 +208,10 @@ export function ConnectPage() {
         }
         push({
           title: 'MCP token ready',
-          detail: 'Copy the config into .cursor/mcp.json then reload Cursor',
+          detail:
+            mcpMode === 'cloud'
+              ? 'Cloud MCP — paste into .cursor/mcp.json (no mem.exe path). Reload Cursor.'
+              : 'Local MCP — requires Nexus Desktop. Paste into .cursor/mcp.json then reload.',
           tone: 'teal',
         })
       },
@@ -172,6 +222,11 @@ export function ConnectPage() {
           tone: 'danger',
         }),
     })
+  }
+
+  const onSelectMcpMode = (mode: McpConfigMode) => {
+    setMcpMode(mode)
+    if (mintedToken) rebuildMcpJson(mintedToken, mode)
   }
 
   const onBindFolder = () => {
@@ -541,9 +596,31 @@ export function ConnectPage() {
           </div>
 
           <p className="text-sm text-fg-dim">
-            MCP is for explicit <span className="font-mono text-xs">memory_write</span>. Auto-harvest
-            above does not need it.
+            MCP is for explicit <span className="font-mono text-xs">memory_write</span>. Prefer{' '}
+            <span className="text-fg">Cloud</span> (HTTPS{' '}
+            <span className="font-mono text-xs">/v1/agent/mcp</span>) so agents never hunt for{' '}
+            <span className="font-mono text-xs">mem.exe</span>. Use Local only when Nexus Desktop is
+            installed. Auto-harvest above does not need MCP.
           </p>
+
+          <div className="flex flex-wrap gap-2" role="group" aria-label="MCP config mode">
+            <Button
+              type="button"
+              size="sm"
+              variant={mcpMode === 'cloud' ? 'primary' : 'secondary'}
+              onClick={() => onSelectMcpMode('cloud')}
+            >
+              Cloud API
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant={mcpMode === 'local' ? 'primary' : 'secondary'}
+              onClick={() => onSelectMcpMode('local')}
+            >
+              Local desktop
+            </Button>
+          </div>
 
           <div className="flex flex-wrap gap-2">
             <Button type="button" size="sm" onClick={onMintMcp} disabled={createToken.isPending}>
@@ -570,9 +647,17 @@ export function ConnectPage() {
           </div>
 
           {mcpJson ? (
-            <pre className="max-h-40 overflow-auto rounded-lg border border-border bg-raised/60 p-3 text-[11px] leading-relaxed text-fg-dim">
-              {mintedToken ? mcpJson.replaceAll(mintedToken, 'nxs_…REDACTED…') : mcpJson}
-            </pre>
+            <>
+              <p className="text-xs text-muted">
+                {mcpMode === 'cloud'
+                  ? `Paste into .cursor/mcp.json · ${publicApiBase()}/v1/agent/mcp` +
+                    (projectId ? ` · project ${projectId.slice(0, 8)}…` : '')
+                  : 'Paste into .cursor/mcp.json · expands %LOCALAPPDATA% on Windows'}
+              </p>
+              <pre className="max-h-48 overflow-auto rounded-lg border border-border bg-raised/60 p-3 text-[11px] leading-relaxed text-fg-dim">
+                {mintedToken ? mcpJson.replaceAll(mintedToken, 'nxs_…REDACTED…') : mcpJson}
+              </pre>
+            </>
           ) : (
             <p className="text-xs text-muted">Signed in as {user?.username ?? 'you'}.</p>
           )}
