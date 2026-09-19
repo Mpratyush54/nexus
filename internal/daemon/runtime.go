@@ -139,6 +139,7 @@ func NewRuntime(d *Daemon, project string, designation DesignationProvider) *Run
 	}
 	harvestCh := make(chan Event, DefaultToolEventBuffer)
 	h := NewHarvester(d.Root, &chanEventEmitter{ch: harvestCh})
+	h.SetSQLiteExtractor("opencode", &openCodeSQLite{Root: d.Root})
 	// Watcher hash persistence: file-backed store under the token dir so
 	// hashes survive restarts (issue #109 atomicity via FileHashStore).
 	// The watcher emits into the Layer-1 interceptor queue (Interceptor

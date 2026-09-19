@@ -296,7 +296,7 @@ func ResolveSources() []TranscriptSource {
 		{Agent: "opencode", Dirs: []string{
 			filepath.Join(xdgData, "opencode"),
 			filepath.Join(home, ".local", "share", "opencode"),
-		}, Format: FormatSQLite, CwdMatch: true},
+		}, Format: FormatSQLite, Global: true},
 		// Cursor Agent chats — append-only JSONL under projects/<slug>/agent-transcripts/
 		{Agent: "cursor", Dirs: []string{
 			filepath.Join(home, ".cursor", "projects"),
@@ -316,12 +316,17 @@ func ResolveSources() []TranscriptSource {
 			filepath.Join(codexHome, "sessions"),
 			filepath.Join(codexHome, "archived_sessions"),
 		}, Format: FormatJSONL, CwdMatch: true},
-		// Antigravity (VS Code fork) — hash-dir workspaceStorage; match via
-		// workspace.json (adapters.ProjectOf) inside MatchesTranscript.
+		// Antigravity IDE — VS Code–style workspaceStorage (workspace.json match)
 		{Agent: "antigravity", Dirs: []string{
 			filepath.Join(appData, "Antigravity", "User", "workspaceStorage"),
 			filepath.Join(home, ".antigravity"),
 		}, Format: FormatSQLite, CwdMatch: true},
+		// Antigravity agent brains — real multi-day chats live here as JSONL
+		// (~/.gemini/antigravity/brain/<id>/.../transcript*.jsonl), not in
+		// workspaceStorage. CwdMatch peeks file bytes for the folder name.
+		{Agent: "antigravity", Dirs: []string{
+			filepath.Join(home, ".gemini", "antigravity", "brain"),
+		}, Format: FormatJSONL, CwdMatch: true},
 		// Copilot — VS Code workspace DB + Copilot CLI session-state JSONL
 		{Agent: "copilot", Dirs: []string{codeWS}, Format: FormatSQLite},
 		{Agent: "copilot", Dirs: []string{
@@ -549,14 +554,18 @@ func (h *Harvester) MatchesTranscript(path string, cwdMatch bool) bool {
 		return false
 	}
 	hint := PeekTranscriptCwd(path)
-	if hint == "" {
-		return false
+	if hint != "" {
+		if h.MatchesWorkspace(hint) {
+			return true
+		}
+		ws := strings.TrimSpace(h.workspace)
+		if ws != "" && strings.EqualFold(filepath.Clean(hint), filepath.Clean(ws)) {
+			return true
+		}
 	}
-	if h.MatchesWorkspace(hint) {
-		return true
-	}
-	ws := strings.TrimSpace(h.workspace)
-	if ws != "" && strings.EqualFold(filepath.Clean(hint), filepath.Clean(ws)) {
+	// Antigravity / nested tool JSON often buries Cwd inside tool_calls; a
+	// raw byte peek for the folder name recovers those transcripts.
+	if h.folderName != "" && len(h.folderName) >= 4 && fileMentionsFolder(path, h.folderName) {
 		return true
 	}
 	return false
@@ -624,6 +633,27 @@ func firstSightOffset(size int64) int64 {
 		return size - keep
 	}
 	return 0
+}
+
+// fileMentionsFolder reports whether the first ~512KiB of path contains the
+// workspace folder name (case-insensitive). Used when structured cwd peeks
+// miss nested Antigravity tool_call Cwd fields.
+func fileMentionsFolder(path, folder string) bool {
+	folder = strings.TrimSpace(folder)
+	if folder == "" || len(folder) < 4 {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, 512<<10)
+	n, _ := io.ReadFull(f, buf)
+	if n <= 0 {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(buf[:n])), strings.ToLower(folder))
 }
 
 // PeekTranscriptCwd reads the first ~64KiB of a transcript and returns a
@@ -826,9 +856,18 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 	// Codex event_msg: type user_message / agent_message without role.
 	if role == "" {
 		switch strings.ToLower(strField(m, "type")) {
-		case "user_message", "user":
+		case "user_message", "user", "user_input", "user_request":
 			role = "user"
-		case "agent_message", "assistant_message", "assistant":
+		case "agent_message", "assistant_message", "assistant", "planner_response", "model_response":
+			role = "assistant"
+		}
+	}
+	// Antigravity brain transcripts: source USER_EXPLICIT / MODEL.
+	if role == "" {
+		switch strings.ToUpper(strField(m, "source")) {
+		case "USER_EXPLICIT", "USER":
+			role = "user"
+		case "MODEL", "AGENT", "PLANNER":
 			role = "assistant"
 		}
 	}
@@ -1145,94 +1184,79 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 	cur := fileMeta{size: info.Size(), mtime: info.ModTime()}
 	h.sqlite[path] = cur
 	agent := h.agents[path]
+	ex := h.extractors[agent]
+	firstSight := !seen
 	if !seen {
 		if _, ok := h.lastActive[path]; !ok {
+			h.lastActive[path] = time.Time{}
+		}
+		// Baseline for normal SQLite/vscdb. OpenCode's single global DB only
+		// changes when the user chats — extract on first sight so multi-day
+		// history is not stuck waiting for the next write.
+		if !strings.EqualFold(filepath.Base(path), "opencode.db") {
+			h.mu.Unlock()
+			return false
+		}
+	}
+	if !firstSight && cur == prev {
+		h.mu.Unlock()
+		return false
+	}
+	since := h.lastActive[path]
+	h.mu.Unlock()
+
+	runExtract := func(turns []Turn) bool {
+		if len(turns) == 0 {
+			return false
+		}
+		last := now
+		h.mu.Lock()
+		for i := range turns {
+			if turns[i].Timestamp.IsZero() {
+				turns[i].Timestamp = now
+			}
+			if turns[i].Timestamp.After(last) {
+				last = turns[i].Timestamp
+			}
+		}
+		h.lastActive[path] = last
+		delete(h.completed, path)
+		h.batch[path] = append(h.batch[path], turns...)
+		h.mu.Unlock()
+		for _, t := range turns {
+			h.emit(Event{
+				Type:      EventConversationTurn,
+				Payload:   turnPayload("conversation_turn", agent, path, t),
+				CreatedAt: now,
+			})
+		}
+		return true
+	}
+
+	// First sight or change: try registered extractor, then stdlib fallback.
+	if ex != nil {
+		turns, err := ex.ExtractNewRows(path, since)
+		if err == nil && runExtract(turns) {
+			return true
+		}
+	}
+	if turns := extractSQLiteFallback(path, since); runExtract(turns) {
+		return true
+	}
+	if firstSight {
+		// Baseline only — no rows yet.
+		h.mu.Lock()
+		if h.lastActive[path].IsZero() {
 			h.lastActive[path] = now
 		}
 		h.mu.Unlock()
 		return false
 	}
-	if cur == prev {
-		h.mu.Unlock()
-		return false
-	}
-	ex := h.extractors[agent]
-	since := h.lastActive[path]
-	h.mu.Unlock()
-
-	// No registered extractor: try the built-in stdlib fallback first
-	// (issue #77: sqlite3 CLI when present, else raw string-scan for
-	// VSCode/Cursor storage payloads). Opaque test fixtures yield zero
-	// turns and fall through to liveness-only, preserving prior behavior.
-	if ex == nil {
-		if turns := extractSQLiteFallback(path, since); len(turns) > 0 {
-			last := now
-			h.mu.Lock()
-			for i := range turns {
-				if turns[i].Timestamp.IsZero() {
-					turns[i].Timestamp = now
-				}
-				if turns[i].Timestamp.After(last) {
-					last = turns[i].Timestamp
-				}
-			}
-			h.lastActive[path] = last
-			delete(h.completed, path)
-			h.batch[path] = append(h.batch[path], turns...)
-			h.mu.Unlock()
-			for _, t := range turns {
-				h.emit(Event{
-					Type:      EventConversationTurn,
-					Payload:   turnPayload("conversation_turn", agent, path, t),
-					CreatedAt: now,
-				})
-			}
-			return true
-		}
-		log.Printf("harvester: sqlite source %q (%s) has no SQLiteExtractor registered — liveness-only (no SQL driver dep, see ADR-033)", agent, path)
-		h.mu.Lock()
-		h.lastActive[path] = now
-		delete(h.completed, path) // new activity re-arms idle detection
-		h.mu.Unlock()
-		return true
-	}
-	turns, err := ex.ExtractNewRows(path, since)
-	if err != nil {
-		log.Printf("harvester: sqlite extractor for %q (%s) failed: %v; keeping liveness only", agent, path, err)
-		h.mu.Lock()
-		h.lastActive[path] = now
-		delete(h.completed, path)
-		h.mu.Unlock()
-		return true
-	}
-	if len(turns) == 0 {
-		h.mu.Lock()
-		h.lastActive[path] = now
-		delete(h.completed, path)
-		h.mu.Unlock()
-		return true
-	}
-	last := now
+	log.Printf("harvester: sqlite source %q (%s) has no rows parsed — liveness-only", agent, path)
 	h.mu.Lock()
-	for i := range turns {
-		if turns[i].Timestamp.IsZero() {
-			turns[i].Timestamp = now
-		}
-		if turns[i].Timestamp.After(last) {
-			last = turns[i].Timestamp
-		}
-	}
-	h.lastActive[path] = last
+	h.lastActive[path] = now
 	delete(h.completed, path)
-	h.batch[path] = append(h.batch[path], turns...)
 	h.mu.Unlock()
-	for _, t := range turns {
-		h.emit(Event{
-			Type:      EventConversationTurn,
-			Payload:   turnPayload("conversation_turn", agent, path, t),
-			CreatedAt: now,
-		})
-	}
 	return true
 }
 
@@ -1307,6 +1331,11 @@ var harvesterSkipDirs = map[string]bool{
 	"out": true, ".next": true, "__pycache__": true, ".venv": true,
 	"venv": true, "target": true, "bin": true, "obj": true,
 	"coverage": true, ".idea": true, ".vscode": true, "Library": true,
+	// OpenCode snapshot trees drown the walk before opencode.db is seen.
+	"snapshot": true, "tool-output": true, "log": true,
+	// Antigravity brain noise — only transcript*.jsonl under logs matter.
+	"messages": true, "steps": true, "tasks": true, "scratch": true,
+	"chunks": true, "extensions": true,
 }
 
 // HarvesterStats is a point-in-time view for /local/harvest.
@@ -1401,6 +1430,23 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 	if dir == "" {
 		return 0, 0, nil, nil
 	}
+	// OpenCode: harvest the global DB directly — it is multi-GB and sits
+	// beside a huge snapshot/ tree that would exhaust maxWalkFiles.
+	if src.Agent == "opencode" && src.Format == FormatSQLite {
+		db := filepath.Join(dir, "opencode.db")
+		if st, serr := os.Stat(db); serr == nil && !st.IsDir() {
+			h.mu.Lock()
+			h.agents[db] = src.Agent
+			h.mu.Unlock()
+			_ = h.TrackSQLite(db, st)
+			hit := HarvestFileHit{Agent: src.Agent, Format: src.Format, Path: db, Name: "opencode.db"}
+			if agentFiles != nil {
+				agentFiles[src.Agent]++
+			}
+			return 1, 0, []HarvestFileHit{hit}, nil
+		}
+		return 0, 0, nil, nil
+	}
 	visited := 0
 	walkErr := filepath.Walk(dir, func(p string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
@@ -1423,7 +1469,9 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 			return nil
 		}
 		visited++
-		if info.Size() > maxWalkFileBytes {
+		// SQLite extractors query by SQL — allow large DBs (OpenCode ~GB).
+		tooBig := info.Size() > maxWalkFileBytes
+		if tooBig && !(src.Format == FormatSQLite && strings.EqualFold(filepath.Base(p), "opencode.db")) {
 			return nil
 		}
 		if adapters.ClassifyPath(p) == adapters.Never {
@@ -1443,6 +1491,19 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 		case FormatJSONL:
 			if ext != ".jsonl" {
 				return nil
+			}
+			base := filepath.Base(p)
+			// Antigravity brains: only the canonical transcript logs.
+			if src.Agent == "antigravity" {
+				if base != "transcript_full.jsonl" && base != "transcript.jsonl" {
+					return nil
+				}
+				if base == "transcript.jsonl" {
+					full := filepath.Join(filepath.Dir(p), "transcript_full.jsonl")
+					if _, err := os.Stat(full); err == nil {
+						return nil // prefer the full transcript sibling
+					}
+				}
 			}
 			h.mu.Lock()
 			h.agents[p] = src.Agent
@@ -1470,6 +1531,10 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 			}
 		case FormatSQLite:
 			if ext != ".db" && ext != ".sqlite" && ext != ".sqlite3" && ext != ".vscdb" {
+				return nil
+			}
+			// OpenCode: only the main DB (ignore snapshots / sidecars).
+			if src.Agent == "opencode" && !strings.EqualFold(filepath.Base(p), "opencode.db") {
 				return nil
 			}
 			h.mu.Lock()
