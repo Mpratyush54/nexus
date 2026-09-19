@@ -192,20 +192,33 @@ func (s *PostgresStore) ConfirmMemory(ctx context.Context, id string, confirmedB
 }
 
 // SearchMemory is the text fallback: substring match on key/content, exact
-// tag hit, or empty query (list). MemStore parity: same CONFIRMED/PROPOSED
-// visibility, org-level rows included.
-//
+// SearchMemory is the keyword/tag fallback (works with zero embeddings).
 // Scope isolation (issue #102): NULL-project rows match only when
-// explicitly organization-level. Personal/session rows with a NULL
-// project_id never leak across projects.
-//
-// Sharing visibility (issue #164): WithViewer filters private/shared rows;
-// empty viewer returns project+public only.
+// explicitly organization-level. Sharing visibility (issue #164): WithViewer
+// filters private/shared rows; empty viewer returns project+public only.
 func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error) {
+	items, _, err := s.SearchMemoryPage(ctx, projectID, query, tags, limit, 0)
+	return items, err
+}
+
+// SearchMemoryPage returns a page of keyword matches plus the total visible count.
+func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int) ([]*MemoryItem, int, error) {
 	if limit <= 0 {
 		limit = 20
 	}
+	if offset < 0 {
+		offset = 0
+	}
 	viewerID := ViewerFrom(ctx)
+	// Over-fetch before visibility filter, then page in Go. For large libraries
+	// this is still bounded by limit+offset+buffer.
+	fetch := (limit + offset) * 4
+	if fetch < 80 {
+		fetch = 80
+	}
+	if fetch > 4000 {
+		fetch = 4000
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items
 		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
@@ -215,9 +228,9 @@ func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, quer
 		    AND ($3::text[] IS NULL OR tags && $3)
 		  ORDER BY confidence DESC, created_at DESC
 		  LIMIT $4`,
-		nullText(projectID), query, nilTextArray(tags), limit*4) // over-fetch before visibility filter
+		nullText(projectID), query, nilTextArray(tags), fetch)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 
@@ -225,16 +238,16 @@ func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, quer
 	if viewerID != "" {
 		ok, merr := s.IsProjectMember(ctx, viewerID, projectID)
 		if merr != nil {
-			return nil, merr
+			return nil, 0, merr
 		}
 		isMember = ok
 	}
 
-	var out []*MemoryItem
+	var visible []*MemoryItem
 	for rows.Next() {
 		m, err := scanMemoryItem(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		if viewerID == "" {
 			vis := NormalizeVisibility(m.Visibility)
@@ -246,19 +259,45 @@ func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, quer
 			if NormalizeVisibility(m.Visibility) == VisibilityShared {
 				hasShare, err = s.hasMemoryShare(ctx, m.ID, viewerID, m.ProjectID)
 				if err != nil {
-					return nil, err
+					return nil, 0, err
 				}
 			}
 			if !CanViewMemory(m, viewerID, isMember, hasShare) {
 				continue
 			}
 		}
-		out = append(out, m)
-		if len(out) >= limit {
-			break
+		visible = append(visible, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	// Exact total when the fetch window covered all candidates.
+	total := len(visible)
+	if len(visible) >= fetch {
+		// May be more — count without LIMIT for a true total.
+		var cnt int
+		cerr := s.pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM memory_items
+			  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
+			    AND status IN ('CONFIRMED','PROPOSED')
+			    AND ($2 = '' OR content ILIKE '%'||$2||'%'
+			         OR "key" ILIKE '%'||$2||'%' OR $2 = ANY(tags))
+			    AND ($3::text[] IS NULL OR tags && $3)`,
+			nullText(projectID), query, nilTextArray(tags)).Scan(&cnt)
+		if cerr == nil && cnt > total {
+			total = cnt
 		}
 	}
-	return out, rows.Err()
+
+	if offset >= len(visible) {
+		return []*MemoryItem{}, total, nil
+	}
+	end := offset + limit
+	if end > len(visible) {
+		end = len(visible)
+	}
+	return visible[offset:end], total, nil
 }
 
 func nilTextArray(tags []string) any {

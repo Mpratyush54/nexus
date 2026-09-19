@@ -16,6 +16,7 @@ export type MemorySearchParams = {
   tags?: string[]
   level?: string
   limit?: number
+  offset?: number
 }
 
 export type HarvestJob = {
@@ -50,6 +51,7 @@ export const memoryApi = {
     if (params.q) qs.set('q', params.q)
     if (params.level) qs.set('level', params.level)
     if (params.limit) qs.set('limit', String(params.limit))
+    if (params.offset != null && params.offset > 0) qs.set('offset', String(params.offset))
     if (params.tags?.length) qs.set('tags', params.tags.join(','))
     return apiRequest<ListResponse<MemoryItem>>(`/memory/search?${qs}`, { signal })
   },

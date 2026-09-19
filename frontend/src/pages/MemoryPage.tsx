@@ -354,9 +354,38 @@ export function MemoryPage() {
 
       {rest.length > 0 ? (
         <section className="space-y-2.5">
-          <h2 className="text-xs font-medium uppercase tracking-wide text-muted">
-            Library · {rest.length}
-          </h2>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="text-xs font-medium uppercase tracking-wide text-muted">
+              Library · {search.total} total
+              <span className="ml-2 font-normal normal-case text-fg-dim">
+                {search.page * search.pageSize + 1}–
+                {Math.min((search.page + 1) * search.pageSize, search.total)} on this page
+              </span>
+            </h2>
+            <div className="flex items-center gap-2">
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={!search.hasPrev || search.isFetching}
+                onClick={() => search.prevPage()}
+              >
+                Previous
+              </Button>
+              <span className="text-[11px] tabular-nums text-muted">
+                {search.page + 1} / {search.pageCount}
+              </span>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={!search.hasNext || search.isFetching}
+                onClick={() => search.nextPage()}
+              >
+                Next
+              </Button>
+            </div>
+          </div>
           <AnimatePresence initial={false}>
             {rest.map((item) => (
               <MemoryCard

@@ -20,10 +20,10 @@ import (
 	"central-memory/internal/security"
 )
 
-// Search pagination bounds (issue #94).
+// Search pagination bounds (issue #94). Library browsing needs more than 100.
 const (
 	DefaultSearchLimit = 20
-	MaxSearchLimit     = 100
+	MaxSearchLimit     = 500
 )
 
 // clampSearchLimit parses raw ?limit=: empty means DefaultSearchLimit,
@@ -41,6 +41,24 @@ func clampSearchLimit(raw string, w http.ResponseWriter) int {
 	}
 	if n > MaxSearchLimit {
 		n = MaxSearchLimit
+	}
+	return n
+}
+
+// clampSearchOffset parses ?offset= (default 0). Negative/invalid → 400.
+func clampSearchOffset(raw string, w http.ResponseWriter) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		writeError(w, http.StatusBadRequest, "offset must be a non-negative integer")
+		return -1
+	}
+	if n > 100_000 {
+		writeError(w, http.StatusBadRequest, "offset too large")
+		return -1
 	}
 	return n
 }

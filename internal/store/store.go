@@ -583,6 +583,29 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 	return results, nil
 }
 
+// SearchMemoryPage pages MemStore keyword results and returns total matches.
+func (s *MemStore) SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int) ([]*MemoryItem, int, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	all, err := s.SearchMemory(ctx, projectID, query, tags, offset+limit+10_000)
+	if err != nil {
+		return nil, 0, err
+	}
+	total := len(all)
+	if offset >= total {
+		return []*MemoryItem{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return all[offset:end], total, nil
+}
+
 // SearchMemoryVector ranks memories by cosine similarity (issue #165).
 // Mirrors PostgresStore.SearchMemoryVector: CONFIRMED only, confidence > 0.3,
 // non-empty embeddings. Used by local MCP/mem wiring and tests so vector

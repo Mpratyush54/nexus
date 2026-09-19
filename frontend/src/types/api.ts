@@ -90,6 +90,10 @@ export type MemoryShareVisibility = 'private' | 'shared' | 'project' | 'public'
 export type ListResponse<T> = {
   items: T[]
   count: number
+  total?: number
+  limit?: number
+  offset?: number
+  has_more?: boolean
 }
 
 export type Project = {

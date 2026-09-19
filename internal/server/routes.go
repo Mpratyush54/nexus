@@ -486,6 +486,10 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	if limit < 0 {
 		return
 	}
+	offset := clampSearchOffset(q.Get("offset"), w)
+	if offset < 0 {
+		return
+	}
 	// Vector path (issue #37): a caller-supplied ?embedding= vector routes
 	// through pgvector cosine search when the configured store supports it
 	// (PostgresStore.SearchMemoryVector). Text-only stores answer 400, never
@@ -514,7 +518,10 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		if items == nil {
 			items = []*store.MemoryItem{}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items": items, "count": len(items), "total": len(items),
+			"limit": limit, "offset": 0, "has_more": false,
+		})
 		return
 	}
 	// Text query → embed via configured provider, then vector search
@@ -522,7 +529,7 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	// no vector path or vector ranking returns nothing.
 	query := q.Get("q")
 	viewerCtx := store.WithViewer(r.Context(), authSubject(r))
-	if strings.TrimSpace(query) != "" {
+	if strings.TrimSpace(query) != "" && offset == 0 {
 		if vs, ok := s.Store.(interface {
 			SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
 		}); ok {
@@ -532,23 +539,48 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 					items = s.filterMemoriesByVisibility(r, items, authSubject(r))
 					if len(items) > 0 {
 						recordMemoryUse(r.Context(), s.Store, items)
-						writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+						writeJSON(w, http.StatusOK, map[string]any{
+							"items": items, "count": len(items), "total": len(items),
+							"limit": limit, "offset": 0, "has_more": false,
+						})
 						return
 					}
 				}
 			}
 		}
 	}
-	items, err := s.Store.SearchMemory(viewerCtx, projectID, query, tags, limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
-		return
+	var items []*store.MemoryItem
+	total := 0
+	if pager, ok := s.Store.(interface {
+		SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int) ([]*store.MemoryItem, int, error)
+	}); ok {
+		var err error
+		items, total, err = pager.SearchMemoryPage(viewerCtx, projectID, query, tags, limit, offset)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
+			return
+		}
+	} else {
+		var err error
+		items, err = s.Store.SearchMemory(viewerCtx, projectID, query, tags, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
+			return
+		}
+		total = len(items)
 	}
 	recordMemoryUse(r.Context(), s.Store, items)
 	if items == nil {
 		items = []*store.MemoryItem{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":    items,
+		"count":    len(items),
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+		"has_more": offset+len(items) < total,
+	})
 }
 
 // --- episodes ---

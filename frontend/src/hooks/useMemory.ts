@@ -1,15 +1,22 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { memoryApi } from '@/api/memory'
 import { queryKeys } from '@/lib/query-keys'
 import { useAuth } from '@/providers/AuthProvider'
 import type { MemoryItem, MemoryUpdatePayload } from '@/types/api'
 
+export const LIBRARY_PAGE_SIZE = 40
+
 export function useMemorySearch(q = '', level = '') {
   const { projectId, isAuthenticated } = useAuth()
+  const [page, setPage] = useState(0)
 
-  return useQuery({
-    queryKey: queryKeys.memory.search(projectId ?? '', q, level),
+  useEffect(() => {
+    setPage(0)
+  }, [projectId, q, level])
+
+  const query = useQuery({
+    queryKey: [...queryKeys.memory.search(projectId ?? '', q, level), page] as const,
     enabled: isAuthenticated && Boolean(projectId),
     queryFn: ({ signal }) =>
       memoryApi.search(
@@ -17,12 +24,35 @@ export function useMemorySearch(q = '', level = '') {
           projectId: projectId!,
           q: q || undefined,
           level: level || undefined,
-          limit: 100,
+          limit: LIBRARY_PAGE_SIZE,
+          offset: page * LIBRARY_PAGE_SIZE,
         },
         signal,
       ),
-    select: (data) => data.items,
   })
+
+  const items = query.data?.items ?? []
+  const total = query.data?.total ?? query.data?.count ?? items.length
+  const pageCount = Math.max(1, Math.ceil(total / LIBRARY_PAGE_SIZE))
+  const hasPrev = page > 0
+  const hasNext =
+    query.data?.has_more === true ||
+    (page + 1) * LIBRARY_PAGE_SIZE < total ||
+    (query.data?.has_more == null && items.length >= LIBRARY_PAGE_SIZE)
+
+  return {
+    ...query,
+    data: items,
+    total,
+    page,
+    pageCount,
+    pageSize: LIBRARY_PAGE_SIZE,
+    hasPrev,
+    hasNext,
+    setPage,
+    nextPage: () => setPage((p) => p + 1),
+    prevPage: () => setPage((p) => Math.max(0, p - 1)),
+  }
 }
 
 /** Raw harvest jobs (queued / processing / done) for the active project. */
