@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useToast } from '@/components/ui/Toast'
+import { memoryApi, type HarvestJob } from '@/api/memory'
 import { useConfirmMemory, useHarvestQueue, useMemorySearch, useRejectMemory } from '@/hooks/useMemory'
 import {
   useLocalDaemonAutodetect,
@@ -42,6 +43,31 @@ export function MemoryPage() {
   const confirm = useConfirmMemory()
   const reject = useRejectMemory()
 
+  const [expandedHarvest, setExpandedHarvest] = useState<string | null>(null)
+  const [harvestFull, setHarvestFull] = useState<Record<string, HarvestJob>>({})
+  const [harvestLoading, setHarvestLoading] = useState<string | null>(null)
+
+  const toggleHarvest = async (id: string) => {
+    if (expandedHarvest === id) {
+      setExpandedHarvest(null)
+      return
+    }
+    setExpandedHarvest(id)
+    if (harvestFull[id]) return
+    setHarvestLoading(id)
+    try {
+      const job = await memoryApi.harvestJob(id)
+      setHarvestFull((prev) => ({ ...prev, [id]: job }))
+    } catch (err) {
+      push({
+        title: 'Could not load full harvest',
+        detail: err instanceof Error ? err.message : 'Request failed',
+        tone: 'danger',
+      })
+    } finally {
+      setHarvestLoading(null)
+    }
+  }
   const [editing, setEditing] = useState<MemoryItem | null>(null)
   const [historyItem, setHistoryItem] = useState<MemoryItem | null>(null)
   const [shareItem, setShareItem] = useState<MemoryItem | null>(null)
@@ -120,35 +146,57 @@ export function MemoryPage() {
             <h2 className="text-sm font-medium text-fg">Incoming harvest (raw)</h2>
             <StatusPill tone="teal">{`${harvestQ.data!.length} batches`}</StatusPill>
           </div>
-          <ul className="max-h-64 space-y-2 overflow-auto text-sm">
-            {harvestQ.data!.slice(0, 12).map((job) => (
-              <li key={job.id} className="rounded-lg border border-border bg-raised/40 px-3 py-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusPill
-                    tone={
-                      job.status === 'done'
-                        ? 'teal'
-                        : job.status === 'failed'
-                          ? 'danger'
-                          : job.status === 'processing'
-                            ? 'amber'
-                            : 'amber'
-                    }
-                  >
-                    {job.status}
-                  </StatusPill>
-                  <span className="text-[11px] text-muted">
-                    {job.turn_count} turns
-                    {job.result_count ? ` · ${job.result_count} memories` : ''}
-                    {job.provider ? ` · ${job.provider}` : ''}
-                  </span>
-                </div>
-                <pre className="mt-1.5 whitespace-pre-wrap font-sans text-xs text-fg-dim">
-                  {job.raw_preview || '(empty)'}
-                </pre>
-                {job.error ? <p className="mt-1 text-[11px] text-danger">{job.error}</p> : null}
-              </li>
-            ))}
+          <ul className="max-h-[28rem] space-y-2 overflow-auto text-sm">
+            {harvestQ.data!.slice(0, 20).map((job) => {
+              const open = expandedHarvest === job.id
+              const full = harvestFull[job.id]
+              const body =
+                open && full?.turns?.length
+                  ? full.turns
+                      .map((t) => `${t.speaker || '?'}: ${t.content}`)
+                      .join('\n\n')
+                  : job.raw_preview || '(empty)'
+              return (
+                <li key={job.id} className="rounded-lg border border-border bg-raised/40 px-3 py-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusPill
+                        tone={
+                          job.status === 'done'
+                            ? 'teal'
+                            : job.status === 'failed'
+                              ? 'danger'
+                              : 'amber'
+                        }
+                      >
+                        {job.status}
+                      </StatusPill>
+                      <span className="text-[11px] text-muted">
+                        {job.turn_count} turns
+                        {job.result_count ? ` · ${job.result_count} memories` : ''}
+                        {job.provider ? ` · ${job.provider}` : ''}
+                      </span>
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => void toggleHarvest(job.id)}
+                    >
+                      {harvestLoading === job.id
+                        ? 'Loading…'
+                        : open
+                          ? 'Collapse'
+                          : 'Show full'}
+                    </Button>
+                  </div>
+                  <pre className="mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap font-sans text-xs text-fg-dim">
+                    {body}
+                  </pre>
+                  {job.error ? <p className="mt-1 text-[11px] text-danger">{job.error}</p> : null}
+                </li>
+              )
+            })}
           </ul>
         </GlassPanel>
       ) : null}

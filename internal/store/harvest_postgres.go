@@ -66,7 +66,7 @@ func (q *PostgresHarvestQueue) EnqueueHarvestJob(ctx context.Context, projectID,
 		return nil, false, err
 	}
 	dedupe := HarvestDedupeKey(cleaned)
-	preview := HarvestRawPreview(cleaned, 600)
+	preview := HarvestRawPreview(cleaned, 8000)
 	source = strings.TrimSpace(source)
 
 	var id string
@@ -177,6 +177,11 @@ func (q *PostgresHarvestQueue) FinishHarvestJob(ctx context.Context, id, status,
 }
 
 func (q *PostgresHarvestQueue) ListHarvestJobs(ctx context.Context, projectID string, limit int) ([]*HarvestJob, error) {
+	return q.ListHarvestJobsOpt(ctx, projectID, limit, false)
+}
+
+// ListHarvestJobsOpt lists jobs; when includeTurns is true, full turn payloads are returned.
+func (q *PostgresHarvestQueue) ListHarvestJobsOpt(ctx context.Context, projectID string, limit int, includeTurns bool) ([]*HarvestJob, error) {
 	if q == nil || q.pool == nil {
 		return nil, nil
 	}
@@ -201,7 +206,11 @@ func (q *PostgresHarvestQueue) ListHarvestJobs(ctx context.Context, projectID st
 		if err != nil {
 			return nil, err
 		}
-		job.Turns = nil
+		if !includeTurns {
+			job.Turns = nil
+		} else if job.RawPreview == "" || len(job.RawPreview) < 200 {
+			job.RawPreview = HarvestRawPreview(job.Turns, 8000)
+		}
 		out = append(out, job)
 	}
 	return out, rows.Err()

@@ -108,5 +108,6 @@ type HarvestQueue interface {
 	ClaimNextHarvestJob(ctx context.Context) (*HarvestJob, error)
 	FinishHarvestJob(ctx context.Context, id, status, provider, errMsg string, resultCount int) error
 	ListHarvestJobs(ctx context.Context, projectID string, limit int) ([]*HarvestJob, error)
+	ListHarvestJobsOpt(ctx context.Context, projectID string, limit int, includeTurns bool) ([]*HarvestJob, error)
 	GetHarvestJob(ctx context.Context, id string) (*HarvestJob, error)
 }

@@ -30,6 +30,7 @@ export type HarvestJob = {
   source?: string
   created_at: string
   updated_at: string
+  turns?: Array<{ speaker?: string; content: string; timestamp?: string }>
 }
 
 /** Soft-fail helper: 404 means the Phase-2 edit/history API is not wired yet. */
@@ -53,10 +54,18 @@ export const memoryApi = {
     return apiRequest<ListResponse<MemoryItem>>(`/memory/search?${qs}`, { signal })
   },
 
-  /** Raw harvest queue (turns waiting for / processed by OpenRouter). */
-  harvestQueue(projectId: string, signal?: AbortSignal) {
+  /** Raw harvest queue. Pass full=true to include complete turn payloads. */
+  harvestQueue(projectId: string, signal?: AbortSignal, full = false) {
     const qs = new URLSearchParams({ project_id: projectId })
-    return apiRequest<{ items: HarvestJob[]; count: number }>(`/memory/harvest?${qs}`, { signal })
+    if (full) qs.set('full', '1')
+    return apiRequest<{ items: HarvestJob[]; count: number; full?: boolean }>(
+      `/memory/harvest?${qs}`,
+      { signal },
+    )
+  },
+
+  harvestJob(id: string, signal?: AbortSignal) {
+    return apiRequest<HarvestJob>(`/memory/harvest/${id}`, { signal })
   },
 
   confirm(id: string) {

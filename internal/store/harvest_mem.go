@@ -49,7 +49,7 @@ func (q *MemHarvestQueue) EnqueueHarvestJob(_ context.Context, projectID, source
 		Status:     HarvestQueued,
 		Source:     source,
 		Turns:      cleaned,
-		RawPreview: HarvestRawPreview(cleaned, 600),
+		RawPreview: HarvestRawPreview(cleaned, 8000),
 		TurnCount:  len(cleaned),
 		CreatedAt:  now,
 		UpdatedAt:  now,
@@ -96,7 +96,11 @@ func (q *MemHarvestQueue) FinishHarvestJob(_ context.Context, id, status, provid
 	return nil
 }
 
-func (q *MemHarvestQueue) ListHarvestJobs(_ context.Context, projectID string, limit int) ([]*HarvestJob, error) {
+func (q *MemHarvestQueue) ListHarvestJobs(ctx context.Context, projectID string, limit int) ([]*HarvestJob, error) {
+	return q.ListHarvestJobsOpt(ctx, projectID, limit, false)
+}
+
+func (q *MemHarvestQueue) ListHarvestJobsOpt(_ context.Context, projectID string, limit int, includeTurns bool) ([]*HarvestJob, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if limit <= 0 {
@@ -109,7 +113,11 @@ func (q *MemHarvestQueue) ListHarvestJobs(_ context.Context, projectID string, l
 			continue
 		}
 		cp := *j
-		cp.Turns = nil
+		if !includeTurns {
+			cp.Turns = nil
+		} else {
+			cp.Turns = append([]HarvestTurn(nil), j.Turns...)
+		}
 		out = append(out, &cp)
 	}
 	return out, nil

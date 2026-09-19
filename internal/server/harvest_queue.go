@@ -259,7 +259,19 @@ func (s *Server) handleMemoryHarvestList(w http.ResponseWriter, r *http.Request)
 	if !s.authorizePermission(w, r, projectID, store.PermMemoryRead) {
 		return
 	}
-	items, err := s.Harvest.ListHarvestJobs(r.Context(), projectID, 40)
+	full := strings.EqualFold(r.URL.Query().Get("full"), "1") ||
+		strings.EqualFold(r.URL.Query().Get("full"), "true")
+	limit := 40
+	if full {
+		limit = 20 // full turn payloads are large
+	}
+	var items []*store.HarvestJob
+	var err error
+	if full {
+		items, err = s.Harvest.ListHarvestJobsOpt(r.Context(), projectID, limit, true)
+	} else {
+		items, err = s.Harvest.ListHarvestJobs(r.Context(), projectID, limit)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -267,7 +279,28 @@ func (s *Server) handleMemoryHarvestList(w http.ResponseWriter, r *http.Request)
 	if items == nil {
 		items = []*store.HarvestJob{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items), "full": full})
+}
+
+func (s *Server) handleMemoryHarvestGet(w http.ResponseWriter, r *http.Request) {
+	if s.Harvest == nil {
+		writeError(w, http.StatusServiceUnavailable, "harvest queue not configured")
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	job, err := s.Harvest.GetHarvestJob(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "harvest job not found")
+		return
+	}
+	if !s.authorizePermission(w, r, job.ProjectID, store.PermMemoryRead) {
+		return
+	}
+	writeJSON(w, http.StatusOK, job)
 }
 
 // handleMemoryExtract enqueues onto the harvest queue when available.
