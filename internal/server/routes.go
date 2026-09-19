@@ -46,6 +46,7 @@ func (s *Server) registerRoutes() {
 	s.registerOrgRoutes()
 	s.registerBillingRoutes()
 	s.registerAdminRoutes()
+	s.registerAgentV1Routes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

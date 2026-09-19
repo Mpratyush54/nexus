@@ -267,26 +267,34 @@ func cmdMCP() error {
 	var st mcp.Store
 	if serverURL != "" && token != "" {
 		remote := mcp.NewHTTPStore(serverURL, token)
-		pid, display, err := remote.ResolveProject(ctx, origin, rootCommit, name)
-		if err != nil {
-			return fmt.Errorf("mem mcp: resolve project via server: %w", err)
+		if forced := strings.TrimSpace(os.Getenv("NEXUS_PROJECT")); forced != "" {
+			cfg.ProjectID = forced
+		} else {
+			pid, display, err := remote.ResolveProject(ctx, origin, rootCommit, name)
+			if err != nil {
+				return fmt.Errorf("mem mcp: resolve project via server: %w", err)
+			}
+			if display != "" {
+				cfg.ProjectName = display
+			}
+			cfg.ProjectID = pid
 		}
-		if display != "" {
-			cfg.ProjectName = display
-		}
-		cfg.ProjectID = pid
 		st = remote
 		loggers = append(loggers, remote)
-		if access, err := remote.FetchAgentAccess(ctx, pid, agentName); err == nil {
+		if access, err := remote.FetchAgentAccess(ctx, cfg.ProjectID, agentName); err == nil {
 			cfg.Access = access
 		}
 	} else {
 		mem := store.NewMemStore()
-		p, err := mem.ResolveProject(ctx, origin, rootCommit, name)
-		if err != nil {
-			return fmt.Errorf("mem mcp: resolve project: %w", err)
+		if forced := strings.TrimSpace(os.Getenv("NEXUS_PROJECT")); forced != "" {
+			cfg.ProjectID = forced
+		} else {
+			p, err := mem.ResolveProject(ctx, origin, rootCommit, name)
+			if err != nil {
+				return fmt.Errorf("mem mcp: resolve project: %w", err)
+			}
+			cfg.ProjectID = p.ID
 		}
-		cfg.ProjectID = p.ID
 		st = mcpStore{mem}
 	}
 	cfg.ToolLogger = multiToolLogger(loggers)

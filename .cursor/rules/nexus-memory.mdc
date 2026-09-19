@@ -5,13 +5,30 @@ alwaysApply: true
 
 # Nexus memory (this workspace)
 
-This folder is tracked by **Nexus** (central memory). Cursor chats are **not** auto-imported.
+This folder is tracked by **Nexus** (central memory). Cursor chats are **not** auto-imported as full transcripts — only durable facts belong in Memory.
 
-When you learn durable facts about this project (decisions, architecture, how-to, bugs fixed, deploy notes):
+## How to use Nexus (do this)
 
-1. Prefer Nexus MCP tools if available: `memory_search` before answering from guesswork; `memory_write` for lasting facts.
-2. If MCP is unavailable, tell the user to run:
-   `nexus memory propose -k topic/key "the fact (20+ characters)"`
-3. Do not dump entire chat transcripts — store concise, reusable facts.
+1. **Preferred:** use the **Nexus MCP** tools (`memory_search`, `memory_write`, …) when the Nexus app is installed and MCP is configured (e.g. `.cursor/mcp.json` → local `mem mcp`). That is the normal path for installed users.
+2. Call `memory_search` before guessing project decisions; call `memory_write` for lasting facts (20+ characters, concise).
+3. If MCP tools are in your tool catalog, use them immediately. Do not rediscover how Nexus is installed.
 
-Project identity is resolved from this git repo (folder `central-memory`). The web app may also show `nexus-default`; durable repo facts belong on the git project.
+## If MCP is unavailable (cloud / CI / no app)
+
+Use the **HTTPS agent API** with a Bearer token from Nexus login / portal API tokens. Do **not** hunt for binaries.
+
+- Discovery: `GET https://api-nexus.pratyushes.dev/v1/agent`
+- Search: `POST /v1/agent/memory/search` — JSON `{ "query", "project_id?" }`
+- Write: `POST /v1/agent/memory/write` — JSON `{ "key", "content", "project_id?" }`
+- Remote MCP JSON-RPC: `POST /v1/agent/mcp` (optional `X-Nexus-Project` header)
+
+Pass `project_id` in the body or `X-Nexus-Project`. If the token has exactly one project, it may be omitted.
+
+## Do NOT do this (common agent failure mode)
+
+- Do **not** walk `C:\Users`, `%LOCALAPPDATA%\Nexus`, or hunt for `mem.exe` / `nexus.exe`.
+- Do **not** run `mem --help`, `nexus --help`, or hand-roll MCP JSON-RPC over stdin to “figure out” the CLI.
+- Do **not** paste API tokens into shell commands or chat.
+- Do **not** treat Memory as a chat log — store decisions/preferences/facts only.
+
+Project identity is this git repo (`central-memory`). Harvested memories for the product may also live on project `nexus` (`37e3963b-a4e2-4e66-9c5d-60451c796d7a`). Prefer installed-app MCP; otherwise `/v1/agent`. MCP resolves the project from the workspace (or `NEXUS_PROJECT` when set).
