@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BUCKET="${FRONTEND_S3_BUCKET:-central-memory-frontend-833291393451}"
+# Live site (Cloudflare → S3) uses the domain bucket. The account-id bucket is a
+# staging/mirror only — deploying there alone leaves nexus.pratyushes.dev stale.
+BUCKET="${FRONTEND_S3_BUCKET:-nexus.pratyushes.dev}"
 echo "==> Target S3 Bucket: $BUCKET"
 
 if ! aws s3api head-bucket --bucket "$BUCKET" 2>/dev/null; then
