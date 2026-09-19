@@ -88,3 +88,75 @@ func TestHTTPMemoryStoreSaveSurfacesErrorBody(t *testing.T) {
 		t.Fatalf("error should include body, got %v", err)
 	}
 }
+
+func TestHTTPMemoryStoreExtractRemote(t *testing.T) {
+	var gotPath string
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"provider":"openrouter","count":1,"items":[{"key":"cache/redis","content":"We decided to use Redis for pub/sub.","level":"project","scope":"decision","confidence":0.9,"source":"processor:openrouter"}]}`))
+	}))
+	defer srv.Close()
+
+	store := NewHTTPMemoryStore(srv.URL, "tok", "proj-uuid")
+	provider, props, err := store.ExtractRemote(t.Context(), []map[string]string{
+		{"speaker": "user", "content": "We decided to use Redis for pub/sub between services."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/memory/extract" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if provider != "openrouter" || len(props) != 1 {
+		t.Fatalf("provider=%q props=%+v", provider, props)
+	}
+	if len(store.Existing()) != 1 {
+		t.Fatalf("local cache = %d", len(store.Existing()))
+	}
+}
+
+func TestProcessorConnectedUsesExtractRemote(t *testing.T) {
+	var memoryPosts, extractPosts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/memory/extract":
+			extractPosts++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"provider":"heuristic","count":1,"items":[{"key":"a/b","content":"We decided to use Redis for pub/sub between daemon and portal.","level":"project","scope":"decision","confidence":0.9,"source":"processor:heuristic"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/memory":
+			memoryPosts++
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(`{}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	store := NewHTTPMemoryStore(srv.URL, "tok", "proj-uuid")
+	p := NewProcessor(store, 0, 0, true, HeuristicProvider{})
+	ev := Event{Type: EventConversationTurn, Payload: map[string]any{
+		"speaker": "user",
+		"content": "Use when the user asks anything about pull requests and also random skill noise.",
+	}}
+	got, err := p.ProcessEvents(t.Context(), "proj", []Event{ev})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if extractPosts != 1 {
+		t.Fatalf("extract posts = %d", extractPosts)
+	}
+	if memoryPosts != 0 {
+		t.Fatalf("direct /memory posts = %d want 0", memoryPosts)
+	}
+	if p.LastExtractProvider() != "heuristic" {
+		t.Fatalf("provider = %q", p.LastExtractProvider())
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %+v", got)
+	}
+}

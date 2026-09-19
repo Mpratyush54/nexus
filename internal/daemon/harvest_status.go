@@ -33,6 +33,7 @@ type HarvestStatus struct {
 	Designated      bool               `json:"designated"`
 	ProjectID       string             `json:"project_id,omitempty"`
 	Root            string             `json:"root,omitempty"`
+	Extractor       string             `json:"extractor,omitempty"`
 	PollSeconds     int                `json:"poll_seconds"`
 	IdleSeconds     int                `json:"idle_seconds"`
 	LastScanAt      string             `json:"last_scan_at,omitempty"`
@@ -255,6 +256,15 @@ func (r *Runtime) HarvestSnapshot() HarvestStatus {
 	st.ProjectID = r.ProjectID
 	if r.Processor != nil {
 		st.Designated = r.Processor.Designated
+		if _, ok := r.Processor.Store.(*HTTPMemoryStore); ok {
+			if p := r.Processor.LastExtractProvider(); p != "" {
+				st.Extractor = "server:" + p
+			} else {
+				st.Extractor = "server"
+			}
+		} else {
+			st.Extractor = "local:heuristic"
+		}
 	}
 	if r.Daemon != nil {
 		st.Root = r.Daemon.Root

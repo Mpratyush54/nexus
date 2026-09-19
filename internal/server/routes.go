@@ -30,6 +30,7 @@ func (s *Server) registerRoutes() {
 	s.registerLocalBridgeRoutes()
 
 	s.Mux.HandleFunc("POST /memory", s.requireAuth(s.handleMemoryCreate))
+	s.Mux.HandleFunc("POST /memory/extract", s.requireAuth(s.handleMemoryExtract))
 	s.Mux.HandleFunc("GET /memory/search", s.requireAuth(s.handleMemorySearch))
 
 	s.Mux.HandleFunc("POST /episodes", s.requireAuth(s.handleEpisodeCreate))

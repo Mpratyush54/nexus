@@ -158,6 +158,7 @@ resource "aws_iam_role_policy" "task_exec_secrets" {
       Resource = [
         aws_secretsmanager_secret.db_app.arn,
         aws_secretsmanager_secret.jwt.arn,
+        data.aws_secretsmanager_secret.openrouter.arn,
       ]
     }]
   })
@@ -200,6 +201,7 @@ resource "aws_ecs_task_definition" "server" {
       { name = "PORT", value = tostring(var.server_port) },
       { name = "DB_SSLMODE", value = "require" },
       { name = "MIGRATIONS_DIR", value = "/migrations" },
+      { name = "OPENROUTER_MODEL", value = "openrouter/free" },
     ]
     # Secrets Manager refs — resolved by ECS at launch, never in git/env files.
     # Discrete DB_* parts (assembled into an identical DSN by migrate.sh and
@@ -212,6 +214,7 @@ resource "aws_ecs_task_definition" "server" {
       { name = "DB_USER", valueFrom = "${aws_secretsmanager_secret.db_app.arn}:username::" },
       { name = "DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.db_app.arn}:password::" },
       { name = "JWT_SECRET", valueFrom = "${aws_secretsmanager_secret.jwt.arn}:signing_key::" },
+      { name = "OPENROUTER_API_KEY", valueFrom = "${data.aws_secretsmanager_secret.openrouter.arn}:api_key::" },
     ]
     logConfiguration = {
       logDriver = "awslogs"

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -327,8 +328,8 @@ func TestProcessorDedupsAgainstStore(t *testing.T) {
 func TestProcessorCaps(t *testing.T) {
 	p := NewProcessor(NewInMemoryStore(nil), 100, 10, true, nil) // tiny budget: first ~70-char proposal fits, two do not
 	events := []Event{
-		turnEvent("First long decision statement about caching with Redis for sessions"),
-		turnEvent("Second long decision statement about queues with NATS for messaging"),
+		turnEvent("We decided to use Redis for session caching across the API fleet today."),
+		turnEvent("We decided to use NATS for messaging queues between worker processes."),
 	}
 	got, err := p.ProcessEvents(context.Background(), "proj", events)
 	if err != nil {
@@ -341,7 +342,7 @@ func TestProcessorCaps(t *testing.T) {
 	p2 := NewProcessor(NewInMemoryStore(nil), 0, 1, true, nil) // batch size 1
 	var many []Event
 	for i := 0; i < 5; i++ {
-		many = append(many, turnEvent("Independent statement number about testing approach and fixtures"))
+		many = append(many, turnEvent("We decided to use pytest fixtures for independent statement testing approach."))
 	}
 	got2, err := p2.ProcessEvents(context.Background(), "proj", many)
 	if err != nil {
@@ -386,6 +387,61 @@ func TestHeuristicSkipsSQLiteHintAsContent(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Errorf("sqlite hint extracted as memory: %+v", got)
+	}
+}
+
+func TestHeuristicDropsSkillAndAssistantJunk(t *testing.T) {
+	var hp HeuristicProvider
+	junk := []Event{
+		{Type: EventConversationTurn, Payload: map[string]any{
+			"speaker": "assistant",
+			"content": "Use the Bugbot subagent with Diff: branch changes and Custom Instructions as needed.",
+		}},
+		{Type: EventConversationTurn, Payload: map[string]any{
+			"speaker": "user",
+			"content": "- `review-bugbot`: Launch exactly one Bugbot subagent with run_in_background false",
+		}},
+		{Type: EventConversationTurn, Payload: map[string]any{
+			"speaker": "assistant",
+			"content": "C:\\Users\\Pratyush Mishra\\.cursor\\skills-cursor\\review-bugbot\\SKILL.md",
+		}},
+		{Type: EventConversationTurn, Payload: map[string]any{
+			"speaker": "assistant",
+			"content": "Here is a long explanation of how the harvest pipeline works without stating any project decision.",
+		}},
+		{Type: EventConversationTurn, Payload: map[string]any{
+			"speaker": "user",
+			"content": "Use when the user asks to summarize a failing pull request check.",
+		}},
+		{Type: EventConversationTurn, Payload: map[string]any{
+			"speaker": "user",
+			"content": "Use for best-of-N parallel attempts or isolated experiments.",
+		}},
+	}
+	got, err := hp.Extract(context.Background(), "proj", junk, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no proposals from junk, got %+v", got)
+	}
+}
+
+func TestHeuristicKeepsUserDecisions(t *testing.T) {
+	var hp HeuristicProvider
+	ev := Event{Type: EventConversationTurn, Payload: map[string]any{
+		"speaker": "user",
+		"content": "We decided to use Redis for pub/sub between the daemon and the portal.",
+	}}
+	got, err := hp.Extract(context.Background(), "proj", []Event{ev}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 proposal, got %+v", got)
+	}
+	if got[0].Scope != ScopeDecision && !strings.Contains(strings.ToLower(got[0].Content), "decided") {
+		t.Errorf("unexpected proposal: %+v", got[0])
 	}
 }
 

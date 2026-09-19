@@ -25,6 +25,7 @@ import (
 	"time"
 
 	memctx "central-memory/internal/context"
+	"central-memory/internal/extract"
 	"central-memory/internal/store"
 )
 
@@ -87,6 +88,10 @@ type Server struct {
 	// when the client omits a precomputed embedding (issue #165). Nil
 	// selects EmbedderFromEnv at first use (hash fallback by default).
 	Embedder memctx.Embedder
+
+	// Extractor runs server-side OpenRouter / heuristic memory extraction
+	// for POST /memory/extract. Nil selects extract.NewService(ConfigFromEnv).
+	Extractor *extract.Service
 
 	// PushClient is the HTTP client used for Web Push delivery. Nil uses
 	// http.DefaultClient; tests inject an httptest client.

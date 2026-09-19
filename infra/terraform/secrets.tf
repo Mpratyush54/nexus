@@ -61,3 +61,10 @@ resource "aws_secretsmanager_secret_version" "jwt" {
   secret_id     = aws_secretsmanager_secret.jwt.id
   secret_string = jsonencode({ signing_key = random_password.jwt.result })
 }
+
+# OpenRouter API key for server-side memory extraction. Created out-of-band
+# (Secrets Manager name "openrouter", JSON key api_key) so the key never
+# lands in Terraform state as a generated value.
+data "aws_secretsmanager_secret" "openrouter" {
+  name = "openrouter"
+}

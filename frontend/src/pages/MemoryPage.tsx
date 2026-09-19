@@ -77,10 +77,9 @@ export function MemoryPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-fg">Memory</h1>
-          <p className="mt-1 text-sm text-fg-dim">
-            {projectId
-              ? 'Active project only — use the switcher if this list looks empty'
-              : 'No project selected yet.'}
+          <p className="mt-1 max-w-xl text-sm text-fg-dim">
+            Durable project facts and decisions — not a chat transcript. Confirm useful
+            proposals; reject the rest. Full conversations live under Sessions / Connect.
           </p>
           <div className="mt-3 max-w-xs">
             <ProjectSwitcher compact />

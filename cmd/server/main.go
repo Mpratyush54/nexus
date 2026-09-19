@@ -18,6 +18,10 @@
 //	CENTRAL_EMBEDDING_API_KEY           OpenAI / custom API key
 //	CENTRAL_EMBEDDING_MODEL             default text-embedding-3-small
 //	CENTRAL_EMBEDDING_ENDPOINT          optional OpenAI base or Ollama embeddings URL
+//	OPENROUTER_API_KEY                  server-side memory extraction (never sent to clients)
+//	OPENROUTER_MODEL                    default openrouter/free
+//	OPENROUTER_BASE_URL                 optional OpenRouter API base
+//	OPENROUTER_HTTP_REFERER / OPENROUTER_APP_TITLE  optional OpenRouter headers
 //
 // Boot-migration bootstrap is deploy/migrate.sh (the container ENTRYPOINT),
 // not a Go bootstrap binary: it assembles the same DSN from the same env and
@@ -46,6 +50,7 @@ import (
 	"time"
 
 	memctx "central-memory/internal/context"
+	"central-memory/internal/extract"
 	"central-memory/internal/server"
 	"central-memory/internal/store"
 )
@@ -345,6 +350,12 @@ func run() error {
 
 	srv := newServer(cfg.jwtSecret)
 	srv.Embedder = memctx.EmbedderFromEnv()
+	srv.Extractor = extract.NewService(extract.ConfigFromEnv())
+	if srv.Extractor.HasAPIKey() {
+		log.Print("server: OpenRouter memory extraction enabled")
+	} else {
+		log.Print("server: OPENROUTER_API_KEY unset — /memory/extract uses heuristic fallback")
+	}
 	// Postgres wiring (issues #37, #150): with a DSN configured, boot the
 	// real store, apply pending migrations through the versioned Go runner
 	// (same ledger migrate.sh now shares), and enable password login via

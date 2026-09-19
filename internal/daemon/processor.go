@@ -273,10 +273,12 @@ func ClassifyScope(text string) MemoryScope {
 
 // explicitMarkers detect explicit user statements (1h auto-confirm lane).
 // These are first-person declarations or imperatives, not inferred context.
+// Keep phrases specific — bare "must "/"never "/"do not " match agent prompts.
 var explicitMarkers = []string{
 	"i prefer", "i like", "i want", "i decided", "we decided",
-	"let's use", "lets use", "use redis", "must ", "never ",
-	"always ", "do not ", "don't ",
+	"let's use", "lets use", "use redis", "we must ", "i must ",
+	"never use", "always use", "must not", "must never",
+	"don't use", "do not use",
 }
 
 // IsExplicitStatement reports whether text looks like an explicit user
@@ -596,30 +598,38 @@ type Provider interface {
 // HeuristicProvider is the offline stub: sentence-split conversation content,
 // classify level/scope per §2.6, score confidence, mark explicit statements.
 // Deterministic and key-free — used when no LLM key is configured and in tests.
+// It only proposes durable user/decision-like lines; skill dumps, agent
+// instructions, and assistant narration are dropped.
 type HeuristicProvider struct{}
 
 // Extract implements Provider.
 func (HeuristicProvider) Extract(_ context.Context, _ string, events []Event, _ []MemoryRecord) ([]Proposal, error) {
 	var out []Proposal
 	for _, ev := range events {
-		for _, text := range eventTexts(ev) {
-			for _, sent := range splitSentences(text) {
-				if len(strings.TrimSpace(sent)) < 20 {
+		for _, cand := range eventCandidates(ev) {
+			for _, sent := range splitSentences(cand.Text) {
+				sent = strings.TrimSpace(sent)
+				if len(sent) < 20 {
 					continue // plan §1.1: content must be ≥ 20 chars
 				}
 				if len(sent) > 2000 {
 					sent = sent[:2000]
 				}
+				if !isDurableHeuristic(sent, cand.Speaker) {
+					continue
+				}
 				explicit := IsExplicitStatement(sent)
-				conf := 0.7
+				conf := 0.75
 				if explicit {
 					conf = 0.95
+				} else if ClassifyScope(sent) == ScopeDecision {
+					conf = 0.85
 				} else if strings.Contains(strings.ToLower(sent), "because") {
-					conf = 0.8 // reasoned statement ⇒ higher confidence
+					conf = 0.8
 				}
 				p := Proposal{
 					Key:        KeyFromContent(sent),
-					Content:    strings.TrimSpace(sent),
+					Content:    sent,
 					Level:      ClassifyLevel(sent),
 					Scope:      ClassifyScope(sent),
 					Confidence: conf,
@@ -634,32 +644,196 @@ func (HeuristicProvider) Extract(_ context.Context, _ string, events []Event, _ 
 	return out, nil
 }
 
-// eventTexts pulls candidate texts from conversation-style Events.
-func eventTexts(ev Event) []string {
-	var texts []string
+// textCandidate is one turn (or detail blob) with its speaker for filtering.
+type textCandidate struct {
+	Speaker string
+	Text    string
+}
+
+// eventCandidates pulls speaker-aware texts from conversation-style Events.
+func eventCandidates(ev Event) []textCandidate {
+	var out []textCandidate
 	if ev.Type == EventConversationTurn {
-		if s, ok := ev.Payload["content"].(string); ok && s != "" {
-			texts = append(texts, s)
+		s, _ := ev.Payload["content"].(string)
+		if s == "" {
+			return nil
 		}
-		return texts
+		sp, _ := ev.Payload["speaker"].(string)
+		return []textCandidate{{Speaker: sp, Text: s}}
 	}
 	if ev.Type == EventSessionComplete {
 		if turns, ok := ev.Payload["turns"].([]any); ok {
 			for _, t := range turns {
-				if m, ok := t.(map[string]any); ok {
-					if s, ok := m["content"].(string); ok && s != "" {
-						texts = append(texts, s)
-					}
+				m, ok := t.(map[string]any)
+				if !ok {
+					continue
 				}
+				s, _ := m["content"].(string)
+				if s == "" {
+					continue
+				}
+				sp, _ := m["speaker"].(string)
+				out = append(out, textCandidate{Speaker: sp, Text: s})
 			}
 		}
 		if s, ok := ev.Payload["detail"].(string); ok && s != "" &&
 			!strings.Contains(s, "sqlite/vscdb") {
-			texts = append(texts, s)
+			out = append(out, textCandidate{Speaker: "system", Text: s})
 		}
-		return texts
+		return out
 	}
 	return nil
+}
+
+// junkMemoryMarkers match agent/skill/prompt dumps that must never become memories.
+var junkMemoryMarkers = []string{
+	"subagent_type", "skill.md", "use this skill", "launch exactly",
+	"full repository path:", "custom instructions:", "by default, the review",
+	"when launching this subagent", "run_in_background",
+	"agent transcripts", "do not dump entire chat",
+	"prefer nexus mcp", "memory_search", "memory_write",
+	"always_applied_workspace_rule", "available_skills",
+	"you are an ai coding", "follow the user's instructions",
+	"diff: branch changes", "change description:",
+	"bugbot", "security review", "review-bugbot",
+	"<user_query>", "<communication>", "citing_code",
+	"tool call", "function calls to help you",
+	"<timestamp>", "</timestamp>", "<user_info>", "<git_status>",
+	"agent-transcripts", "open_and_recently_viewed", "todo_update",
+	"conversation_summary", "calldynamictool", "getdynamictools",
+	"you must read the tool schemas", "always inspect a tool",
+	"please always cite", "never write a or d",
+	"this subagent is single-shot", "model family",
+	"namespace and single-tool", "[truncated]",
+	"use when ", "use for ", "use this ", "use the ",
+	"use `[", "unless the user explicitly", "browser automation",
+	"when speaking to the user", "kebab-case model",
+	"available_subagent", "subagent_type", "best-of-n",
+	"exact prompt shape", "analyze why", "do not use browser",
+}
+
+// durableMarkers are phrases that signal a reusable decision/preference/fact.
+var durableMarkers = []string{
+	"i prefer", "i like", "i want", "i decided", "we decided", "we chose",
+	"let's use", "lets use", "we're using", "we are using", "we use ",
+	"going with", "switched to", "migrate to", "migrated to",
+	"decision recorded", "decision:", "we chose", "agreed to",
+	"never use", "always use", "must not", "must never", "we must ",
+	"prefer ", "preference", "my style",
+	"use redis", "use postgres", "use sqlite",
+	"harvested cursor", "auto-sync", "auto sync",
+}
+
+// isJunkMemoryContent reports transcript/skill/prompt noise.
+func isJunkMemoryContent(text string) bool {
+	lowered := strings.ToLower(strings.TrimSpace(text))
+	if lowered == "" {
+		return true
+	}
+	for _, m := range junkMemoryMarkers {
+		if strings.Contains(lowered, m) {
+			return true
+		}
+	}
+	// Skill / instruction bullet lists: "- `something`"
+	if strings.HasPrefix(lowered, "- `") || strings.HasPrefix(lowered, "- **") {
+		return true
+	}
+	// Path-only or path-heavy fragments (Windows or POSIX).
+	if looksLikePathFragment(text) {
+		return true
+	}
+	// Dense backtick instruction lines without a durable marker.
+	if strings.Count(text, "`") >= 4 && !hasDurableMarker(lowered) {
+		return true
+	}
+	return false
+}
+
+func looksLikePathFragment(text string) bool {
+	t := strings.TrimSpace(text)
+	if len(t) < 8 {
+		return false
+	}
+	// Drive path or absolute unix path with little prose.
+	if (len(t) >= 3 && t[1] == ':' && (t[2] == '\\' || t[2] == '/')) ||
+		strings.HasPrefix(t, "/") || strings.HasPrefix(t, `\\`) {
+		spaceCount := strings.Count(t, " ")
+		if spaceCount <= 2 && (strings.Contains(t, `\`) || strings.Contains(t, "/")) {
+			return true
+		}
+	}
+	if strings.Contains(t, `\.cursor\`) || strings.Contains(t, "/.cursor/") ||
+		strings.Contains(t, `skills-cursor`) || strings.Contains(t, "SKILL.md") {
+		return true
+	}
+	return false
+}
+
+func hasDurableMarker(lowered string) bool {
+	for _, m := range durableMarkers {
+		if strings.Contains(lowered, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// isDurableHeuristic gates heuristic proposals: user turns with durable
+// language, or rare assistant lines that clearly record a decision.
+func isDurableHeuristic(text, speaker string) bool {
+	if isJunkMemoryContent(text) {
+		return false
+	}
+	sp := strings.ToLower(strings.TrimSpace(speaker))
+	if sp == "tool" || sp == "system" {
+		return false
+	}
+	lowered := strings.ToLower(text)
+	durable := hasDurableMarker(lowered) || IsExplicitStatement(text)
+	switch sp {
+	case "user", "human":
+		// User lines: durable markers only (no bare "use …" — that matches skill blurbs).
+		if durable {
+			return true
+		}
+		return isStackChoiceImperative(lowered)
+	case "assistant", "ai", "model", "bot":
+		// Assistants narrate constantly — only keep clear decision records.
+		for _, m := range []string{
+			"we decided", "i decided", "we chose", "agreed to",
+			"going with", "we'll use", "we will use", "decision recorded", "decision:",
+		} {
+			if strings.Contains(lowered, m) {
+				return true
+			}
+		}
+		return false
+	default:
+		// Unknown speaker: only strong durable markers.
+		return durable
+	}
+}
+
+// isStackChoiceImperative matches short "use <tool> …" decisions, not skill
+// blurbs like "Use when the user asks…" or "Use for best-of-N…".
+func isStackChoiceImperative(lowered string) bool {
+	if !strings.HasPrefix(lowered, "use ") || len(lowered) > 120 {
+		return false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(lowered, "use "))
+	words := strings.Fields(rest)
+	if len(words) == 0 {
+		return false
+	}
+	switch words[0] {
+	case "when", "this", "the", "a", "an", "for", "to", "in", "with", "exactly":
+		return false
+	}
+	if strings.HasPrefix(words[0], "`") || strings.HasPrefix(words[0], "[") {
+		return false
+	}
+	return true
 }
 
 // splitSentences splits on sentence terminators and newlines.
@@ -789,6 +963,10 @@ type Processor struct {
 	BatchSize  int // max proposals emitted per batch
 	Designated bool
 	Provider   Provider
+
+	// lastExtractProvider is set after a successful server extract flush
+	// ("openrouter" | "heuristic") for Connect telemetry.
+	lastExtractProvider string
 }
 
 // NewProcessor builds a Processor. budget <= 0 selects DefaultBudget,
@@ -819,6 +997,14 @@ func NewProcessor(store MemoryStore, budget, batchSize int, designated bool, pro
 // Decisions: designated processor eliminates multi-device divergence).
 func (p *Processor) ShouldRun() bool { return p.Designated }
 
+// LastExtractProvider returns the last server extract provider label, if any.
+func (p *Processor) LastExtractProvider() string {
+	if p == nil {
+		return ""
+	}
+	return p.lastExtractProvider
+}
+
 // ShouldFlush reports whether a batch is due: true on
 // SESSION_TRANSCRIPT_COMPLETE, or when now-lastActive >= IdleFlushAfter.
 func ShouldFlush(ev Event, lastActive, now time.Time) bool {
@@ -834,7 +1020,9 @@ func ShouldFlush(ev Event, lastActive, now time.Time) bool {
 // ProcessEvents extracts proposals from conversation events (Layer 2/3/4),
 // dedups against the store, enforces budget/batch caps, stamps confirmation
 // delays, and saves survivors. Non-designated daemons return nil without
-// doing anything. ctx carries cancellation for future network providers.
+// doing anything. When Store is an HTTPMemoryStore (portal-connected), turns
+// are uploaded to POST /memory/extract so the server owns LLM/heuristic
+// quality — no local propose+POST /memory junk path.
 func (p *Processor) ProcessEvents(ctx context.Context, project string, events []Event) ([]Proposal, error) {
 	if !p.ShouldRun() {
 		return nil, nil
@@ -844,6 +1032,18 @@ func (p *Processor) ProcessEvents(ctx context.Context, project string, events []
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	if hs, ok := p.Store.(*HTTPMemoryStore); ok {
+		turns := eventsToExtractTurns(events)
+		if len(turns) == 0 {
+			return nil, nil
+		}
+		provider, proposals, err := hs.ExtractRemote(ctx, turns)
+		if err != nil {
+			return nil, err
+		}
+		p.lastExtractProvider = provider
+		return proposals, nil
 	}
 	proposals, err := p.Provider.Extract(ctx, project, events, p.Store.Existing())
 	if err != nil {
@@ -879,6 +1079,31 @@ func (p *Processor) ProcessEvents(ctx context.Context, project string, events []
 		return proposals, firstErr
 	}
 	return proposals, nil
+}
+
+// eventsToExtractTurns flattens conversation events into speaker/content maps
+// for POST /memory/extract.
+func eventsToExtractTurns(events []Event) []map[string]string {
+	var out []map[string]string
+	for _, ev := range events {
+		for _, cand := range eventCandidates(ev) {
+			c := strings.TrimSpace(cand.Text)
+			if c == "" {
+				continue
+			}
+			if len(c) > 4000 {
+				c = c[:4000]
+			}
+			out = append(out, map[string]string{
+				"speaker": cand.Speaker,
+				"content": c,
+			})
+			if len(out) >= 40 {
+				return out
+			}
+		}
+	}
+	return out
 }
 
 // ProcessToolEvents runs episode auto-detection (plan §2.3, issue #115) over

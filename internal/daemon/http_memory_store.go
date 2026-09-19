@@ -201,3 +201,121 @@ func (s *HTTPMemoryStore) PrefetchExisting(ctx context.Context) error {
 	s.mu.Unlock()
 	return nil
 }
+
+// ExtractRemote posts conversation turns to POST /memory/extract so the
+// central server (OpenRouter key) creates PROPOSED memories. Returns the
+// provider name and proposals mirrored into the local dedup cache.
+func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]string) (provider string, proposals []Proposal, err error) {
+	if s == nil {
+		return "", nil, fmt.Errorf("daemon: http memory store is nil")
+	}
+	s.mu.Lock()
+	projectID := s.ProjectID
+	base := s.Base
+	token := s.Token
+	existing := append([]MemoryRecord(nil), s.local...)
+	s.mu.Unlock()
+	if base == "" || projectID == "" {
+		return "", nil, fmt.Errorf("daemon: http memory store missing server or project_id")
+	}
+	if len(turns) == 0 {
+		return "heuristic", nil, nil
+	}
+	existPayload := make([]map[string]string, 0, len(existing))
+	for _, e := range existing {
+		if strings.TrimSpace(e.Content) == "" {
+			continue
+		}
+		existPayload = append(existPayload, map[string]string{
+			"level":   string(e.Level),
+			"scope":   string(e.Scope),
+			"content": e.Content,
+		})
+		if len(existPayload) >= 30 {
+			break
+		}
+	}
+	body := map[string]any{
+		"project_id": projectID,
+		"turns":      turns,
+		"source":     "daemon:harvester",
+		"existing":   existPayload,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return "", nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base+"/memory/extract", bytes.NewReader(raw))
+	if err != nil {
+		return "", nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := s.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", nil, fmt.Errorf("daemon: memory extract: %w", err)
+	}
+	defer resp.Body.Close()
+	rawResp, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(rawResp))
+		if msg == "" {
+			msg = resp.Status
+		}
+		if len(msg) > 400 {
+			msg = msg[:400]
+		}
+		return "", nil, fmt.Errorf("daemon: memory extract: %s", msg)
+	}
+	var out struct {
+		Provider string `json:"provider"`
+		Items    []struct {
+			Key        string  `json:"key"`
+			Content    string  `json:"content"`
+			Level      string  `json:"level"`
+			Scope      string  `json:"scope"`
+			Confidence float64 `json:"confidence"`
+			Source     string  `json:"source"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(rawResp, &out); err != nil {
+		return "", nil, fmt.Errorf("daemon: memory extract decode: %w", err)
+	}
+	now := time.Now().UTC()
+	for _, it := range out.Items {
+		p := Proposal{
+			Key:        it.Key,
+			Content:    it.Content,
+			Level:      MemoryLevel(it.Level),
+			Scope:      MemoryScope(it.Scope),
+			Confidence: it.Confidence,
+			Source:     it.Source,
+			ProposedAt: now,
+		}
+		proposals = append(proposals, p)
+		s.mu.Lock()
+		s.local = append(s.local, MemoryRecord{
+			Key:        it.Key,
+			Content:    it.Content,
+			Level:      MemoryLevel(it.Level),
+			Scope:      MemoryScope(it.Scope),
+			Confidence: it.Confidence,
+		})
+		if len(s.local) > 500 {
+			s.local = s.local[len(s.local)-400:]
+		}
+		s.mu.Unlock()
+	}
+	provider = out.Provider
+	if provider == "" {
+		provider = "heuristic"
+	}
+	return provider, proposals, nil
+}

@@ -13,11 +13,6 @@
       "image": "ACCOUNT.dkr.ecr.REGION.amazonaws.com/central-server:COMMIT_SHA",
       "essential": true,
       "portMappings": [{ "containerPort": 8080, "protocol": "tcp" }],
-      "environment": [
-        { "name": "PORT", "value": "8080" },
-        { "name": "DB_SSLMODE", "value": "require" },
-        { "name": "MIGRATIONS_DIR", "value": "/migrations" }
-      ],
       "secrets": [
         {
           "name": "DATABASE_URL",
@@ -26,7 +21,17 @@
         {
           "name": "JWT_SECRET",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/jwt:signing_key::"
+        },
+        {
+          "name": "OPENROUTER_API_KEY",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:openrouter:api_key::"
         }
+      ],
+      "environment": [
+        { "name": "PORT", "value": "8080" },
+        { "name": "DB_SSLMODE", "value": "require" },
+        { "name": "MIGRATIONS_DIR", "value": "/migrations" },
+        { "name": "OPENROUTER_MODEL", "value": "openrouter/free" }
       ],
       "logConfiguration": {
         "logDriver": "awslogs",
