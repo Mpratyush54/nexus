@@ -16,7 +16,7 @@ export function useMemorySearch(q = '', level = '') {
           projectId: projectId!,
           q: q || undefined,
           level: level || undefined,
-          limit: 50,
+          limit: 100,
         },
         signal,
       ),

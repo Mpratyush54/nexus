@@ -23,6 +23,7 @@ import {
   useTriggerHarvestScan,
 } from '@/hooks/useDaemon'
 import { useCurrentProject } from '@/hooks/useProjects'
+import { useProjectSummaries } from '@/hooks/useProjectSummaries'
 import { useAuth } from '@/providers/AuthProvider'
 import { formatRelative } from '@/utils/format'
 
@@ -35,9 +36,14 @@ function shortTime(iso?: string) {
   }
 }
 
+function projectLabelOf(p: { display_name?: string; folder_name?: string; id: string }) {
+  return p.display_name || p.folder_name || p.id.slice(0, 8)
+}
+
 export function DashboardPage() {
-  const { projectId } = useAuth()
+  const { projectId, setProjectId } = useAuth()
   const { current } = useCurrentProject()
+  const summaries = useProjectSummaries()
   const dash = useDashboard()
   const memories = useMemorySearch('')
   const local = useLocalDaemonAutodetect()
@@ -63,9 +69,16 @@ export function DashboardPage() {
         : 'unknown'
 
   const memoryItems = memories.data ?? []
-  const proposed = memoryItems.filter((x) => x.status === 'PROPOSED').slice(0, 6)
-  const confirmed = memoryItems.filter((x) => x.status === 'CONFIRMED').slice(0, 6)
+  const proposed = memoryItems.filter((x) => x.status === 'PROPOSED').slice(0, 8)
+  const confirmed = memoryItems.filter((x) => x.status === 'CONFIRMED').slice(0, 8)
   const shown = proposed.length ? proposed : confirmed
+
+  const richer = (summaries.data ?? []).find(
+    (s) =>
+      s.project.id !== projectId &&
+      s.metrics.proposed + s.metrics.memories >
+        (m?.proposed ?? 0) + (m?.memories ?? 0) + 5,
+  )
 
   if (!projectId) {
     return (
@@ -87,13 +100,79 @@ export function DashboardPage() {
           <p className="text-[11px] uppercase tracking-wide text-muted">Working on</p>
           <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">{projectLabel}</h1>
           <p className="mt-1 text-sm text-fg-dim">
-            Memories for this project · harvest scans your machine into this project’s review queue
+            Memories are per project — switch below if this folder looks empty
           </p>
         </div>
         <div className="w-full max-w-xs sm:w-56">
           <ProjectSwitcher compact />
         </div>
       </div>
+
+      {richer ? (
+        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/30 p-4">
+          <div>
+            <p className="text-sm text-fg">
+              <span className="font-medium">{projectLabelOf(richer.project)}</span> has{' '}
+              {richer.metrics.proposed > 0
+                ? `${richer.metrics.proposed} proposed`
+                : `${richer.metrics.memories} memories`}{' '}
+              — more than this project.
+            </p>
+            <p className="mt-1 text-xs text-fg-dim">Harvest and Memory pages only show the active project.</p>
+          </div>
+          <Button
+            type="button"
+            size="sm"
+            onClick={() => setProjectId(richer.project.id)}
+          >
+            Switch to {projectLabelOf(richer.project)}
+          </Button>
+        </GlassPanel>
+      ) : null}
+
+      <section className="space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-medium text-fg">Your projects</h2>
+          <p className="text-[11px] text-muted">
+            {(summaries.data ?? []).length || '…'} registered · folders on disk need Desktop bind / resolve to appear
+          </p>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          {(summaries.data ?? []).map((row) => {
+            const active = row.project.id === projectId
+            return (
+              <button
+                key={row.project.id}
+                type="button"
+                onClick={() => setProjectId(row.project.id)}
+                className={[
+                  'rounded-lg border px-3 py-3 text-left transition',
+                  active
+                    ? 'border-amber/50 bg-raised'
+                    : 'border-border bg-raised/40 hover:border-border-strong',
+                ].join(' ')}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-sm font-medium text-fg">
+                    {projectLabelOf(row.project)}
+                  </span>
+                  {active ? <StatusPill tone="amber">active</StatusPill> : null}
+                </div>
+                <p className="mt-1 truncate font-mono text-[10px] text-muted">
+                  {row.project.folder_name || row.project.id.slice(0, 12)}
+                </p>
+                <p className="mt-2 text-xs text-fg-dim">
+                  {row.metrics.memories} memories
+                  {row.metrics.proposed ? ` · ${row.metrics.proposed} proposed` : ''}
+                </p>
+              </button>
+            )
+          })}
+          {summaries.isLoading ? (
+            <p className="text-xs text-muted sm:col-span-2 lg:col-span-3">Loading project counts…</p>
+          ) : null}
+        </div>
+      </section>
 
       <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <GlassPanel className="p-4">

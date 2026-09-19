@@ -4,6 +4,7 @@ import { useDeferredValue, useMemo, useState } from 'react'
 import { MemoryEditorSlideOver } from '@/components/MemoryEditorSlideOver'
 import { SharingControlsModal } from '@/components/SharingControlsModal'
 import { VersionHistoryDrawer } from '@/components/VersionHistoryDrawer'
+import { ProjectSwitcher } from '@/components/ProjectSwitcher'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
@@ -78,9 +79,12 @@ export function MemoryPage() {
           <h1 className="text-2xl font-semibold tracking-tight text-fg">Memory</h1>
           <p className="mt-1 text-sm text-fg-dim">
             {projectId
-              ? `Project ${projectId.slice(0, 8)}… · live via React Query + WS`
-              : 'No project resolved yet — log in again to attach one.'}
+              ? 'Active project only — use the switcher if this list looks empty'
+              : 'No project selected yet.'}
           </p>
+          <div className="mt-3 max-w-xs">
+            <ProjectSwitcher compact />
+          </div>
         </div>
         <div className="flex gap-2">
           <Button

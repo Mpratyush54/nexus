@@ -362,6 +362,10 @@ func (s *MemStore) CreateOrgProject(ctx context.Context, orgID, folderName, disp
 const orgColumns = `id::TEXT AS id, name, COALESCE(slug, '') AS slug,
 	COALESCE(created_by::TEXT, '') AS created_by, created_at`
 
+// Prefixed for JOINs (organization_members also has created_at / created_by).
+const orgColumnsAliased = `o.id::TEXT AS id, o.name, COALESCE(o.slug, '') AS slug,
+	COALESCE(o.created_by::TEXT, '') AS created_by, o.created_at`
+
 func scanOrganization(row pgx.Row) (*Organization, error) {
 	var o Organization
 	if err := row.Scan(&o.ID, &o.Name, &o.Slug, &o.CreatedBy, &o.CreatedAt); err != nil {
@@ -425,7 +429,7 @@ func (s *PostgresStore) ListOrganizations(ctx context.Context, userID string) ([
 		return nil, errors.New("store: user id is required")
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+orgColumns+`
+		`SELECT `+orgColumnsAliased+`
 		   FROM organizations o
 		   JOIN organization_members om ON om.org_id = o.id
 		  WHERE om.user_id = $1::uuid

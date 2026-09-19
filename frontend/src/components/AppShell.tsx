@@ -3,11 +3,13 @@ import { Outlet, useLocation } from 'react-router-dom'
 import { CommandPalette } from './CommandPalette'
 import { DaemonBanner, LocalWorkspacePanel } from './LocalWorkspace'
 import { MobileNav, SideNav } from './SideNav'
+import { useEnsureActiveProject } from '@/hooks/useProjectSummaries'
 
 export function AppShell() {
   const [cmdOpen, setCmdOpen] = useState(false)
   const location = useLocation()
   const onHome = location.pathname.includes('/app/dashboard') || location.pathname === '/app'
+  useEnsureActiveProject()
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
