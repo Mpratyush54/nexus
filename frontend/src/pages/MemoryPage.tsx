@@ -80,6 +80,7 @@ export function MemoryPage() {
           <p className="mt-1 max-w-xl text-sm text-fg-dim">
             Durable project facts and decisions — not a chat transcript. Confirm useful
             proposals; reject the rest. Full conversations live under Sessions / Connect.
+            {!projectId ? ' Select a project to load memories.' : null}
           </p>
           <div className="mt-3 max-w-xs">
             <ProjectSwitcher compact />
