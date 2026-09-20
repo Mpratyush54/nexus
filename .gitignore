@@ -7,3 +7,4 @@
 .central-memory/
 dist/
 hackathon-demo/*
+.agents
