@@ -22,6 +22,12 @@ output "jwt_secret_arn" {
   sensitive   = true
 }
 
+output "smtp_secret_arn" {
+  description = "Secrets Manager ARN for SMTP (Brevo/SendGrid). Operator sets password."
+  value       = aws_secretsmanager_secret.smtp.arn
+  sensitive   = true
+}
+
 output "task_role_arn" {
   description = "ECS task role ARN (matches deploy/ecs-task.json taskRoleArn; least-privilege, no S3 until the cold-writer lands)."
   value       = aws_iam_role.task.arn

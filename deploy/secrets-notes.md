@@ -12,6 +12,31 @@
 | (plain env / optional) | — | `CENTRAL_EMBEDDING_PROVIDER` (`openai`\|`ollama`\|`hash`), `CENTRAL_EMBEDDING_API_KEY`, `CENTRAL_EMBEDDING_MODEL`, `CENTRAL_EMBEDDING_ENDPOINT` | server, `mem mcp` (issue #165; defaults to hash) |
 | `openrouter` | `api_key` | **`OPENROUTER_API_KEY`** — server-side harvest extraction; never shipped to clients | server |
 | (plain env / optional) | — | `OPENROUTER_MODEL` (default `nvidia/nemotron-3.5-lightning:free`; avoid `openrouter/free` which can route to safety-only models), `OPENROUTER_BASE_URL`, `OPENROUTER_HTTP_REFERER`, `OPENROUTER_APP_TITLE` | server |
+| `central-memory/smtp` | `host`,`port`,`username`,`password`,`from` | **`SMTP_HOST`**, **`SMTP_PORT`**, **`SMTP_USER`**, **`SMTP_PASSWORD`**, **`MAIL_FROM`** — signup + forgot-password OTP mail via Brevo or SendGrid | server |
+
+### Mail (Brevo / SendGrid → `@pratyushes.dev`)
+
+From address is always **`Nexus <noreply@pratyushes.dev>`** (domain must be verified in Brevo/SendGrid).
+
+Seeded secret shape (Terraform creates `central-memory/smtp`; **you set `password`**):
+
+| Key | Brevo (default) | SendGrid |
+|---|---|---|
+| `host` | `smtp-relay.brevo.com` | `smtp.sendgrid.net` |
+| `port` | `587` | `587` |
+| `username` | `mpratyush54@gmail.com` | `apikey` |
+| `password` | Brevo SMTP key | SendGrid API key |
+| `from` | `Nexus <noreply@pratyushes.dev>` | same |
+
+```bash
+# After TF creates the secret, put the real SMTP password (never commit it):
+aws secretsmanager put-secret-value \
+  --secret-id central-memory/smtp \
+  --secret-string '{"host":"smtp-relay.brevo.com","port":"587","username":"mpratyush54@gmail.com","password":"<SMTP_KEY>","from":"Nexus <noreply@pratyushes.dev>"}'
+```
+
+Then force a new ECS deployment so tasks pick up the secret. Without `password`, OTP mail stays unavailable in prod (`email delivery is not configured`). Local: `CENTRAL_MEMORY_LOCAL_DEV=1` still returns `dev_code`.
+
 
 Free OpenRouter models are rate-limited (~20 RPM / ~50 RPD without credits). The API throttles LLM extract to about one call per project per 5 minutes and falls back to a tightened heuristic when the key is unset or the call fails.
 
@@ -37,6 +62,11 @@ aws secretsmanager create-secret \
 aws secretsmanager create-secret \
   --name central-memory/jwt \
   --secret-string '{"signing_key":"<32+ random bytes, base64>"}'
+
+# Mail SMTP (if not created by Terraform) — replace <SMTP_KEY> with Brevo/SendGrid secret:
+aws secretsmanager create-secret \
+  --name central-memory/smtp \
+  --secret-string '{"host":"smtp-relay.brevo.com","port":"587","username":"mpratyush54@gmail.com","password":"<SMTP_KEY>","from":"Nexus <noreply@pratyushes.dev>"}'
 ```
 
 Generate the JWT key locally, never commit it:
@@ -48,7 +78,7 @@ Generate the JWT key locally, never commit it:
 
 ## ECS wiring
 
-- The task execution role needs `secretsmanager:GetSecretValue` on both ARNs.
+- The task execution role needs `secretsmanager:GetSecretValue` on db-app, jwt, openrouter, and **smtp** ARNs.
 - `deploy/ecs-task.json` injects them via `containerDefinitions[].secrets`
   (`valueFrom` = `secret-arn:key:version-stage:version-id`); containers see
   plain env vars, secrets never land in the image or task JSON.

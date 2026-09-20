@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { authApi, type LoginInput, type SignupInput } from '@/api/auth'
+import { authApi, type LoginInput, type SignupInput, type SignupSendCodeInput } from '@/api/auth'
 import { projectsApi } from '@/api/projects'
 import { queryKeys } from '@/lib/query-keys'
 import { useAuth } from '@/providers/AuthProvider'
@@ -29,6 +29,30 @@ export function useLogin() {
   })
 }
 
+export function useSendSignupCode() {
+  return useMutation({
+    mutationFn: (input: SignupSendCodeInput) => authApi.sendSignupCode(input),
+  })
+}
+
+export function useCancelSignup() {
+  return useMutation({
+    mutationFn: (email: string) => authApi.cancelSignup(email),
+  })
+}
+
+export function useResendSignupCode() {
+  return useMutation({
+    mutationFn: (email: string) => authApi.resendSignupCode(email),
+  })
+}
+
+export function useSignupStatus() {
+  return useMutation({
+    mutationFn: (email: string) => authApi.signupStatus(email),
+  })
+}
+
 export function useSignup() {
   const { setSession, setProjectId } = useAuth()
   const qc = useQueryClient()
@@ -40,6 +64,19 @@ export function useSignup() {
       void qc.invalidateQueries({ queryKey: queryKeys.memory.all })
       void qc.invalidateQueries({ queryKey: queryKeys.project.current })
     },
+  })
+}
+
+export function useForgotPassword() {
+  return useMutation({
+    mutationFn: (email: string) => authApi.forgotPassword(email),
+  })
+}
+
+export function useResetPassword() {
+  return useMutation({
+    mutationFn: (input: { email: string; code: string; new_password: string }) =>
+      authApi.resetPassword(input),
   })
 }
 

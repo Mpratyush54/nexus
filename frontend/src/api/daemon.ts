@@ -1,4 +1,5 @@
 import { apiRequest } from '@/lib/api-client'
+import { storage } from '@/utils/storage'
 
 export type LocalWorkspaceView = {
   online: boolean
@@ -72,6 +73,8 @@ export type HarvestStatus = {
   running?: boolean
   designated?: boolean
   project_id?: string
+  user_id?: string
+  username?: string
   root?: string
   poll_seconds?: number
   idle_seconds?: number
@@ -125,18 +128,27 @@ export const daemonApi = {
     init?: RequestInit,
   ): Promise<T> {
     const base = proxyUrl.replace(/\/$/, '')
+    const portalUser = storage.getUser()?.userId?.trim()
     const res = await fetch(`${base}${path}`, {
       ...init,
       signal: init?.signal ?? AbortSignal.timeout(4_000),
       headers: {
         Accept: 'application/json',
         ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(portalUser ? { 'X-Nexus-Portal-User': portalUser } : {}),
         ...init?.headers,
       },
     })
     if (!res.ok) {
       const text = await res.text().catch(() => '')
-      throw new Error(text || `bridge ${res.status}`)
+      let detail = text || `bridge ${res.status}`
+      try {
+        const parsed = JSON.parse(text) as { error?: string }
+        if (parsed.error) detail = parsed.error
+      } catch {
+        /* keep raw */
+      }
+      throw new Error(detail)
     }
     return (await res.json()) as T
   },

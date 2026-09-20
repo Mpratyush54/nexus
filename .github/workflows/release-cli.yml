@@ -78,6 +78,18 @@ jobs:
           if [ "$GOOS" = "windows" ] && [ "$GOARCH" = "amd64" ]; then
             cp scripts/install-windows.ps1 dist/install-windows.ps1
           fi
+          if [ "$GOOS" = "darwin" ] && [ "$GOARCH" = "arm64" ]; then
+            cp scripts/install-macos.sh dist/install-macos.sh
+            chmod +x dist/install-macos.sh
+          fi
+          if [ "$GOOS" = "linux" ] && [ "$GOARCH" = "amd64" ]; then
+            cp scripts/install-linux.sh dist/install-linux.sh
+            chmod +x dist/install-linux.sh
+          fi
+          # Also build desktop for non-Windows (cross-OS tray)
+          if [ "$GOOS" != "windows" ]; then
+            go build -trimpath -ldflags "$LDFLAGS" -o "dist/nexus-desktop-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus-desktop
+          fi
 
       - name: Upload dist
         uses: actions/upload-artifact@v4

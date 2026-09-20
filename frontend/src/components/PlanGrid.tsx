@@ -11,8 +11,10 @@ type Props = {
   plans: BillingPlan[]
   current?: BillingSnapshot | null
   onSelect?: (planId: string) => void
+  /** Fired when someone clicks a paid plan while upgrades are closed. */
+  onPaidUnavailable?: (plan: BillingPlan) => void
   pending?: boolean
-  /** When false, hide switch/upgrade actions entirely. */
+  /** When false, hide switch/upgrade actions entirely (except paid “coming soon” CTA). */
   canChange?: boolean
   /**
    * When false (default), paid plans cannot be self-selected — checkout is not wired.
@@ -30,6 +32,7 @@ export function PlanGrid({
   plans,
   current,
   onSelect,
+  onPaidUnavailable,
   pending,
   canChange = true,
   allowPaidUpgrade = false,
@@ -43,7 +46,7 @@ export function PlanGrid({
         const active = plan.id === activeId
         const paid = plan.price_cents > 0
         const canSelect = Boolean(canChange && onSelect && !active)
-        const blockedPaid = canSelect && paid && !allowPaidUpgrade
+        const blockedPaid = paid && !allowPaidUpgrade && !active
 
         return (
           <div
@@ -56,6 +59,7 @@ export function PlanGrid({
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-medium text-fg">{plan.name}</h3>
               {active ? <StatusPill tone="teal">current</StatusPill> : null}
+              {blockedPaid ? <StatusPill tone="neutral">soon</StatusPill> : null}
             </div>
             <p className="mt-1 text-lg font-semibold tracking-tight text-fg">{formatPlanPrice(plan)}</p>
             {plan.description ? <p className="mt-1 text-xs text-fg-dim">{plan.description}</p> : null}
@@ -75,10 +79,22 @@ export function PlanGrid({
                 {usageLine('seats', current.usage.members, plan.limits.members)}
               </p>
             ) : null}
+
             {blockedPaid ? (
-              <p className="mt-4 text-[11px] leading-relaxed text-muted">
-                Checkout coming soon — paid upgrades are disabled until payment is wired.
-              </p>
+              <div className="mt-4 space-y-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="secondary"
+                  className="w-full"
+                  onClick={() => onPaidUnavailable?.(plan)}
+                >
+                  Get {plan.name}
+                </Button>
+                <p className="text-[11px] leading-relaxed text-muted">
+                  Not available yet — keep enjoying free until paid plans open.
+                </p>
+              </div>
             ) : canSelect ? (
               <Button
                 type="button"

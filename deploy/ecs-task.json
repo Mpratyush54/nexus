@@ -25,6 +25,26 @@
         {
           "name": "OPENROUTER_API_KEY",
           "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:openrouter:api_key::"
+        },
+        {
+          "name": "SMTP_HOST",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/smtp:host::"
+        },
+        {
+          "name": "SMTP_PORT",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/smtp:port::"
+        },
+        {
+          "name": "SMTP_USER",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/smtp:username::"
+        },
+        {
+          "name": "SMTP_PASSWORD",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/smtp:password::"
+        },
+        {
+          "name": "MAIL_FROM",
+          "valueFrom": "arn:aws:secretsmanager:REGION:ACCOUNT:secret:central-memory/smtp:from::"
         }
       ],
       "environment": [

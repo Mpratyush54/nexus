@@ -143,13 +143,13 @@ func run() error {
 	menu.Add("Check for updates…", func() {
 		go checkAndApplyUpdate(tray)
 	})
-	menu.Add("Install Start Menu + Startup shortcuts", func() {
+	menu.Add("Repair Start Menu shortcuts", func() {
 		go func() {
 			if err := installAppShortcuts(); err != nil {
 				tray.ShowNotification("Nexus", err.Error())
 				return
 			}
-			tray.ShowNotification("Nexus", "Shortcuts installed — Start Menu → Programs → Nexus")
+			tray.ShowNotification("Nexus", "Shortcuts ready — Start Menu → Programs → Nexus")
 		}()
 	})
 	verLabel := "Version: " + strings.TrimPrefix(buildinfo.Version, "v")

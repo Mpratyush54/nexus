@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { ProjectSwitcher } from '@/components/ProjectSwitcher'
+import { ActivityHeatmap } from '@/components/ActivityHeatmap'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { Button } from '@/components/ui/Button'
@@ -17,14 +18,13 @@ import { useToast } from '@/components/ui/Toast'
 import { useDashboard } from '@/hooks/useDashboard'
 import { useMemorySearch } from '@/hooks/useMemory'
 import {
-  useLocalDaemonAutodetect,
   useLocalHarvest,
-  useLocalWorkspaceView,
   useTriggerHarvestScan,
 } from '@/hooks/useDaemon'
 import { useCurrentProject } from '@/hooks/useProjects'
 import { useProjectSummaries } from '@/hooks/useProjectSummaries'
 import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
+import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
 import { useAuth } from '@/providers/AuthProvider'
 import { formatRelative } from '@/utils/format'
 
@@ -47,17 +47,12 @@ export function DashboardPage() {
   const summaries = useProjectSummaries()
   const dash = useDashboard()
   const memories = useMemorySearch('')
-  const local = useLocalDaemonAutodetect()
-  const serverView = useLocalWorkspaceView()
-  const bridgeUrl =
-    local.data?.baseUrl ||
-    local.data?.status.proxy_url ||
-    serverView.data?.proxy_url ||
-    undefined
+  const bridge = useTrustedLocalBridge()
+  const bridgeUrl = bridge.bridgeUrl
   const harvest = useLocalHarvest(bridgeUrl)
   const scanNow = useTriggerHarvestScan(bridgeUrl)
   const { push } = useToast()
-  useFollowHarvestProject(harvest.data)
+  useFollowHarvestProject(harvest.data, bridge.trusted)
 
   const m = dash.data?.metrics
   const hs = harvest.data
@@ -225,6 +220,19 @@ export function DashboardPage() {
         </GlassPanel>
       </div>
 
+      <GlassPanel className="space-y-3 p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <Activity size={16} className="text-amber" />
+            <h2 className="text-sm font-medium text-fg">Activity</h2>
+          </div>
+          <Link to="/app/activity" className="text-xs text-ember hover:underline">
+            Full log →
+          </Link>
+        </div>
+        <ActivityHeatmap days={dash.data?.heatmap} loading={dash.isLoading} />
+      </GlassPanel>
+
       <div className="grid gap-6 lg:grid-cols-5">
         <GlassPanel className="space-y-4 p-5 lg:col-span-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -306,7 +314,7 @@ export function DashboardPage() {
             </p>
             <p>
               <span className="text-muted">Folder</span>{' '}
-              <span className="font-mono text-fg">{hs?.root || local.data?.status.root || '—'}</span>
+              <span className="font-mono text-fg">{hs?.root || bridge.local.data?.status.root || '—'}</span>
             </p>
             <p>
               <span className="text-muted">Last scan</span> {shortTime(hs?.last_scan_at)} ·{' '}
@@ -345,7 +353,7 @@ export function DashboardPage() {
               variant="secondary"
               onClick={() => {
                 void harvest.refetch()
-                void local.refetch()
+                void bridge.local.refetch()
                 void memories.refetch()
               }}
             >

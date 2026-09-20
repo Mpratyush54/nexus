@@ -11,9 +11,11 @@ import { LandingPage } from '@/pages/LandingPage'
 import { LoginPage } from '@/pages/LoginPage'
 import { MemoryPage } from '@/pages/MemoryPage'
 import { NotificationsPage } from '@/pages/NotificationsPage'
+import { OnboardingPage } from '@/pages/OnboardingPage'
 import { SessionsPage } from '@/pages/SessionsPage'
 import { SettingsPage } from '@/pages/SettingsPage'
 import { SignupPage } from '@/pages/SignupPage'
+import { ForgotPasswordPage } from '@/pages/ForgotPasswordPage'
 import { TeamPage } from '@/pages/TeamPage'
 import { OrgPage } from '@/pages/OrgPage'
 import { AppProviders } from '@/providers/AppProviders'
@@ -30,12 +32,14 @@ export default function App() {
           <Route element={<GuestRoute />}>
             <Route path="/login" element={<LoginPage />} />
             <Route path="/signup" element={<SignupPage />} />
+            <Route path="/forgot-password" element={<ForgotPasswordPage />} />
           </Route>
 
           <Route element={<ProtectedRoute />}>
             <Route path="/app" element={<AppShell />}>
               <Route index element={<Navigate to="dashboard" replace />} />
               <Route path="connect" element={<ConnectPage />} />
+              <Route path="onboarding" element={<OnboardingPage />} />
               <Route path="dashboard" element={<DashboardPage />} />
               <Route path="memory" element={<MemoryPage />} />
               <Route path="agents" element={<AgentsPage />} />

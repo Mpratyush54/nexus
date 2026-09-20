@@ -7,9 +7,39 @@ export type LoginInput = {
 }
 
 export type SignupInput = {
+  email: string
+  code: string
+  username?: string
+  password?: string
+}
+
+export type SignupSendCodeInput = {
   username: string
   password: string
   email: string
+}
+
+export type SignupSendCodeResponse = {
+  ok: boolean
+  email: string
+  expires_in: number
+  /** Present only in local/dev when mail is not configured. */
+  dev_code?: string
+}
+
+export type SignupStatusResponse = {
+  pending: boolean
+  expired?: boolean
+  email?: string
+  username?: string
+  expires_in?: number
+}
+
+export type PasswordForgotResponse = {
+  ok: boolean
+  email: string
+  expires_in: number
+  dev_code?: string
 }
 
 export type UserProfile = {
@@ -55,6 +85,54 @@ export const authApi = {
 
   signup(input: SignupInput) {
     return apiRequest<LoginResponse>('/auth/signup', {
+      method: 'POST',
+      body: input,
+      auth: false,
+    })
+  },
+
+  sendSignupCode(input: SignupSendCodeInput) {
+    return apiRequest<SignupSendCodeResponse>('/auth/signup/send-code', {
+      method: 'POST',
+      body: input,
+      auth: false,
+    })
+  },
+
+  signupStatus(email: string) {
+    return apiRequest<SignupStatusResponse>('/auth/signup/status', {
+      method: 'POST',
+      body: { email },
+      auth: false,
+    })
+  },
+
+  cancelSignup(email: string) {
+    return apiRequest<{ ok: boolean; cancelled: boolean }>('/auth/signup/cancel', {
+      method: 'POST',
+      body: { email },
+      auth: false,
+    })
+  },
+
+  resendSignupCode(email: string) {
+    return apiRequest<SignupSendCodeResponse & { username?: string }>('/auth/signup/resend', {
+      method: 'POST',
+      body: { email },
+      auth: false,
+    })
+  },
+
+  forgotPassword(email: string) {
+    return apiRequest<PasswordForgotResponse>('/auth/password/forgot', {
+      method: 'POST',
+      body: { email },
+      auth: false,
+    })
+  },
+
+  resetPassword(input: { email: string; code: string; new_password: string }) {
+    return apiRequest<{ ok: boolean }>('/auth/password/reset', {
       method: 'POST',
       body: input,
       auth: false,

@@ -55,11 +55,11 @@ func (d *Daemon) StatusSnapshot() ConnectionStatus {
 	st.Connected = st.WorkspaceID != "" && st.HasToken
 	switch {
 	case !st.HasToken:
-		st.Message = "Not signed in — log in below to connect this machine."
+		st.Message = "Not signed in — log in below. Use the same Nexus account as the web portal."
 	case st.WorkspaceID == "":
 		st.Message = "Signed in, but not registered with the server yet. Retrying…"
 	default:
-		st.Message = "Connected — this workspace is online."
+		st.Message = "Connected — use the same account in the web portal or harvest stays locked."
 	}
 	return st
 }
@@ -294,7 +294,7 @@ var statusPageTmpl = template.Must(template.New("status").Parse(`<!DOCTYPE html>
     </div>
     <div id="logoutBox" style="{{if not .HasToken}}display:none{{end}}">
       <button type="button" class="ghost" id="logoutBtn" style="width:100%">Sign out</button>
-      <p class="foot">Open the web app: <a href="{{.AppURL}}/app/dashboard" target="_blank" rel="noopener">{{.AppURL}}</a></p>
+      <p class="foot">Open the web app (same account): <a href="{{.AppURL}}/app/connect" target="_blank" rel="noopener">Desktop setup</a></p>
     </div>
   </div>
 </main>

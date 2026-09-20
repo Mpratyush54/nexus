@@ -26,6 +26,7 @@ import (
 
 	memctx "central-memory/internal/context"
 	"central-memory/internal/extract"
+	"central-memory/internal/mail"
 	"central-memory/internal/mcp"
 	"central-memory/internal/store"
 )
@@ -107,6 +108,9 @@ type Server struct {
 	// PushClient is the HTTP client used for Web Push delivery. Nil uses
 	// http.DefaultClient; tests inject an httptest client.
 	PushClient *http.Client
+
+	// Mail delivers signup OTP emails. Nil selects mail.FromEnv at first use.
+	Mail mail.Sender
 }
 
 // NewServer wires routes onto a fresh stdlib ServeMux.

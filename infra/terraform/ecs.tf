@@ -159,6 +159,7 @@ resource "aws_iam_role_policy" "task_exec_secrets" {
         aws_secretsmanager_secret.db_app.arn,
         aws_secretsmanager_secret.jwt.arn,
         data.aws_secretsmanager_secret.openrouter.arn,
+        aws_secretsmanager_secret.smtp.arn,
       ]
     }]
   })
@@ -217,6 +218,11 @@ resource "aws_ecs_task_definition" "server" {
       { name = "DB_PASSWORD", valueFrom = "${aws_secretsmanager_secret.db_app.arn}:password::" },
       { name = "JWT_SECRET", valueFrom = "${aws_secretsmanager_secret.jwt.arn}:signing_key::" },
       { name = "OPENROUTER_API_KEY", valueFrom = "${data.aws_secretsmanager_secret.openrouter.arn}:api_key::" },
+      { name = "SMTP_HOST", valueFrom = "${aws_secretsmanager_secret.smtp.arn}:host::" },
+      { name = "SMTP_PORT", valueFrom = "${aws_secretsmanager_secret.smtp.arn}:port::" },
+      { name = "SMTP_USER", valueFrom = "${aws_secretsmanager_secret.smtp.arn}:username::" },
+      { name = "SMTP_PASSWORD", valueFrom = "${aws_secretsmanager_secret.smtp.arn}:password::" },
+      { name = "MAIL_FROM", valueFrom = "${aws_secretsmanager_secret.smtp.arn}:from::" },
     ]
     logConfiguration = {
       logDriver = "awslogs"

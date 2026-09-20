@@ -1,0 +1,208 @@
+name: Release Desktop (all OS)
+
+# Cross-compiles Nexus Desktop + daemon + CLI for Windows / macOS / Linux,
+# publishes a GitHub Release on tags, and syncs every artifact to S3.
+
+on:
+  # Every master push + every version tag + manual run → build all OS → S3.
+  # (Do not combine path filters with tags — GitHub would skip tag releases.)
+  push:
+    branches: [master]
+    tags:
+      - 'desktop-v*'
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version label (e.g. 0.2.0) — defaults to tag or short SHA
+        required: false
+
+permissions:
+  id-token: write
+  contents: write
+
+env:
+  AWS_REGION: ap-south-1
+  ROLE_TO_ASSUME: arn:aws:iam::833291393451:role/GitHubActions-CentralMemory-Deploy
+  API_URL: https://api-nexus.pratyushes.dev
+  RELEASES_BUCKET: central-memory-releases
+
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      built_at: ${{ steps.meta.outputs.built_at }}
+    steps:
+      - id: meta
+        run: |
+          VER="${{ github.event.inputs.version }}"
+          if [ -z "$VER" ]; then
+            if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+              VER="${GITHUB_REF_NAME}"
+              VER="${VER#desktop-}"
+            else
+              VER="0.0.0-${GITHUB_SHA:0:7}"
+            fi
+          fi
+          VER="${VER#v}"
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: meta
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+          VER: ${{ needs.meta.outputs.version }}
+          BUILT_AT: ${{ needs.meta.outputs.built_at }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+          LD_COMMON="-s -w -X central-memory/internal/buildinfo.Version=${VER} -X central-memory/internal/buildinfo.Commit=${GITHUB_SHA} -X central-memory/internal/buildinfo.BuiltAt=${BUILT_AT} -X main.defaultServerURL=${API_URL}"
+          go build -trimpath -ldflags "${LD_COMMON}" -o "dist/nexus-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus
+          go build -trimpath -ldflags "${LD_COMMON}" -o "dist/nexus-daemon-${GOOS}-${GOARCH}${EXT}" ./cmd/daemon
+          DESKTOP_LD="${LD_COMMON}"
+          if [ "$GOOS" = "windows" ]; then DESKTOP_LD="${LD_COMMON} -H windowsgui"; fi
+          go build -trimpath -ldflags "${DESKTOP_LD}" -o "dist/nexus-desktop-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus-desktop
+          if [ "$GOOS" = "windows" ] && [ "$GOARCH" = "amd64" ]; then
+            cp scripts/install-windows.ps1 dist/install-windows.ps1
+          fi
+          if [ "$GOOS" = "darwin" ] && [ "$GOARCH" = "arm64" ]; then
+            cp scripts/install-macos.sh dist/install-macos.sh
+            chmod +x dist/install-macos.sh
+          fi
+          if [ "$GOOS" = "linux" ] && [ "$GOARCH" = "amd64" ]; then
+            cp scripts/install-linux.sh dist/install-linux.sh
+            chmod +x dist/install-linux.sh
+          fi
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nexus-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble dist + manifest
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+          BUILT_AT: ${{ needs.meta.outputs.built_at }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          find artifacts -type f -exec cp -f {} dist/ \;
+          ls -la dist
+          BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
+          if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
+          export BUCKET VER BUILT_AT
+          export BASE="https://${BUCKET}.s3.${AWS_REGION}.amazonaws.com/desktop/${VER}"
+          export LATEST_BASE="https://${BUCKET}.s3.${AWS_REGION}.amazonaws.com/desktop/latest"
+          python3 <<'PY'
+          import json, os
+          ver = os.environ["VER"]
+          base = os.environ["BASE"]
+          latest = os.environ["LATEST_BASE"]
+          platforms = {}
+          for name in sorted(os.listdir("dist")):
+              if not name.startswith("nexus"):
+                  continue
+              stem = name.replace(".exe", "")
+              parts = stem.split("-")
+              if len(parts) < 3:
+                  continue
+              if parts[1] == "desktop":
+                  kind, goos, arch = "desktop", parts[2], parts[3]
+              elif parts[1] == "daemon":
+                  kind, goos, arch = "daemon", parts[2], parts[3]
+              else:
+                  kind, goos, arch = "cli", parts[1], parts[2]
+              key = f"{goos}-{arch}"
+              platforms.setdefault(key, {"os": goos, "arch": arch, "artifacts": {}})
+              platforms[key]["artifacts"][kind] = {"filename": name, "url": f"{base}/{name}"}
+          installs = {}
+          for key, fname in (("windows", "install-windows.ps1"), ("macos", "install-macos.sh"), ("linux", "install-linux.sh")):
+              if os.path.exists(f"dist/{fname}"):
+                  installs[key] = f"{latest}/{fname}"
+          win = platforms.get("windows-amd64", {}).get("artifacts", {})
+          art = []
+          for kind, meta in win.items():
+              art.append({"name": "nexus" if kind == "cli" else f"nexus-{kind}", "filename": meta["filename"], "url": meta["url"]})
+          manifest = {
+              "app": "desktop",
+              "version": ver,
+              "channel": "stable",
+              "os": "windows",
+              "arch": "amd64",
+              "published_at": os.environ.get("BUILT_AT", ""),
+              "commit": os.environ["GITHUB_SHA"],
+              "install_url": installs.get("windows", f"{latest}/install-windows.ps1"),
+              "installs": installs,
+              "platforms": platforms,
+              "artifacts": art,
+          }
+          open("dist/latest.json", "w", encoding="utf-8").write(json.dumps(manifest, indent=2) + "\n")
+          print("platforms:", ", ".join(sorted(platforms)))
+          PY
+          (cd dist && sha256sum nexus-* install-* latest.json > SHA256SUMS.txt) || true
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
+          if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
+          aws s3 sync dist "s3://${BUCKET}/desktop/${VER}/" --exclude "*" --include "nexus-*" --include "install-*" --include "SHA256SUMS.txt" --include "latest.json"
+          aws s3 sync dist "s3://${BUCKET}/cli/${VER}/" --exclude "*" --include "nexus-*" --include "install-*" --include "SHA256SUMS.txt"
+          aws s3 cp dist/latest.json "s3://${BUCKET}/desktop/latest.json" --cache-control "no-cache, max-age=60" --content-type application/json
+          for f in install-windows.ps1 install-macos.sh install-linux.sh; do
+            if [ -f "dist/$f" ]; then
+              aws s3 cp "dist/$f" "s3://${BUCKET}/desktop/latest/$f" --cache-control "no-cache, max-age=60"
+            fi
+          done
+          echo "Desktop release: s3://${BUCKET}/desktop/${VER}/"

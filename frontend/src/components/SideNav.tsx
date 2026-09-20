@@ -8,7 +8,6 @@ import {
   LayoutDashboard,
   Layers,
   Menu,
-  MessageSquare,
   Search,
   Shield,
   Split,
@@ -28,7 +27,6 @@ const links = [
   { to: '/app/dashboard', label: 'Home', icon: LayoutDashboard },
   { to: '/app/memory', label: 'Memory', icon: Layers },
   { to: '/app/agents', label: 'Agents', icon: Bot },
-  { to: '/app/sessions', label: 'Sessions', icon: MessageSquare },
   { to: '/app/team', label: 'Team', icon: Users },
   { to: '/app/org', label: 'Org', icon: Building2 },
   { to: '/app/activity', label: 'Activity', icon: Activity },
@@ -172,26 +170,35 @@ function Presence() {
 export function SideNav({ onOpenCommand }: Props) {
   return (
     <aside className="app-sidebar" aria-label="Main">
-      <NavLink to="/app/dashboard" className="app-brand">
-        Nexus
-      </NavLink>
+      <div className="app-sidebar-top">
+        <NavLink to="/app/dashboard" className="app-brand">
+          Nexus
+        </NavLink>
 
-      <div className="mt-5 flex items-center gap-1">
-        <button type="button" className="app-search !mt-0 !w-auto min-w-0 flex-1" onClick={onOpenCommand}>
-          <Search size={13} />
-          <span className="app-search-label">Search</span>
-          <kbd className="app-search-kbd">⌘K</kbd>
-        </button>
-        <NotificationBell />
-      </div>
+        <div className="mt-5 flex items-center gap-1">
+          <button
+            type="button"
+            className="app-search !mt-0 !w-auto min-w-0 flex-1"
+            onClick={onOpenCommand}
+          >
+            <Search size={13} />
+            <span className="app-search-label">Search</span>
+            <kbd className="app-search-kbd">⌘K</kbd>
+          </button>
+          <NotificationBell />
+        </div>
 
-      <div className="mt-3">
-        <ProjectSwitcher />
+        <div className="mt-3">
+          <ProjectSwitcher />
+        </div>
       </div>
 
       <NavLinks />
-      <Presence />
-      <ProfileCard />
+
+      <div className="app-sidebar-foot">
+        <Presence />
+        <ProfileCard />
+      </div>
     </aside>
   )
 }
@@ -259,9 +266,13 @@ export function MobileNav({ onOpenCommand }: Props) {
                 <ProjectSwitcher />
               </div>
 
-              <NavLinks onNavigate={() => setOpen(false)} />
-              <Presence />
-              <ProfileCard />
+              <div className="app-nav-scroll flex min-h-0 flex-1 flex-col overflow-y-auto">
+                <NavLinks onNavigate={() => setOpen(false)} />
+              </div>
+              <div className="app-sidebar-foot mt-auto shrink-0 border-t border-border pt-3">
+                <Presence />
+                <ProfileCard />
+              </div>
             </motion.aside>
           </motion.div>
         ) : null}

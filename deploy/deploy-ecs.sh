@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Ensuring task execution role can read central-memory/github + openrouter secrets..."
+echo "==> Ensuring task execution role can read central-memory/github + openrouter + smtp secrets..."
 aws iam put-role-policy --role-name central-memory-task-exec \
   --policy-name central-memory-read-github-secret \
   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:'"${AWS_REGION}"':833291393451:secret:central-memory/github*"}]}' 2>/dev/null || true
 aws iam put-role-policy --role-name central-memory-task-exec \
   --policy-name central-memory-read-openrouter-secret \
   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:'"${AWS_REGION}"':833291393451:secret:openrouter*"}]}' 2>/dev/null || true
+aws iam put-role-policy --role-name central-memory-task-exec \
+  --policy-name central-memory-read-smtp-secret \
+  --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:'"${AWS_REGION}"':833291393451:secret:central-memory/smtp*"}]}' 2>/dev/null || true
 
 echo "==> Finding active ECS cluster and service..."
 CLUSTER="central-memory-cluster"
@@ -55,6 +58,7 @@ jq --arg img "$IMAGE" \
    --arg cid "Ov23li997FyAUgaucZQO" \
    --arg sec "arn:aws:secretsmanager:${AWS_REGION}:833291393451:secret:central-memory/github:client_secret::" \
    --arg orkey "arn:aws:secretsmanager:${AWS_REGION}:833291393451:secret:openrouter:api_key::" \
+   --arg smtp_base "arn:aws:secretsmanager:${AWS_REGION}:833291393451:secret:central-memory/smtp" \
    --arg hq "$QUEUE_URL" \
    --arg region "${AWS_REGION}" \
    '.taskDefinition | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy) |
@@ -70,9 +74,14 @@ jq --arg img "$IMAGE" \
       {name: "AWS_REGION", value: $region}
     ] |
     .containerDefinitions[0].secrets = [
-      (.containerDefinitions[0].secrets // [] | .[] | select(.name != "GITHUB_CLIENT_SECRET" and .name != "OPENROUTER_API_KEY")),
+      (.containerDefinitions[0].secrets // [] | .[] | select(.name != "GITHUB_CLIENT_SECRET" and .name != "OPENROUTER_API_KEY" and .name != "SMTP_HOST" and .name != "SMTP_PORT" and .name != "SMTP_USER" and .name != "SMTP_PASSWORD" and .name != "MAIL_FROM")),
       {name: "GITHUB_CLIENT_SECRET", valueFrom: $sec},
-      {name: "OPENROUTER_API_KEY", valueFrom: $orkey}
+      {name: "OPENROUTER_API_KEY", valueFrom: $orkey},
+      {name: "SMTP_HOST", valueFrom: ($smtp_base + ":host::")},
+      {name: "SMTP_PORT", valueFrom: ($smtp_base + ":port::")},
+      {name: "SMTP_USER", valueFrom: ($smtp_base + ":username::")},
+      {name: "SMTP_PASSWORD", valueFrom: ($smtp_base + ":password::")},
+      {name: "MAIL_FROM", valueFrom: ($smtp_base + ":from::")}
     ]' > /tmp/task-def.json
 
 echo "==> Registering new ECS task definition revision..."

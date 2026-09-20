@@ -58,19 +58,22 @@ func (p *CORSProxy) Handler() http.Handler {
 		return withProxyCORS(mux)
 	}
 
-	// Allowlisted read-only local endpoints (no bearer auth).
+	// Allowlisted read-only local endpoints.
+	// Status/healthz stay open so the portal can detect Desktop identity.
+	// Privileged harvest/git/file require matching portal user (desktop guard).
 	mux.HandleFunc("/", d.handleStatusPage)
 	mux.HandleFunc("/local/healthz", handleLocalHealthz)
-	mux.HandleFunc("/local/git/status", d.handleGitStatus)
-	mux.HandleFunc("/local/git/diff", d.handleGitDiff)
-	mux.HandleFunc("/local/git/log", d.handleGitLog)
-	mux.HandleFunc("/local/file/read", d.handleFileRead)
-	mux.HandleFunc("/local/workspace", d.handleLocalWorkspace)
 	mux.HandleFunc("/local/status", d.handleLocalStatus)
-	mux.HandleFunc("/local/harvest", d.handleLocalHarvest)
 	mux.HandleFunc("/local/browser-login", d.handleLocalBrowserLogin)
 	mux.HandleFunc("/local/login", d.handleLocalLogin) // legacy password form
 	mux.HandleFunc("/local/logout", d.handleLocalLogout)
+
+	mux.HandleFunc("/local/git/status", d.withPortalIdentityGate(d.handleGitStatus))
+	mux.HandleFunc("/local/git/diff", d.withPortalIdentityGate(d.handleGitDiff))
+	mux.HandleFunc("/local/git/log", d.withPortalIdentityGate(d.handleGitLog))
+	mux.HandleFunc("/local/file/read", d.withPortalIdentityGate(d.handleFileRead))
+	mux.HandleFunc("/local/workspace", d.withPortalIdentityGate(d.handleLocalWorkspace))
+	mux.HandleFunc("/local/harvest", d.withPortalIdentityGate(d.handleLocalHarvest))
 
 	// Explicitly block dangerous surfaces if a client probes them.
 	block := func(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +183,7 @@ func withProxyCORS(next http.Handler) http.Handler {
 		if origin != "" && allowed[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Access-Control-Request-Private-Network")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Nexus-Portal-User, Access-Control-Request-Private-Network")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 			// Chrome Private Network Access: HTTPS public sites (nexus.pratyushes.dev)

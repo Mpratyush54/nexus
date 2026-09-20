@@ -289,8 +289,8 @@ export function SettingsPage() {
         <div>
           <h2 className="text-sm font-medium text-fg">Plan</h2>
           <p className="mt-1 text-xs text-fg-dim">
-            Personal subscription. You are on the free plan for now — paid upgrades open when
-            checkout ships.
+            Personal subscription. Paid plans aren’t open yet — click one to see the note, and keep
+            enjoying free until then.
           </p>
         </div>
         {plans.data ? (
@@ -299,6 +299,13 @@ export function SettingsPage() {
             current={billing.data}
             canChange={false}
             allowPaidUpgrade={false}
+            onPaidUnavailable={(plan) =>
+              push({
+                title: 'Sorry — not available yet',
+                detail: `${plan.name} is coming soon. Keep enjoying the free plan until then.`,
+                tone: 'amber',
+              })
+            }
           />
         ) : (
           <p className="text-sm text-muted">Loading plans…</p>

@@ -68,3 +68,28 @@ resource "aws_secretsmanager_secret_version" "jwt" {
 data "aws_secretsmanager_secret" "openrouter" {
   name = "openrouter"
 }
+
+# SMTP for signup / password-reset OTP (Brevo or SendGrid).
+# Password is operator-managed — set via Console/CLI; Terraform only seeds
+# the JSON shape once (lifecycle ignore_changes).
+resource "aws_secretsmanager_secret" "smtp" {
+  name                    = "${var.project}/smtp"
+  description             = "SMTP relay for Nexus mail (MAIL_FROM @pratyushes.dev). Keys: host, port, username, password, from."
+  recovery_window_in_days = 7
+}
+
+resource "aws_secretsmanager_secret_version" "smtp" {
+  secret_id = aws_secretsmanager_secret.smtp.id
+  # Brevo defaults. For SendGrid use host smtp.sendgrid.net and username "apikey".
+  secret_string = jsonencode({
+    host     = "smtp-relay.brevo.com"
+    port     = "587"
+    username = "mpratyush54@gmail.com"
+    password = "REPLACE_ME"
+    from     = "Nexus <noreply@pratyushes.dev>"
+  })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
+}

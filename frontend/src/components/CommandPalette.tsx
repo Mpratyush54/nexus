@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Activity, Bell, Bot, Building2, Cable, LayoutDashboard, MessageSquare, Search, Settings, Shield, Split, Users } from 'lucide-react'
+import { Activity, Bell, Bot, Building2, Cable, LayoutDashboard, Search, Settings, Shield, Split, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 
@@ -10,10 +10,10 @@ const items = [
   { id: 'team', label: 'Team', hint: 'Members, roles, GitHub', icon: Users, to: '/app/team' },
   { id: 'org', label: 'Org', hint: 'Organizations, projects, billing', icon: Building2, to: '/app/org' },
   { id: 'branches', label: 'Overlays', hint: 'Memory fork / diff / merge (not git)', icon: Split, to: '/app/branches' },
-  { id: 'sessions', label: 'Sessions', hint: 'Handoffs between agents', icon: MessageSquare, to: '/app/sessions' },
   { id: 'activity', label: 'Activity', hint: 'Project event log with filters', icon: Activity, to: '/app/activity' },
   { id: 'notifications', label: 'Notifications', hint: 'Inbox, preferences, devices', icon: Bell, to: '/app/notifications' },
-  { id: 'connect', label: 'Desktop setup', hint: 'Install desktop + MCP config', icon: Cable, to: '/app/connect' },
+  { id: 'connect', label: 'Desktop setup', hint: 'Install Desktop + harvest', icon: Cable, to: '/app/connect' },
+  { id: 'onboarding', label: 'Onboarding', hint: 'First-run setup guide', icon: Cable, to: '/app/onboarding' },
   { id: 'settings', label: 'Settings', hint: 'Tokens, plan, export', icon: Settings, to: '/app/settings' },
   { id: 'admin', label: 'Platform', hint: 'Super Admin, versions, CLI releases', icon: Shield, to: '/app/admin' },
 ]

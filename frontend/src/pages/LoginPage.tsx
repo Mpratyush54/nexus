@@ -77,6 +77,14 @@ export function LoginPage() {
                 placeholder="••••••••"
               />
             </label>
+            <div className="flex justify-end">
+              <Link
+                to={next ? `/forgot-password?next=${encodeURIComponent(next)}` : '/forgot-password'}
+                className="text-xs text-ember hover:underline"
+              >
+                Forgot password?
+              </Link>
+            </div>
             <Button type="submit" className="w-full" size="lg" disabled={login.isPending}>
               {login.isPending ? 'Signing in…' : 'Log in'}
             </Button>

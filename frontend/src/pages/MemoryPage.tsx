@@ -12,11 +12,10 @@ import { useToast } from '@/components/ui/Toast'
 import { memoryApi, type HarvestJob } from '@/api/memory'
 import { useConfirmMemory, useHarvestQueue, useMemorySearch, useRejectMemory } from '@/hooks/useMemory'
 import {
-  useLocalDaemonAutodetect,
   useLocalHarvest,
-  useLocalWorkspaceView,
 } from '@/hooks/useDaemon'
 import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
+import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError, type MemoryItem } from '@/types/api'
 import { formatRelative } from '@/utils/format'
@@ -34,15 +33,9 @@ export function MemoryPage() {
   const { push } = useToast()
   const projects = useProjects()
   const summaries = useProjectSummaries()
-  const local = useLocalDaemonAutodetect()
-  const serverView = useLocalWorkspaceView()
-  const bridgeUrl =
-    local.data?.baseUrl ||
-    local.data?.status.proxy_url ||
-    serverView.data?.proxy_url ||
-    undefined
-  const harvestStatus = useLocalHarvest(bridgeUrl).data
-  useFollowHarvestProject(harvestStatus)
+  const bridge = useTrustedLocalBridge()
+  const harvestStatus = useLocalHarvest(bridge.bridgeUrl).data
+  useFollowHarvestProject(harvestStatus, bridge.trusted)
   const [q, setQ] = useState('')
   const [level, setLevel] = useState('')
   const [tagFilter, setTagFilter] = useState<string | null>(null)

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { Button } from '@/components/ui/Button'
 import { PlanGrid } from '@/components/PlanGrid'
+import { useToast } from '@/components/ui/Toast'
 import { useBillingPlans } from '@/hooks/useBilling'
 import { useAuth } from '@/providers/AuthProvider'
 
@@ -37,6 +38,7 @@ const STAGES = [
 export function LandingPage() {
   const { isAuthenticated } = useAuth()
   const plans = useBillingPlans()
+  const { push } = useToast()
   const stageRef = useRef<HTMLElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const [soundOn, setSoundOn] = useState(false)
@@ -263,7 +265,18 @@ export function LandingPage() {
         </p>
         <div className="landing-pricing-grid">
           {plans.data ? (
-            <PlanGrid plans={plans.data} highlight="free" canChange={false} />
+            <PlanGrid
+              plans={plans.data}
+              highlight="free"
+              canChange={false}
+              onPaidUnavailable={(plan) =>
+                push({
+                  title: 'Sorry — not available yet',
+                  detail: `${plan.name} isn’t open yet. Keep enjoying free until we bring it to you.`,
+                  tone: 'amber',
+                })
+              }
+            />
           ) : (
             <p className="text-sm text-muted">Loading plans…</p>
           )}

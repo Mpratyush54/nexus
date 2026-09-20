@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"central-memory/internal/config"
 )
 
 // HarvestAgentStat is one harness the portal shows on Connect.
@@ -32,6 +34,8 @@ type HarvestStatus struct {
 	Running         bool               `json:"running"`
 	Designated      bool               `json:"designated"`
 	ProjectID       string             `json:"project_id,omitempty"`
+	UserID          string             `json:"user_id,omitempty"`
+	Username        string             `json:"username,omitempty"`
 	Root            string             `json:"root,omitempty"`
 	Extractor       string             `json:"extractor,omitempty"`
 	PollSeconds     int                `json:"poll_seconds"`
@@ -97,13 +101,23 @@ func (d *Daemon) HarvestSnapshot() HarvestStatus {
 		return st
 	}
 	st.Root = d.Root
+	st.UserID = d.effectiveUserID()
+	if cfg, err := config.LoadFile(); err == nil {
+		st.Username = strings.TrimSpace(cfg.Username)
+	}
 	rt := d.Pipeline()
 	if rt == nil {
 		st.Message = "Harvest pipeline not started on this daemon."
 		st.Agents = sourceAgentStats(nil)
 		return st
 	}
-	return rt.HarvestSnapshot()
+	out := rt.HarvestSnapshot()
+	out.UserID = st.UserID
+	out.Username = st.Username
+	if out.Root == "" {
+		out.Root = st.Root
+	}
+	return out
 }
 
 // TriggerHarvestScan forces an immediate transcript scan (Connect "Scan now").

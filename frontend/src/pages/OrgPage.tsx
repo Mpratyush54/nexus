@@ -238,6 +238,13 @@ export function OrgPage() {
                     current={orgBilling.data}
                     canChange={false}
                     allowPaidUpgrade={false}
+                    onPaidUnavailable={(plan) =>
+                      push({
+                        title: 'Sorry — not available yet',
+                        detail: `${plan.name} is coming soon. Keep enjoying free until paid plans open.`,
+                        tone: 'amber',
+                      })
+                    }
                   />
                 ) : (
                   <p className="text-sm text-muted">Loading plans…</p>

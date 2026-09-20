@@ -11,7 +11,7 @@
   irm https://central-memory-releases.s3.ap-south-1.amazonaws.com/desktop/latest/install-windows.ps1 | iex
 
 .EXAMPLE
-  .\install-windows.ps1 -Version 0.2.0
+  irm https://raw.githubusercontent.com/Mpratyush54/nexus/master/scripts/install-windows.ps1 | iex
 #>
 param(
   [string]$Version = "latest",
@@ -22,7 +22,6 @@ $ErrorActionPreference = "Stop"
 $binDir = Join-Path $env:LOCALAPPDATA "Nexus\bin"
 New-Item -ItemType Directory -Force -Path $binDir | Out-Null
 
-# Resolve versioned prefix: desktop/latest.json or desktop/{ver}/ / cli/{ver}/
 function Get-Manifest {
   param([string]$Url)
   try {
@@ -53,7 +52,6 @@ $files = @(
 
 Write-Host "Installing Nexus Desktop $Version into $binDir"
 
-# Stop running tray/daemon so files can be replaced
 Get-Process nexus-desktop, nexus-daemon -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 
@@ -75,7 +73,7 @@ foreach ($f in $files) {
     }
   }
   if (-not $ok) {
-    throw "Could not download $($f.Name) from desktop/ or cli/ prefixes"
+    throw "Could not download $($f.Name). Tried:`n  $($urls -join "`n  ")"
   }
 }
 
@@ -122,4 +120,5 @@ Write-Host "  Start Menu: Programs → Nexus → Nexus Desktop"
 Write-Host "  Startup:    launches at logon (system tray)"
 Write-Host "  Quit:       right-click tray icon → Quit Nexus Desktop"
 Write-Host ""
-Start-Process $desktopExe
+# Detached GUI process — closing this PowerShell/terminal must not kill the tray.
+Start-Process -FilePath $desktopExe -WorkingDirectory $binDir -WindowStyle Hidden
