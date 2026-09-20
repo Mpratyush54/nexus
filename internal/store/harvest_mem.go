@@ -10,8 +10,8 @@ import (
 
 // MemHarvestQueue is an in-memory HarvestQueue for tests / local stub.
 type MemHarvestQueue struct {
-	mu   sync.Mutex
-	jobs map[string]*HarvestJob
+	mu    sync.Mutex
+	jobs  map[string]*HarvestJob
 	order []string
 }
 

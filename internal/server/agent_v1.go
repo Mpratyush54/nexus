@@ -262,8 +262,8 @@ func (s *Server) resolveAgentProject(w http.ResponseWriter, r *http.Request, bod
 	}
 	writeJSON(w, http.StatusBadRequest, map[string]any{
 		"error": map[string]any{
-			"code":    400,
-			"message": "project_id required (pass JSON project_id, header X-Nexus-Project, or ensure the token has exactly one project)",
+			"code":     400,
+			"message":  "project_id required (pass JSON project_id, header X-Nexus-Project, or ensure the token has exactly one project)",
 			"projects": ids,
 		},
 	})

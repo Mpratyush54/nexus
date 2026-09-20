@@ -12,6 +12,7 @@ import (
 )
 
 const defaultOpenRouterBase = "https://openrouter.ai/api/v1"
+
 // openrouter/free can route to safety-only models that return non-JSON.
 // Prefer an instruct-capable free model; callers can override via OPENROUTER_MODEL.
 const defaultOpenRouterModel = "nvidia/nemotron-3.5-lightning:free"
@@ -25,8 +26,8 @@ var defaultOpenRouterFallbacks = []string{
 
 // Client calls OpenRouter's OpenAI-compatible chat completions API.
 type Client struct {
-	Cfg    Config
-	HTTP   *http.Client
+	Cfg  Config
+	HTTP *http.Client
 	// BaseURLOverride is used by tests (httptest).
 	BaseURLOverride string
 }
@@ -110,7 +111,7 @@ func (c *Client) chat(ctx context.Context, model string, fallbacks []string, sys
 			{"role": "system", "content": system},
 			{"role": "user", "content": prompt},
 		},
-		"temperature": 0.1,
+		"temperature":     0.1,
 		"response_format": map[string]string{"type": "json_object"},
 	})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(body))

@@ -629,4 +629,3 @@ func TestMatchesTranscriptCwdPeek(t *testing.T) {
 		t.Fatal("foreign cwd must not match")
 	}
 }
-

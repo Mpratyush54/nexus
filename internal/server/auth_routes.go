@@ -168,7 +168,7 @@ func (s *Server) handleSignupResend(w http.ResponseWriter, r *http.Request) {
 	if s.login == nil {
 		s.login = newRateGate(1, 5)
 	}
-	if !s.login.allow("signup-resend:" + clientIP(r)) || !s.login.allow("signup-otp-mail:"+email) {
+	if !s.login.allow("signup-resend:"+clientIP(r)) || !s.login.allow("signup-otp-mail:"+email) {
 		writeError(w, http.StatusTooManyRequests, "too many codes for this email — try again shortly")
 		return
 	}
@@ -421,7 +421,7 @@ func (s *Server) handlePasswordForgot(w http.ResponseWriter, r *http.Request) {
 	if s.login == nil {
 		s.login = newRateGate(1, 5)
 	}
-	if !s.login.allow("pw-forgot:" + clientIP(r)) || !s.login.allow("pw-forgot-mail:"+email) {
+	if !s.login.allow("pw-forgot:"+clientIP(r)) || !s.login.allow("pw-forgot-mail:"+email) {
 		writeError(w, http.StatusTooManyRequests, "too many reset attempts — try again shortly")
 		return
 	}

@@ -5,8 +5,8 @@ package main
 import "syscall"
 
 var (
-	modKernel32              = syscall.NewLazyDLL("kernel32.dll")
-	procFreeConsole          = modKernel32.NewProc("FreeConsole")
+	modKernel32               = syscall.NewLazyDLL("kernel32.dll")
+	procFreeConsole           = modKernel32.NewProc("FreeConsole")
 	procSetConsoleCtrlHandler = modKernel32.NewProc("SetConsoleCtrlHandler")
 )
 
