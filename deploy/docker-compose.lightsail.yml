@@ -1,0 +1,43 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nexus-postgres
+    environment:
+      POSTGRES_DB: central_memory
+      POSTGRES_USER: central
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-CentralMemorySecure2026!}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U central -d central_memory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: always
+
+  server:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+    container_name: nexus-server
+    environment:
+      DATABASE_URL: postgres://central:${DB_PASSWORD:-CentralMemorySecure2026!}@postgres:5432/central_memory?sslmode=disable
+      CENTRAL_MEMORY_LOCAL_DEV: "1"
+      JWT_SECRET: ${JWT_SECRET:-nexus-production-jwt-signing-secret-central-memory-2026}
+      PORT: "8080"
+      MIGRATIONS_DIR: "/migrations"
+      PUBLIC_API_URL: "https://api-nexus.pratyushes.dev"
+      PUBLIC_APP_URL: "https://nexus.pratyushes.dev"
+      GITHUB_OAUTH_REDIRECT: "https://api-nexus.pratyushes.dev/auth/github/callback"
+      GITHUB_CLIENT_ID: "Ov23li997FyAUgaucZQO"
+      GITHUB_CLIENT_SECRET: "f7594cfdc93aaada48513dfd303ab0f0bd490728"
+    ports:
+      - "80:8080"
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+
+volumes:
+  pgdata:
