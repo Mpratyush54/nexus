@@ -146,7 +146,7 @@ func (s *Server) handleSignupSendCode(w http.ResponseWriter, r *http.Request) {
 		"expires_in": int(signupOTPTTL.Seconds()),
 	}
 	// Local/dev without a real mailer: surface the code so signup still works.
-	if !mailer.Configured() || localDev {
+	if !mailer.Configured() {
 		out["dev_code"] = code
 		s.Log.Printf("signup otp for %s: %s (dev/local)", email, code)
 	}
@@ -220,7 +220,7 @@ func (s *Server) handleSignupResend(w http.ResponseWriter, r *http.Request) {
 		"username":   pending.Username,
 		"expires_in": int(signupOTPTTL.Seconds()),
 	}
-	if !mailer.Configured() || localDev {
+	if !mailer.Configured() {
 		out["dev_code"] = code
 		s.Log.Printf("signup otp resend for %s: %s (dev/local)", email, code)
 	}
@@ -473,7 +473,7 @@ func (s *Server) handlePasswordForgot(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "could not send reset email")
 		return
 	}
-	if !mailer.Configured() || localDev {
+	if !mailer.Configured() {
 		okOut["dev_code"] = code
 		s.Log.Printf("password reset otp for %s: %s (dev/local)", email, code)
 	}

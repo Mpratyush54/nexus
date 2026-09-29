@@ -1,0 +1,52 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nexus-postgres
+    environment:
+      POSTGRES_DB: central_memory
+      POSTGRES_USER: central
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U central -d central_memory"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: always
+
+  server:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile.server
+      args:
+        VERSION: "${VERSION:-v0.2.0}"
+        COMMIT: "${COMMIT:-unknown}"
+        BUILT_AT: "${BUILT_AT:-}"
+    container_name: nexus-server
+    environment:
+      DATABASE_URL: postgres://central:${DB_PASSWORD}@postgres:5432/central_memory?sslmode=disable
+      CENTRAL_MEMORY_LOCAL_DEV: "${CENTRAL_MEMORY_LOCAL_DEV:-1}"
+      JWT_SECRET: ${JWT_SECRET}
+      PORT: "8080"
+      MIGRATIONS_DIR: "/migrations"
+      PUBLIC_API_URL: "${PUBLIC_API_URL:-https://api-nexus.pratyushes.dev}"
+      PUBLIC_APP_URL: "${PUBLIC_APP_URL:-https://nexus.pratyushes.dev}"
+      GITHUB_OAUTH_REDIRECT: "${GITHUB_OAUTH_REDIRECT:-https://api-nexus.pratyushes.dev/auth/github/callback}"
+      GITHUB_CLIENT_ID: "${GITHUB_CLIENT_ID:-}"
+      GITHUB_CLIENT_SECRET: "${GITHUB_CLIENT_SECRET:-}"
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      MAIL_FROM: "${MAIL_FROM:-Nexus <noreply@pratyushes.dev>}"
+    ports:
+      - "80:8080"
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+
+volumes:
+  pgdata:
