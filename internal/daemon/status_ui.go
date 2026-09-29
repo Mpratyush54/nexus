@@ -84,6 +84,8 @@ func (d *Daemon) handleStatusPage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	// Legacy debug HTML only. Product UI is the Fyne native shell
+	// (cmd/nexus-desktop + internal/desktopui) — do not redesign this page.
 	st := d.StatusSnapshot()
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

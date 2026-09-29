@@ -9,7 +9,7 @@ infrastructure changes.
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `.github/workflows/deploy.yml` | push `master` | ECR image build; optional ECS roll (skipped when no task def); frontend S3 sync (`deploy-frontend.sh`); optional Lightsail API deploy |
-| `.github/workflows/release-desktop.yml` | push `master` / tags `v*` `desktop-v*` / `workflow_dispatch` | Cross-compile desktop+daemon+CLI → S3 `central-memory-releases/desktop/` + `latest.json` (in-app update feed) |
+| `.github/workflows/release-desktop.yml` | push `master` / tags `v*` `desktop-v*` / `workflow_dispatch` | Build desktop (Fyne, CGO, per-OS runners) + cross-compile daemon/CLI → S3; **`latest.json` promoted only on tags / explicit version** (not master SHA builds) |
 | `.github/workflows/ci.yml` | push / PR | build, vet, gofmt, tests |
 
 Auth for AWS jobs uses OIDC role `GitHubActions-CentralMemory-Deploy` (no long-lived AWS keys in Actions).
@@ -34,9 +34,10 @@ gh secret set LIGHTSAIL_SSH_KEY < ~/.ssh/central-memory-key.pem
 gh variable set DEPLOY_LIGHTSAIL --body true
 ```
 
-Desktop clients discover updates via tray **Check for updates** / silent notify, reading
+Desktop clients discover updates via in-app **Check for updates** / silent notify, reading
 `https://central-memory-releases.s3.ap-south-1.amazonaws.com/desktop/latest.json`
-(fallback after `/platform/releases/latest?app=desktop`).
+(S3 is source of truth; `/platform/releases/latest?app=desktop` often 404 until registered).
+Native UI: Fyne shell (`docs/decisions/ADR-050-native-desktop-fyne.md`).
 
 ## Contents
 
