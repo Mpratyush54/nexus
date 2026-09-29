@@ -1,4 +1,4 @@
-﻿*.exe
+*.exe
 *.exe~
 *.dll
 *.so
@@ -9,3 +9,5 @@ dist/
 hackathon-demo/*
 .agents
 brag-output/*
+dist-desktop/
+skills-lock.json

@@ -18,6 +18,7 @@ func doProxy(p *CORSProxy, method, target, body, origin string) *httptest.Respon
 	r := httptest.NewRequest(method, target, rdr)
 	if origin != "" {
 		r.Header.Set("Origin", origin)
+		r.Header.Set(HeaderPortalUserID, "u-test-portal")
 	}
 	if body != "" {
 		r.Header.Set("Content-Type", "application/json")

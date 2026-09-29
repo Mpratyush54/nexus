@@ -71,11 +71,13 @@ func (c *Client) compressModel() string {
 // Complete sends the extraction prompt and returns parsed proposals.
 func (c *Client) Complete(ctx context.Context, prompt string) ([]Proposal, error) {
 	content, err := c.chat(ctx, c.model(), defaultOpenRouterFallbacks,
-		"You extract durable project memories including decisions, actions, files touched, and outcomes. "+
+		"You extract durable project memories including decisions, architecture, actions, files touched, tools used, and outcomes. "+
 			"Prefer empty only when the batch is pure noise. "+
+			"category must be one of: architecture, infrastructure, auth, api, conventions, dependencies. "+
 			"level must be one of: organization, project, personal, session (default project). "+
 			"scope must be one of: fact, preference, decision, constraint, pattern, episode_summary. "+
-			"Reply with JSON only: {\"memories\":[{\"key\",\"content\",\"level\",\"scope\",\"confidence\",\"explicit\"}]}.",
+			"outcome must be one of: active, resolved, deprecated. "+
+			"Reply with JSON only: {\"memories\":[{\"key\",\"content\",\"level\",\"scope\",\"category\",\"files_affected\":[],\"tools_used\":[],\"supersedes_key\":\"\",\"outcome\":\"active\",\"confidence\",\"explicit\"}]}.",
 		prompt)
 	if err != nil {
 		return nil, err
@@ -88,8 +90,9 @@ func (c *Client) CompleteCompress(ctx context.Context, prompt string) (summary s
 	content, err := c.chat(ctx, c.compressModel(), append([]string{c.model()}, defaultOpenRouterFallbacks...),
 		"You compress a coding chat session into one rich episode summary plus optional sharp decisions. "+
 			"Require actions (files/commands), outcomes, and decisions. Keep concrete nouns. "+
+			"category must be one of: architecture, infrastructure, auth, api, conventions, dependencies. "+
 			"Empty session_summary only if transcript is pure noise. "+
-			"Reply with JSON only: {\"session_summary\":\"...\",\"decisions\":[{\"key\",\"content\",\"level\",\"scope\",\"confidence\",\"explicit\"}]}.",
+			"Reply with JSON only: {\"session_summary\":\"...\",\"decisions\":[{\"key\",\"content\",\"level\",\"scope\",\"category\",\"files_affected\":[],\"tools_used\":[],\"supersedes_key\":\"\",\"outcome\":\"active\",\"confidence\",\"explicit\"}]}.",
 		prompt)
 	if err != nil {
 		return "", nil, err
@@ -178,12 +181,18 @@ func openAIMessageContent(raw []byte) (string, error) {
 }
 
 type llmMemory struct {
-	Key        string  `json:"key"`
-	Content    string  `json:"content"`
-	Level      string  `json:"level"`
-	Scope      string  `json:"scope"`
-	Confidence float64 `json:"confidence"`
-	Explicit   bool    `json:"explicit"`
+	Key           string   `json:"key"`
+	Content       string   `json:"content"`
+	Level         string   `json:"level"`
+	Scope         string   `json:"scope"`
+	Confidence    float64  `json:"confidence"`
+	Explicit      bool     `json:"explicit"`
+	Category      string   `json:"category"`
+	FilesAffected []string `json:"files_affected"`
+	ToolsUsed     []string `json:"tools_used"`
+	SupersedesKey string   `json:"supersedes_key"`
+	Outcome       string   `json:"outcome"`
+	WeekBucket    string   `json:"week_bucket"`
 }
 
 func parseProposals(data []byte) []Proposal {
@@ -255,15 +264,79 @@ func llmToProposal(m llmMemory) (Proposal, bool) {
 	if key == "" {
 		key = KeyFromContent(content)
 	}
+
+	cat := normalizeCategory(m.Category, content)
+	outcome := normalizeOutcome(m.Outcome)
+	week := strings.TrimSpace(m.WeekBucket)
+	if week == "" {
+		y, w := time.Now().UTC().ISOWeek()
+		week = fmt.Sprintf("%04d-W%02d", y, w)
+	}
+
+	files := make([]string, 0, len(m.FilesAffected))
+	for _, f := range m.FilesAffected {
+		f = strings.TrimSpace(f)
+		if f != "" && len(f) < 256 {
+			files = append(files, f)
+		}
+	}
+
+	tools := make([]string, 0, len(m.ToolsUsed))
+	for _, t := range m.ToolsUsed {
+		t = strings.TrimSpace(t)
+		if t != "" && len(t) < 64 {
+			tools = append(tools, t)
+		}
+	}
+
 	return Proposal{
-		Key:        key,
-		Content:    content,
-		Level:      level,
-		Scope:      scope,
-		Confidence: conf,
-		Explicit:   m.Explicit || isExplicit(content),
-		Source:     "processor:openrouter",
+		Key:           key,
+		Content:       content,
+		Level:         level,
+		Scope:         scope,
+		Confidence:    conf,
+		Explicit:      m.Explicit || isExplicit(content),
+		Source:        "processor:openrouter",
+		Category:      cat,
+		FilesAffected: files,
+		ToolsUsed:     tools,
+		SupersedesKey: strings.TrimSpace(m.SupersedesKey),
+		Outcome:       outcome,
+		WeekBucket:    week,
 	}, true
+}
+
+func normalizeCategory(cat, content string) string {
+	cat = strings.ToLower(strings.TrimSpace(cat))
+	switch cat {
+	case "architecture", "infrastructure", "auth", "api", "conventions", "dependencies":
+		return cat
+	}
+	lc := strings.ToLower(content)
+	switch {
+	case strings.Contains(lc, "auth") || strings.Contains(lc, "jwt") || strings.Contains(lc, "oauth") || strings.Contains(lc, "smtp") || strings.Contains(lc, "secret"):
+		return "auth"
+	case strings.Contains(lc, "docker") || strings.Contains(lc, "deploy") || strings.Contains(lc, "lightsail") || strings.Contains(lc, "aws") || strings.Contains(lc, "port") || strings.Contains(lc, "systemd"):
+		return "infrastructure"
+	case strings.Contains(lc, "api") || strings.Contains(lc, "endpoint") || strings.Contains(lc, "http") || strings.Contains(lc, "rest") || strings.Contains(lc, "json"):
+		return "api"
+	case strings.Contains(lc, "depend") || strings.Contains(lc, "package") || strings.Contains(lc, "version") || strings.Contains(lc, "module"):
+		return "dependencies"
+	case strings.Contains(lc, "pattern") || strings.Contains(lc, "convention") || strings.Contains(lc, "naming") || strings.Contains(lc, "format"):
+		return "conventions"
+	default:
+		return "architecture"
+	}
+}
+
+func normalizeOutcome(o string) string {
+	o = strings.ToLower(strings.TrimSpace(o))
+	switch o {
+	case "active", "resolved", "superseded", "deprecated":
+		return o
+	default:
+		return "active"
+	}
 }
 
 func parseCompressResult(data []byte) (summary string, decisions []Proposal, err error) {

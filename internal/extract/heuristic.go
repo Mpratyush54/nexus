@@ -69,13 +69,17 @@ func Heuristic(project string, turns []Turn, _ []Existing) []Proposal {
 				conf = 0.95
 			}
 			out = append(out, Proposal{
-				Key:        KeyFromContent(sent),
-				Content:    sent,
-				Level:      classifyLevel(sent),
-				Scope:      classifyScope(sent),
-				Confidence: conf,
-				Explicit:   explicit,
-				Source:     "processor:heuristic",
+				Key:           KeyFromContent(sent),
+				Content:       sent,
+				Level:         classifyLevel(sent),
+				Scope:         classifyScope(sent),
+				Confidence:    conf,
+				Explicit:      explicit,
+				Source:        "processor:heuristic",
+				Category:      normalizeCategory("", sent),
+				FilesAffected: []string{},
+				ToolsUsed:     []string{},
+				Outcome:       "active",
 			})
 		}
 	}

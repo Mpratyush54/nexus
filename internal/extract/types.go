@@ -25,13 +25,19 @@ type Existing struct {
 
 // Proposal is one candidate memory.
 type Proposal struct {
-	Key        string  `json:"key"`
-	Content    string  `json:"content"`
-	Level      string  `json:"level"`
-	Scope      string  `json:"scope"`
-	Confidence float64 `json:"confidence"`
-	Explicit   bool    `json:"explicit,omitempty"`
-	Source     string  `json:"source,omitempty"`
+	Key           string   `json:"key"`
+	Content       string   `json:"content"`
+	Level         string   `json:"level"`
+	Scope         string   `json:"scope"`
+	Confidence    float64  `json:"confidence"`
+	Explicit      bool     `json:"explicit,omitempty"`
+	Source        string   `json:"source,omitempty"`
+	Category      string   `json:"category,omitempty"`      // architecture | infrastructure | auth | api | conventions | dependencies
+	FilesAffected []string `json:"files_affected,omitempty"`
+	ToolsUsed     []string `json:"tools_used,omitempty"`
+	SupersedesKey string   `json:"supersedes_key,omitempty"`
+	Outcome       string   `json:"outcome,omitempty"`       // active | superseded | deprecated
+	WeekBucket    string   `json:"week_bucket,omitempty"`   // e.g. 2026-W39
 }
 
 // Provider names returned in Result.Provider.

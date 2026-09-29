@@ -218,6 +218,8 @@ func cloneMemoryItem(m *MemoryItem) *MemoryItem {
 	cp := *m
 	cp.Tags = append([]string{}, m.Tags...)
 	cp.Embedding = append([]float32{}, m.Embedding...)
+	cp.FilesAffected = append([]string{}, m.FilesAffected...)
+	cp.ToolsUsed = append([]string{}, m.ToolsUsed...)
 	return &cp
 }
 

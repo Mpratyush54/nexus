@@ -81,6 +81,12 @@ type MemoryItem struct {
 	ProposedBy     string    `json:"proposed_by,omitempty"`
 	ConfirmedBy    string    `json:"confirmed_by,omitempty"`
 	SupersededBy   string    `json:"superseded_by,omitempty"`
+	Category       string    `json:"category,omitempty"` // architecture | infrastructure | auth | api | conventions | dependencies
+	FilesAffected  []string  `json:"files_affected,omitempty"`
+	ToolsUsed      []string  `json:"tools_used,omitempty"`
+	SupersedesKey  string    `json:"supersedes_key,omitempty"`
+	Outcome        string    `json:"outcome,omitempty"` // active | superseded | deprecated
+	WeekBucket     string    `json:"week_bucket,omitempty"` // e.g. 2026-W39
 	Visibility     string    `json:"visibility,omitempty"` // private | shared | project | public
 	UseCount       int       `json:"use_count"`
 	LastUsedAt     time.Time `json:"last_used_at,omitempty"`

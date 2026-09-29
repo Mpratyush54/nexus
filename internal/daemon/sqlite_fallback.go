@@ -49,7 +49,7 @@ func extractViaCLI(dbPath string) []Turn {
 	if err != nil || strings.TrimSpace(bin) == "" {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	// .dump is read-only; -readonly flag added when supported (best-effort:
 	// failure falls back to raw scan).

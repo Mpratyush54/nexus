@@ -114,6 +114,9 @@ func TestAuditRuntimeStartStopLifecycle(t *testing.T) {
 	r := NewRuntime(d, "proj-a", NewStaticDesignation(true))
 	r.DesignationPoll = 10 * time.Millisecond
 	r.DroppedLogEvery = 10 * time.Millisecond
+	if r.Harvester != nil {
+		r.Harvester.Sources = nil
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); r.Start(ctx) }()

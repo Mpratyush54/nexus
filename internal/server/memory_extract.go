@@ -1,8 +1,10 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	memctx "central-memory/internal/context"
 	"central-memory/internal/extract"
@@ -77,16 +79,36 @@ func (s *Server) persistExtractProposal(r *http.Request, projectID string, p ext
 	if conf <= 0 {
 		conf = 0.7
 	}
+	cat := p.Category
+	if cat == "" {
+		cat = "general"
+	}
+	outcome := p.Outcome
+	if outcome == "" {
+		outcome = "active"
+	}
+	week := p.WeekBucket
+	if week == "" {
+		y, w := time.Now().UTC().ISOWeek()
+		week = fmt.Sprintf("%04d-W%02d", y, w)
+	}
+
 	item := &store.MemoryItem{
-		ProjectID:  projectID,
-		Key:        key,
-		Content:    content,
-		Level:      level,
-		Scope:      scope,
-		Confidence: conf,
-		Status:     store.StatusProposed,
-		Source:     source,
-		ProposedBy: authSubject(r),
+		ProjectID:     projectID,
+		Key:           key,
+		Content:       content,
+		Level:         level,
+		Scope:         scope,
+		Confidence:    conf,
+		Status:        store.StatusProposed,
+		Source:        source,
+		ProposedBy:    authSubject(r),
+		Category:      cat,
+		FilesAffected: p.FilesAffected,
+		ToolsUsed:     p.ToolsUsed,
+		SupersedesKey: p.SupersedesKey,
+		Outcome:       outcome,
+		WeekBucket:    week,
 	}
 	if level == "personal" {
 		item.UserID = authSubject(r)

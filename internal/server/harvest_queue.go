@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -202,16 +203,22 @@ func (s *Server) upsertSessionSummary(ctx context.Context, job *store.HarvestJob
 		}
 	}
 
+	y, w := time.Now().UTC().ISOWeek()
 	item := &store.MemoryItem{
-		ProjectID:  job.ProjectID,
-		Key:        key,
-		Content:    content,
-		Level:      "project",
-		Scope:      "episode_summary",
-		Confidence: 0.9,
-		Status:     store.StatusConfirmed,
-		Source:     src,
-		Tags:       []string{"session-compress", "session:" + sessionID},
+		ProjectID:     job.ProjectID,
+		Key:           key,
+		Content:       content,
+		Level:         "project",
+		Scope:         "episode_summary",
+		Confidence:    0.9,
+		Status:        store.StatusConfirmed,
+		Source:        src,
+		Tags:          []string{"session-compress", "session:" + sessionID},
+		Category:      "architecture",
+		Outcome:       "active",
+		WeekBucket:    fmt.Sprintf("%04d-W%02d", y, w),
+		FilesAffected: []string{},
+		ToolsUsed:     []string{},
 	}
 	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {
@@ -297,16 +304,36 @@ func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob
 	if job.Source != "" {
 		tags = append(tags, "source:"+job.Source)
 	}
+	cat := p.Category
+	if cat == "" {
+		cat = "general"
+	}
+	outcome := p.Outcome
+	if outcome == "" {
+		outcome = "active"
+	}
+	week := p.WeekBucket
+	if week == "" {
+		y, w := time.Now().UTC().ISOWeek()
+		week = fmt.Sprintf("%04d-W%02d", y, w)
+	}
+
 	item := &store.MemoryItem{
-		ProjectID:  job.ProjectID,
-		Key:        key,
-		Content:    content,
-		Level:      level,
-		Scope:      scope,
-		Confidence: conf,
-		Status:     store.StatusConfirmed,
-		Source:     src,
-		Tags:       tags,
+		ProjectID:     job.ProjectID,
+		Key:           key,
+		Content:       content,
+		Level:         level,
+		Scope:         scope,
+		Confidence:    conf,
+		Status:        store.StatusConfirmed,
+		Source:        src,
+		Tags:          tags,
+		Category:      cat,
+		FilesAffected: p.FilesAffected,
+		ToolsUsed:     p.ToolsUsed,
+		SupersedesKey: p.SupersedesKey,
+		Outcome:       outcome,
+		WeekBucket:    week,
 	}
 	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {

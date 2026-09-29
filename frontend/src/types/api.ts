@@ -40,6 +40,13 @@ export type MemoryItem = {
   source?: string
   proposed_by?: string
   confirmed_by?: string
+  superseded_by?: string
+  category?: 'architecture' | 'infrastructure' | 'auth' | 'api' | 'conventions' | 'dependencies' | string
+  files_affected?: string[]
+  tools_used?: string[]
+  supersedes_key?: string
+  outcome?: 'active' | 'superseded' | 'deprecated' | 'resolved' | string
+  week_bucket?: string
   use_count: number
   visibility?: MemoryShareVisibility | string
   created_at: string

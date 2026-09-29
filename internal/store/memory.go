@@ -11,6 +11,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -20,7 +21,10 @@ const memoryColumns = `id, project_id, user_id, session_id, org_id,
 	"key", content, context_snippet, level, scope, embedding::text,
 	tags, confidence, status, source, source_event_id,
 	proposed_by, confirmed_by, superseded_by, visibility,
-	use_count, last_used_at, created_at, updated_at`
+	use_count, last_used_at, created_at, updated_at,
+	COALESCE(category, 'general'), COALESCE(files_affected, '{}'),
+	COALESCE(tools_used, '{}'), COALESCE(supersedes_key, ''),
+	COALESCE(outcome, 'active'), COALESCE(week_bucket, '')`
 
 func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
 	var m MemoryItem
@@ -31,11 +35,15 @@ func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
 	var proposedBy, confirmedBy, supersededBy *string
 	var visibility *string
 	var lastUsedAt *time.Time
+	var category, supersedesKey, outcome, weekBucket *string
+	var filesAffected, toolsUsed []string
 	if err := row.Scan(&m.ID, &projectID, &userID, &sessionID, &orgID,
 		&m.Key, &m.Content, &contextSnippet, &m.Level, &m.Scope, &embeddingText,
 		&m.Tags, &m.Confidence, &m.Status, &source, &sourceEventID,
 		&proposedBy, &confirmedBy, &supersededBy, &visibility,
-		&m.UseCount, &lastUsedAt, &m.CreatedAt, &m.UpdatedAt); err != nil {
+		&m.UseCount, &lastUsedAt, &m.CreatedAt, &m.UpdatedAt,
+		&category, &filesAffected, &toolsUsed, &supersedesKey,
+		&outcome, &weekBucket); err != nil {
 		return nil, err
 	}
 	if projectID != nil {
@@ -76,6 +84,26 @@ func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
 	if lastUsedAt != nil {
 		m.LastUsedAt = *lastUsedAt
 	}
+	if category != nil {
+		m.Category = *category
+	}
+	m.FilesAffected = filesAffected
+	if m.FilesAffected == nil {
+		m.FilesAffected = []string{}
+	}
+	m.ToolsUsed = toolsUsed
+	if m.ToolsUsed == nil {
+		m.ToolsUsed = []string{}
+	}
+	if supersedesKey != nil {
+		m.SupersedesKey = *supersedesKey
+	}
+	if outcome != nil {
+		m.Outcome = *outcome
+	}
+	if weekBucket != nil {
+		m.WeekBucket = *weekBucket
+	}
 	m.Embedding = parseEmbedding(embeddingText)
 	return &m, nil
 }
@@ -107,14 +135,61 @@ func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) 
 	} else {
 		item.Visibility = NormalizeVisibility(item.Visibility)
 	}
+	targetKey := strings.TrimSpace(item.SupersedesKey)
+	if targetKey == "" && strings.TrimSpace(item.Key) != "" && item.ProjectID != "" {
+		targetKey = strings.TrimSpace(item.Key)
+	}
+
+	var supersededIDs []string
+	if item.ProjectID != "" && targetKey != "" {
+		rows, err := s.pool.Query(ctx,
+			`SELECT id FROM memory_items 
+			 WHERE project_id = $1::uuid AND key = $2 
+			   AND status IN ('CONFIRMED', 'PROPOSED') AND superseded_by IS NULL`,
+			item.ProjectID, targetKey)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var oldID string
+				if err := rows.Scan(&oldID); err == nil && oldID != "" && oldID != item.ID {
+					supersededIDs = append(supersededIDs, oldID)
+				}
+			}
+		}
+	}
+
+	cat := item.Category
+	if cat == "" {
+		cat = "general"
+	}
+	outc := item.Outcome
+	if outc == "" {
+		outc = "active"
+	}
+	files := item.FilesAffected
+	if files == nil {
+		files = []string{}
+	}
+	tools := item.ToolsUsed
+	if tools == nil {
+		tools = []string{}
+	}
+	week := item.WeekBucket
+	if week == "" {
+		y, w := time.Now().UTC().ISOWeek()
+		week = fmt.Sprintf("%04d-W%02d", y, w)
+	}
+
 	row := s.pool.QueryRow(ctx,
 		`INSERT INTO memory_items
 			(project_id, user_id, session_id, org_id, "key", content,
 			 context_snippet, level, scope, embedding, tags, confidence,
-			 status, source, source_event_id, proposed_by, visibility)
+			 status, source, source_event_id, proposed_by, visibility,
+			 category, files_affected, tools_used, supersedes_key, outcome, week_bucket)
 		 VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6,
 		         NULLIF($7,''), $8, $9, $10::vector, $11, $12,
-		         $13, NULLIF($14,''), $15, $16::uuid, $17)
+		         $13, NULLIF($14,''), $15, $16::uuid, $17,
+		         $18, $19, $20, NULLIF($21,''), $22, $23)
 		 RETURNING id, created_at, updated_at`,
 		nullText(item.ProjectID), nullText(item.UserID),
 		nullText(item.SessionID), nullText(item.OrgID),
@@ -122,8 +197,24 @@ func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) 
 		item.Level, item.Scope, encodeEmbedding(item.Embedding),
 		item.Tags, item.Confidence, item.Status, item.Source,
 		nullEventID(item.SourceEventID), nullText(item.ProposedBy),
-		item.Visibility)
-	return row.Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
+		item.Visibility,
+		cat, files, tools, item.SupersedesKey, outc, week)
+	if err := row.Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		return err
+	}
+
+	for _, oldID := range supersededIDs {
+		_, _ = s.pool.Exec(ctx,
+			`INSERT INTO memory_versions (memory_id, version, key, content, tags, level, scope, created_at)
+			 SELECT id, COALESCE((SELECT MAX(version) FROM memory_versions WHERE memory_id = $1::uuid), 0) + 1,
+			        key, content, tags, level, scope, now()
+			 FROM memory_items WHERE id = $1::uuid`, oldID)
+		_, _ = s.pool.Exec(ctx,
+			`UPDATE memory_items 
+			 SET status = 'SUPERSEDED', superseded_by = $1::uuid, outcome = 'superseded', updated_at = now()
+			 WHERE id = $2::uuid`, item.ID, oldID)
+	}
+	return nil
 }
 
 func nullEventID(id int64) any {
@@ -223,6 +314,7 @@ func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, 
 		`SELECT `+memoryColumns+` FROM memory_items
 		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
 		    AND status IN ('CONFIRMED','PROPOSED')
+		    AND superseded_by IS NULL
 		    AND ($2 = '' OR content ILIKE '%'||$2||'%'
 		         OR "key" ILIKE '%'||$2||'%' OR $2 = ANY(tags))
 		    AND ($3::text[] IS NULL OR tags && $3)
@@ -323,6 +415,7 @@ func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string
 		`SELECT `+memoryColumns+` FROM memory_items
 		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
 		    AND status = 'CONFIRMED'
+		    AND superseded_by IS NULL
 		    AND confidence > 0.3
 		    AND embedding IS NOT NULL
 		  ORDER BY embedding <=> $2::vector

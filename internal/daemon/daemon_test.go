@@ -25,6 +25,7 @@ func testDaemon(t *testing.T) *Daemon {
 	if err != nil {
 		t.Fatal(err)
 	}
+	d.UserID = "u-test-portal"
 	return d
 }
 
