@@ -121,6 +121,10 @@ type MemStore struct {
 	// Billing catalog + subscriptions (org and personal).
 	plans       map[string]*Plan
 	billingSubs map[string]*Subscription // ownerType/ownerID
+	// Session provenance + snapshots (migration 028).
+	fileOps     []FileOperation
+	toolExecs   []ToolExecution
+	snapshots   []SessionSnapshot
 }
 
 // memSubscription is one in-process event subscriber.

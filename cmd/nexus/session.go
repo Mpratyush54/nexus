@@ -11,18 +11,22 @@ import (
 )
 
 type sessionOptions struct {
-	Sub     string
-	ID      string
-	Title   string
-	Project string
-	JSON    bool
+	Sub       string
+	ID        string
+	Title     string
+	Project   string
+	Workspace string
+	Harness   string
+	DryRun    bool
+	Force     bool
+	JSON      bool
 }
 
 // parseSessionArgs parses `nexus session <sub> ...`. Pure: no network, no exit.
 func parseSessionArgs(args []string) (sessionOptions, error) {
 	var o sessionOptions
 	if len(args) == 0 {
-		return o, errors.New("session requires a subcommand: list|create|join")
+		return o, errors.New("session requires a subcommand: list|create|join|restore")
 	}
 	o.Sub = args[0]
 	rest := args[1:]
@@ -57,10 +61,53 @@ func parseSessionArgs(args []string) (sessionOptions, error) {
 			return o, errors.New(`session join requires exactly one <id> argument`)
 		}
 		o.ID = fs.Args()[0]
+	case "restore":
+		fs.StringVar(&o.Workspace, "workspace", "", "target workspace directory")
+		fs.StringVar(&o.Workspace, "w", "", "target workspace directory (shorthand)")
+		fs.StringVar(&o.Harness, "harness", "", "override harness type")
+		fs.BoolVar(&o.DryRun, "dry-run", false, "show restore plan without writing")
+		fs.BoolVar(&o.Force, "force", false, "allow dirty workspace / non-git folder")
+		if err := fs.Parse(normalizeFlagArgs(rest)); err != nil {
+			return o, err
+		}
+		if len(fs.Args()) != 1 {
+			return o, errors.New(`session restore requires exactly one <session-id> argument`)
+		}
+		o.ID = fs.Args()[0]
+		if strings.TrimSpace(o.Workspace) == "" {
+			return o, errors.New("session restore requires --workspace / -w")
+		}
 	default:
-		return o, fmt.Errorf("unknown session subcommand %q (want list|create|join)", o.Sub)
+		return o, fmt.Errorf("unknown session subcommand %q (want list|create|join|restore)", o.Sub)
 	}
 	return o, nil
+}
+
+// normalizeFlagArgs moves -flag [value] pairs ahead of positionals so
+// flag.FlagSet can parse `restore <id> --workspace /path`.
+func normalizeFlagArgs(args []string) []string {
+	var flags, pos []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "-") {
+			pos = append(pos, a)
+			continue
+		}
+		flags = append(flags, a)
+		if strings.Contains(a, "=") {
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		// Boolean flags have no value.
+		if name == "dry-run" || name == "force" || name == "json" {
+			continue
+		}
+		if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			i++
+			flags = append(flags, args[i])
+		}
+	}
+	return append(flags, pos...)
 }
 
 // runSession calls the Phase 3 session routes. The Phase 1.8 server does not
@@ -136,6 +183,8 @@ func runSession(ctx context.Context, cfg Config, args []string, stdout io.Writer
 		}
 		fmt.Fprintf(stdout, "joined session %s\n", o.ID)
 		return nil
+	case "restore":
+		return runRestore(ctx, cfg, o, stdout)
 	}
 	return fmt.Errorf("unknown session subcommand %q", o.Sub)
 }

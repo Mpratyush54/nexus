@@ -79,3 +79,13 @@ export function useSteerResume() {
     mutationFn: (sessionId: string) => sessionsApi.steerResume(sessionId),
   })
 }
+
+export function useSessionSnapshots() {
+  const { projectId, isAuthenticated } = useAuth()
+  return useQuery({
+    queryKey: ['sessions', 'snapshots', projectId],
+    enabled: isAuthenticated && Boolean(projectId),
+    refetchInterval: 30_000,
+    queryFn: async () => (await sessionsApi.listSnapshots(projectId!)).items ?? [],
+  })
+}

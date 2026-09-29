@@ -123,6 +123,11 @@ type Runtime struct {
 	lastScanTurns   int
 	lastScanErr     string
 	recent          []HarvestLogLine
+
+	// Snapshot push state (Phase 4 teleport).
+	snapshotMu           sync.Mutex
+	lastSnapshotTurnCount map[string]int
+	sessionTurnCount      map[string]int
 }
 
 // NewRuntime builds the pipeline for daemon d. Harvester/Watcher/Processor
@@ -177,6 +182,8 @@ func NewRuntime(d *Daemon, project string, designation DesignationProvider) *Run
 		harvestCh:       harvestCh,
 		DesignationPoll: 30 * time.Second,
 		DroppedLogEvery: time.Minute,
+		lastSnapshotTurnCount: map[string]int{},
+		sessionTurnCount:      map[string]int{},
 	}
 }
 
@@ -325,11 +332,18 @@ func (r *Runtime) Start(ctx context.Context) {
 				if len(batch) == 0 {
 					continue
 				}
+				r.noteSessionTurns(sid, len(batch))
+				r.pushParsedToolOps(ctx, sid, batch)
 				if props, err := r.Processor.ProcessEvents(ctx, r.ProjectID, batch); err != nil {
 					log.Printf("daemon: conversation process (session=%s): %v", sid, err)
 					r.noteProposals(len(props), err)
 				} else if len(props) > 0 {
 					r.noteProposals(len(props), nil)
+				}
+				for _, ev := range batch {
+					if ev.Type == EventSessionComplete {
+						r.maybePushSnapshot(ctx, sid, true)
+					}
 				}
 			}
 		}
@@ -341,6 +355,8 @@ func (r *Runtime) Start(ctx context.Context) {
 	defer dropT.Stop()
 	epT := time.NewTicker(30 * time.Second)
 	defer epT.Stop()
+	snapT := time.NewTicker(60 * time.Second)
+	defer snapT.Stop()
 
 	for {
 		select {
@@ -367,6 +383,8 @@ func (r *Runtime) Start(ctx context.Context) {
 			}
 		case <-epT.C:
 			flush()
+		case <-snapT.C:
+			r.pushDueSnapshots(ctx)
 		case <-desigT.C:
 			r.SyncDesignation()
 		case <-dropT.C:
@@ -375,4 +393,127 @@ func (r *Runtime) Start(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (r *Runtime) noteSessionTurns(sessionID string, n int) {
+	if r == nil || sessionID == "" || n <= 0 {
+		return
+	}
+	r.snapshotMu.Lock()
+	defer r.snapshotMu.Unlock()
+	if r.sessionTurnCount == nil {
+		r.sessionTurnCount = map[string]int{}
+	}
+	r.sessionTurnCount[sessionID] += n
+}
+
+func (r *Runtime) pushDueSnapshots(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	r.snapshotMu.Lock()
+	sessions := make([]string, 0, len(r.sessionTurnCount))
+	for sid, n := range r.sessionTurnCount {
+		if n > r.lastSnapshotTurnCount[sid] {
+			sessions = append(sessions, sid)
+		}
+	}
+	r.snapshotMu.Unlock()
+	for _, sid := range sessions {
+		r.maybePushSnapshot(ctx, sid, false)
+	}
+}
+
+func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force bool) {
+	if r == nil || r.Daemon == nil || sessionID == "" {
+		return
+	}
+	hs, ok := r.httpStore()
+	if !ok || hs == nil || strings.TrimSpace(hs.ProjectID) == "" {
+		return
+	}
+	r.snapshotMu.Lock()
+	turns := r.sessionTurnCount[sessionID]
+	last := r.lastSnapshotTurnCount[sessionID]
+	r.snapshotMu.Unlock()
+	if !force && turns <= last {
+		return
+	}
+	snap, err := CollectSnapshot(r.Daemon.Root, sessionID, "antigravity", r.Daemon.MachineID)
+	if err != nil {
+		log.Printf("daemon: collect snapshot session=%s: %v", sessionID, err)
+		return
+	}
+	snap.SessionID = sessionID
+	snap.ProjectID = hs.ProjectID
+	if err := hs.PushSnapshot(ctx, snap); err != nil {
+		log.Printf("daemon: push snapshot session=%s: %v", sessionID, err)
+		return
+	}
+	r.snapshotMu.Lock()
+	if r.lastSnapshotTurnCount == nil {
+		r.lastSnapshotTurnCount = map[string]int{}
+	}
+	r.lastSnapshotTurnCount[sessionID] = turns
+	r.snapshotMu.Unlock()
+}
+
+func (r *Runtime) httpStore() (*HTTPMemoryStore, bool) {
+	if r == nil || r.Processor == nil {
+		return nil, false
+	}
+	hs, ok := r.Processor.Store.(*HTTPMemoryStore)
+	return hs, ok
+}
+
+func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID string, batch []Event) {
+	hs, ok := r.httpStore()
+	if !ok || hs == nil || strings.TrimSpace(hs.ProjectID) == "" {
+		return
+	}
+	var fileOps []map[string]any
+	var toolExecs []map[string]any
+	for i, ev := range batch {
+		payload := ev.Payload
+		if payload == nil {
+			continue
+		}
+		if payload["workspace_root"] == nil && r.Daemon != nil {
+			payload = copyMap(payload)
+			payload["workspace_root"] = r.Daemon.Root
+		}
+		for _, p := range ParseToolCalls(payload, i) {
+			if p.Type == "file_op" {
+				fileOps = append(fileOps, map[string]any{
+					"harness": "antigravity", "tool_name": p.ToolName, "file_path": p.FilePath,
+					"op_type": p.OpType, "line_start": p.LineStart, "line_end": p.LineEnd,
+					"diff_hunk": p.DiffHunk, "turn_index": p.TurnIndex,
+				})
+			} else if p.Type == "tool_exec" {
+				row := map[string]any{
+					"harness": "antigravity", "tool_name": p.ToolName, "command_line": p.CommandLine,
+					"working_directory": p.WorkingDirectory, "output_snippet": p.OutputSnippet,
+					"truncated": p.Truncated,
+				}
+				if p.ExitCode != nil {
+					row["exit_code"] = *p.ExitCode
+				}
+				toolExecs = append(toolExecs, row)
+			}
+		}
+	}
+	if len(fileOps) == 0 && len(toolExecs) == 0 {
+		return
+	}
+	if err := hs.PushOperations(ctx, sessionID, fileOps, toolExecs); err != nil {
+		log.Printf("daemon: push operations session=%s: %v", sessionID, err)
+	}
+}
+
+func copyMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m)+1)
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }

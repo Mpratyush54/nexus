@@ -7,6 +7,7 @@ package main
 import (
 	"context"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -69,18 +70,29 @@ func run() error {
 
 	refreshStatus := func() {
 		file, _ := config.LoadFile()
-		label := "Status: Not signed in"
+		label := "● Status: Not signed in"
 		tip := "Nexus — not signed in"
-		if strings.TrimSpace(file.Token) != "" {
+		root := resolveWorkspaceRoot()
+		if root == "" {
+			label = "⚠ No workspace folder set"
+			tip = "Nexus — set a workspace folder"
+		} else if strings.TrimSpace(file.Token) != "" {
 			name := file.Username
 			if name == "" {
 				name = file.UserID
 			}
-			label = "Status: Signed in as " + name
+			label = "● Signed in as " + name
 			tip = "Nexus — " + name
-			if online := daemonOnline(); online {
+			n := harvestHarnessCount()
+			if n > 0 {
+				label += fmt.Sprintf(" · %d harnesses active", n)
+			} else if daemonOnline() {
 				label += " · daemon online"
 				tip += " (connected)"
+			}
+			base := filepath.Base(root)
+			if base != "" && base != "." {
+				tip += " · " + base
 			}
 		}
 		mu.Lock()
@@ -125,7 +137,7 @@ func run() error {
 	menu.Add("Open Nexus home", func() {
 		_ = authbrowser.OpenBrowser(config.ResolveAppURL() + "/app/dashboard")
 	})
-	menu.Add("Open local status", func() {
+	menu.Add("Open Cockpit Dashboard", func() {
 		_ = authbrowser.OpenBrowser("http://127.0.0.1:7272/")
 	})
 	menu.Add("Start workspace daemon", func() {
@@ -136,8 +148,32 @@ func run() error {
 		tray.ShowNotification("Nexus", "Workspace daemon started")
 		refreshStatus()
 	})
-	menu.Add("Set workspace folder…", func() {
+	wsMenu := systray.NewMenu()
+	file, _ := config.LoadFile()
+	for _, path := range file.RecentWorkspaces {
+		p := path
+		label := filepath.Base(p)
+		if label == "" || label == "." || label == string(filepath.Separator) {
+			label = p
+		}
+		wsMenu.Add(label, func() {
+			go switchToWorkspace(tray, &mu, &daemonProc, refreshStatus, p)
+		})
+	}
+	wsMenu.AddSeparator()
+	wsMenu.Add("Browse for folder…", func() {
 		go pickWorkspaceFolder(tray, &mu, &daemonProc, refreshStatus)
+	})
+	menu.AddSubmenu("Switch workspace", wsMenu)
+	menu.Add("Scan Now", func() {
+		go func() {
+			if err := postLocalHarvest(); err != nil {
+				tray.ShowNotification("Nexus", "Scan: "+err.Error())
+				return
+			}
+			tray.ShowNotification("Nexus", "Harvest scan requested")
+			refreshStatus()
+		}()
 	})
 	menu.AddSeparator()
 	menu.Add("Check for updates…", func() {
@@ -260,6 +296,65 @@ func daemonOnline() bool {
 	}
 	defer resp.Body.Close()
 	return resp.StatusCode == 200
+}
+
+func harvestHarnessCount() int {
+	client := &http.Client{Timeout: time.Second}
+	resp, err := client.Get("http://127.0.0.1:7272/local/harvest")
+	if err != nil {
+		return 0
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return 0
+	}
+	var body struct {
+		Agents []any `json:"agents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0
+	}
+	return len(body.Agents)
+}
+
+func postLocalHarvest() error {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Post("http://127.0.0.1:7272/local/harvest", "application/json", strings.NewReader("{}"))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("HTTP %s", resp.Status)
+	}
+	return nil
+}
+
+func switchToWorkspace(tray *systray.SystemTray, mu *sync.Mutex, proc **os.Process, refresh func(), path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	if st, err := os.Stat(path); err != nil || !st.IsDir() {
+		tray.ShowNotification("Nexus", "Folder missing: "+path)
+		return
+	}
+	if err := config.SaveFile(config.File{WorkspaceRoot: path}); err != nil {
+		tray.ShowNotification("Nexus", "Could not save folder: "+err.Error())
+		return
+	}
+	mu.Lock()
+	if *proc != nil {
+		_ = (*proc).Kill()
+		*proc = nil
+	}
+	mu.Unlock()
+	if err := ensureDaemon(mu, proc); err != nil {
+		tray.ShowNotification("Nexus", "Saved "+path+" — daemon: "+err.Error())
+	} else {
+		tray.ShowNotification("Nexus", "Watching "+path)
+	}
+	refresh()
 }
 
 func ensureDaemon(mu *sync.Mutex, proc **os.Process) error {

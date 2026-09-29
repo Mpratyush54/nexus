@@ -77,4 +77,20 @@ export const sessionsApi = {
       body: {},
     })
   },
+  listSnapshots(projectId: string) {
+    return apiRequest<ListResponse<SessionSnapshotMeta>>(`/projects/${projectId}/snapshots`)
+  },
+  snapshotDownloadURL(sessionId: string) {
+    return `/sessions/${sessionId}/snapshot/download`
+  },
+}
+
+export type SessionSnapshotMeta = {
+  session_id: string
+  harness: string
+  turn_count: number
+  git_branch?: string
+  source_machine_id?: string
+  updated_at: string
+  age_seconds: number
 }

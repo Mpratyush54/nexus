@@ -12,12 +12,63 @@ import (
 // File holds the on-disk shape of ~/.config/central-memory/config.json
 // (or %APPDATA%\central-memory\config.json on Windows).
 type File struct {
-	ServerURL     string `json:"server_url,omitempty"`
-	AppURL        string `json:"app_url,omitempty"`
-	Token         string `json:"token,omitempty"`
-	UserID        string `json:"user_id,omitempty"`
-	Username      string `json:"username,omitempty"`
-	WorkspaceRoot string `json:"workspace_root,omitempty"`
+	ServerURL        string   `json:"server_url,omitempty"`
+	AppURL           string   `json:"app_url,omitempty"`
+	Token            string   `json:"token,omitempty"`
+	UserID           string   `json:"user_id,omitempty"`
+	Username         string   `json:"username,omitempty"`
+	WorkspaceRoot    string   `json:"workspace_root,omitempty"`
+	RecentWorkspaces []string `json:"recent_workspaces,omitempty"`
+}
+
+// maxRecentWorkspaces caps the MRU workspace list persisted in config.json.
+const maxRecentWorkspaces = 5
+
+// NormalizeWorkspacePath cleans path and lowercases the Windows drive letter
+// so D:\foo and d:\foo collapse to one recent-workspace entry.
+func NormalizeWorkspacePath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	path = filepath.Clean(path)
+	if len(path) >= 2 && path[1] == ':' {
+		drive := path[0]
+		if drive >= 'A' && drive <= 'Z' {
+			path = string(drive+'a'-'A') + path[1:]
+		}
+	}
+	return path
+}
+
+// PushRecentWorkspace prepends path to RecentWorkspaces (deduped, capped at 5).
+func PushRecentWorkspace(path string) error {
+	path = NormalizeWorkspacePath(path)
+	if path == "" {
+		return nil
+	}
+	cfg, err := LoadFile()
+	if err != nil {
+		return err
+	}
+	cfg.RecentWorkspaces = pushRecent(cfg.RecentWorkspaces, path)
+	return writeFile(cfg)
+}
+
+func pushRecent(list []string, path string) []string {
+	out := make([]string, 0, maxRecentWorkspaces)
+	out = append(out, path)
+	for _, p := range list {
+		p = NormalizeWorkspacePath(p)
+		if p == "" || strings.EqualFold(p, path) {
+			continue
+		}
+		out = append(out, p)
+		if len(out) >= maxRecentWorkspaces {
+			break
+		}
+	}
+	return out
 }
 
 // LoadFile reads the local config file. Missing/unreadable files return an
@@ -67,6 +118,7 @@ func SaveFile(patch File) error {
 	}
 	if v := strings.TrimSpace(patch.WorkspaceRoot); v != "" {
 		cur.WorkspaceRoot = v
+		cur.RecentWorkspaces = pushRecent(cur.RecentWorkspaces, NormalizeWorkspacePath(v))
 	}
 	return writeFile(cur)
 }

@@ -89,6 +89,8 @@ func (s *Server) registerExtraRoutes() {
 	s.registerDashboardRoutes()
 
 	s.registerExportRoutes()
+	s.registerProvenanceRoutes()
+	s.registerSnapshotRoutes()
 
 	// Episodes.
 	s.Mux.HandleFunc("POST /episodes/{id}/resolve", s.requireAuth(s.handleEpisodeResolve))

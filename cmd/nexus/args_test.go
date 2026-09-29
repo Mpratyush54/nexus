@@ -107,6 +107,13 @@ func TestParseSessionArgs(t *testing.T) {
 	if _, err := parseSessionArgs([]string{"join"}); err == nil {
 		t.Error("join without id should fail")
 	}
+	o, err = parseSessionArgs([]string{"restore", "sess-9", "--workspace", "/tmp/ws"})
+	if err != nil || o.ID != "sess-9" || o.Workspace != "/tmp/ws" || o.Sub != "restore" {
+		t.Errorf("restore parse wrong: %+v %v", o, err)
+	}
+	if _, err := parseSessionArgs([]string{"restore", "sess-9"}); err == nil {
+		t.Error("restore without workspace should fail")
+	}
 	if _, err := parseSessionArgs([]string{"bogus"}); err == nil {
 		t.Error("unknown session subcommand should fail")
 	}

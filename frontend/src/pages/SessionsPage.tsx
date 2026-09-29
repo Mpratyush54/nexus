@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { Pause, Play, Radio, Send } from 'lucide-react'
+import { Pause, Play, Radio, Send, Copy, Download } from 'lucide-react'
 import { useState, type FormEvent } from 'react'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
@@ -11,11 +11,13 @@ import {
   useHandoff,
   useJoinSession,
   useLeaveSession,
+  useSessionSnapshots,
   useSessions,
   useSteerInterrupt,
   useSteerPrompt,
   useSteerResume,
 } from '@/hooks/useSessions'
+import { sessionsApi } from '@/api/sessions'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
@@ -24,6 +26,7 @@ export function SessionsPage() {
   const { projectId } = useAuth()
   const { push } = useToast()
   const sessions = useSessions()
+  const snapshots = useSessionSnapshots()
   const create = useCreateSession()
   const join = useJoinSession()
   const leave = useLeaveSession()
@@ -347,6 +350,68 @@ export function SessionsPage() {
           </GlassPanel>
         </div>
       </div>
+
+      <GlassPanel className="space-y-4 p-5">
+        <div>
+          <h2 className="text-sm font-medium text-fg">Session snapshots (Teleport)</h2>
+          <p className="mt-1 text-xs text-muted">
+            Auto-refreshes every 30s. Restore on another machine with the CLI or Desktop Cockpit.
+          </p>
+        </div>
+        {(snapshots.data ?? []).length === 0 ? (
+          <p className="text-sm text-muted">No snapshots yet — Desktop pushes them while you work.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead className="text-xs text-muted">
+                <tr>
+                  <th className="py-2 pr-3 font-medium">Session</th>
+                  <th className="py-2 pr-3 font-medium">Harness</th>
+                  <th className="py-2 pr-3 font-medium">Turns</th>
+                  <th className="py-2 pr-3 font-medium">Branch</th>
+                  <th className="py-2 pr-3 font-medium">Age</th>
+                  <th className="py-2 font-medium">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(snapshots.data ?? []).map((s) => (
+                  <tr key={s.session_id} className="border-t border-border/60">
+                    <td className="py-2 pr-3 font-mono text-xs">{s.session_id.slice(0, 8)}…</td>
+                    <td className="py-2 pr-3">{s.harness}</td>
+                    <td className="py-2 pr-3">{s.turn_count}</td>
+                    <td className="py-2 pr-3">{s.git_branch || '—'}</td>
+                    <td className="py-2 pr-3">{formatRelative(s.updated_at)}</td>
+                    <td className="py-2">
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            const cmd = `nexus session restore ${s.session_id} --workspace <path>`
+                            void navigator.clipboard.writeText(cmd)
+                            push({ title: 'Copied restore command', detail: cmd })
+                          }}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                          Copy restore
+                        </Button>
+                        <a
+                          className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-2 text-xs text-fg-dim hover:text-fg"
+                          href={sessionsApi.snapshotDownloadURL(s.session_id)}
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          Bundle
+                        </a>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </GlassPanel>
     </div>
   )
 }

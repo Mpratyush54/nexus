@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"central-memory/internal/store"
 )
 
 // HTTPMemoryStore uploads processor proposals to the central server
@@ -234,8 +237,14 @@ func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]
 	base := s.Base
 	token := s.Token
 	s.mu.Unlock()
-	if base == "" || projectID == "" {
-		return "", nil, fmt.Errorf("daemon: http memory store missing server or project_id")
+	if base == "" {
+		return "", nil, fmt.Errorf("daemon: http memory store missing server URL")
+	}
+	if token == "" {
+		return "", nil, fmt.Errorf("not signed in — please sign in via Nexus Desktop tray menu or run 'nexus login'")
+	}
+	if projectID == "" {
+		return "", nil, fmt.Errorf("no workspace folder linked — open Nexus Desktop and select a workspace folder, or run 'nexus workspace set <path>'")
 	}
 	if len(turns) == 0 {
 		return "queued", nil, nil
@@ -359,4 +368,111 @@ func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]
 		s.mu.Unlock()
 	}
 	return provider, proposals, nil
+}
+
+// PushSnapshot uploads a gzip-backed session snapshot to the server.
+func (s *HTTPMemoryStore) PushSnapshot(ctx context.Context, snap *store.SessionSnapshot) error {
+	if s == nil || snap == nil {
+		return fmt.Errorf("daemon: push snapshot: nil store or snapshot")
+	}
+	s.mu.Lock()
+	base, token, projectID := s.Base, s.Token, s.ProjectID
+	s.mu.Unlock()
+	if base == "" || token == "" || projectID == "" {
+		return fmt.Errorf("daemon: push snapshot: missing server/token/project")
+	}
+	if snap.ProjectID == "" {
+		snap.ProjectID = projectID
+	}
+	body := map[string]any{
+		"project_id":              snap.ProjectID,
+		"harness":                 snap.Harness,
+		"conversation_id":         snap.ConversationID,
+		"turn_count":              snap.TurnCount,
+		"git_branch":              snap.GitBranch,
+		"git_commit":              snap.GitCommit,
+		"git_dirty":               snap.GitDirty,
+		"uncommitted_diff_b64":    encodeB64(snap.UncommittedDiff),
+		"diff_size_bytes":         snap.DiffSizeBytes,
+		"diff_truncated":           snap.DiffTruncated,
+		"transcript_payload_b64":  encodeB64(snap.TranscriptPayload),
+		"artifacts_bundle_b64":    encodeB64(snap.ArtifactsBundle),
+		"source_machine_id":       snap.SourceMachineID,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base+"/sessions/"+url.PathEscape(snap.SessionID)+"/snapshot", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := s.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 60 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Errorf("daemon: push snapshot: %s %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+// PushOperations posts parsed file/tool provenance for a session.
+func (s *HTTPMemoryStore) PushOperations(ctx context.Context, sessionID string, fileOps, toolExecs []map[string]any) error {
+	if s == nil {
+		return fmt.Errorf("daemon: push operations: nil store")
+	}
+	s.mu.Lock()
+	base, token, projectID := s.Base, s.Token, s.ProjectID
+	s.mu.Unlock()
+	if base == "" || token == "" || projectID == "" || sessionID == "" {
+		return fmt.Errorf("daemon: push operations: missing fields")
+	}
+	body := map[string]any{
+		"project_id":       projectID,
+		"harness":          "antigravity",
+		"file_operations":  fileOps,
+		"tool_executions":  toolExecs,
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		base+"/sessions/"+url.PathEscape(sessionID)+"/operations", bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	client := s.HTTP
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		return fmt.Errorf("daemon: push operations: %s %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	return nil
+}
+
+func encodeB64(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }

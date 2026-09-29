@@ -74,6 +74,11 @@ func (p *CORSProxy) Handler() http.Handler {
 	mux.HandleFunc("/local/file/read", d.withPortalIdentityGate(d.handleFileRead))
 	mux.HandleFunc("/local/workspace", d.withPortalIdentityGate(d.handleLocalWorkspace))
 	mux.HandleFunc("/local/harvest", d.withPortalIdentityGate(d.handleLocalHarvest))
+	mux.HandleFunc("/local/workspace/switch", d.withPortalIdentityGate(d.handleWorkspaceSwitch))
+	mux.HandleFunc("/local/workspace/recent", d.withPortalIdentityGate(d.handleWorkspaceRecent))
+	mux.HandleFunc("/local/diagnostics", d.withPortalIdentityGate(d.handleDiagnostics))
+	mux.HandleFunc("/local/session/restore", d.withPortalIdentityGate(d.handleSessionRestore))
+	mux.HandleFunc("/local/snapshots", d.withPortalIdentityGate(d.handleLocalSnapshots))
 
 	// Explicitly block dangerous surfaces if a client probes them.
 	block := func(w http.ResponseWriter, r *http.Request) {

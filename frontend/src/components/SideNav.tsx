@@ -8,6 +8,7 @@ import {
   LayoutDashboard,
   Layers,
   Menu,
+  Radio,
   Search,
   Shield,
   Split,
@@ -26,6 +27,7 @@ import { useProjectPresence } from '@/hooks/useTeam'
 const links = [
   { to: '/app/dashboard', label: 'Home', icon: LayoutDashboard },
   { to: '/app/memory', label: 'Memory', icon: Layers },
+  { to: '/app/sessions', label: 'Sessions', icon: Radio },
   { to: '/app/agents', label: 'Agents', icon: Bot },
   { to: '/app/team', label: 'Team', icon: Users },
   { to: '/app/org', label: 'Org', icon: Building2 },

@@ -312,6 +312,8 @@ func (r *Runtime) HarvestSnapshot() HarvestStatus {
 	r.statsMu.Unlock()
 
 	switch {
+	case strings.TrimSpace(st.Root) == "":
+		st.Message = "No workspace folder selected — use the tray menu → Set workspace folder."
 	case !st.Designated:
 		st.Message = "Daemon online but not designated — proposals stay local until designation is on."
 	case st.ProjectID == "" || !looksLikeUUID(st.ProjectID):

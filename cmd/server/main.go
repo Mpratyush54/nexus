@@ -391,6 +391,8 @@ func run() error {
 	// lands. Stopped via the run context.
 	stopSweeps := server.StartLifecycleSweeper(ctx, srv.Store, 0)
 	defer stopSweeps()
+	stopSnap := server.StartSnapshotRetention(ctx, srv.Store, 0)
+	defer stopSnap()
 	httpSrv := &http.Server{
 		Addr:              ":" + cfg.port,
 		Handler:           buildMux(srv, cfg),
