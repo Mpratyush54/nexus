@@ -17,7 +17,7 @@ services:
 
   server:
     build:
-      context: .
+      context: ..
       dockerfile: deploy/Dockerfile.server
       args:
         VERSION: "${VERSION:-v0.2.0}"
