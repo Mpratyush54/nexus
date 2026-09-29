@@ -214,6 +214,7 @@ func (q *PostgresHarvestQueue) ListHarvestJobs(ctx context.Context, projectID st
 }
 
 // ListHarvestJobsOpt lists jobs; when includeTurns is true, full turn payloads are returned.
+// In-flight (processing/queued) jobs are ordered first so a capped page still surfaces the backlog.
 func (q *PostgresHarvestQueue) ListHarvestJobsOpt(ctx context.Context, projectID string, limit int, includeTurns bool) ([]*HarvestJob, error) {
 	if q == nil || q.pool == nil {
 		return nil, nil
@@ -225,7 +226,14 @@ func (q *PostgresHarvestQueue) ListHarvestJobsOpt(ctx context.Context, projectID
 		SELECT `+harvestJobSelectCols+`
 		FROM harvest_jobs
 		WHERE project_id = $1::uuid
-		ORDER BY created_at DESC
+		ORDER BY
+		  CASE status
+		    WHEN 'processing' THEN 0
+		    WHEN 'queued' THEN 1
+		    WHEN 'failed' THEN 2
+		    ELSE 3
+		  END,
+		  created_at DESC
 		LIMIT $2`, projectID, limit)
 	if err != nil {
 		return nil, err
@@ -245,6 +253,43 @@ func (q *PostgresHarvestQueue) ListHarvestJobsOpt(ctx context.Context, projectID
 		out = append(out, job)
 	}
 	return out, rows.Err()
+}
+
+func (q *PostgresHarvestQueue) CountHarvestJobs(ctx context.Context, projectID string) (HarvestJobCounts, error) {
+	var c HarvestJobCounts
+	if q == nil || q.pool == nil {
+		return c, nil
+	}
+	rows, err := q.pool.Query(ctx, `
+		SELECT status, COUNT(*)::int
+		FROM harvest_jobs
+		WHERE project_id = $1::uuid
+		GROUP BY status`, projectID)
+	if err != nil {
+		return c, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var status string
+		var n int
+		if err := rows.Scan(&status, &n); err != nil {
+			return c, err
+		}
+		switch status {
+		case HarvestQueued:
+			c.Queued = n
+		case HarvestProcessing:
+			c.Processing = n
+		case HarvestDone:
+			c.Done = n
+		case HarvestFailed:
+			c.Failed = n
+		case HarvestDuplicate:
+			c.Duplicate = n
+		}
+		c.Total += n
+	}
+	return c, rows.Err()
 }
 
 func (q *PostgresHarvestQueue) GetHarvestJob(ctx context.Context, id string) (*HarvestJob, error) {

@@ -66,7 +66,19 @@ export function useHarvestQueue() {
     queryKey: queryKeys.memory.harvest(projectId ?? ''),
     enabled: isAuthenticated && Boolean(projectId),
     queryFn: ({ signal }) => memoryApi.harvestQueue(projectId!, signal),
-    select: (data) => data.items ?? [],
+    select: (data) => {
+      const items = data.items ?? []
+      const counts = data.counts ?? {
+        queued: data.queued ?? items.filter((j) => j.status === 'queued').length,
+        processing: data.processing ?? items.filter((j) => j.status === 'processing').length,
+        done: data.done ?? items.filter((j) => j.status === 'done').length,
+        failed: data.failed ?? items.filter((j) => j.status === 'failed').length,
+        total: data.total ?? data.count ?? items.length,
+      }
+      const inFlight =
+        data.in_flight ?? counts.queued + counts.processing
+      return { items, counts, inFlight, total: counts.total, counted: Boolean(data.counted) }
+    },
     refetchInterval: 4_000,
     retry: false,
   })
@@ -77,9 +89,9 @@ export function useHarvestQueue() {
   }, [projectId])
 
   useEffect(() => {
-    const items = query.data ?? []
+    const items = query.data?.items ?? []
     const results = items.reduce((n, j) => n + (j.result_count ?? 0), 0)
-    const inFlight = items.filter((j) => j.status === 'queued' || j.status === 'processing').length
+    const inFlight = query.data?.inFlight ?? 0
     // Refresh Library when new memories land or a batch leaves the in-flight queue.
     if (results > prevResults.current || (prevInFlight.current > 0 && inFlight < prevInFlight.current)) {
       void qc.invalidateQueries({ queryKey: queryKeys.memory.all })

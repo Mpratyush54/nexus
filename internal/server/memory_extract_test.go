@@ -205,3 +205,53 @@ func TestMemoryHarvestEnqueueShowsRaw(t *testing.T) {
 		t.Fatalf("list status = %d", list.Code)
 	}
 }
+
+func TestMemoryHarvestListReportsUncappedCounts(t *testing.T) {
+	s := newTestServer()
+	q := store.NewMemHarvestQueue()
+	s.Harvest = q
+	tok := loginAs(t, s, "alice")
+	pid := resolveTestProject(t, s, tok, "harvest-counts")
+
+	for i := 0; i < 45; i++ {
+		rec := doJSON(t, s, http.MethodPost, "/memory/harvest", tok, map[string]any{
+			"project_id": pid,
+			"source":     "test",
+			"turns": []map[string]string{
+				{"speaker": "user", "content": "Unique harvest count batch " + string(rune('A'+i%26)) + "-" + strings.Repeat("x", i+1)},
+			},
+		})
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("enqueue %d status = %d body=%s", i, rec.Code, rec.Body.String())
+		}
+	}
+
+	list := doJSON(t, s, http.MethodGet, "/memory/harvest?project_id="+pid, tok, nil)
+	if list.Code != http.StatusOK {
+		t.Fatalf("list status = %d body=%s", list.Code, list.Body.String())
+	}
+	var out struct {
+		Items     []json.RawMessage   `json:"items"`
+		Count     int                 `json:"count"`
+		Listed    int                 `json:"listed"`
+		Queued    int                 `json:"queued"`
+		Total     int                 `json:"total"`
+		InFlight  int                 `json:"in_flight"`
+		Counted   bool                `json:"counted"`
+		Counts    store.HarvestJobCounts `json:"counts"`
+	}
+	decodeBody(t, list, &out)
+	if !out.Counted {
+		t.Fatal("expected counted=true")
+	}
+	if len(out.Items) != 40 || out.Count != 40 || out.Listed != 40 {
+		t.Fatalf("listed page = items=%d count=%d listed=%d want 40", len(out.Items), out.Count, out.Listed)
+	}
+	if out.Total != 45 || out.Queued != 45 || out.InFlight != 45 {
+		t.Fatalf("totals = total=%d queued=%d in_flight=%d want 45", out.Total, out.Queued, out.InFlight)
+	}
+	if out.Counts.Total != 45 || out.Counts.Queued != 45 {
+		t.Fatalf("counts object = %+v", out.Counts)
+	}
+}
+

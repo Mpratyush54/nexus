@@ -231,9 +231,13 @@ export function MemoryPage() {
 
   // Only in-flight batches — done/failed leave this list; facts land in Library.
   const incomingHarvest = useMemo(
-    () => (harvestQ.data ?? []).filter((j) => j.status === 'queued' || j.status === 'processing'),
+    () => (harvestQ.data?.items ?? []).filter((j) => j.status === 'queued' || j.status === 'processing'),
     [harvestQ.data],
   )
+  const harvestInFlight = harvestQ.data?.inFlight ?? incomingHarvest.length
+  const harvestQueued = harvestQ.data?.counts?.queued ?? incomingHarvest.filter((j) => j.status === 'queued').length
+  const harvestProcessing =
+    harvestQ.data?.counts?.processing ?? incomingHarvest.filter((j) => j.status === 'processing').length
 
   const onConfirm = (id: string, key: string) => {
     confirm.mutate(id, {
@@ -360,14 +364,22 @@ export function MemoryPage() {
       ) : null}
 
       {/* In-flight Harvest Queue */}
-      {incomingHarvest.length > 0 ? (
+      {harvestInFlight > 0 ? (
         <GlassPanel className="space-y-3 p-5">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-medium text-fg">Incoming harvest (raw batches)</h2>
-            <StatusPill tone="amber">{`${incomingHarvest.length} in flight`}</StatusPill>
+            <StatusPill tone="amber">
+              {harvestQueued} queued · {harvestProcessing} processing
+              {harvestInFlight > incomingHarvest.length
+                ? ` · ${harvestInFlight} total in flight`
+                : ''}
+            </StatusPill>
           </div>
           <p className="text-[11px] text-muted">
             OpenRouter is extracting architecture facts and decisions. Processed items appear automatically.
+            {harvestInFlight > incomingHarvest.length
+              ? ` Showing ${incomingHarvest.length} of ${harvestInFlight} in-flight batches.`
+              : null}
           </p>
           <ul className="max-h-[28rem] space-y-2 overflow-auto text-sm">
             {incomingHarvest.slice(0, 20).map((job) => {

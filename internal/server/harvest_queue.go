@@ -7,8 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	memctx "central-memory/internal/context"
@@ -21,41 +21,52 @@ type harvestSQSNotifier interface {
 	SendHarvestJob(ctx context.Context, jobID, projectID string) error
 }
 
-// StartHarvestWorker claims queued jobs one-at-a-time and runs OpenRouter.
+// harvestWorkerCount returns how many concurrent claim/process loops to run.
+// ClaimNextHarvestJob uses FOR UPDATE SKIP LOCKED, so a small pool is safe.
+// Cap stays modest to respect OpenRouter free-tier RPM.
+func harvestWorkerCount() int {
+	n := 2
+	if raw := strings.TrimSpace(os.Getenv("HARVEST_WORKERS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			n = parsed
+		}
+	}
+	if n < 1 {
+		n = 1
+	}
+	if n > 4 {
+		n = 4
+	}
+	return n
+}
+
+// StartHarvestWorker claims queued jobs and runs OpenRouter extraction.
+// Default concurrency is 2 (override with HARVEST_WORKERS=1..4).
 func (s *Server) StartHarvestWorker(ctx context.Context) {
 	if s == nil || s.Harvest == nil {
 		return
 	}
-	go s.runHarvestWorker(ctx)
+	n := harvestWorkerCount()
+	if s.Log != nil {
+		s.Log.Printf("harvest worker: starting %d concurrent workers", n)
+	}
+	for i := 0; i < n; i++ {
+		go s.runHarvestWorker(ctx, i)
+	}
 }
 
-func (s *Server) runHarvestWorker(ctx context.Context) {
+func (s *Server) runHarvestWorker(ctx context.Context, workerID int) {
 	lg := s.Log
 	if lg == nil {
 		lg = log.Default()
 	}
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
-	var mu sync.Mutex
-	busy := false
 
 	runOnce := func() {
-		mu.Lock()
-		if busy {
-			mu.Unlock()
-			return
-		}
-		busy = true
-		mu.Unlock()
-		defer func() {
-			mu.Lock()
-			busy = false
-			mu.Unlock()
-		}()
-
 		job, err := s.Harvest.ClaimNextHarvestJob(ctx)
 		if err != nil {
-			lg.Printf("harvest worker: claim: %v", err)
+			lg.Printf("harvest worker[%d]: claim: %v", workerID, err)
 			return
 		}
 		if job == nil {
@@ -443,7 +454,26 @@ func (s *Server) handleMemoryHarvestList(w http.ResponseWriter, r *http.Request)
 	if items == nil {
 		items = []*store.HarvestJob{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items), "full": full})
+	counts, err := s.Harvest.CountHarvestJobs(r.Context(), projectID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	// counted=true signals clients that counts.* are uncapped (not len(items)).
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      items,
+		"count":      len(items), // listed page size (compat)
+		"listed":     len(items),
+		"counts":     counts,
+		"queued":     counts.Queued,
+		"processing": counts.Processing,
+		"done":       counts.Done,
+		"failed":     counts.Failed,
+		"total":      counts.Total,
+		"in_flight":  counts.InFlight(),
+		"full":       full,
+		"counted":    true,
+	})
 }
 
 func (s *Server) handleMemoryHarvestGetByID(w http.ResponseWriter, r *http.Request, id string) {

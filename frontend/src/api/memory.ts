@@ -34,7 +34,7 @@ export type HarvestJob = {
   turns?: Array<{ speaker?: string; content: string; timestamp?: string }>
 }
 
-/** Soft-fail helper: 404 means the Phase-2 edit/history API is not wired yet. */
+  /** Soft-fail helper: 404 means the Phase-2 edit/history API is not wired yet. */
 async function gracefulNotFound<T>(fn: () => Promise<T>): Promise<T | null> {
   try {
     return await fn()
@@ -42,6 +42,31 @@ async function gracefulNotFound<T>(fn: () => Promise<T>): Promise<T | null> {
     if (err instanceof ApiError && err.status === 404) return null
     throw err
   }
+}
+
+export type HarvestQueueCounts = {
+  queued: number
+  processing: number
+  done: number
+  failed: number
+  duplicate?: number
+  total: number
+}
+
+export type HarvestQueueResponse = {
+  items: HarvestJob[]
+  /** Listed page size (compat; capped). Prefer counts / total. */
+  count: number
+  listed?: number
+  counts?: HarvestQueueCounts
+  queued?: number
+  processing?: number
+  done?: number
+  failed?: number
+  total?: number
+  in_flight?: number
+  full?: boolean
+  counted?: boolean
 }
 
 export const memoryApi = {
@@ -60,10 +85,7 @@ export const memoryApi = {
   harvestQueue(projectId: string, signal?: AbortSignal, full = false) {
     const qs = new URLSearchParams({ project_id: projectId })
     if (full) qs.set('full', '1')
-    return apiRequest<{ items: HarvestJob[]; count: number; full?: boolean }>(
-      `/memory/harvest?${qs}`,
-      { signal },
-    )
+    return apiRequest<HarvestQueueResponse>(`/memory/harvest?${qs}`, { signal })
   },
 
   harvestJob(id: string, signal?: AbortSignal) {

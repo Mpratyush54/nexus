@@ -32,6 +32,21 @@ const (
 	HarvestMaxAttempts = 8
 )
 
+// HarvestJobCounts is the true per-status tally for a project (not capped by list limit).
+type HarvestJobCounts struct {
+	Queued     int `json:"queued"`
+	Processing int `json:"processing"`
+	Done       int `json:"done"`
+	Failed     int `json:"failed"`
+	Duplicate  int `json:"duplicate,omitempty"`
+	Total      int `json:"total"`
+}
+
+// InFlight returns queued + processing.
+func (c HarvestJobCounts) InFlight() int {
+	return c.Queued + c.Processing
+}
+
 // HarvestJob is a queued batch of turns visible in the portal while the
 // OpenRouter worker processes it.
 type HarvestJob struct {
@@ -222,5 +237,7 @@ type HarvestQueue interface {
 	RequeueHarvestJob(ctx context.Context, id, provider, errMsg string, delay time.Duration) error
 	ListHarvestJobs(ctx context.Context, projectID string, limit int) ([]*HarvestJob, error)
 	ListHarvestJobsOpt(ctx context.Context, projectID string, limit int, includeTurns bool) ([]*HarvestJob, error)
+	// CountHarvestJobs returns uncapped status tallies for the project.
+	CountHarvestJobs(ctx context.Context, projectID string) (HarvestJobCounts, error)
 	GetHarvestJob(ctx context.Context, id string) (*HarvestJob, error)
 }
