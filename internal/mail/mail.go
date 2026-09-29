@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	netmail "net/mail"
 	"net/smtp"
 	"os"
 	"strings"
@@ -87,6 +88,10 @@ func (s *SMTP) Configured() bool {
 
 func (s *SMTP) Send(to, subject, textBody string) error {
 	addr := s.Host + ":" + s.Port
+	fromAddr := strings.TrimSpace(s.From)
+	if parsed, err := netmail.ParseAddress(fromAddr); err == nil && parsed.Address != "" {
+		fromAddr = parsed.Address
+	}
 	msg := []byte("From: " + s.From + "\r\n" +
 		"To: " + to + "\r\n" +
 		"Subject: " + subject + "\r\n" +
@@ -95,9 +100,9 @@ func (s *SMTP) Send(to, subject, textBody string) error {
 		"\r\n" + textBody + "\r\n")
 	if s.User != "" {
 		auth := smtp.PlainAuth("", s.User, s.Password, s.Host)
-		return smtp.SendMail(addr, auth, s.From, []string{to}, msg)
+		return smtp.SendMail(addr, auth, fromAddr, []string{to}, msg)
 	}
-	return smtp.SendMail(addr, nil, s.From, []string{to}, msg)
+	return smtp.SendMail(addr, nil, fromAddr, []string{to}, msg)
 }
 
 // LogSender writes to stderr (local / when mail is not configured).
