@@ -28,7 +28,7 @@ type RestoreOptions struct {
 	Token     string
 }
 
-// RestoreSession downloads a snapshot and reconstitutes Antigravity brain + git diff.
+// RestoreSession downloads a snapshot and reconstitutes harness brain + git diff.
 func RestoreSession(ctx context.Context, opt RestoreOptions) (string, error) {
 	opt.SessionID = strings.TrimSpace(opt.SessionID)
 	opt.Workspace = strings.TrimSpace(opt.Workspace)
@@ -71,14 +71,14 @@ func RestoreSession(ctx context.Context, opt RestoreOptions) (string, error) {
 		return "", fmt.Errorf("download snapshot: %s %s", resp.Status, strings.TrimSpace(string(raw)))
 	}
 	var snap struct {
-		Harness            string `json:"harness"`
-		ConversationID     string `json:"conversation_id"`
-		TurnCount          int    `json:"turn_count"`
-		GitBranch          string `json:"git_branch"`
-		GitCommit          string `json:"git_commit"`
-		TranscriptB64      string `json:"transcript_payload_b64"`
-		DiffB64            string `json:"uncommitted_diff_b64"`
-		ArtifactsB64       string `json:"artifacts_bundle_b64"`
+		Harness        string `json:"harness"`
+		ConversationID string `json:"conversation_id"`
+		TurnCount      int    `json:"turn_count"`
+		GitBranch      string `json:"git_branch"`
+		GitCommit      string `json:"git_commit"`
+		TranscriptB64  string `json:"transcript_payload_b64"`
+		DiffB64        string `json:"uncommitted_diff_b64"`
+		ArtifactsB64   string `json:"artifacts_bundle_b64"`
 	}
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		return "", fmt.Errorf("bad snapshot JSON: %w", err)
@@ -87,11 +87,9 @@ func RestoreSession(ctx context.Context, opt RestoreOptions) (string, error) {
 	if harness == "" {
 		harness = snap.Harness
 	}
-	if harness == "" {
-		harness = "antigravity"
-	}
-	if !strings.EqualFold(harness, "antigravity") && !strings.EqualFold(harness, "gemini") {
-		return "", fmt.Errorf("harness %q not supported yet (Antigravity only)", harness)
+	harness = normalizeHarness(harness)
+	if !HarnessSupported(harness) {
+		return "", fmt.Errorf("harness %q not supported for restore", harness)
 	}
 
 	steps := []string{}
@@ -122,16 +120,22 @@ func RestoreSession(ctx context.Context, opt RestoreOptions) (string, error) {
 	if convID == "" {
 		convID = opt.SessionID
 	}
-	_, brainDir := SnapshotHarnessPaths("antigravity", convID)
-	steps = append(steps, "restore artifacts into "+brainDir)
+	layout, err := ResolveSnapshotLayout(harness, convID, opt.Workspace)
+	if err != nil {
+		return "", err
+	}
+	steps = append(steps, "restore artifacts into "+layout.ArtifactDir)
+	steps = append(steps, "restore transcript to "+layout.TranscriptFile)
 	if !opt.DryRun {
-		if err := os.MkdirAll(brainDir, 0o755); err != nil {
-			return "", err
-		}
-		artGZ, _ := base64.StdEncoding.DecodeString(snap.ArtifactsB64)
-		if len(artGZ) > 0 {
-			if err := untarGzipTo(artGZ, brainDir); err != nil {
-				return "", fmt.Errorf("unpack artifacts: %w", err)
+		if layout.ArtifactDir != "" {
+			if err := os.MkdirAll(layout.ArtifactDir, 0o755); err != nil {
+				return "", err
+			}
+			artGZ, _ := base64.StdEncoding.DecodeString(snap.ArtifactsB64)
+			if len(artGZ) > 0 {
+				if err := untarGzipTo(artGZ, layout.ArtifactDir); err != nil {
+					return "", fmt.Errorf("unpack artifacts: %w", err)
+				}
 			}
 		}
 		trGZ, _ := base64.StdEncoding.DecodeString(snap.TranscriptB64)
@@ -139,17 +143,18 @@ func RestoreSession(ctx context.Context, opt RestoreOptions) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("decompress transcript: %w", err)
 		}
-		logDir := filepath.Join(brainDir, ".system_generated", "logs")
-		if err := os.MkdirAll(logDir, 0o755); err != nil {
-			return "", err
-		}
-		if err := os.WriteFile(filepath.Join(logDir, "transcript.jsonl"), trRaw, 0o644); err != nil {
-			return "", err
+		if layout.TranscriptFile != "" {
+			if err := os.MkdirAll(filepath.Dir(layout.TranscriptFile), 0o755); err != nil {
+				return "", err
+			}
+			if err := os.WriteFile(layout.TranscriptFile, trRaw, 0o644); err != nil {
+				return "", err
+			}
 		}
 	}
 
-	msg := fmt.Sprintf("Restored session %s (%d turns) into %s. Open Antigravity to continue.",
-		opt.SessionID, snap.TurnCount, opt.Workspace)
+	msg := fmt.Sprintf("Restored session %s (%d turns, harness=%s) into %s. Open %s to continue.",
+		opt.SessionID, snap.TurnCount, harness, opt.Workspace, harness)
 	if opt.DryRun {
 		msg = "Dry-run: " + msg + " Steps: " + strings.Join(steps, "; ")
 	}

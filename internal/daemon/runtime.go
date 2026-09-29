@@ -125,9 +125,10 @@ type Runtime struct {
 	recent          []HarvestLogLine
 
 	// Snapshot push state (Phase 4 teleport).
-	snapshotMu           sync.Mutex
+	snapshotMu            sync.Mutex
 	lastSnapshotTurnCount map[string]int
 	sessionTurnCount      map[string]int
+	sessionHarness        map[string]string // session_id -> harvest agent/harness
 }
 
 // NewRuntime builds the pipeline for daemon d. Harvester/Watcher/Processor
@@ -173,17 +174,18 @@ func NewRuntime(d *Daemon, project string, designation DesignationProvider) *Run
 	}
 	proc := NewProcessor(store, 0, 0, desigNow, AutoProvider())
 	return &Runtime{
-		Daemon:          d,
-		Harvester:       h,
-		Watcher:         w,
-		Processor:       proc,
-		Designation:     designation,
-		ProjectID:       project,
-		harvestCh:       harvestCh,
-		DesignationPoll: 30 * time.Second,
-		DroppedLogEvery: time.Minute,
+		Daemon:                d,
+		Harvester:             h,
+		Watcher:               w,
+		Processor:             proc,
+		Designation:           designation,
+		ProjectID:             project,
+		harvestCh:             harvestCh,
+		DesignationPoll:       30 * time.Second,
+		DroppedLogEvery:       time.Minute,
 		lastSnapshotTurnCount: map[string]int{},
 		sessionTurnCount:      map[string]int{},
+		sessionHarness:        map[string]string{},
 	}
 }
 
@@ -332,8 +334,9 @@ func (r *Runtime) Start(ctx context.Context) {
 				if len(batch) == 0 {
 					continue
 				}
-				r.noteSessionTurns(sid, len(batch))
-				r.pushParsedToolOps(ctx, sid, batch)
+				harness := harnessFromEvents(batch)
+				r.noteSessionTurns(sid, harness, len(batch))
+				r.pushParsedToolOps(ctx, sid, harness, batch)
 				if props, err := r.Processor.ProcessEvents(ctx, r.ProjectID, batch); err != nil {
 					log.Printf("daemon: conversation process (session=%s): %v", sid, err)
 					r.noteProposals(len(props), err)
@@ -395,7 +398,7 @@ func (r *Runtime) Start(ctx context.Context) {
 	}
 }
 
-func (r *Runtime) noteSessionTurns(sessionID string, n int) {
+func (r *Runtime) noteSessionTurns(sessionID, harness string, n int) {
 	if r == nil || sessionID == "" || n <= 0 {
 		return
 	}
@@ -405,6 +408,27 @@ func (r *Runtime) noteSessionTurns(sessionID string, n int) {
 		r.sessionTurnCount = map[string]int{}
 	}
 	r.sessionTurnCount[sessionID] += n
+	if h := strings.TrimSpace(harness); h != "" {
+		if r.sessionHarness == nil {
+			r.sessionHarness = map[string]string{}
+		}
+		r.sessionHarness[sessionID] = normalizeHarness(h)
+	}
+}
+
+func harnessFromEvents(batch []Event) string {
+	for _, ev := range batch {
+		if ev.Payload == nil {
+			continue
+		}
+		if a, ok := ev.Payload["agent"].(string); ok && strings.TrimSpace(a) != "" {
+			return strings.TrimSpace(a)
+		}
+		if a, ok := ev.Payload["harness"].(string); ok && strings.TrimSpace(a) != "" {
+			return strings.TrimSpace(a)
+		}
+	}
+	return ""
 }
 
 func (r *Runtime) pushDueSnapshots(ctx context.Context) {
@@ -435,13 +459,27 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	r.snapshotMu.Lock()
 	turns := r.sessionTurnCount[sessionID]
 	last := r.lastSnapshotTurnCount[sessionID]
+	harness := r.sessionHarness[sessionID]
 	r.snapshotMu.Unlock()
 	if !force && turns <= last {
 		return
 	}
-	snap, err := CollectSnapshot(r.Daemon.Root, sessionID, "antigravity", r.Daemon.MachineID)
+	if harness == "" {
+		harness = DetectHarnessForConversation(sessionID, r.Daemon.Root)
+	}
+	if harness == "" {
+		harness = "antigravity"
+	}
+	snap, err := CollectSnapshot(r.Daemon.Root, sessionID, harness, r.Daemon.MachineID)
 	if err != nil {
-		log.Printf("daemon: collect snapshot session=%s: %v", sessionID, err)
+		// Retry once with auto-detect when the hinted harness has no files yet.
+		if alt := DetectHarnessForConversation(sessionID, r.Daemon.Root); alt != "" && alt != harness {
+			snap, err = CollectSnapshot(r.Daemon.Root, sessionID, alt, r.Daemon.MachineID)
+			harness = alt
+		}
+	}
+	if err != nil {
+		log.Printf("daemon: collect snapshot session=%s harness=%s: %v", sessionID, harness, err)
 		return
 	}
 	snap.SessionID = sessionID
@@ -455,6 +493,10 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 		r.lastSnapshotTurnCount = map[string]int{}
 	}
 	r.lastSnapshotTurnCount[sessionID] = turns
+	if r.sessionHarness == nil {
+		r.sessionHarness = map[string]string{}
+	}
+	r.sessionHarness[sessionID] = harness
 	r.snapshotMu.Unlock()
 }
 
@@ -466,11 +508,12 @@ func (r *Runtime) httpStore() (*HTTPMemoryStore, bool) {
 	return hs, ok
 }
 
-func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID string, batch []Event) {
+func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID, harness string, batch []Event) {
 	hs, ok := r.httpStore()
 	if !ok || hs == nil || strings.TrimSpace(hs.ProjectID) == "" {
 		return
 	}
+	harness = normalizeHarness(harness)
 	var fileOps []map[string]any
 	var toolExecs []map[string]any
 	for i, ev := range batch {
@@ -485,13 +528,13 @@ func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID string, batch
 		for _, p := range ParseToolCalls(payload, i) {
 			if p.Type == "file_op" {
 				fileOps = append(fileOps, map[string]any{
-					"harness": "antigravity", "tool_name": p.ToolName, "file_path": p.FilePath,
+					"harness": harness, "tool_name": p.ToolName, "file_path": p.FilePath,
 					"op_type": p.OpType, "line_start": p.LineStart, "line_end": p.LineEnd,
 					"diff_hunk": p.DiffHunk, "turn_index": p.TurnIndex,
 				})
 			} else if p.Type == "tool_exec" {
 				row := map[string]any{
-					"harness": "antigravity", "tool_name": p.ToolName, "command_line": p.CommandLine,
+					"harness": harness, "tool_name": p.ToolName, "command_line": p.CommandLine,
 					"working_directory": p.WorkingDirectory, "output_snippet": p.OutputSnippet,
 					"truncated": p.Truncated,
 				}
@@ -505,7 +548,7 @@ func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID string, batch
 	if len(fileOps) == 0 && len(toolExecs) == 0 {
 		return
 	}
-	if err := hs.PushOperations(ctx, sessionID, fileOps, toolExecs); err != nil {
+	if err := hs.PushOperations(ctx, sessionID, harness, fileOps, toolExecs); err != nil {
 		log.Printf("daemon: push operations session=%s: %v", sessionID, err)
 	}
 }

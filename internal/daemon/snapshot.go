@@ -18,26 +18,20 @@ import (
 const maxSnapshotDiffBytes = 512 * 1024
 const maxUntrackedFileBytes = 100 * 1024
 
-// CollectSnapshot builds a SessionSnapshot for a conversation (Antigravity-first).
+// CollectSnapshot builds a SessionSnapshot for a conversation across harnesses.
 func CollectSnapshot(root, conversationID, harness, machineID string) (*store.SessionSnapshot, error) {
-	harness = strings.TrimSpace(harness)
-	if harness == "" {
-		harness = "antigravity"
+	harness = normalizeHarness(harness)
+	layout, err := ResolveSnapshotLayout(harness, conversationID, root)
+	if err != nil {
+		return nil, err
 	}
-	transcriptDir, brainDir := SnapshotHarnessPaths(harness, conversationID)
-	if transcriptDir == "" && brainDir == "" {
-		return nil, fmt.Errorf("snapshot: harness %q not supported yet (Antigravity only)", harness)
+	if layout.TranscriptFile == "" && layout.ArtifactDir == "" {
+		return nil, fmt.Errorf("snapshot: harness %q has no layout for %s", harness, conversationID)
 	}
 
-	transcriptPath := filepath.Join(transcriptDir, "transcript.jsonl")
-	transcriptRaw, err := os.ReadFile(transcriptPath)
+	transcriptRaw, err := readSnapshotTranscript(layout, root)
 	if err != nil {
-		// Fall back to transcript_full.jsonl
-		alt := filepath.Join(transcriptDir, "transcript_full.jsonl")
-		transcriptRaw, err = os.ReadFile(alt)
-		if err != nil {
-			return nil, fmt.Errorf("snapshot: read transcript: %w", err)
-		}
+		return nil, fmt.Errorf("snapshot: read transcript: %w", err)
 	}
 	if security.ContainsSecret(transcriptRaw) {
 		if redacted, ok := RedactSecrets(string(transcriptRaw)); ok {
@@ -49,7 +43,7 @@ func CollectSnapshot(root, conversationID, harness, machineID string) (*store.Se
 		return nil, err
 	}
 
-	artifacts, err := tarGzipBrain(brainDir)
+	artifacts, err := tarGzipArtifacts(layout)
 	if err != nil {
 		log.Printf("daemon: snapshot artifacts: %v", err)
 		artifacts = nil
@@ -92,24 +86,35 @@ func CollectSnapshot(root, conversationID, harness, machineID string) (*store.Se
 	}, nil
 }
 
-// SnapshotHarnessPaths returns transcript log dir and brain root for a harness.
-// Only Antigravity is implemented initially ([Audit Fix M5]).
-func SnapshotHarnessPaths(harness, conversationID string) (transcriptDir, brainDir string) {
-	harness = strings.ToLower(strings.TrimSpace(harness))
-	conversationID = strings.TrimSpace(conversationID)
-	if conversationID == "" {
-		return "", ""
+func readSnapshotTranscript(layout SnapshotLayout, workspaceRoot string) ([]byte, error) {
+	path := layout.TranscriptFile
+	// Antigravity: prefer full sibling when caller pointed at truncated log.
+	if layout.Harness == "antigravity" && path != "" {
+		dir := filepath.Dir(path)
+		full := filepath.Join(dir, "transcript_full.jsonl")
+		if st, err := os.Stat(full); err == nil && !st.IsDir() {
+			path = full
+		} else {
+			alt := filepath.Join(dir, "transcript.jsonl")
+			if _, err := os.Stat(path); err != nil {
+				path = alt
+			}
+		}
 	}
-	switch harness {
-	case "antigravity", "gemini", "":
-		home, _ := os.UserHomeDir()
-		brainDir = filepath.Join(home, ".gemini", "antigravity", "brain", conversationID)
-		transcriptDir = filepath.Join(brainDir, ".system_generated", "logs")
-		return transcriptDir, brainDir
-	default:
-		log.Printf("daemon: snapshot harness %q not implemented yet", harness)
-		return "", ""
+	if path != "" {
+		if raw, err := os.ReadFile(path); err == nil {
+			return raw, nil
+		}
 	}
+	// SQLite-only harnesses (Windsurf/Copilot/OpenCode/…): extract dialogue
+	// into JSONL at collect time — no permanent sidecar required.
+	if layout.SQLiteSource != "" {
+		return extractSnapshotTranscriptJSONL(layout.Harness, layout.SQLiteSource, workspaceRoot)
+	}
+	if path != "" {
+		return nil, fmt.Errorf("no transcript at %s", path)
+	}
+	return nil, fmt.Errorf("no transcript path")
 }
 
 func collectUncommittedDiff(root string) (string, bool, error) {
@@ -169,11 +174,22 @@ func gzipBytes(raw []byte) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func tarGzipBrain(brainDir string) ([]byte, error) {
+// tarGzipArtifacts packs harness brain/custom state. Transcripts are stored
+// separately in TranscriptPayload — skip them and ephemeral dirs.
+func tarGzipArtifacts(layout SnapshotLayout) ([]byte, error) {
+	brainDir := layout.ArtifactDir
 	st, err := os.Stat(brainDir)
 	if err != nil || !st.IsDir() {
 		return nil, err
 	}
+	skipPrefixes := artifactSkipPrefixes(layout)
+	transcriptRel := ""
+	if layout.TranscriptFile != "" {
+		if rel, err := filepath.Rel(brainDir, layout.TranscriptFile); err == nil && !strings.HasPrefix(rel, "..") {
+			transcriptRel = filepath.ToSlash(rel)
+		}
+	}
+
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
@@ -189,7 +205,15 @@ func tarGzipBrain(brainDir string) ([]byte, error) {
 		if relSlash == "." {
 			return nil
 		}
-		if strings.HasPrefix(relSlash, ".system_generated/") || relSlash == ".system_generated" {
+		for _, skip := range skipPrefixes {
+			if relSlash == skip || strings.HasPrefix(relSlash, skip+"/") {
+				if info.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+		}
+		if transcriptRel != "" && relSlash == transcriptRel {
 			return nil
 		}
 		if info.IsDir() {
@@ -197,8 +221,12 @@ func tarGzipBrain(brainDir string) ([]byte, error) {
 		}
 		ext := strings.ToLower(filepath.Ext(path))
 		switch ext {
-		case ".md", ".txt", ".json", ".sh", ".py", ".go", ".ts", ".tsx", ".js":
+		case ".md", ".txt", ".json", ".jsonl", ".sh", ".py", ".go", ".ts", ".tsx", ".js", ".yaml", ".yml", ".toml":
 		default:
+			return nil
+		}
+		// Cap individual artifact files (avoid packing huge jsonl dumps twice).
+		if info.Size() > maxUntrackedFileBytes*20 {
 			return nil
 		}
 		raw, err := os.ReadFile(path)
@@ -212,12 +240,29 @@ func tarGzipBrain(brainDir string) ([]byte, error) {
 		_, err = tw.Write(raw)
 		return err
 	})
+	if err == nil {
+		if aerr := appendSmallSQLiteArtifact(tw, layout, brainDir); aerr != nil {
+			err = aerr
+		}
+	}
 	_ = tw.Close()
 	_ = gz.Close()
 	if err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+func artifactSkipPrefixes(layout SnapshotLayout) []string {
+	switch layout.Harness {
+	case "antigravity":
+		return []string{".system_generated"}
+	case "cursor":
+		// Transcripts packed separately; terminals are ephemeral local state.
+		return []string{"agent-transcripts", "terminals"}
+	default:
+		return nil
+	}
 }
 
 // ungzipBytes is used by restore.

@@ -385,19 +385,19 @@ func (s *HTTPMemoryStore) PushSnapshot(ctx context.Context, snap *store.SessionS
 		snap.ProjectID = projectID
 	}
 	body := map[string]any{
-		"project_id":              snap.ProjectID,
-		"harness":                 snap.Harness,
-		"conversation_id":         snap.ConversationID,
-		"turn_count":              snap.TurnCount,
-		"git_branch":              snap.GitBranch,
-		"git_commit":              snap.GitCommit,
-		"git_dirty":               snap.GitDirty,
-		"uncommitted_diff_b64":    encodeB64(snap.UncommittedDiff),
-		"diff_size_bytes":         snap.DiffSizeBytes,
-		"diff_truncated":           snap.DiffTruncated,
-		"transcript_payload_b64":  encodeB64(snap.TranscriptPayload),
-		"artifacts_bundle_b64":    encodeB64(snap.ArtifactsBundle),
-		"source_machine_id":       snap.SourceMachineID,
+		"project_id":             snap.ProjectID,
+		"harness":                snap.Harness,
+		"conversation_id":        snap.ConversationID,
+		"turn_count":             snap.TurnCount,
+		"git_branch":             snap.GitBranch,
+		"git_commit":             snap.GitCommit,
+		"git_dirty":              snap.GitDirty,
+		"uncommitted_diff_b64":   encodeB64(snap.UncommittedDiff),
+		"diff_size_bytes":        snap.DiffSizeBytes,
+		"diff_truncated":         snap.DiffTruncated,
+		"transcript_payload_b64": encodeB64(snap.TranscriptPayload),
+		"artifacts_bundle_b64":   encodeB64(snap.ArtifactsBundle),
+		"source_machine_id":      snap.SourceMachineID,
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
@@ -427,7 +427,7 @@ func (s *HTTPMemoryStore) PushSnapshot(ctx context.Context, snap *store.SessionS
 }
 
 // PushOperations posts parsed file/tool provenance for a session.
-func (s *HTTPMemoryStore) PushOperations(ctx context.Context, sessionID string, fileOps, toolExecs []map[string]any) error {
+func (s *HTTPMemoryStore) PushOperations(ctx context.Context, sessionID, harness string, fileOps, toolExecs []map[string]any) error {
 	if s == nil {
 		return fmt.Errorf("daemon: push operations: nil store")
 	}
@@ -437,11 +437,15 @@ func (s *HTTPMemoryStore) PushOperations(ctx context.Context, sessionID string, 
 	if base == "" || token == "" || projectID == "" || sessionID == "" {
 		return fmt.Errorf("daemon: push operations: missing fields")
 	}
+	harness = strings.TrimSpace(harness)
+	if harness == "" {
+		harness = "unknown"
+	}
 	body := map[string]any{
-		"project_id":       projectID,
-		"harness":          "antigravity",
-		"file_operations":  fileOps,
-		"tool_executions":  toolExecs,
+		"project_id":      projectID,
+		"harness":         harness,
+		"file_operations": fileOps,
+		"tool_executions": toolExecs,
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
