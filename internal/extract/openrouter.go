@@ -60,11 +60,10 @@ func (c *Client) compressModel() string {
 	if c != nil && strings.TrimSpace(c.Cfg.CompressModel) != "" {
 		return strings.TrimSpace(c.Cfg.CompressModel)
 	}
-	// Prefer a stronger paid instruct model when unset; falls back via models[].
 	if c != nil && strings.TrimSpace(c.Cfg.Model) != "" {
 		return strings.TrimSpace(c.Cfg.Model)
 	}
-	return "anthropic/claude-sonnet-4"
+	return defaultOpenRouterModel
 }
 
 // Complete sends the extraction prompt and returns parsed proposals.
@@ -86,7 +85,7 @@ func (c *Client) Complete(ctx context.Context, prompt string) ([]Proposal, error
 
 // CompleteCompress runs session-compress and returns summary + decision proposals.
 func (c *Client) CompleteCompress(ctx context.Context, prompt string) (summary string, decisions []Proposal, err error) {
-	content, err := c.chat(ctx, c.compressModel(), append([]string{c.model()}, defaultOpenRouterFallbacks...),
+	content, err := c.chat(ctx, c.compressModel(), defaultOpenRouterFallbacks,
 		"You compress a coding chat session into one rich episode summary plus optional sharp decisions. "+
 			"Require actions (files/commands), outcomes, and decisions. Keep concrete nouns. "+
 			"category must be one of: architecture, infrastructure, auth, api, conventions, dependencies. "+
