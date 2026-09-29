@@ -23,7 +23,8 @@ ssh -i "$KEY" -o StrictHostKeyChecking=no "$USER@$HOST" << 'REMOTE_COMMANDS'
   echo "Pulling latest changes..."
   git pull origin master
   echo "Rebuilding and restarting stack..."
-  docker compose -f deploy/docker-compose.lightsail.yml up -d --build
+  # Project name must stay "repo" to match existing container names (nexus-*).
+  docker compose -p repo --env-file .env -f deploy/docker-compose.lightsail.yml up -d --build
   echo "Stack updated successfully!"
 REMOTE_COMMANDS
 

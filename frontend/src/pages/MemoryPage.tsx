@@ -369,10 +369,11 @@ export function MemoryPage() {
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-sm font-medium text-fg">Incoming harvest (raw batches)</h2>
             <StatusPill tone="amber">
-              {harvestQueued} queued · {harvestProcessing} processing
-              {harvestInFlight > incomingHarvest.length
-                ? ` · ${harvestInFlight} total in flight`
-                : ''}
+              {`${harvestQueued} queued · ${harvestProcessing} processing${
+                harvestInFlight > incomingHarvest.length
+                  ? ` · ${harvestInFlight} total in flight`
+                  : ''
+              }`}
             </StatusPill>
           </div>
           <p className="text-[11px] text-muted">
