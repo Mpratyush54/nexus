@@ -193,7 +193,8 @@ func (s *Server) upsertSessionSummary(ctx context.Context, job *store.HarvestJob
 			level := "project"
 			patch.Scope = &scope
 			patch.Level = &level
-			item, err := es.UpdateMemory(ctx, existing.ID, patch, "harvest")
+			// edited_by is UUID (nullable); system harvest has no user actor.
+			item, err := es.UpdateMemory(ctx, existing.ID, patch, "")
 			if err != nil {
 				return nil, err
 			}
