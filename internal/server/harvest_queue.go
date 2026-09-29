@@ -122,7 +122,7 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 			}
 		}
 		for _, p := range result.Decisions {
-			if _, err := s.persistHarvestMemory(ctx, job, p); err != nil {
+			if _, err := s.persistHarvestMemory(ctx, job, p, sessionID); err != nil {
 				if s.Log != nil {
 					s.Log.Printf("harvest worker: persist job=%s key=%q: %v", job.ID, p.Key, err)
 				}
@@ -142,7 +142,7 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 		}
 		provider = result.Provider
 		for _, p := range result.Proposals {
-			if _, err := s.persistHarvestMemory(ctx, job, p); err != nil {
+			if _, err := s.persistHarvestMemory(ctx, job, p, sessionID); err != nil {
 				if s.Log != nil {
 					s.Log.Printf("harvest worker: persist job=%s key=%q: %v", job.ID, p.Key, err)
 				}
@@ -262,7 +262,7 @@ func (s *Server) harvestExisting(ctx context.Context, projectID string) []extrac
 	return out
 }
 
-func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob, p extract.Proposal) (*store.MemoryItem, error) {
+func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob, p extract.Proposal, sessionID string) (*store.MemoryItem, error) {
 	content := strings.TrimSpace(p.Content)
 	if err := store.ValidateMemoryContent(content); err != nil {
 		return nil, err
@@ -290,6 +290,13 @@ func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob
 	if job.Source != "" {
 		src = src + ":" + job.Source
 	}
+	tags := []string{}
+	if sid := strings.TrimSpace(sessionID); sid != "" {
+		tags = append(tags, "session:"+sid)
+	}
+	if job.Source != "" {
+		tags = append(tags, "source:"+job.Source)
+	}
 	item := &store.MemoryItem{
 		ProjectID:  job.ProjectID,
 		Key:        key,
@@ -299,6 +306,7 @@ func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob
 		Confidence: conf,
 		Status:     store.StatusConfirmed,
 		Source:     src,
+		Tags:       tags,
 	}
 	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {

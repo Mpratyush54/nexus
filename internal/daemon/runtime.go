@@ -309,13 +309,28 @@ func (r *Runtime) Start(ctx context.Context) {
 			}
 		}
 		if len(conv) > 0 && r.Processor != nil {
-			batch := append([]Event(nil), conv...)
+			bySession := make(map[string][]Event)
+			var sessionOrder []string
+			for _, ev := range conv {
+				sid, _ := ev.Payload["session_id"].(string)
+				sid = strings.TrimSpace(sid)
+				if _, ok := bySession[sid]; !ok {
+					sessionOrder = append(sessionOrder, sid)
+				}
+				bySession[sid] = append(bySession[sid], ev)
+			}
 			conv = conv[:0]
-			if props, err := r.Processor.ProcessEvents(ctx, r.ProjectID, batch); err != nil {
-				log.Printf("daemon: conversation process: %v", err)
-				r.noteProposals(len(props), err)
-			} else if len(props) > 0 {
-				r.noteProposals(len(props), nil)
+			for _, sid := range sessionOrder {
+				batch := bySession[sid]
+				if len(batch) == 0 {
+					continue
+				}
+				if props, err := r.Processor.ProcessEvents(ctx, r.ProjectID, batch); err != nil {
+					log.Printf("daemon: conversation process (session=%s): %v", sid, err)
+					r.noteProposals(len(props), err)
+				} else if len(props) > 0 {
+					r.noteProposals(len(props), nil)
+				}
 			}
 		}
 	}

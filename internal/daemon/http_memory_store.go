@@ -296,6 +296,12 @@ func (s *HTTPMemoryStore) ExtractRemote(ctx context.Context, turns []map[string]
 	defer resp.Body.Close()
 	rawResp, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return "", nil, fmt.Errorf("authentication required — please sign in via Nexus Desktop or run 'nexus login'")
+		}
+		if resp.StatusCode == http.StatusBadRequest && strings.Contains(string(rawResp), "project_id") {
+			return "", nil, fmt.Errorf("workspace folder not linked to a server project — please select a workspace folder in Nexus Desktop")
+		}
 		msg := strings.TrimSpace(string(rawResp))
 		if msg == "" {
 			msg = resp.Status

@@ -79,6 +79,10 @@ def main():
     gh_client_id = gh_data.get("client_id", "Ov23li997FyAUgaucZQO")
     gh_client_secret = gh_data.get("client_secret", "")
 
+    # 4. OpenRouter
+    or_data = get_secret("openrouter")
+    openrouter_api_key = or_data.get("api_key", "")
+
     # Fetch existing DB_PASSWORD from server so we never lose database access
     print("[*] Checking existing DB_PASSWORD on Lightsail...")
     res = run_ssh("grep '^DB_PASSWORD=' /opt/central-memory/repo/.env 2>/dev/null || true")
@@ -102,6 +106,7 @@ def main():
         f"SMTP_USER={smtp_user}",
         f"SMTP_PASSWORD={smtp_pass}",
         f"MAIL_FROM={mail_from}",
+        f"OPENROUTER_API_KEY={openrouter_api_key}",
         "CENTRAL_MEMORY_LOCAL_DEV=1",
     ]
     env_content = "\n".join(env_lines) + "\n"
