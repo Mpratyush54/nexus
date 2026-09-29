@@ -94,6 +94,48 @@ jobs:
 
       - name: Deploy to S3 & CloudFront
         env:
+          AWS_REGION: ${{ env.AWS_REGION }}
           FRONTEND_S3_BUCKET: ${{ vars.FRONTEND_S3_BUCKET }}
           FRONTEND_CLOUDFRONT_ID: ${{ vars.FRONTEND_CLOUDFRONT_ID }}
+          FRONTEND_LIVE_S3_BUCKET: ${{ vars.FRONTEND_LIVE_S3_BUCKET }}
         run: bash deploy/deploy-frontend.sh
+
+  # Production API host (Lightsail). Skipped until LIGHTSAIL_SSH_KEY is set —
+  # see deploy/README.md "GitHub Actions secrets".
+  deploy-lightsail:
+    name: Deploy Lightsail API
+    runs-on: ubuntu-latest
+    if: ${{ vars.DEPLOY_LIGHTSAIL == 'true' }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Install SSH key
+        env:
+          LIGHTSAIL_SSH_KEY: ${{ secrets.LIGHTSAIL_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${LIGHTSAIL_SSH_KEY}" ]; then
+            echo "LIGHTSAIL_SSH_KEY secret is empty; set it in repo Settings → Secrets"
+            exit 1
+          fi
+          mkdir -p ~/.ssh
+          printf '%s\n' "$LIGHTSAIL_SSH_KEY" > ~/.ssh/central-memory-key.pem
+          chmod 600 ~/.ssh/central-memory-key.pem
+
+      - name: Deploy to Lightsail
+        env:
+          LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
+          LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
+        run: |
+          set -euo pipefail
+          export LIGHTSAIL_KEY="$HOME/.ssh/central-memory-key.pem"
+          export LIGHTSAIL_HOST="${LIGHTSAIL_HOST:-13.205.221.207}"
+          export LIGHTSAIL_USER="${LIGHTSAIL_USER:-ubuntu}"
+          bash deploy/deploy-lightsail.sh

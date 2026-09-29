@@ -12,17 +12,17 @@ import (
 
 // DiagnosticResult is the JSON payload for GET /local/diagnostics.
 type DiagnosticResult struct {
-	ServerReachable  bool            `json:"server_reachable"`
-	ServerLatencyMs  int             `json:"server_latency_ms"`
-	TokenValid       bool            `json:"token_valid"`
-	UserID           string          `json:"user_id,omitempty"`
-	WorkspaceLinked  bool            `json:"workspace_linked"`
-	WorkspaceID      string          `json:"workspace_id,omitempty"`
-	GitAvailable     bool            `json:"git_available"`
-	GitBranch        string          `json:"git_branch,omitempty"`
-	GitRemote        string          `json:"git_remote,omitempty"`
+	ServerReachable   bool            `json:"server_reachable"`
+	ServerLatencyMs   int             `json:"server_latency_ms"`
+	TokenValid        bool            `json:"token_valid"`
+	UserID            string          `json:"user_id,omitempty"`
+	WorkspaceLinked   bool            `json:"workspace_linked"`
+	WorkspaceID       string          `json:"workspace_id,omitempty"`
+	GitAvailable      bool            `json:"git_available"`
+	GitBranch         string          `json:"git_branch,omitempty"`
+	GitRemote         string          `json:"git_remote,omitempty"`
 	HarnessPathsFound map[string]bool `json:"harness_paths_found"`
-	Errors           []string        `json:"errors,omitempty"`
+	Errors            []string        `json:"errors,omitempty"`
 }
 
 // RunDiagnostics probes server reachability, auth, workspace, git, and harness paths.

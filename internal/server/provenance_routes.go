@@ -20,10 +20,10 @@ func provenanceStore(st store.Store) store.ProvenanceStore {
 }
 
 type operationsBatch struct {
-	ProjectID      string                 `json:"project_id"`
-	Harness        string                 `json:"harness"`
-	FileOperations []store.FileOperation  `json:"file_operations"`
-	ToolExecutions []store.ToolExecution  `json:"tool_executions"`
+	ProjectID      string                `json:"project_id"`
+	Harness        string                `json:"harness"`
+	FileOperations []store.FileOperation `json:"file_operations"`
+	ToolExecutions []store.ToolExecution `json:"tool_executions"`
 }
 
 func (s *Server) handleSessionOperationsPost(w http.ResponseWriter, r *http.Request) {
@@ -77,8 +77,8 @@ func (s *Server) handleSessionOperationsPost(w http.ResponseWriter, r *http.Requ
 		}
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"ok":             true,
-		"file_ops":       len(body.FileOperations),
+		"ok":              true,
+		"file_ops":        len(body.FileOperations),
 		"tool_executions": len(body.ToolExecutions),
 	})
 }

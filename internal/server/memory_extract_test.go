@@ -231,14 +231,14 @@ func TestMemoryHarvestListReportsUncappedCounts(t *testing.T) {
 		t.Fatalf("list status = %d body=%s", list.Code, list.Body.String())
 	}
 	var out struct {
-		Items     []json.RawMessage   `json:"items"`
-		Count     int                 `json:"count"`
-		Listed    int                 `json:"listed"`
-		Queued    int                 `json:"queued"`
-		Total     int                 `json:"total"`
-		InFlight  int                 `json:"in_flight"`
-		Counted   bool                `json:"counted"`
-		Counts    store.HarvestJobCounts `json:"counts"`
+		Items    []json.RawMessage      `json:"items"`
+		Count    int                    `json:"count"`
+		Listed   int                    `json:"listed"`
+		Queued   int                    `json:"queued"`
+		Total    int                    `json:"total"`
+		InFlight int                    `json:"in_flight"`
+		Counted  bool                   `json:"counted"`
+		Counts   store.HarvestJobCounts `json:"counts"`
 	}
 	decodeBody(t, list, &out)
 	if !out.Counted {
@@ -254,4 +254,3 @@ func TestMemoryHarvestListReportsUncappedCounts(t *testing.T) {
 		t.Fatalf("counts object = %+v", out.Counts)
 	}
 }
-

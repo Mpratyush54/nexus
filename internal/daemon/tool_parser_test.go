@@ -12,11 +12,11 @@ func TestParseReplaceFileContent(t *testing.T) {
 			map[string]any{
 				"name": "replace_file_content",
 				"args": map[string]any{
-					"TargetFile":          `D:\central-memory\internal\store\memory.go`,
-					"StartLine":           10,
-					"EndLine":             12,
-					"TargetContent":       "old line",
-					"ReplacementContent":  "new line",
+					"TargetFile":         `D:\central-memory\internal\store\memory.go`,
+					"StartLine":          10,
+					"EndLine":            12,
+					"TargetContent":      "old line",
+					"ReplacementContent": "new line",
 				},
 			},
 		},

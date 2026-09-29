@@ -22,19 +22,19 @@ func (s *Server) registerSnapshotRoutes() {
 }
 
 type snapshotPostBody struct {
-	ProjectID         string `json:"project_id"`
-	Harness           string `json:"harness"`
-	ConversationID    string `json:"conversation_id"`
-	TurnCount         int    `json:"turn_count"`
-	GitBranch         string `json:"git_branch"`
-	GitCommit         string `json:"git_commit"`
-	GitDirty          bool   `json:"git_dirty"`
+	ProjectID          string `json:"project_id"`
+	Harness            string `json:"harness"`
+	ConversationID     string `json:"conversation_id"`
+	TurnCount          int    `json:"turn_count"`
+	GitBranch          string `json:"git_branch"`
+	GitCommit          string `json:"git_commit"`
+	GitDirty           bool   `json:"git_dirty"`
 	UncommittedDiffB64 string `json:"uncommitted_diff_b64"`
-	DiffSizeBytes     int    `json:"diff_size_bytes"`
-	DiffTruncated     bool   `json:"diff_truncated"`
-	TranscriptB64     string `json:"transcript_payload_b64"`
-	ArtifactsB64      string `json:"artifacts_bundle_b64"`
-	SourceMachineID   string `json:"source_machine_id"`
+	DiffSizeBytes      int    `json:"diff_size_bytes"`
+	DiffTruncated      bool   `json:"diff_truncated"`
+	TranscriptB64      string `json:"transcript_payload_b64"`
+	ArtifactsB64       string `json:"artifacts_bundle_b64"`
+	SourceMachineID    string `json:"source_machine_id"`
 }
 
 func (s *Server) handleSnapshotPost(w http.ResponseWriter, r *http.Request) {
@@ -125,21 +125,21 @@ func (s *Server) handleSnapshotGet(w http.ResponseWriter, r *http.Request) {
 	}
 	include := strings.ToLower(r.URL.Query().Get("include"))
 	out := map[string]any{
-		"id":                 snap.ID,
-		"session_id":         snap.SessionID,
-		"snapshot_version":   snap.SnapshotVersion,
-		"project_id":         snap.ProjectID,
-		"harness":            snap.Harness,
-		"conversation_id":    snap.ConversationID,
-		"turn_count":         snap.TurnCount,
-		"git_branch":         snap.GitBranch,
-		"git_commit":         snap.GitCommit,
-		"git_dirty":          snap.GitDirty,
-		"diff_size_bytes":    snap.DiffSizeBytes,
-		"diff_truncated":      snap.DiffTruncated,
-		"source_machine_id":  snap.SourceMachineID,
-		"created_at":         snap.CreatedAt,
-		"updated_at":         snap.UpdatedAt,
+		"id":                snap.ID,
+		"session_id":        snap.SessionID,
+		"snapshot_version":  snap.SnapshotVersion,
+		"project_id":        snap.ProjectID,
+		"harness":           snap.Harness,
+		"conversation_id":   snap.ConversationID,
+		"turn_count":        snap.TurnCount,
+		"git_branch":        snap.GitBranch,
+		"git_commit":        snap.GitCommit,
+		"git_dirty":         snap.GitDirty,
+		"diff_size_bytes":   snap.DiffSizeBytes,
+		"diff_truncated":    snap.DiffTruncated,
+		"source_machine_id": snap.SourceMachineID,
+		"created_at":        snap.CreatedAt,
+		"updated_at":        snap.UpdatedAt,
 	}
 	if strings.Contains(include, "transcript") {
 		out["transcript_payload_b64"] = base64.StdEncoding.EncodeToString(snap.TranscriptPayload)

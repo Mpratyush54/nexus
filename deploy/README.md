@@ -4,6 +4,40 @@ For nexus issue #20 ([Phase 6] AWS Cloud Infrastructure & Production
 Deployment). Templates and notes only — no `terraform apply`, no live
 infrastructure changes.
 
+## GitHub Actions (push → master)
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `.github/workflows/deploy.yml` | push `master` | ECR image build; optional ECS roll (skipped when no task def); frontend S3 sync (`deploy-frontend.sh`); optional Lightsail API deploy |
+| `.github/workflows/release-desktop.yml` | push `master` / tags `v*` `desktop-v*` / `workflow_dispatch` | Cross-compile desktop+daemon+CLI → S3 `central-memory-releases/desktop/` + `latest.json` (in-app update feed) |
+| `.github/workflows/ci.yml` | push / PR | build, vet, gofmt, tests |
+
+Auth for AWS jobs uses OIDC role `GitHubActions-CentralMemory-Deploy` (no long-lived AWS keys in Actions).
+
+### Secrets / variables to set (Settings → Secrets and variables → Actions)
+
+| Name | Type | Required | Purpose |
+|---|---|---|---|
+| `LIGHTSAIL_SSH_KEY` | secret | for Lightsail job | PEM private key contents (same as local `~/.ssh/central-memory-key.pem`) |
+| `LIGHTSAIL_HOST` | secret | optional | default `13.205.221.207` |
+| `LIGHTSAIL_USER` | secret | optional | default `ubuntu` |
+| `DEPLOY_LIGHTSAIL` | variable | set to `true` to enable | gates the Lightsail job |
+| `FRONTEND_S3_BUCKET` | variable | optional | override mirror bucket |
+| `FRONTEND_LIVE_S3_BUCKET` | variable | optional | default `nexus.pratyushes.dev` |
+| `FRONTEND_CLOUDFRONT_ID` | variable | optional | only if a CF distribution exists (portal is normally Cloudflare → S3) |
+| `RELEASES_S3_BUCKET` | variable | optional | default `central-memory-releases` |
+
+Never commit keys. Seed Lightsail SSH from a trusted machine:
+
+```bash
+gh secret set LIGHTSAIL_SSH_KEY < ~/.ssh/central-memory-key.pem
+gh variable set DEPLOY_LIGHTSAIL --body true
+```
+
+Desktop clients discover updates via tray **Check for updates** / silent notify, reading
+`https://central-memory-releases.s3.ap-south-1.amazonaws.com/desktop/latest.json`
+(fallback after `/platform/releases/latest?app=desktop`).
+
 ## Contents
 
 | File                | Purpose |

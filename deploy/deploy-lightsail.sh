@@ -24,7 +24,15 @@ ssh -i "$KEY" -o StrictHostKeyChecking=no "$USER@$HOST" << 'REMOTE_COMMANDS'
   git pull origin master
   echo "Rebuilding and restarting stack..."
   # Project name must stay "repo" to match existing container names (nexus-*).
-  docker compose -p repo --env-file .env -f deploy/docker-compose.lightsail.yml up -d --build
+  # If postgres already exists under another compose project label, rebuild server only.
+  COMPOSE=(docker compose -p repo --env-file .env -f deploy/docker-compose.lightsail.yml)
+  "${COMPOSE[@]}" build
+  if docker ps -a --format '{{.Names}}' | grep -qx nexus-postgres; then
+    echo "postgres container already present — recreating server only"
+    "${COMPOSE[@]}" up -d --no-deps --force-recreate server
+  else
+    "${COMPOSE[@]}" up -d
+  fi
   echo "Stack updated successfully!"
 REMOTE_COMMANDS
 

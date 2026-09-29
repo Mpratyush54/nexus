@@ -13,6 +13,8 @@ aws iam put-role-policy --role-name central-memory-task-exec \
   --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"secretsmanager:GetSecretValue","Resource":"arn:aws:secretsmanager:'"${AWS_REGION}"':833291393451:secret:central-memory/smtp*"}]}' 2>/dev/null || true
 
 echo "==> Finding active ECS cluster and service..."
+AWS_REGION="${AWS_REGION:-${AWS_DEFAULT_REGION:-ap-south-1}}"
+export AWS_REGION AWS_DEFAULT_REGION="$AWS_REGION"
 CLUSTER="central-memory-cluster"
 SERVICE="central-memory-srv"
 
@@ -29,8 +31,14 @@ if ! aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --quer
 fi
 echo "Active target: cluster=$CLUSTER, service=$SERVICE"
 
-CURRENT_TASK_DEF=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query "services[0].taskDefinition" --output text)
+CURRENT_TASK_DEF=$(aws ecs describe-services --cluster "$CLUSTER" --services "$SERVICE" --query "services[0].taskDefinition" --output text 2>/dev/null || true)
 echo "Current running task definition: $CURRENT_TASK_DEF"
+
+# Production API currently runs on Lightsail. Skip ECS roll when no task def is wired.
+if [ -z "$CURRENT_TASK_DEF" ] || [ "$CURRENT_TASK_DEF" = "None" ] || [ "$CURRENT_TASK_DEF" = "null" ]; then
+  echo "==> SKIP: no active ECS task definition (Lightsail is primary). Image already pushed to ECR."
+  exit 0
+fi
 
 IMAGE="${REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
 echo "Target Image: $IMAGE"
