@@ -15,9 +15,12 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -277,6 +280,26 @@ type statusRecorder struct {
 func (rec *statusRecorder) WriteHeader(status int) {
 	rec.status = status
 	rec.ResponseWriter.WriteHeader(status)
+}
+
+// Hijack delegates to the underlying ResponseWriter so /ws upgrades work
+// through withLogging (plain embedding hides http.Hijacker).
+func (rec *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := rec.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("http.ResponseWriter does not implement http.Hijacker")
+	}
+	if rec.status == http.StatusOK {
+		rec.status = http.StatusSwitchingProtocols
+	}
+	return hj.Hijack()
+}
+
+// Flush delegates so streaming handlers keep working through withLogging.
+func (rec *statusRecorder) Flush() {
+	if f, ok := rec.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // withLogging logs method, path, status, and latency for every request.

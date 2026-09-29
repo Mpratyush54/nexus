@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -208,6 +209,49 @@ func TestWSUpgradeGate(t *testing.T) {
 	r := doAuthedGet(t, s, token)
 	if r != http.StatusUpgradeRequired {
 		t.Fatalf("plain-GET status = %d, want 426", r)
+	}
+}
+
+// withLogging wraps ResponseWriter; without Hijacker/Flusher delegation,
+// real /ws upgrades fail with "hijack not supported" (production 500s).
+func TestWSUpgradeThroughLoggingMiddleware(t *testing.T) {
+	s := NewServer(store.NewMemStore())
+	s.AttachHub(NewHub())
+	token := loginAs(t, s, "alice")
+
+	ts := httptest.NewServer(s) // ServeHTTP → withCORS → withLogging → mux
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodGet, ts.URL+"/ws", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	req.Header.Set("Sec-WebSocket-Version", "13")
+	req.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+
+	if err := req.Write(conn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		t.Fatalf("upgrade status = %d body=%s; want 101 (logging middleware must expose Hijacker)",
+			resp.StatusCode, body)
 	}
 }
 
