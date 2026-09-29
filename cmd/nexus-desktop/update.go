@@ -38,22 +38,22 @@ type desktopManifest struct {
 type updatePhase string
 
 const (
-	updateIdle       updatePhase = "idle"
-	updateChecking   updatePhase = "checking"
-	updateAvailable  updatePhase = "available"
+	updateIdle        updatePhase = "idle"
+	updateChecking    updatePhase = "checking"
+	updateAvailable   updatePhase = "available"
 	updateDownloading updatePhase = "downloading"
-	updateApplying   updatePhase = "applying"
-	updateRestarting updatePhase = "restarting"
-	updateOK         updatePhase = "ok"
-	updateFailed     updatePhase = "failed"
+	updateApplying    updatePhase = "applying"
+	updateRestarting  updatePhase = "restarting"
+	updateOK          updatePhase = "ok"
+	updateFailed      updatePhase = "failed"
 )
 
 type updateStatus struct {
-	mu      sync.Mutex
-	phase   updatePhase
-	detail  string
-	remote  string
-	errMsg  string
+	mu     sync.Mutex
+	phase  updatePhase
+	detail string
+	remote string
+	errMsg string
 }
 
 var globalUpdate = &updateStatus{phase: updateIdle}
@@ -166,8 +166,8 @@ func fetchManifestURL(client *http.Client, rawURL string) (*desktopManifest, err
 		return &m, nil
 	}
 	var api struct {
-		Version string `json:"version"`
-		GitSHA  string `json:"git_sha"`
+		Version   string `json:"version"`
+		GitSHA    string `json:"git_sha"`
 		Artifacts []struct {
 			OS       string `json:"os"`
 			Arch     string `json:"arch"`

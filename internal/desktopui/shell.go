@@ -23,14 +23,14 @@ import (
 // Hooks lets cmd/nexus-desktop wire sign-in, workspace pick, and updates
 // without importing UI details into the updater.
 type Hooks struct {
-	OnSignIn       func()
-	OnSignOut      func()
-	OnOpenPortal   func()
-	OnPickFolder   func()
-	OnCheckUpdate  func()
-	OnQuit         func()
-	UpdateLabel    func() string
-	EnsureDaemon   func() error
+	OnSignIn      func()
+	OnSignOut     func()
+	OnOpenPortal  func()
+	OnPickFolder  func()
+	OnCheckUpdate func()
+	OnQuit        func()
+	UpdateLabel   func() string
+	EnsureDaemon  func() error
 }
 
 // Shell owns the main window content and a refresh loop.
@@ -39,18 +39,18 @@ type Shell struct {
 	client *localclient.Client
 	hooks  Hooks
 
-	statusLine   *widget.Label
-	messageLine  *widget.Label
-	detailServer *widget.Label
-	detailUser   *widget.Label
-	detailWS     *widget.Label
-	detailRoot   *widget.Label
+	statusLine    *widget.Label
+	messageLine   *widget.Label
+	detailServer  *widget.Label
+	detailUser    *widget.Label
+	detailWS      *widget.Label
+	detailRoot    *widget.Label
 	detailMachine *widget.Label
-	harvestStats *widget.Label
-	harnessList  *widget.List
-	agents       []localclient.HarvestAgent
-	versionLine  *widget.Label
-	daemonHint   *widget.Label
+	harvestStats  *widget.Label
+	harnessList   *widget.List
+	agents        []localclient.HarvestAgent
+	versionLine   *widget.Label
+	daemonHint    *widget.Label
 
 	mu     sync.Mutex
 	stopCh chan struct{}

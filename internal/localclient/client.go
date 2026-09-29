@@ -17,8 +17,8 @@ const DefaultBase = "http://127.0.0.1:7272"
 
 // Client is a thin HTTP client for daemon local endpoints.
 type Client struct {
-	Base   string
-	HTTP   *http.Client
+	Base string
+	HTTP *http.Client
 }
 
 func New(base string) *Client {
@@ -50,16 +50,16 @@ type Status struct {
 
 // Harvest is a subset of /local/harvest.
 type Harvest struct {
-	Root            string         `json:"root"`
-	LastScanAt      string         `json:"last_scan_at"`
-	LastScanFiles   int            `json:"last_scan_files"`
-	LastScanTurns   int            `json:"last_scan_turns"`
-	TurnsEmitted    int            `json:"turns_emitted"`
-	ActiveSessions  int            `json:"active_sessions"`
-	ProposalsSaved  int            `json:"proposals_saved"`
-	ProposalErrors  int            `json:"proposal_errors"`
-	Agents          []HarvestAgent `json:"agents"`
-	Recent          []HarvestEvent `json:"recent"`
+	Root           string         `json:"root"`
+	LastScanAt     string         `json:"last_scan_at"`
+	LastScanFiles  int            `json:"last_scan_files"`
+	LastScanTurns  int            `json:"last_scan_turns"`
+	TurnsEmitted   int            `json:"turns_emitted"`
+	ActiveSessions int            `json:"active_sessions"`
+	ProposalsSaved int            `json:"proposals_saved"`
+	ProposalErrors int            `json:"proposal_errors"`
+	Agents         []HarvestAgent `json:"agents"`
+	Recent         []HarvestEvent `json:"recent"`
 }
 
 type HarvestAgent struct {
