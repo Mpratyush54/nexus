@@ -58,8 +58,11 @@ type Harvest struct {
 	ActiveSessions int            `json:"active_sessions"`
 	ProposalsSaved int            `json:"proposals_saved"`
 	ProposalErrors int            `json:"proposal_errors"`
-	Agents         []HarvestAgent `json:"agents"`
-	Recent         []HarvestEvent `json:"recent"`
+	Agents         []HarvestAgent   `json:"agents"`
+	Files          []HarvestFileHit `json:"files"`
+	Recent         []HarvestEvent   `json:"recent"`
+	ProjectID      string           `json:"project_id"`
+	Message        string           `json:"message"`
 }
 
 type HarvestAgent struct {
@@ -69,6 +72,14 @@ type HarvestAgent struct {
 	Kind      string `json:"kind"`
 	FilesSeen int    `json:"files_seen"`
 	FileCount int    `json:"file_count"`
+}
+
+// HarvestFileHit is an agent transcript file on disk (not a memory entry).
+type HarvestFileHit struct {
+	Agent  string `json:"agent"`
+	Format string `json:"format"`
+	Path   string `json:"path"`
+	Name   string `json:"name"`
 }
 
 type HarvestEvent struct {
@@ -151,6 +162,54 @@ func (c *Client) SwitchWorkspace(path string) error {
 		return fmt.Errorf("workspace switch: %s %s", resp.Status, strings.TrimSpace(string(b)))
 	}
 	return nil
+}
+
+// Workspace is GET /local/workspace (git + folder metadata).
+type Workspace struct {
+	Project     string `json:"project"`
+	Path        string `json:"path"`
+	Branch      string `json:"branch"`
+	Commit      string `json:"commit"`
+	IsDirty     bool   `json:"is_dirty"`
+	MachineID   string `json:"machine_id"`
+	WorkspaceID string `json:"workspace_id"`
+}
+
+// FileRead is POST /local/file/read (workspace-relative path).
+type FileRead struct {
+	Path    string `json:"path"`
+	Size    int    `json:"size"`
+	Content string `json:"content"`
+}
+
+func (c *Client) GetWorkspace() (*Workspace, error) {
+	var ws Workspace
+	if err := c.getJSON("/local/workspace", &ws); err != nil {
+		return nil, err
+	}
+	return &ws, nil
+}
+
+func (c *Client) ReadFile(path string) (*FileRead, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+	body, _ := json.Marshal(map[string]string{"path": path})
+	resp, err := c.HTTP.Post(c.Base+"/local/file/read", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("file read: %s %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var fr FileRead
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&fr); err != nil {
+		return nil, err
+	}
+	return &fr, nil
 }
 
 func (c *Client) RecentWorkspaces() ([]string, error) {

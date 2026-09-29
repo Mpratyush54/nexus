@@ -1,8 +1,9 @@
 # Native desktop UI (ADR)
 
 ## Status
-Accepted for implementation (2026-09-30). Replaces browser/webview “cockpit”
-navigation for Nexus Desktop.
+Accepted for implementation (2026-09-30). **Amended 2026-09-30:** Fyne remains the
+**interim** native shell (cockpit + preview); **embedded portal (Wails/WebView2)**
+is the planned path to full UI parity — see [native-app-direction.md](../native-app-direction.md).
 
 ## Context
 `nexus-desktop` was a **Windows systray** (`github.com/gogpu/systray`) that
@@ -16,7 +17,8 @@ Ship the desktop shell with **[Fyne v2](https://fyne.io/)** (`fyne.io/fyne/v2`):
 | Option | Verdict |
 |--------|---------|
 | **Fyne** | **Chosen** — native widgets in Go, Win/Mac/Linux, no web runtime; can share code with daemon/updater; Fyne also has a later iOS packaging path |
-| Wails / Tauri | Rejected for product direction — still HTML/JS webviews |
+| Wails / WebView2 embed | **Planned** — same React portal in one window (not daemon HTML); Fyne interim until embed ships |
+| Tauri | Not chosen — separate Rust stack |
 | Flutter desktop | Strong iOS story later, but splits the stack (Dart) from Go daemon/updater |
 | Keep systray + browser | Explicitly rejected by users |
 

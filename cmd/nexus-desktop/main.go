@@ -107,7 +107,7 @@ func run() error {
 				shell.Refresh()
 			}
 		},
-		OnOpenPortal: func() {
+		OnOpenWebPortal: func() {
 			_ = authbrowser.OpenBrowser(config.ResolveAppURL() + "/app/dashboard")
 		},
 		OnPickFolder: func() {
@@ -151,7 +151,7 @@ func run() error {
 		desk.SetSystemTrayMenu(fyne.NewMenu("Nexus",
 			fyne.NewMenuItem("Open Nexus", func() { shell.Show() }),
 			fyne.NewMenuItem("Sign in…", doLogin),
-			fyne.NewMenuItem("Open portal", hooks.OnOpenPortal),
+			fyne.NewMenuItem("Team & org (web)", hooks.OnOpenWebPortal),
 			fyne.NewMenuItem("Choose workspace…", hooks.OnPickFolder),
 			fyne.NewMenuItem("Scan now", func() {
 				go func() {

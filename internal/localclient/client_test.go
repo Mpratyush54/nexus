@@ -40,3 +40,19 @@ func TestGetStatusAndHarvest(t *testing.T) {
 		t.Fatal("expected online")
 	}
 }
+
+func TestReadFile(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/local/file/read", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(FileRead{Path: "README.md", Size: 4, Content: "hi\n"})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	fr, err := New(srv.URL).ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fr.Content != "hi\n" {
+		t.Fatalf("%q", fr.Content)
+	}
+}
