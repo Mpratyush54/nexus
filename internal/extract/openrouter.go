@@ -17,11 +17,10 @@ const defaultOpenRouterBase = "https://openrouter.ai/api/v1"
 // Prefer an instruct-capable free model; callers can override via OPENROUTER_MODEL.
 const defaultOpenRouterModel = "nvidia/nemotron-3.5-lightning:free"
 
-// defaultOpenRouterFallbacks are tried when the primary model is unavailable.
+// defaultOpenRouterFallbacks are tried when the primary model is unavailable (max 3 total for OpenRouter).
 var defaultOpenRouterFallbacks = []string{
 	"liquid/lfm-2.5-2.6b:free",
 	"google/gemma-4-31b-it:free",
-	"qwen/qwen3.8-27b:free",
 }
 
 // Client calls OpenRouter's OpenAI-compatible chat completions API.
@@ -106,6 +105,9 @@ func (c *Client) chat(ctx context.Context, model string, fallbacks []string, sys
 	}
 	if strings.TrimSpace(model) == "" {
 		model = defaultOpenRouterModel
+	}
+	if len(fallbacks) > 3 {
+		fallbacks = fallbacks[:3]
 	}
 	body, _ := json.Marshal(map[string]any{
 		"model":  model,
