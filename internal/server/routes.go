@@ -51,6 +51,10 @@ func (s *Server) registerRoutes() {
 	s.registerAdminRoutes()
 	s.registerAgentV1Routes()
 	s.registerTimelineRoutes()
+	s.registerMemoryActionRoutes()
+	s.registerBlobChunkRoutes()
+	s.registerGuestOffboardRoutes()
+	s.registerAgentSessionToolRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
