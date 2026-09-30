@@ -17,7 +17,6 @@ func (s *Shell) buildSidebar() fyne.CanvasObject {
 		sec   section
 	}{
 		{"Home", theme.HomeIcon(), secHome},
-		{"Connect", theme.LoginIcon(), secConnect},
 		{"Memory", theme.DocumentIcon(), secMemory},
 		{"Harvest", theme.ListIcon(), secHarvest},
 		{"Workspace", theme.FolderIcon(), secWorkspace},
@@ -47,9 +46,15 @@ func (s *Shell) buildSidebar() fyne.CanvasObject {
 }
 
 func (s *Shell) switchSection(sec section) {
+	if sec == secConnect {
+		sec = secHome // Connect lives on Home now
+	}
 	s.section = sec
 	s.clearPreviewForSection(sec)
 	s.rebuildChrome()
+	if sec == secMemory {
+		go s.runMemorySearch(true)
+	}
 }
 
 func (s *Shell) renderCenter() {
@@ -58,8 +63,6 @@ func (s *Shell) renderCenter() {
 		page = s.welcomePage()
 	} else {
 		switch s.section {
-		case secConnect:
-			page = s.connectPage()
 		case secMemory:
 			page = s.memoryPage()
 		case secHarvest:

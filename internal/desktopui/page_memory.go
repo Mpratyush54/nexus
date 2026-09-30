@@ -12,15 +12,23 @@ import (
 
 func (s *Shell) memoryPage() fyne.CanvasObject {
 	searchBtn := secondaryButton("Search", func() {
-		go s.runMemorySearch()
+		go s.runMemorySearch(false)
 	})
 	searchBtn.Icon = theme.SearchIcon()
 	s.memorySearch.OnSubmitted = func(string) {
-		go s.runMemorySearch()
+		go s.runMemorySearch(false)
 	}
 
 	header := pageHeader("Memory", "Durable facts in Nexus cloud — not files on disk.")
 	searchRow := container.NewBorder(nil, nil, nil, searchBtn, s.memorySearch)
+
+	// Auto-browse recent on open when the list is empty.
+	s.mu.Lock()
+	needLoad := len(s.memoryItems) == 0 && s.signedIn
+	s.mu.Unlock()
+	if needLoad {
+		go s.runMemorySearch(true)
+	}
 
 	return container.NewBorder(
 		container.NewVBox(
@@ -48,13 +56,11 @@ func (s *Shell) setMemoryBanner(msg string, cta string, onCTA func()) {
 	s.memoryBanner.Refresh()
 }
 
-func (s *Shell) runMemorySearch() {
+func (s *Shell) runMemorySearch(browseIfEmpty bool) {
 	q := strings.TrimSpace(s.memorySearch.Text)
-	if q == "" {
-		fyne.Do(func() {
-			s.setMemoryBanner("Enter a search query to find cloud memory.", "", nil)
-		})
-		return
+	if q == "" && !browseIfEmpty {
+		// Explicit Search with empty box → browse recent.
+		browseIfEmpty = true
 	}
 
 	s.mu.Lock()
@@ -74,11 +80,51 @@ func (s *Shell) runMemorySearch() {
 		return
 	}
 
-	items, usedPID, err := s.cloud.MemorySearch(q, pid, 25)
+	if pid == "" {
+		projects, err := s.cloud.ListProjects()
+		if err == nil && len(projects) == 1 {
+			pid = projects[0].ID
+		} else if err == nil && len(projects) > 1 {
+			fyne.Do(func() {
+				names := make([]string, 0, len(projects))
+				for _, p := range projects {
+					names = append(names, first(p.DisplayName, p.FolderName, p.ID))
+				}
+				s.setMemoryBanner("Multiple projects on this account. Link a workspace on Home so harvest sets the active project, or search after connecting.", "Open Home", func() {
+					s.switchSection(secHome)
+				})
+				s.setPreviewKind("memory", "Memory", "Projects:\n- "+strings.Join(names, "\n- "))
+			})
+			return
+		} else if err != nil {
+			fyne.Do(func() {
+				s.setMemoryBanner("Could not resolve project: "+err.Error(), "Open Home", func() {
+					s.switchSection(secHome)
+				})
+			})
+			return
+		}
+	}
+
+	if pid == "" {
+		fyne.Do(func() {
+			s.setMemoryBanner("No linked project yet. Finish setup on Home (workspace + harvest) so memory can load.", "Open Home", func() {
+				s.switchSection(secHome)
+			})
+			s.setPreviewKind("memory", "Memory", "Missing project_id — choose a workspace and wait for harvest to link a project.")
+		})
+		return
+	}
+
+	limit := 25
+	if q == "" {
+		limit = 40
+	}
+	items, usedPID, err := s.cloud.MemorySearch(q, pid, limit)
 	fyne.Do(func() {
 		if err != nil {
-			s.setMemoryBanner("Search failed: "+err.Error(), "Open Connect", func() {
-				s.switchSection(secConnect)
+			s.setMemoryBanner("Search failed: "+err.Error(), "Open Home", func() {
+				s.switchSection(secHome)
 			})
 			s.setPreviewKind("memory", "Memory search", err.Error())
 			return
@@ -88,13 +134,21 @@ func (s *Shell) runMemorySearch() {
 		s.mu.Unlock()
 		s.memoryList.Refresh()
 		if len(items) == 0 {
-			s.setMemoryBanner("No results for \""+q+"\". Try another query or confirm the linked project on Connect.", "Open Connect", func() {
-				s.switchSection(secConnect)
+			msg := "No memories yet for this project."
+			if q != "" {
+				msg = "No results for \"" + q + "\". Try another query or confirm the linked project on Home."
+			}
+			s.setMemoryBanner(msg, "Open Home", func() {
+				s.switchSection(secHome)
 			})
-			s.setPreviewKind("memory", "Memory search", "No results for \""+q+"\"."+pidHint(usedPID))
+			s.setPreviewKind("memory", "Memory search", msg+pidHint(usedPID))
 			return
 		}
 		s.setMemoryBanner("", "", nil)
-		s.setPreviewKind("memory", "Memory search", fmt.Sprintf("%d results for \"%s\"%s\n\nSelect a row to preview.", len(items), q, pidHint(usedPID)))
+		label := fmt.Sprintf("%d recent memories%s\n\nSelect a row for full details and linked files.", len(items), pidHint(usedPID))
+		if q != "" {
+			label = fmt.Sprintf("%d results for \"%s\"%s\n\nSelect a row for full details and linked files.", len(items), q, pidHint(usedPID))
+		}
+		s.setPreviewKind("memory", "Memory", label)
 	})
 }

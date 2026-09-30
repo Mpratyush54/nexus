@@ -14,7 +14,7 @@ import (
 func (s *Shell) homePage() fyne.CanvasObject {
 	scan := primaryButton("Scan now", func() {
 		if err := s.client.TriggerHarvest(); err != nil {
-			s.setPreview("Scan", "Could not start harvest:\n"+err.Error()+"\n\nOpen Connect to verify daemon and workspace.")
+			s.setPreview("Scan", "Could not start harvest:\n"+err.Error()+"\n\nCheck setup status on this page (daemon + workspace).")
 			return
 		}
 		s.Refresh()
@@ -25,14 +25,11 @@ func (s *Shell) homePage() fyne.CanvasObject {
 		}
 		s.Refresh()
 	})
-	connect := outlineButton("Open Connect", func() {
-		s.switchSection(secConnect)
-	})
 
 	header := container.NewBorder(
 		nil, nil, nil,
-		toolbar(refresh, scan, connect),
-		pageHeader("Home", "Connection, harvest pulse, and what to do next."),
+		toolbar(refresh, scan),
+		pageHeader("Home", "Setup status, harvest pulse, and what to do next."),
 	)
 
 	if s.homeBody == nil {
@@ -42,8 +39,9 @@ func (s *Shell) homePage() fyne.CanvasObject {
 	st := s.cachedStatus
 	h := s.cachedHarvest
 	signedIn := s.signedIn
+	recent := append([]string(nil), s.recentWorkspaces...)
 	s.mu.Unlock()
-	s.rebuildHomeCards(st, h, signedIn)
+	s.rebuildHomeCards(st, h, signedIn, recent)
 
 	return container.NewBorder(
 		container.NewVBox(header, widget.NewSeparator()),
@@ -52,11 +50,69 @@ func (s *Shell) homePage() fyne.CanvasObject {
 	)
 }
 
-func (s *Shell) rebuildHomeCards(st *localclient.Status, h *localclient.Harvest, signedIn bool) {
+func (s *Shell) rebuildHomeCards(st *localclient.Status, h *localclient.Harvest, signedIn bool, recent ...[]string) {
 	if s.homeBody == nil {
 		return
 	}
-	cards := make([]fyne.CanvasObject, 0, 4)
+	var recentList []string
+	if len(recent) > 0 {
+		recentList = recent[0]
+	} else {
+		s.mu.Lock()
+		recentList = append([]string(nil), s.recentWorkspaces...)
+		s.mu.Unlock()
+	}
+
+	cards := make([]fyne.CanvasObject, 0, 12)
+	cards = append(cards, sectionHeading("Setup"))
+
+	for _, it := range buildConnectChecklist(st, h, signedIn) {
+		it := it
+		status := "Pending"
+		if it.done {
+			status = "Done"
+		}
+		title := it.title + "  ·  " + status
+		var actions []fyne.CanvasObject
+		if it.signIn {
+			actions = append(actions, primaryButton(it.action, func() {
+				if s.hooks.OnSignIn != nil {
+					s.hooks.OnSignIn()
+				}
+			}))
+		}
+		if it.pickWS {
+			label := it.action
+			if label == "" {
+				label = "Choose folder"
+			}
+			actions = append(actions, secondaryButton(label, func() {
+				s.pickWorkspaceFolder()
+			}))
+		}
+		if it.goTo == secHarvest && it.done {
+			actions = append(actions, outlineButton("Open Harvest", func() {
+				s.switchSection(secHarvest)
+			}))
+		}
+		cards = append(cards, card(title, it.detail, actions...))
+	}
+
+	cards = append(cards, widget.NewSeparator(), sectionHeading("Recent workspaces"))
+	if len(recentList) == 0 {
+		cards = append(cards, mutedLabel("No recent folders yet. Choose a workspace above."))
+	} else {
+		for _, path := range recentList {
+			path := path
+			btn := outlineButton(recentDisplayName(path), func() {
+				s.selectWorkspacePath(path)
+			})
+			btn.Alignment = widget.ButtonAlignLeading
+			cards = append(cards, btn)
+		}
+	}
+
+	cards = append(cards, widget.NewSeparator(), sectionHeading("Pulse"))
 
 	connBody := "Sign in to link your cloud account."
 	var connActions []fyne.CanvasObject
@@ -67,14 +123,19 @@ func (s *Shell) rebuildHomeCards(st *localclient.Status, h *localclient.Harvest,
 			}
 		}))
 	} else if st == nil {
-		connBody = "Signed in — local daemon is offline. Refresh or finish Connect."
-		connActions = append(connActions, outlineButton("Open Connect", func() { s.switchSection(secConnect) }))
+		connBody = "Signed in — local daemon is offline. Refresh to start it."
+		connActions = append(connActions, outlineButton("Refresh", func() {
+			if s.hooks.EnsureDaemon != nil {
+				_ = s.hooks.EnsureDaemon()
+			}
+			s.Refresh()
+		}))
 	} else if st.Connected {
 		connBody = fmt.Sprintf("%s · %s", first(st.Username, st.UserID, "account"), orDash(st.ServerURL))
 	} else {
 		connBody = "Signed in — linking workspace to the portal…"
 	}
-	cards = append(cards, card("Connection", connBody, connActions...))
+	cards = append(cards, card("Account", connBody, connActions...))
 
 	harvestBody := "Daemon offline — harvest pulse unavailable."
 	var harvestActions []fyne.CanvasObject
@@ -85,9 +146,10 @@ func (s *Shell) rebuildHomeCards(st *localclient.Status, h *localclient.Harvest,
 		if msg := strings.TrimSpace(h.Message); msg != "" {
 			harvestBody += "\n" + msg
 		}
+		if pid := strings.TrimSpace(h.ProjectID); pid != "" {
+			harvestBody += "\nProject: " + pid
+		}
 		harvestActions = append(harvestActions, outlineButton("Open Harvest", func() { s.switchSection(secHarvest) }))
-	} else if signedIn {
-		harvestActions = append(harvestActions, outlineButton("Open Connect", func() { s.switchSection(secConnect) }))
 	}
 	cards = append(cards, card("Harvest pulse", harvestBody, harvestActions...))
 

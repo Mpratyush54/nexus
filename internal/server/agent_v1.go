@@ -113,17 +113,27 @@ func (s *Server) handleAgentMemorySearch(w http.ResponseWriter, r *http.Request)
 		if it == nil {
 			continue
 		}
-		out = append(out, map[string]any{
-			"id":         it.ID,
-			"key":        it.Key,
-			"content":    it.Content,
-			"level":      it.Level,
-			"scope":      it.Scope,
-			"status":     it.Status,
-			"confidence": it.Confidence,
-			"tags":       it.Tags,
-			"source":     it.Source,
-		})
+		row := map[string]any{
+			"id":              it.ID,
+			"key":             it.Key,
+			"content":         it.Content,
+			"level":           it.Level,
+			"scope":           it.Scope,
+			"status":          it.Status,
+			"confidence":      it.Confidence,
+			"tags":            it.Tags,
+			"source":          it.Source,
+			"project_id":      it.ProjectID,
+			"category":        it.Category,
+			"context_snippet": it.ContextSnippet,
+			"files_affected":  it.FilesAffected,
+			"created_at":      it.CreatedAt,
+			"updated_at":      it.UpdatedAt,
+		}
+		if !it.LastUsedAt.IsZero() {
+			row["last_used_at"] = it.LastUsedAt
+		}
+		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project_id": projectID,

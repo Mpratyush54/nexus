@@ -15,7 +15,7 @@ func (s *Shell) harvestPage() fyne.CanvasObject {
 	var body fyne.CanvasObject = s.harvestList
 	if n == 0 {
 		body = container.NewBorder(
-			mutedLabel("No harvest rows yet. Finish Connect, then Scan on Home or from the tray."),
+			mutedLabel("No harvest rows yet. Finish setup on Home, then Scan on Home or from the tray."),
 			nil, nil, nil,
 			s.harvestList,
 		)

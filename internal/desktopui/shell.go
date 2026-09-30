@@ -50,9 +50,10 @@ type Shell struct {
 	center     *fyne.Container
 	homeBody   *fyne.Container
 
-	previewHead *widget.Label
-	previewBody *widget.Entry
-	previewPane fyne.CanvasObject
+	previewHead  *widget.Label
+	previewBody  *widget.Entry
+	previewLinks *fyne.Container
+	previewPane  fyne.CanvasObject
 
 	memorySearch *widget.Entry
 	memoryList   *widget.List
@@ -138,10 +139,10 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 			it = s.memoryItems[id]
 		}
 		s.mu.Unlock()
-		if it.Key == "" && it.Content == "" {
+		if it.Key == "" && it.Content == "" && it.ID == "" {
 			return
 		}
-		s.setPreviewKind("memory", "Memory · "+first(it.Key, it.ID), formatMemoryPreview(it))
+		s.showMemoryPreview(it)
 	}
 
 	s.harvestList = widget.NewList(
@@ -344,7 +345,7 @@ func (s *Shell) Refresh() {
 			s.workspaceList.Refresh()
 			s.rebuildHomeCards(nil, nil, signedIn)
 			s.refreshTopChrome(nil, signedIn)
-			if s.mode == modeApp && (s.section == secConnect || s.section == secHome || s.section == secWorkspace) {
+			if s.mode == modeApp && (s.section == secHome || s.section == secWorkspace) {
 				s.renderCenter()
 			}
 			return
@@ -385,7 +386,7 @@ func (s *Shell) Refresh() {
 		s.workspaceList.Refresh()
 		s.rebuildHomeCards(st, h, signedIn)
 		s.refreshTopChrome(st, signedIn)
-		if s.mode == modeApp && (s.section == secConnect || s.section == secHome || s.section == secWorkspace || s.section == secHarvest) {
+		if s.mode == modeApp && (s.section == secHome || s.section == secWorkspace || s.section == secHarvest) {
 			s.renderCenter()
 		}
 	})

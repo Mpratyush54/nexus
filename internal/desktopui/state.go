@@ -72,7 +72,7 @@ func buildStatusLine(st *localclient.Status, signedIn bool) string {
 	}
 	switch {
 	case strings.TrimSpace(st.Root) == "":
-		return "No workspace folder — choose one on Connect or Workspace"
+		return "No workspace folder — choose one on Home or Workspace"
 	case st.Connected:
 		return "Connected · " + first(st.Username, st.UserID)
 	case st.HasToken:
@@ -103,7 +103,7 @@ func buildHomeMarkdown(st *localclient.Status, h *localclient.Harvest, signedIn 
 		b.WriteString(fmt.Sprintf("- **Folder:** %s\n", st.Root))
 		b.WriteString(fmt.Sprintf("- **Linked id:** %s\n", orDash(st.WorkspaceID)))
 	} else {
-		b.WriteString("- No folder yet — use **Connect** or **Workspace** to pick one.\n")
+		b.WriteString("- No folder yet — use **Home** or **Workspace** to pick one.\n")
 	}
 	b.WriteString("\n#### Harvest\n")
 	if h != nil {
@@ -244,36 +244,45 @@ func buildWorkspaceRows(st *localclient.Status, ws *localclient.Workspace) []wor
 }
 
 func formatMemoryPreview(it cloudclient.MemoryItem) string {
-	var b strings.Builder
-	if it.Key != "" {
-		b.WriteString("Key: " + it.Key + "\n")
-	}
-	if it.Level != "" || it.Scope != "" {
-		b.WriteString(fmt.Sprintf("Level: %s · Scope: %s\n", it.Level, it.Scope))
-	}
-	if it.Status != "" {
-		b.WriteString("Status: " + it.Status + "\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(it.Content)
-	return b.String()
+	return formatMemoryDetail(it)
 }
 
+// memoryProjectID returns the cloud project UUID for memory APIs.
+// Never use Status.WorkspaceID — that is a workspace row id, not a project.
 func memoryProjectID(st *localclient.Status, h *localclient.Harvest) string {
 	if h != nil {
-		if pid := strings.TrimSpace(h.ProjectID); pid != "" {
+		if pid := strings.TrimSpace(h.ProjectID); looksLikeProjectUUID(pid) {
 			return pid
 		}
 	}
-	if st != nil {
-		return strings.TrimSpace(st.WorkspaceID)
-	}
+	_ = st // reserved: do not fall back to WorkspaceID
 	return ""
+}
+
+func looksLikeProjectUUID(s string) bool {
+	s = strings.TrimSpace(s)
+	if len(s) != 36 {
+		return false
+	}
+	// xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+	for i, r := range s {
+		switch i {
+		case 8, 13, 18, 23:
+			if r != '-' {
+				return false
+			}
+		default:
+			if (r < '0' || r > '9') && (r < 'a' || r > 'f') && (r < 'A' || r > 'F') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func pidHint(projectID string) string {
 	if projectID == "" {
-		return "\n\nTip: link a project on Connect so search scopes correctly."
+		return "\n\nTip: finish setup on Home (workspace + harvest) so a project is linked."
 	}
 	return "\n\nProject: " + projectID
 }

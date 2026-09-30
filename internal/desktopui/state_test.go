@@ -117,6 +117,21 @@ func TestFolderDialogResizeOrderingInvariant(t *testing.T) {
 	}
 }
 
+func TestMemoryProjectIDNeverUsesWorkspaceID(t *testing.T) {
+	st := &localclient.Status{WorkspaceID: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}
+	if got := memoryProjectID(st, nil); got != "" {
+		t.Fatalf("workspace id leaked: %q", got)
+	}
+	h := &localclient.Harvest{ProjectID: "11111111-2222-3333-4444-555555555555"}
+	if got := memoryProjectID(st, h); got != h.ProjectID {
+		t.Fatalf("got %q", got)
+	}
+	h.ProjectID = "not-a-uuid"
+	if got := memoryProjectID(st, h); got != "" {
+		t.Fatalf("non-uuid accepted: %q", got)
+	}
+}
+
 func contains(s, sub string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
 }

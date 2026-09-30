@@ -25,9 +25,10 @@ Ship and grow the desktop shell with **[Fyne v2](https://fyne.io/)** (`fyne.io/f
 | Keep systray + browser | Explicitly rejected by users |
 
 ## Architecture
-- **Native shell** (`internal/desktopui`) — Fyne Shell v2: Welcome, Connect,
-  Home, Memory, Harvest, Workspace, Settings + preview. Quiet system tray
-  (Open / Scan / Updates / Quit).
+- **Native shell** (`internal/desktopui`) — Fyne Shell v2: Welcome, Home
+  (setup checklist + pulse), Memory (rich preview + file links), Harvest,
+  Workspace, Settings + preview; system browser only for labeled team/org/billing.
+  Quiet system tray (Open / Scan / Updates / Quit).
 - **Local API** (`internal/localclient`) — HTTP to existing `nexus-daemon`
   (`:7272`) + existing cloud API; **no backend rewrite**.
 - **Updater** stays in Go (`cmd/nexus-desktop/update.go`): stop locked
