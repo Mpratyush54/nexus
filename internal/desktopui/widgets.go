@@ -88,13 +88,6 @@ func paneBG(content fyne.CanvasObject, bg color.Color) fyne.CanvasObject {
 
 // card is a raised bordered block for interactive/status groupings.
 func card(title, body string, actions ...fyne.CanvasObject) fyne.CanvasObject {
-	bg := canvas.NewRectangle(colorRaised)
-	bg.CornerRadius = 6
-	border := canvas.NewRectangle(color.Transparent)
-	border.StrokeColor = colorBorder
-	border.StrokeWidth = 1
-	border.CornerRadius = 6
-
 	head := widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	detail := mutedLabel(body)
 	inner := container.NewVBox(head, detail)
@@ -102,6 +95,17 @@ func card(title, body string, actions ...fyne.CanvasObject) fyne.CanvasObject {
 		inner.Add(layout.NewSpacer())
 		inner.Add(container.NewHBox(actions...))
 	}
+	return cardWrap(inner)
+}
+
+// cardWrap paints a raised bordered panel around arbitrary content.
+func cardWrap(inner fyne.CanvasObject) fyne.CanvasObject {
+	bg := canvas.NewRectangle(colorRaised)
+	bg.CornerRadius = 6
+	border := canvas.NewRectangle(color.Transparent)
+	border.StrokeColor = colorBorder
+	border.StrokeWidth = 1
+	border.CornerRadius = 6
 	pad := container.NewPadded(inner)
 	return container.NewStack(bg, border, pad)
 }

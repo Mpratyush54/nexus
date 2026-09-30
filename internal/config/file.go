@@ -160,16 +160,34 @@ func writeFile(cfg File) error {
 	return nil
 }
 
-// ResolveToken returns the first non-empty auth token from env, then config.
-func ResolveToken() string {
-	if v := firstNonEmpty(os.Getenv("NEXUS_TOKEN"), os.Getenv("CENTRAL_MEMORY_TOKEN"), os.Getenv("CENTRAL_SERVER_TOKEN")); v != "" {
-		return v
-	}
+// SessionToken returns the signed-in desktop/CLI token from config.json only.
+// It ignores env overrides (NEXUS_TOKEN, etc.) so a stale agent token cannot
+// shadow a valid portal login stored by authbrowser / local login.
+func SessionToken() string {
 	cfg, err := LoadFile()
 	if err != nil {
 		return ""
 	}
 	return strings.TrimSpace(cfg.Token)
+}
+
+// ResolveDesktopToken prefers the config.json session token, then env.
+// Use this for the native desktop shell and any UI that mirrors portal auth.
+// Headless agents that intentionally set NEXUS_TOKEN should keep using ResolveToken.
+func ResolveDesktopToken() string {
+	if v := SessionToken(); v != "" {
+		return v
+	}
+	return ResolveToken()
+}
+
+// ResolveToken returns the first non-empty auth token from env, then config.
+// Prefer ResolveDesktopToken for the signed-in desktop session.
+func ResolveToken() string {
+	if v := firstNonEmpty(os.Getenv("NEXUS_TOKEN"), os.Getenv("CENTRAL_MEMORY_TOKEN"), os.Getenv("CENTRAL_SERVER_TOKEN")); v != "" {
+		return v
+	}
+	return SessionToken()
 }
 
 // ResolveUserID returns the first non-empty user id from env, then config.

@@ -49,6 +49,7 @@ type Shell struct {
 	accountTxt *canvas.Text
 	center     *fyne.Container
 	homeBody   *fyne.Container
+	homeUI     *homeWidgets
 
 	previewHead  *widget.Label
 	previewBody  *widget.Entry
@@ -73,6 +74,7 @@ type Shell struct {
 	cachedStatus     *localclient.Status
 	cachedHarvest    *localclient.Harvest
 	cachedWorkspace  *localclient.Workspace
+	cachedDashboard  *cloudclient.ProjectDashboard
 	recentWorkspaces []string
 }
 
@@ -84,7 +86,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 	s := &Shell{
 		win:    win,
 		client: client,
-		cloud:  cloudclient.New("", ""),
+		cloud:  cloudclient.NewDesktop(),
 		hooks:  hooks,
 		stopCh: make(chan struct{}),
 		mode:   modeWelcome,
@@ -220,7 +222,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 		win.Hide()
 	})
 
-	signedIn := strings.TrimSpace(config.ResolveToken()) != ""
+	signedIn := strings.TrimSpace(config.ResolveDesktopToken()) != ""
 	s.signedIn = signedIn
 	s.mode = deriveMode(signedIn)
 	s.rebuildChrome()
@@ -318,8 +320,9 @@ func (s *Shell) Refresh() {
 			return
 		}
 
-		s.cloud = cloudclient.New("", "")
-		signedIn := strings.TrimSpace(config.ResolveToken()) != ""
+		// Prefer config.json session token over stale NEXUS_TOKEN env (root cause of Memory 401).
+		s.cloud = cloudclient.NewDesktop()
+		signedIn := strings.TrimSpace(config.ResolveDesktopToken()) != ""
 		prevMode := s.mode
 		s.mu.Lock()
 		s.signedIn = signedIn
@@ -338,6 +341,7 @@ func (s *Shell) Refresh() {
 			s.cachedStatus = nil
 			s.cachedHarvest = nil
 			s.cachedWorkspace = nil
+			s.cachedDashboard = nil
 			s.harvestRows = nil
 			s.workspaceRows = nil
 			s.mu.Unlock()
@@ -345,7 +349,8 @@ func (s *Shell) Refresh() {
 			s.workspaceList.Refresh()
 			s.rebuildHomeCards(nil, nil, signedIn)
 			s.refreshTopChrome(nil, signedIn)
-			if s.mode == modeApp && (s.section == secHome || s.section == secWorkspace) {
+			// Do not remount Home — scroll would jump. Only remount list pages if needed.
+			if s.mode == modeApp && (s.section == secWorkspace || s.section == secHarvest) {
 				s.renderCenter()
 			}
 			return
@@ -380,14 +385,51 @@ func (s *Shell) Refresh() {
 
 		s.mu.Lock()
 		s.workspaceRows = buildWorkspaceRows(s.cachedStatus, s.cachedWorkspace)
+		pid := memoryProjectID(s.cachedStatus, s.cachedHarvest)
 		s.mu.Unlock()
 
 		s.harvestList.Refresh()
 		s.workspaceList.Refresh()
+
+		// Kick dashboard fetch off-thread; Home updates when it returns.
+		if signedIn && pid != "" {
+			go s.fetchDashboard(pid)
+		} else {
+			s.mu.Lock()
+			s.cachedDashboard = nil
+			s.mu.Unlock()
+		}
+
 		s.rebuildHomeCards(st, h, signedIn)
 		s.refreshTopChrome(st, signedIn)
-		if s.mode == modeApp && (s.section == secHome || s.section == secWorkspace || s.section == secHarvest) {
+		// Home updates in place via rebuildHomeCards — remounting reset scroll.
+		if s.mode == modeApp && (s.section == secWorkspace || s.section == secHarvest) {
 			s.renderCenter()
+		}
+	})
+}
+
+func (s *Shell) fetchDashboard(projectID string) {
+	c := s.cloud
+	if c == nil {
+		c = cloudclient.NewDesktop()
+	}
+	dash, err := c.ProjectDashboard(projectID)
+	fyne.Do(func() {
+		s.mu.Lock()
+		if err != nil {
+			s.cachedDashboard = nil
+		} else {
+			s.cachedDashboard = dash
+		}
+		st := s.cachedStatus
+		h := s.cachedHarvest
+		signedIn := s.signedIn
+		recent := append([]string(nil), s.recentWorkspaces...)
+		cached := s.cachedDashboard
+		s.mu.Unlock()
+		if s.homeUI != nil {
+			s.updateHomeDashboard(st, h, signedIn, recent, cached)
 		}
 	})
 }

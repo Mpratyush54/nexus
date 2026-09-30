@@ -23,12 +23,14 @@ type Client struct {
 }
 
 // New builds a client from config when serverURL/token are empty.
+// Empty token uses ResolveDesktopToken (config.json session first) so a stale
+// NEXUS_TOKEN env cannot shadow a valid desktop login.
 func New(serverURL, token string) *Client {
 	if strings.TrimSpace(serverURL) == "" {
 		serverURL = config.ResolveServerURL("https://api-nexus.pratyushes.dev")
 	}
 	if strings.TrimSpace(token) == "" {
-		token = config.ResolveToken()
+		token = config.ResolveDesktopToken()
 	}
 	return &Client{
 		ServerURL: strings.TrimRight(strings.TrimSpace(serverURL), "/"),
@@ -37,8 +39,31 @@ func New(serverURL, token string) *Client {
 	}
 }
 
+// NewDesktop builds a client that always reloads session credentials from
+// config.json (same token authbrowser / local login persist).
+func NewDesktop() *Client {
+	file, _ := config.LoadFile()
+	server := strings.TrimSpace(file.ServerURL)
+	if server == "" {
+		server = config.ResolveServerURL("https://api-nexus.pratyushes.dev")
+	}
+	return New(server, config.ResolveDesktopToken())
+}
+
 func (c *Client) signedIn() bool {
 	return c != nil && strings.TrimSpace(c.Token) != ""
+}
+
+func (c *Client) setAuth(req *http.Request) {
+	if c == nil || req == nil {
+		return
+	}
+	tok := strings.TrimSpace(c.Token)
+	if tok == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Accept", "application/json")
 }
 
 // Project is one entry from GET /v1/agent/projects.
@@ -88,7 +113,7 @@ func (c *Client) ListProjects() ([]Project, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	c.setAuth(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, err
@@ -138,7 +163,7 @@ func (c *Client) memoryPortalSearch(projectID, query string, limit int) ([]Memor
 	if err != nil {
 		return nil, "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	c.setAuth(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, "", err
@@ -194,7 +219,7 @@ func (c *Client) MemorySearch(query, projectID string, limit int) ([]MemoryItem,
 		return nil, "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.Token)
+	c.setAuth(req)
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
 		return nil, "", err
@@ -214,6 +239,76 @@ func (c *Client) MemorySearch(query, projectID string, limit int) ([]MemoryItem,
 		}
 	}
 	return out.Items, out.ProjectID, nil
+}
+
+// HeatDay is one cell in the project activity heatmap.
+type HeatDay struct {
+	Date  string `json:"date"`
+	Count int    `json:"count"`
+}
+
+// DashboardMetrics mirrors GET /projects/{id}/dashboard metrics.
+type DashboardMetrics struct {
+	Memories        int    `json:"memories"`
+	Proposed        int    `json:"proposed"`
+	Confirmed       int    `json:"confirmed"`
+	Members         int    `json:"members"`
+	Online          int    `json:"online"`
+	Events7d        int    `json:"events_7d"`
+	AgentCalls      int    `json:"agent_calls"`
+	GitHubConnected bool   `json:"github_connected"`
+	GitHubRepo      string `json:"github_repo"`
+}
+
+// DashboardEvent is a recent project activity row.
+type DashboardEvent struct {
+	ID        int64  `json:"id"`
+	EventType string `json:"event_type"`
+	CreatedAt string `json:"created_at"`
+}
+
+// ProjectDashboard is GET /projects/{id}/dashboard (portal Home).
+type ProjectDashboard struct {
+	ProjectID string           `json:"project_id"`
+	Metrics   DashboardMetrics `json:"metrics"`
+	Heatmap   []HeatDay        `json:"heatmap"`
+	Recent    []DashboardEvent `json:"recent"`
+}
+
+// ProjectDashboard loads the portal Home dashboard for a project.
+func (c *Client) ProjectDashboard(projectID string) (*ProjectDashboard, error) {
+	if !c.signedIn() {
+		return nil, fmt.Errorf("not signed in")
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, fmt.Errorf("project_id is required")
+	}
+	req, err := http.NewRequest(http.MethodGet, c.ServerURL+"/projects/"+url.PathEscape(projectID)+"/dashboard", nil)
+	if err != nil {
+		return nil, err
+	}
+	c.setAuth(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("dashboard: %s %s", resp.Status, strings.TrimSpace(string(raw)))
+	}
+	var out ProjectDashboard
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, err
+	}
+	if out.ProjectID == "" {
+		out.ProjectID = projectID
+	}
+	for i := range out.Recent {
+		out.Recent[i].CreatedAt = normalizeTime(out.Recent[i].CreatedAt)
+	}
+	return &out, nil
 }
 
 // normalizeTime accepts RFC3339 JSON strings (or already-normalized).

@@ -101,3 +101,34 @@ func TestSaveFileUpdatesRecentWorkspaces(t *testing.T) {
 		t.Fatalf("RecentWorkspaces = %#v, want [%q]", cfg.RecentWorkspaces, want)
 	}
 }
+
+func TestResolveDesktopTokenPrefersSessionOverEnv(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", dir)
+	t.Setenv("NEXUS_TOKEN", "nxs_stale_env_token")
+	t.Setenv("CENTRAL_MEMORY_TOKEN", "")
+	t.Setenv("CENTRAL_SERVER_TOKEN", "")
+
+	if got := config.SessionToken(); got != "" {
+		t.Fatalf("empty session: %q", got)
+	}
+	if got := config.ResolveToken(); got != "nxs_stale_env_token" {
+		t.Fatalf("ResolveToken should prefer env, got %q", got)
+	}
+	if got := config.ResolveDesktopToken(); got != "nxs_stale_env_token" {
+		t.Fatalf("no session → env fallback, got %q", got)
+	}
+
+	if err := config.SaveFile(config.File{Token: "nxs_session_ok"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := config.SessionToken(); got != "nxs_session_ok" {
+		t.Fatalf("SessionToken = %q", got)
+	}
+	if got := config.ResolveDesktopToken(); got != "nxs_session_ok" {
+		t.Fatalf("desktop must prefer config session over stale env, got %q", got)
+	}
+	if got := config.ResolveToken(); got != "nxs_stale_env_token" {
+		t.Fatalf("ResolveToken still prefers env for headless agents, got %q", got)
+	}
+}

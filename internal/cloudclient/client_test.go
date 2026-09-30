@@ -77,7 +77,7 @@ func TestMemoryBrowseEmptyQuery(t *testing.T) {
 }
 
 func TestMemorySearchRequiresSignIn(t *testing.T) {
-	c := New("", "")
+	c := &Client{ServerURL: "http://example.invalid", Token: ""}
 	if _, _, err := c.MemorySearch("x", "p", 5); err == nil {
 		t.Fatal("expected error")
 	}
@@ -104,5 +104,62 @@ func TestMemorySearchAgentFallback(t *testing.T) {
 	}
 	if pid != "auto" || len(items) != 1 {
 		t.Fatalf("%q %+v", pid, items)
+	}
+}
+
+func TestSetAuthBearerHeader(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]any{"items": []any{}, "count": 0})
+	}))
+	defer srv.Close()
+
+	c := &Client{ServerURL: srv.URL, Token: "nxs_session", HTTP: srv.Client()}
+	if _, _, err := c.MemoryBrowse("p1", 5); err != nil {
+		t.Fatal(err)
+	}
+	if gotAuth != "Bearer nxs_session" {
+		t.Fatalf("Authorization = %q", gotAuth)
+	}
+}
+
+func TestProjectDashboard(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/projects/p1/dashboard" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("Authorization") != "Bearer tok" {
+			http.Error(w, "auth", http.StatusUnauthorized)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"project_id": "p1",
+			"metrics": map[string]any{
+				"memories": 12, "proposed": 3, "confirmed": 9,
+				"members": 2, "online": 1, "events_7d": 5, "agent_calls": 7,
+			},
+			"heatmap": []map[string]any{
+				{"date": "2026-09-29", "count": 2},
+				{"date": "2026-09-30", "count": 4},
+			},
+			"recent": []map[string]any{
+				{"id": 1, "event_type": "MEMORY_WRITE", "created_at": "2026-09-30T12:00:00Z"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := &Client{ServerURL: srv.URL, Token: "tok", HTTP: srv.Client()}
+	dash, err := c.ProjectDashboard("p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dash.Metrics.Memories != 12 || len(dash.Heatmap) != 2 || dash.Heatmap[1].Count != 4 {
+		t.Fatalf("%+v", dash)
+	}
+	if len(dash.Recent) != 1 || dash.Recent[0].EventType != "MEMORY_WRITE" {
+		t.Fatalf("recent: %+v", dash.Recent)
 	}
 }

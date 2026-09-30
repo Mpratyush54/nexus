@@ -38,21 +38,21 @@ Clicking a list row in Memory / Harvest / Workspace opens the **preview pane** (
 | Section | Job |
 |---------|-----|
 | **Welcome** | Brand + Sign in (when no token) |
-| **Home** | Setup checklist (sign-in → workspace → daemon → harvest) + recent workspaces + harvest pulse + next actions |
+| **Home** | Portal-style dashboard: stats, GitHub activity heatmap, recent pulse; compact Connect setup strip |
 | **Memory** | Cloud facts; auto-browse recent on open; rich preview with linked-file open |
 | **Harvest** | Agent transcript files + harness status (not repo sources) |
 | **Workspace** | Folder pick (Fyne dialog, all OS) + recent list + workspace-relative preview |
 | **Settings** | Account, updates, quit; Team/org/billing → system browser |
 
-No separate **Connect** nav item — setup lives on **Home**. No auto folder dialog on launch. Tray stays quiet: Open / Scan / Updates / Quit.
+No separate **Connect** nav item — setup lives as a **compact strip on Home**. No auto folder dialog on launch. Tray stays quiet: Open / Scan / Updates / Quit.
 
 ## Web portal feature map (parity checklist)
 
 | Portal route | Section | Desktop today | Target |
 |--------------|---------|---------------|--------|
-| `/app/dashboard` | Home | Fyne Home (setup + pulse) | Native Home |
+| `/app/dashboard` | Home | Fyne Home (stats + heatmap + pulse + setup strip) | Native Home |
 | `/app/memory` | Memory | Browse/search + rich preview + file links | Native browse/edit over time |
-| `/app/connect` | Desktop / harvest | Setup checklist on **Home** | Native Home setup |
+| `/app/connect` | Desktop / harvest | Compact setup strip on **Home** | Native Home setup |
 | `/app/sessions` | Sessions | — | Native or labeled web |
 | `/app/agents` | Agents | — | Native or labeled web |
 | `/app/team`, `/app/org` | Team, Org | Settings → “Team, org & billing (web)” | Labeled web until native |
