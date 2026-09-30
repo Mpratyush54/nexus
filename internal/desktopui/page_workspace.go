@@ -3,17 +3,15 @@ package desktopui
 import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
 func (s *Shell) workspacePage() fyne.CanvasObject {
-	hint := mutedLabel("Workspace is your chosen repo root. Agent transcripts are under Harvest — not listed here.")
-	pick := widget.NewButton("Choose workspace folder…", func() {
+	pick := primaryButton("Choose folder", func() {
 		s.pickWorkspaceFolder()
 	})
-	// Medium — HighImportance painted a full-width orange slab that read as placeholder UI.
-	pick.Importance = widget.MediumImportance
-	pick.Alignment = widget.ButtonAlignLeading
+	pick.Icon = theme.FolderIcon()
 
 	s.mu.Lock()
 	recent := append([]string(nil), s.recentWorkspaces...)
@@ -25,20 +23,24 @@ func (s *Shell) workspacePage() fyne.CanvasObject {
 	} else {
 		for _, path := range recent {
 			path := path
-			btn := widget.NewButton(recentDisplayName(path), func() {
+			btn := outlineButton(recentDisplayName(path), func() {
 				s.selectWorkspacePath(path)
 			})
 			btn.Alignment = widget.ButtonAlignLeading
-			btn.Importance = widget.LowImportance
 			recentBox.Add(btn)
 		}
 	}
 
+	header := container.NewBorder(
+		nil, nil, nil,
+		toolbar(pick),
+		pageHeader("Workspace", "Your chosen repo root. Agent transcripts are under Harvest — not listed here."),
+	)
+
 	return container.NewBorder(
 		container.NewVBox(
-			sectionHeading("Workspace"),
-			hint,
-			container.NewHBox(pick),
+			header,
+			widget.NewSeparator(),
 			recentBox,
 			widget.NewSeparator(),
 			mutedLabel("Current workspace"),

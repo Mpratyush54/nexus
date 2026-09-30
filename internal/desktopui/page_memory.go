@@ -6,22 +6,26 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
 func (s *Shell) memoryPage() fyne.CanvasObject {
-	searchBtn := widget.NewButton("Search", func() {
+	searchBtn := secondaryButton("Search", func() {
 		go s.runMemorySearch()
 	})
+	searchBtn.Icon = theme.SearchIcon()
 	s.memorySearch.OnSubmitted = func(string) {
 		go s.runMemorySearch()
 	}
-	hint := mutedLabel("Memory entries are durable facts in Nexus cloud — not files on disk.")
+
+	header := pageHeader("Memory", "Durable facts in Nexus cloud — not files on disk.")
+	searchRow := container.NewBorder(nil, nil, nil, searchBtn, s.memorySearch)
+
 	return container.NewBorder(
 		container.NewVBox(
-			sectionHeading("Memory"),
-			hint,
-			container.NewBorder(nil, nil, nil, searchBtn, s.memorySearch),
+			header,
+			searchRow,
 			s.memoryBanner,
 			widget.NewSeparator(),
 		),
@@ -38,7 +42,7 @@ func (s *Shell) setMemoryBanner(msg string, cta string, onCTA func()) {
 	}
 	objs := []fyne.CanvasObject{mutedLabel(msg)}
 	if cta != "" && onCTA != nil {
-		objs = append(objs, widget.NewButton(cta, onCTA))
+		objs = append(objs, outlineButton(cta, onCTA))
 	}
 	s.memoryBanner.Objects = []fyne.CanvasObject{container.NewVBox(objs...)}
 	s.memoryBanner.Refresh()

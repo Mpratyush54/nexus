@@ -1,53 +1,49 @@
 package desktopui
 
 import (
+	"central-memory/internal/localclient"
+
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 )
 
 func (s *Shell) buildSidebar() fyne.CanvasObject {
-	brand := widget.NewLabelWithStyle("Nexus", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	sub := mutedLabel("Desktop")
-
 	nav := []struct {
 		label string
+		icon  fyne.Resource
 		sec   section
 	}{
-		{"Home", secHome},
-		{"Connect", secConnect},
-		{"Memory", secMemory},
-		{"Harvest", secHarvest},
-		{"Workspace", secWorkspace},
+		{"Home", theme.HomeIcon(), secHome},
+		{"Connect", theme.LoginIcon(), secConnect},
+		{"Memory", theme.DocumentIcon(), secMemory},
+		{"Harvest", theme.ListIcon(), secHarvest},
+		{"Workspace", theme.FolderIcon(), secWorkspace},
 	}
 
-	items := make([]fyne.CanvasObject, 0, len(nav)+3)
+	items := make([]fyne.CanvasObject, 0, len(nav)+4)
+	items = append(items, brandBlock(), widget.NewSeparator())
 	for _, n := range nav {
 		n := n
-		btn := widget.NewButton(n.label, func() { s.switchSection(n.sec) })
-		btn.Alignment = widget.ButtonAlignLeading
-		if s.section == n.sec {
-			btn.Importance = widget.MediumImportance
-		} else {
-			btn.Importance = widget.LowImportance
-		}
-		items = append(items, btn)
+		items = append(items, navRow(n.label, n.icon, s.section == n.sec, func() {
+			s.switchSection(n.sec)
+		}))
 	}
 	items = append(items, widget.NewSeparator())
-	settings := widget.NewButton("Settings", func() { s.switchSection(secSettings) })
-	settings.Alignment = widget.ButtonAlignLeading
-	if s.section == secSettings {
-		settings.Importance = widget.MediumImportance
-	} else {
-		settings.Importance = widget.LowImportance
-	}
-	items = append(items, settings)
+	items = append(items, navRow("Settings", theme.SettingsIcon(), s.section == secSettings, func() {
+		s.switchSection(secSettings)
+	}))
 
-	return container.NewBorder(
-		container.NewVBox(brand, sub, widget.NewSeparator()),
-		nil, nil, nil,
-		container.NewVBox(items...),
+	body := paneBG(
+		container.NewBorder(
+			nil, nil, nil, nil,
+			container.NewVBox(items...),
+		),
+		colorSurface,
 	)
+	return withFixedWidth(sidebarWidth, body)
 }
 
 func (s *Shell) switchSection(sec section) {
@@ -88,40 +84,108 @@ func (s *Shell) applyMode(signedIn bool) {
 	s.mode = next
 	if next == modeWelcome {
 		s.section = secHome
-	} else if s.section == secHome {
-		// keep Home
 	}
 	s.rebuildChrome()
 }
 
+func (s *Shell) sectionShowsPreview() bool {
+	if s.mode != modeApp {
+		return false
+	}
+	switch s.section {
+	case secMemory, secHarvest, secWorkspace:
+		return true
+	default:
+		return false
+	}
+}
+
 func (s *Shell) rebuildChrome() {
+	if s.topChrome == nil {
+		s.topChrome = s.buildTopChrome()
+	} else {
+		s.refreshTopChrome(s.cachedStatus, s.signedIn)
+	}
+	top := s.topChrome
 	if s.mode == modeWelcome {
 		s.root.Objects = []fyne.CanvasObject{
-			container.NewBorder(
-				container.NewVBox(s.statusLine, widget.NewSeparator()),
-				nil, nil, nil,
-				s.center,
-			),
+			container.NewBorder(top, nil, nil, nil, s.center),
 		}
 	} else {
-		mainSplit := container.NewHSplit(
-			container.NewBorder(nil, nil, nil, nil, s.center),
-			container.NewBorder(
-				s.previewHead, nil, nil, nil,
-				container.NewScroll(s.previewBody),
-			),
-		)
-		mainSplit.SetOffset(0.62)
+		content := paneBG(container.NewPadded(s.center), colorBase)
+		var main fyne.CanvasObject = content
+		if s.sectionShowsPreview() {
+			if s.previewPane == nil {
+				s.previewPane = s.buildPreviewPane()
+			}
+			split := container.NewHSplit(content, s.previewPane)
+			split.SetOffset(0.64)
+			main = split
+		}
 		s.root.Objects = []fyne.CanvasObject{
 			container.NewBorder(
-				container.NewVBox(s.statusLine, widget.NewSeparator()),
+				top,
 				nil,
 				s.buildSidebar(),
 				nil,
-				mainSplit,
+				main,
 			),
 		}
 	}
 	s.root.Refresh()
 	s.renderCenter()
+}
+
+func (s *Shell) buildTopChrome() fyne.CanvasObject {
+	s.refreshTopChrome(s.cachedStatus, s.signedIn)
+
+	chipBG := canvas.NewRectangle(colorRaised)
+	chipBG.CornerRadius = 10
+	chipBG.StrokeColor = colorBorder
+	chipBG.StrokeWidth = 1
+	pill := container.NewStack(chipBG, container.NewPadded(container.NewHBox(
+		container.NewCenter(container.New(&dotSize{}, s.statusDot)),
+		s.statusText,
+	)))
+
+	left := container.NewHBox(pill, s.accountTxt)
+	barBG := paneBG(container.NewPadded(left), colorSurface)
+	return container.NewVBox(barBG, widget.NewSeparator())
+}
+
+func (s *Shell) refreshTopChrome(st *localclient.Status, signedIn bool) {
+	connected := st != nil && st.Connected
+	pillLabel := "Offline"
+	account := ""
+	if st != nil && st.Connected {
+		pillLabel = "Connected"
+		account = first(st.Username, st.UserID)
+	} else if signedIn {
+		pillLabel = "Signed in"
+		if st != nil {
+			account = first(st.Username, st.UserID)
+		}
+	} else if s.mode == modeWelcome {
+		pillLabel = "Sign in"
+	}
+
+	if s.statusDot != nil {
+		if connected {
+			s.statusDot.FillColor = colorTeal
+		} else {
+			s.statusDot.FillColor = emberAccent
+		}
+		s.statusDot.Refresh()
+	}
+	if s.statusText != nil {
+		s.statusText.Text = pillLabel
+		s.statusText.Refresh()
+	}
+	if s.accountTxt != nil {
+		s.accountTxt.Text = account
+		s.accountTxt.Refresh()
+	}
+	if s.statusLine != nil {
+		s.statusLine.SetText(buildStatusLine(st, signedIn))
+	}
 }

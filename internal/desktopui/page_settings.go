@@ -7,51 +7,48 @@ import (
 )
 
 func (s *Shell) settingsPage() fyne.CanvasObject {
-	signIn := widget.NewButton("Sign in", func() {
+	signIn := primaryButton("Sign in", func() {
 		if s.hooks.OnSignIn != nil {
 			s.hooks.OnSignIn()
 		}
 	})
-	signIn.Importance = widget.HighImportance
-	signOut := widget.NewButton("Sign out", func() {
+	signOut := outlineButton("Sign out", func() {
 		if s.hooks.OnSignOut != nil {
 			s.hooks.OnSignOut()
 		}
 		s.Refresh()
 	})
-	folder := widget.NewButton("Choose workspace…", func() {
+	folder := secondaryButton("Choose workspace…", func() {
 		s.pickWorkspaceFolder()
 	})
-	updateBtn := widget.NewButton("Check for updates", func() {
+	updateBtn := outlineButton("Check for updates", func() {
 		if s.hooks.OnCheckUpdate != nil {
 			s.hooks.OnCheckUpdate()
 		}
 	})
-	webPortal := widget.NewButton("Team, org & billing (web)", func() {
+	webPortal := outlineButton("Team, org & billing (web)", func() {
 		if s.hooks.OnOpenWebPortal != nil {
 			s.hooks.OnOpenWebPortal()
 		}
 	})
-	webPortal.Importance = widget.LowImportance
-	quit := widget.NewButton("Quit Nexus", func() {
+	quit := outlineButton("Quit Nexus", func() {
 		if s.hooks.OnQuit != nil {
 			s.hooks.OnQuit()
 		}
 	})
 
-	note := mutedLabel("Team, Org, Overlays, and Admin stay on the web portal until those pages exist natively (see docs/native-app-direction.md). Fyne is the long-term desktop shell.")
+	note := mutedLabel("Team, Org, Overlays, and Admin stay on the web portal until those pages exist natively. Fyne is the long-term desktop shell.")
 
 	return container.NewVBox(
-		sectionHeading("Settings"),
+		pageHeader("Settings", "Account, workspace, updates, and quit."),
 		note,
 		widget.NewSeparator(),
-		container.NewHBox(signIn, signOut),
-		folder,
-		updateBtn,
+		toolbar(signIn, signOut),
+		toolbar(folder, updateBtn),
 		widget.NewSeparator(),
 		webPortal,
 		widget.NewSeparator(),
 		quit,
-		widget.NewLabel(versionText(s.hooks)),
+		mutedLabel(versionText(s.hooks)),
 	)
 }

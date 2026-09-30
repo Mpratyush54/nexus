@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
 )
 
 func (s *Shell) setPreview(title, body string) {
@@ -15,14 +17,32 @@ func (s *Shell) setPreviewKind(kind, title, body string) {
 	s.mu.Lock()
 	s.previewKind = kind
 	s.mu.Unlock()
-	s.previewHead.SetText(title)
-	s.previewBody.SetText(body)
+	if s.previewHead != nil {
+		s.previewHead.SetText(title)
+	}
+	if s.previewBody != nil {
+		s.previewBody.SetText(body)
+	}
+}
+
+func previewEmptyMessage(sec section) string {
+	switch sec {
+	case secMemory:
+		return "Select an item to preview\n\nSearch and select a memory entry to inspect it here."
+	case secHarvest:
+		return "Select an item to preview\n\nSelect a harness or transcript to inspect it here."
+	case secWorkspace:
+		return "Select an item to preview\n\nSelect a workspace file or choose a folder. Agent transcripts live under Harvest."
+	default:
+		return "Select an item to preview"
+	}
 }
 
 func (s *Shell) clearPreviewForSection(sec section) {
 	s.mu.Lock()
 	kind := s.previewKind
 	s.mu.Unlock()
+
 	keep := false
 	switch sec {
 	case secMemory:
@@ -31,22 +51,31 @@ func (s *Shell) clearPreviewForSection(sec section) {
 		keep = kind == "harvest"
 	case secWorkspace:
 		keep = kind == "workspace"
-	case secHome, secConnect, secSettings:
-		keep = kind == "system"
+	default:
+		// Home / Connect / Settings — drop list preview so it never goes stale across pages.
+		keep = false
 	}
 	if keep {
 		return
 	}
-	switch sec {
-	case secMemory:
-		s.setPreviewKind("", "Preview", "Search and select a memory entry to inspect it here.")
-	case secHarvest:
-		s.setPreviewKind("", "Preview", "Select a harness or transcript to inspect it here.")
-	case secWorkspace:
-		s.setPreviewKind("", "Preview", "Select a workspace file or choose a folder. Agent transcripts live under Harvest.")
-	default:
-		s.setPreviewKind("", "Preview", "Select a memory entry, harvest transcript, or workspace file to inspect content here.")
+	s.mu.Lock()
+	s.previewKind = ""
+	s.mu.Unlock()
+	if s.previewHead != nil {
+		s.previewHead.SetText("Preview")
 	}
+	if s.previewBody != nil {
+		s.previewBody.SetText(previewEmptyMessage(sec))
+	}
+}
+
+func (s *Shell) buildPreviewPane() fyne.CanvasObject {
+	inner := container.NewBorder(
+		container.NewVBox(container.NewPadded(s.previewHead), widget.NewSeparator()),
+		nil, nil, nil,
+		container.NewPadded(container.NewScroll(s.previewBody)),
+	)
+	return paneBG(inner, colorSurface)
 }
 
 func (s *Shell) loadFilePreview(path, title string) {

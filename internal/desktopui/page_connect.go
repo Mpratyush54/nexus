@@ -16,51 +16,52 @@ func (s *Shell) connectPage() fyne.CanvasObject {
 
 	items := buildConnectChecklist(st, h, signedIn)
 	rows := make([]fyne.CanvasObject, 0, len(items)+8)
-	rows = append(rows, sectionHeading("Connect"), mutedLabel("Get from signed-out to harvesting without leaving the app."))
+	rows = append(rows, pageHeader("Connect", "Get from signed-out to harvesting without leaving the app."))
+	rows = append(rows, widget.NewSeparator())
 
 	for _, it := range items {
 		it := it
-		title := checklistMark(it.done) + "  " + it.title
-		block := container.NewVBox(
-			widget.NewLabelWithStyle(title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-			mutedLabel(it.detail),
-		)
+		status := "Pending"
+		if it.done {
+			status = "Done"
+		}
+		title := it.title + "  ·  " + status
 		var actions []fyne.CanvasObject
-	if it.signIn {
-			btn := widget.NewButton(it.action, func() {
+		if it.signIn {
+			actions = append(actions, primaryButton(it.action, func() {
 				if s.hooks.OnSignIn != nil {
 					s.hooks.OnSignIn()
 				}
-			})
-			btn.Importance = widget.MediumImportance
-			actions = append(actions, btn)
+			}))
 		}
 		if it.pickWS {
-			btn := widget.NewButton(it.action, func() {
+			label := it.action
+			if label == "" {
+				label = "Choose folder"
+			}
+			actions = append(actions, secondaryButton(label, func() {
 				s.pickWorkspaceFolder()
-			})
-			actions = append(actions, btn)
+			}))
 		}
 		if it.goTo == secHarvest && it.done {
-			actions = append(actions, leadingButton("Open Harvest", func() {
+			actions = append(actions, outlineButton("Open Harvest", func() {
 				s.switchSection(secHarvest)
 			}))
 		}
-		if len(actions) > 0 {
-			block.Add(container.NewHBox(actions...))
-		}
-		rows = append(rows, block, widget.NewSeparator())
+		rows = append(rows, card(title, it.detail, actions...))
 	}
 
-	rows = append(rows, sectionHeading("Recent workspaces"))
+	rows = append(rows, widget.NewSeparator(), sectionHeading("Recent workspaces"))
 	if len(recent) == 0 {
 		rows = append(rows, mutedLabel("No recent folders yet. Choose a workspace above."))
 	} else {
 		for _, path := range recent {
 			path := path
-			rows = append(rows, leadingButton(recentDisplayName(path), func() {
+			btn := outlineButton(recentDisplayName(path), func() {
 				s.selectWorkspacePath(path)
-			}))
+			})
+			btn.Alignment = widget.ButtonAlignLeading
+			rows = append(rows, btn)
 		}
 	}
 

@@ -7,17 +7,21 @@ import (
 )
 
 func (s *Shell) harvestPage() fyne.CanvasObject {
-	hint := mutedLabel("Harvest watches agent transcript files (Cursor, Claude Code, …) under your workspace and syncs turns to the portal. Repo sources live under Workspace.")
-	empty := mutedLabel("No harvest rows yet. Finish Connect, then Scan on Home or from the tray.")
 	s.mu.Lock()
 	n := len(s.harvestRows)
 	s.mu.Unlock()
-	body := fyne.CanvasObject(s.harvestList)
+
+	header := pageHeader("Harvest", "Agent transcript files under your workspace, synced to the portal. Repo sources live under Workspace.")
+	var body fyne.CanvasObject = s.harvestList
 	if n == 0 {
-		body = container.NewBorder(empty, nil, nil, nil, s.harvestList)
+		body = container.NewBorder(
+			mutedLabel("No harvest rows yet. Finish Connect, then Scan on Home or from the tray."),
+			nil, nil, nil,
+			s.harvestList,
+		)
 	}
 	return container.NewBorder(
-		container.NewVBox(sectionHeading("Harvest"), hint, widget.NewSeparator()),
+		container.NewVBox(header, widget.NewSeparator()),
 		nil, nil, nil,
 		body,
 	)

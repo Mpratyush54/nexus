@@ -1,9 +1,6 @@
-// Package desktopui is the native Fyne Shell v2 for Nexus Desktop (Win/Mac/Linux).
-// Layout: Welcome (signed out) or sidebar + content + preview (signed in).
 package desktopui
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +12,7 @@ import (
 	"central-memory/internal/localclient"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/storage"
@@ -43,13 +41,18 @@ type Shell struct {
 	mode    shellMode
 	section section
 
-	root        *fyne.Container
-	statusLine  *widget.Label
-	center      *fyne.Container
+	root       *fyne.Container
+	topChrome  fyne.CanvasObject
+	statusLine *widget.Label // legacy sync text; chrome uses pill widgets
+	statusDot  *canvas.Circle
+	statusText *canvas.Text
+	accountTxt *canvas.Text
+	center     *fyne.Container
+	homeBody   *fyne.Container
+
 	previewHead *widget.Label
 	previewBody *widget.Entry
-
-	homeStats *widget.RichText
+	previewPane fyne.CanvasObject
 
 	memorySearch *widget.Entry
 	memoryList   *widget.List
@@ -91,16 +94,22 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 	}
 
 	s.statusLine = widget.NewLabel("Checking connection…")
-	s.statusLine.TextStyle = fyne.TextStyle{Bold: true}
+	s.statusLine.Hide()
+	s.statusDot = canvas.NewCircle(colorMuted)
+	s.statusText = canvas.NewText("Checking…", colorFg)
+	s.statusText.TextSize = 12
+	s.accountTxt = canvas.NewText("", colorFgDim)
+	s.accountTxt.TextSize = 12
+	s.topChrome = s.buildTopChrome()
 
-	s.previewHead = widget.NewLabel("Preview")
-	s.previewHead.TextStyle = fyne.TextStyle{Bold: true}
+	s.previewHead = widget.NewLabelWithStyle("Preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	s.previewBody = widget.NewMultiLineEntry()
-	s.previewBody.SetPlaceHolder("Select a memory entry, harvest transcript, or workspace file to inspect content here.")
+	s.previewBody.SetText(previewEmptyMessage(secHome))
 	s.previewBody.Wrapping = fyne.TextWrapWord
 	s.previewBody.Disable()
+	s.previewPane = s.buildPreviewPane()
 
-	s.homeStats = widget.NewRichTextFromMarkdown("### Home\nLoading…")
+	s.homeBody = container.NewVBox()
 	s.memoryBanner = container.NewVBox()
 
 	s.memorySearch = widget.NewEntry()
@@ -111,9 +120,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 			defer s.mu.Unlock()
 			return len(s.memoryItems)
 		},
-		func() fyne.CanvasObject {
-			return container.NewVBox(widget.NewLabel("title"), widget.NewLabel("sub"))
-		},
+		listRowTemplate,
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -121,9 +128,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 				return
 			}
 			it := s.memoryItems[id]
-			box := obj.(*fyne.Container)
-			box.Objects[0].(*widget.Label).SetText(first(it.Key, "memory"))
-			box.Objects[1].(*widget.Label).SetText(truncate(it.Content, 96))
+			updateListRow(obj, first(it.Key, "memory"), truncate(it.Content, 96))
 		},
 	)
 	s.memoryList.OnSelected = func(id widget.ListItemID) {
@@ -145,9 +150,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 			defer s.mu.Unlock()
 			return len(s.harvestRows)
 		},
-		func() fyne.CanvasObject {
-			return container.NewVBox(widget.NewLabel("t"), widget.NewLabel("s"))
-		},
+		listRowTemplate,
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
@@ -155,9 +158,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 				return
 			}
 			row := s.harvestRows[id]
-			box := obj.(*fyne.Container)
-			box.Objects[0].(*widget.Label).SetText(row.title)
-			box.Objects[1].(*widget.Label).SetText(row.subtitle)
+			updateListRow(obj, row.title, row.subtitle)
 		},
 	)
 	s.harvestList.OnSelected = func(id widget.ListItemID) {
@@ -183,16 +184,19 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 			defer s.mu.Unlock()
 			return len(s.workspaceRows)
 		},
-		func() fyne.CanvasObject {
-			return widget.NewLabel("row")
-		},
+		listRowTemplate,
 		func(id widget.ListItemID, obj fyne.CanvasObject) {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			if id < 0 || id >= len(s.workspaceRows) {
 				return
 			}
-			obj.(*widget.Label).SetText(s.workspaceRows[id].title)
+			row := s.workspaceRows[id]
+			sub := row.path
+			if sub == "" {
+				sub = " "
+			}
+			updateListRow(obj, row.title, sub)
 		},
 	)
 	s.workspaceList.OnSelected = func(id widget.ListItemID) {
@@ -209,9 +213,8 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 
 	s.center = container.NewStack(s.welcomePage())
 	s.root = container.NewStack()
-	win.SetContent(container.NewPadded(s.root))
-	win.Resize(fyne.NewSize(1120, 720))
-	// Close → hide (tray keeps process alive). Quit only from tray / Settings.
+	win.SetContent(s.root)
+	win.Resize(fyne.NewSize(1180, 740))
 	win.SetCloseIntercept(func() {
 		win.Hide()
 	})
@@ -224,19 +227,16 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 }
 
 // pickWorkspaceFolder opens the Fyne folder dialog on all OS (no auto-launch).
-// Guarded against panics and skips Refresh rebuilds while the modal is open
-// (rebuilding chrome under an open folder dialog has crashed the Windows app).
+//
+// ROOT CAUSE (fixed): FileDialog.Resize before Show panics — MinSize() nil-derefs
+// dialog.win which only exists after Show. Always Show first, then Resize.
 func (s *Shell) pickWorkspaceFolder() {
-	defer func() {
-		if r := recover(); r != nil {
-			s.mu.Lock()
-			s.pickingFolder = false
-			s.mu.Unlock()
-			s.setPreviewKind("workspace", "Workspace", "Folder picker failed (recovered):\n"+fmt.Sprint(r)+"\n\nUse a Recent folder below, or try again.")
-		}
-	}()
 	if s.win == nil {
 		s.setPreviewKind("workspace", "Workspace", "Folder picker unavailable: no window parent.")
+		return
+	}
+	if s.win.Canvas() == nil {
+		s.setPreviewKind("workspace", "Workspace", "Folder picker unavailable: window canvas not ready.")
 		return
 	}
 	s.mu.Lock()
@@ -260,7 +260,7 @@ func (s *Shell) pickWorkspaceFolder() {
 			return
 		}
 		if uri == nil {
-			return
+			return // cancel
 		}
 		path := folderURIPath(uri)
 		if path == "" {
@@ -269,18 +269,19 @@ func (s *Shell) pickWorkspaceFolder() {
 		}
 		s.selectWorkspacePath(path)
 	}, s.win)
-	d.Resize(fyne.NewSize(720, 480))
+
+	// SetLocation before Show is safe — it only sets startingLocation.
 	if file, err := config.LoadFile(); err == nil {
 		if root := strings.TrimSpace(file.WorkspaceRoot); root != "" {
-			func() {
-				defer func() { _ = recover() }()
-				if u, err := storage.ListerForURI(storage.NewFileURI(root)); err == nil && u != nil {
-					d.SetLocation(u)
-				}
-			}()
+			if u, err := storage.ListerForURI(storage.NewFileURI(root)); err == nil && u != nil {
+				d.SetLocation(u)
+			}
 		}
 	}
+
+	// Show creates dialog.win; Resize after that is safe.
 	d.Show()
+	d.Resize(fyne.NewSize(720, 480))
 }
 
 func (s *Shell) selectWorkspacePath(path string) {
@@ -313,8 +314,6 @@ func (s *Shell) Refresh() {
 		picking := s.pickingFolder
 		s.mu.Unlock()
 		if picking {
-			// Do not rebuild chrome/lists under an open folder dialog — that has
-			// panicked/crashed the Windows Fyne shell.
 			return
 		}
 
@@ -325,9 +324,7 @@ func (s *Shell) Refresh() {
 		s.signedIn = signedIn
 		s.mu.Unlock()
 		s.applyMode(signedIn)
-		if s.mode != prevMode {
-			// chrome already rebuilt
-		}
+		_ = prevMode
 
 		recent := loadRecentWorkspaces(s.client)
 		s.mu.Lock()
@@ -336,7 +333,6 @@ func (s *Shell) Refresh() {
 
 		st, err := s.client.GetStatus()
 		if err != nil {
-			s.statusLine.SetText(buildStatusLine(nil, signedIn))
 			s.mu.Lock()
 			s.cachedStatus = nil
 			s.cachedHarvest = nil
@@ -346,7 +342,8 @@ func (s *Shell) Refresh() {
 			s.mu.Unlock()
 			s.harvestList.Refresh()
 			s.workspaceList.Refresh()
-			s.homeStats.ParseMarkdown(buildHomeMarkdown(nil, nil, signedIn))
+			s.rebuildHomeCards(nil, nil, signedIn)
+			s.refreshTopChrome(nil, signedIn)
 			if s.mode == modeApp && (s.section == secConnect || s.section == secHome || s.section == secWorkspace) {
 				s.renderCenter()
 			}
@@ -355,7 +352,6 @@ func (s *Shell) Refresh() {
 		s.mu.Lock()
 		s.cachedStatus = st
 		s.mu.Unlock()
-		s.statusLine.SetText(buildStatusLine(st, signedIn))
 
 		h, err := s.client.GetHarvest()
 		if err == nil {
@@ -387,7 +383,8 @@ func (s *Shell) Refresh() {
 
 		s.harvestList.Refresh()
 		s.workspaceList.Refresh()
-		s.homeStats.ParseMarkdown(buildHomeMarkdown(st, h, signedIn))
+		s.rebuildHomeCards(st, h, signedIn)
+		s.refreshTopChrome(st, signedIn)
 		if s.mode == modeApp && (s.section == secConnect || s.section == secHome || s.section == secWorkspace || s.section == secHarvest) {
 			s.renderCenter()
 		}
@@ -474,4 +471,9 @@ func versionText(h Hooks) string {
 		v = "dev"
 	}
 	return "Version: " + v
+}
+
+// folderDialogResizeAfterShow documents the Fyne ordering invariant for tests.
+func folderDialogResizeAfterShow() string {
+	return "Show before Resize — FileDialog.MinSize nil-derefs dialog.win until Show"
 }

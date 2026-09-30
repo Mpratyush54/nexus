@@ -107,6 +107,16 @@ func TestFolderURIPathWindowsStyle(t *testing.T) {
 	}
 }
 
+// TestFolderDialogResizeOrderingInvariant documents the Fyne v2.8 root cause:
+// FileDialog.Resize before Show panics because MinSize() nil-derefs dialog.win.
+// pickWorkspaceFolder must Show() first, then Resize().
+func TestFolderDialogResizeOrderingInvariant(t *testing.T) {
+	got := folderDialogResizeAfterShow()
+	if !contains(got, "Show before Resize") {
+		t.Fatalf("invariant text missing: %q", got)
+	}
+}
+
 func contains(s, sub string) bool {
 	return strings.Contains(strings.ToLower(s), strings.ToLower(sub))
 }
