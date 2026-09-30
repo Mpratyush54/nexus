@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Cable,
   History,
+  Send,
   LayoutDashboard,
   Layers,
   Menu,
@@ -28,6 +29,7 @@ import { useProjectPresence } from '@/hooks/useTeam'
 const links = [
   { to: '/app/dashboard', label: 'Home', icon: LayoutDashboard },
   { to: '/app/timeline', label: 'Timeline', icon: History },
+  { to: '/app/teleport', label: 'Teleport', icon: Send },
   { to: '/app/memory', label: 'Memory', icon: Layers },
   { to: '/app/sessions', label: 'Sessions', icon: Radio },
   { to: '/app/agents', label: 'Agents', icon: Bot },
