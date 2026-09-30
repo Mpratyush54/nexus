@@ -20,6 +20,8 @@ import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 import { useAuth } from '@/providers/AuthProvider'
 import { useBillingPlans, useMyBilling } from '@/hooks/useBilling'
+import { useQuery } from '@tanstack/react-query'
+import { formatBytes, storageApi } from '@/api/storage'
 
 export function SettingsPage() {
   const { push } = useToast()
@@ -31,6 +33,10 @@ export function SettingsPage() {
   const revokeToken = useRevokeToken()
   const plans = useBillingPlans()
   const billing = useMyBilling()
+  const storageUsage = useQuery({
+    queryKey: ['storage', 'usage'],
+    queryFn: ({ signal }) => storageApi.usage(undefined, signal),
+  })
 
   const [email, setEmail] = useState('')
   const [tokenName, setTokenName] = useState('')
@@ -320,6 +326,21 @@ export function SettingsPage() {
             <span>{usage.data.episodes_created} episodes</span>
             <span>~{usage.data.requests_approx} writes</span>
           </div>
+        </GlassPanel>
+      ) : null}
+
+      {storageUsage.data ? (
+        <GlassPanel className="space-y-2 p-5">
+          <h2 className="text-sm font-medium text-fg">Storage</h2>
+          <p className="text-sm text-fg-dim">
+            {formatBytes(storageUsage.data.used)} used
+            {storageUsage.data.cap > 0 ? ` of ${formatBytes(storageUsage.data.cap)}` : ''}
+            {storageUsage.data.state === 'full'
+              ? ' — full: new file blobs are blocked; transcripts continue.'
+              : storageUsage.data.state === 'warn'
+                ? ' — nearing your plan cap.'
+                : ''}
+          </p>
         </GlassPanel>
       ) : null}
 

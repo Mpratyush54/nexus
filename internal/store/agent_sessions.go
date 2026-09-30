@@ -95,12 +95,24 @@ type TimelineQuery struct {
 	Limit     int
 }
 
+// SessionGrantOpts is a live or point-in-time share (D15).
+// Live=true (default) covers all current and future complete versions.
+// Live=false pins the grant to VersionID. Team shares always force Live.
+type SessionGrantOpts struct {
+	Live      bool   `json:"live"`
+	VersionID string `json:"version_id,omitempty"`
+}
+
 // AgentCloudStore is the cloud session API (spec 4.2 and 3.5).
 type AgentCloudStore interface {
 	UpsertAgentSession(ctx context.Context, in *AgentSession) (*AgentSession, error)
 	GetAgentSession(ctx context.Context, id string) (*AgentSession, error)
 	CanReadAgentSession(ctx context.Context, userID, sessionID string) (bool, error)
 	GrantAgentSession(ctx context.Context, sessionID, granteeUserID, grantedBy string) error
+	GrantAgentSessionOpts(ctx context.Context, sessionID, granteeUserID, grantedBy string, opts SessionGrantOpts) error
+	ListVisibleSessionVersions(ctx context.Context, sessionID, userID string) ([]SessionVersion, error)
+	ListAgentSessionForks(ctx context.Context, parentSessionID string) ([]AgentSession, error)
+	ForkAgentSession(ctx context.Context, parentSessionID, ownerUserID string) (*AgentSession, error)
 	AppendSessionTurn(ctx context.Context, turn SessionTurn) error
 	ListSessionTurns(ctx context.Context, sessionID string) ([]SessionTurn, error)
 	CreateSessionVersion(ctx context.Context, sessionID, uploadedBy string) (*SessionVersion, error)
@@ -112,10 +124,12 @@ type AgentCloudStore interface {
 }
 
 type agentGrant struct {
-	Grantee string
-	Team    bool
-	By      string
-	Revoked bool
+	Grantee   string
+	Team      bool
+	By        string
+	Revoked   bool
+	Live      bool
+	VersionID string
 }
 
 type blobRec struct {
@@ -269,11 +283,31 @@ func (m *MemStore) agentVisibleLocked(userID string, row *AgentSession) bool {
 }
 
 func (m *MemStore) GrantAgentSession(ctx context.Context, sessionID, granteeUserID, grantedBy string) error {
+	return m.GrantAgentSessionOpts(ctx, sessionID, granteeUserID, grantedBy, SessionGrantOpts{Live: true})
+}
+
+func normalizeGrantOpts(opts SessionGrantOpts) (SessionGrantOpts, error) {
+	opts.VersionID = strings.TrimSpace(opts.VersionID)
+	if !opts.Live && opts.VersionID == "" {
+		return opts, errors.New("store: point-in-time grant requires version_id")
+	}
+	if opts.Live {
+		// Live grants ignore a pinned version; keep VersionID empty for clarity.
+		opts.VersionID = ""
+	}
+	return opts, nil
+}
+
+func (m *MemStore) GrantAgentSessionOpts(ctx context.Context, sessionID, granteeUserID, grantedBy string, opts SessionGrantOpts) error {
 	_ = ctx
 	sessionID = strings.TrimSpace(sessionID)
 	granteeUserID = strings.TrimSpace(granteeUserID)
 	if sessionID == "" || granteeUserID == "" {
 		return errors.New("store: grant requires session and user")
+	}
+	opts, err := normalizeGrantOpts(opts)
+	if err != nil {
+		return err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -281,13 +315,146 @@ func (m *MemStore) GrantAgentSession(ctx context.Context, sessionID, granteeUser
 	if m.agentSessions[sessionID] == nil {
 		return ErrNotFound
 	}
-	for _, g := range m.agentGrants[sessionID] {
+	if opts.VersionID != "" {
+		found := false
+		for _, v := range m.sessionVersions[sessionID] {
+			if v.ID == opts.VersionID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("store: version %s: %w", opts.VersionID, ErrNotFound)
+		}
+	}
+	for i, g := range m.agentGrants[sessionID] {
 		if !g.Revoked && g.Grantee == granteeUserID {
+			m.agentGrants[sessionID][i].Live = opts.Live
+			m.agentGrants[sessionID][i].VersionID = opts.VersionID
+			m.agentGrants[sessionID][i].By = grantedBy
 			return nil
 		}
 	}
-	m.agentGrants[sessionID] = append(m.agentGrants[sessionID], agentGrant{Grantee: granteeUserID, By: grantedBy})
+	m.agentGrants[sessionID] = append(m.agentGrants[sessionID], agentGrant{
+		Grantee: granteeUserID, By: grantedBy, Live: opts.Live, VersionID: opts.VersionID,
+	})
 	return nil
+}
+
+func versionReadable(state string) bool {
+	return state == "complete" || state == "transcript_only"
+}
+
+func (m *MemStore) ListVisibleSessionVersions(ctx context.Context, sessionID, userID string) ([]SessionVersion, error) {
+	_ = ctx
+	sessionID = strings.TrimSpace(sessionID)
+	userID = strings.TrimSpace(userID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	row := m.agentSessions[sessionID]
+	if row == nil {
+		return nil, ErrNotFound
+	}
+	if !m.agentVisibleLocked(userID, row) {
+		return []SessionVersion{}, nil
+	}
+	versions := m.sessionVersions[sessionID]
+	if row.OwnerUserID == userID || row.Visibility == "team" {
+		return filterCompleteVersions(versions, ""), nil
+	}
+	pin := ""
+	live := false
+	for _, g := range m.agentGrants[sessionID] {
+		if g.Revoked || g.Grantee != userID {
+			continue
+		}
+		if g.Live {
+			live = true
+			pin = ""
+			break
+		}
+		pin = g.VersionID
+	}
+	if live || pin == "" && row.OwnerUserID == userID {
+		return filterCompleteVersions(versions, ""), nil
+	}
+	if pin == "" {
+		// Grant without pin defaults to live for legacy rows.
+		return filterCompleteVersions(versions, ""), nil
+	}
+	return filterCompleteVersions(versions, pin), nil
+}
+
+func filterCompleteVersions(versions []SessionVersion, onlyID string) []SessionVersion {
+	var out []SessionVersion
+	for _, v := range versions {
+		if !versionReadable(v.State) {
+			continue
+		}
+		if onlyID != "" && v.ID != onlyID {
+			continue
+		}
+		cp := v
+		cp.Manifest = append([]byte(nil), v.Manifest...)
+		out = append(out, cp)
+	}
+	if out == nil {
+		out = []SessionVersion{}
+	}
+	return out
+}
+
+func (m *MemStore) ListAgentSessionForks(ctx context.Context, parentSessionID string) ([]AgentSession, error) {
+	_ = ctx
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.agentSessions[parentSessionID] == nil {
+		return nil, ErrNotFound
+	}
+	var out []AgentSession
+	for _, row := range m.agentSessions {
+		if row == nil || row.ParentSessionID != parentSessionID {
+			continue
+		}
+		out = append(out, *row)
+	}
+	if out == nil {
+		out = []AgentSession{}
+	}
+	return out, nil
+}
+
+func (m *MemStore) ForkAgentSession(ctx context.Context, parentSessionID, ownerUserID string) (*AgentSession, error) {
+	_ = ctx
+	parentSessionID = strings.TrimSpace(parentSessionID)
+	ownerUserID = strings.TrimSpace(ownerUserID)
+	if parentSessionID == "" || ownerUserID == "" {
+		return nil, errors.New("store: fork requires parent session and owner")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureAgentMaps()
+	parent := m.agentSessions[parentSessionID]
+	if parent == nil {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	id := newID("asess")
+	native := parent.NativeID + "-fork-" + id[len(id)-6:]
+	row := &AgentSession{
+		ID: id, ProjectID: parent.ProjectID, OwnerUserID: ownerUserID,
+		Harness: parent.Harness, NativeID: native, OriginMachineID: parent.OriginMachineID,
+		WorkspaceRootHint: parent.WorkspaceRootHint, Title: parent.Title,
+		StartedAt: now, LastActiveAt: now, Visibility: "private",
+		ParentSessionID: parent.ID, LineageKind: "fork",
+		Summary: parent.Summary,
+	}
+	key := nativeKey(row.ProjectID, row.Harness, row.NativeID, row.OriginMachineID)
+	m.agentSessions[id] = row
+	m.agentByNative[key] = id
+	cp := *row
+	return &cp, nil
 }
 
 func (m *MemStore) AppendSessionTurn(ctx context.Context, turn SessionTurn) error {
@@ -380,22 +547,58 @@ func (m *MemStore) PutBlob(ctx context.Context, projectID, sum, kind, purpose st
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureAgentMaps()
-	scope := m.storageUsage["user"]
-	// Per-owner scope is set explicitly; "user" is the test default when only one scope exists.
-	if rec, ok := m.storageUsage[projectID]; ok {
-		scope = rec
-	}
-	if purpose == "file" && scope.Cap > 0 && scope.Used+int64(len(body)) > scope.Cap {
+	used, cap, scopeKey := m.resolveBlobStorageLocked(projectID)
+	if purpose == "file" && cap > 0 && used+int64(len(body)) > cap {
 		return fmt.Errorf("store: %w", ErrStorageFull)
 	}
 	m.blobs[blobKey(projectID, sum)] = blobRec{Size: int64(len(body)), Kind: kind, Purpose: purpose, Body: append([]byte(nil), body...)}
-	if scope.Cap > 0 || scope.Used > 0 {
-		scope.Used += int64(len(body))
-		if _, ok := m.storageUsage[projectID]; ok {
-			m.storageUsage[projectID] = scope
-		}
+	if purpose == "file" && (cap > 0 || used > 0) {
+		used += int64(len(body))
+		m.storageUsage[scopeKey] = storageRec{Used: used, Cap: cap}
 	}
 	return nil
+}
+
+// resolveBlobStorageLocked returns used/cap and the map key to update.
+func (m *MemStore) resolveBlobStorageLocked(projectID string) (used, cap int64, scopeKey string) {
+	scopeKey = projectID
+	if rec, ok := m.storageUsage[projectID]; ok {
+		used, cap = rec.Used, rec.Cap
+	}
+	owner := ""
+	if p := m.projects[projectID]; p != nil {
+		owner = strings.TrimSpace(p.CreatedBy)
+	}
+	if owner != "" {
+		userScope := "user:" + owner
+		if rec, ok := m.storageUsage[userScope]; ok && (cap <= 0 || !mapHasStorage(m.storageUsage, projectID)) {
+			used, cap = rec.Used, rec.Cap
+			scopeKey = userScope
+		}
+	}
+	if rec, ok := m.storageUsage["user"]; ok && cap <= 0 {
+		used, cap = rec.Used, rec.Cap
+		scopeKey = "user"
+	}
+	if cap <= 0 {
+		if owner != "" {
+			cap = m.planStorageCapLocked(OwnerUser, owner)
+			if scopeKey == projectID && owner != "" {
+				scopeKey = "user:" + owner
+			}
+		} else {
+			cap = PlanStorageBytes(PlanFree)
+		}
+		if existing, ok := m.storageUsage[scopeKey]; ok {
+			used = existing.Used
+		}
+	}
+	return used, cap, scopeKey
+}
+
+func mapHasStorage(m map[string]storageRec, key string) bool {
+	_, ok := m[key]
+	return ok
 }
 
 func (m *MemStore) MissingBlobs(ctx context.Context, projectID string, hashes []string) ([]string, error) {
@@ -455,7 +658,8 @@ func (m *MemStore) CompleteSessionVersion(ctx context.Context, sessionID string,
 		return nil, &MissingBlobsError{Missing: missing}
 	}
 	state := "complete"
-	if rec, ok := m.storageUsage[sess.ProjectID]; ok && capture.UsageState(rec.Used, rec.Cap) == "full" {
+	used, cap, _ := m.resolveBlobStorageLocked(sess.ProjectID)
+	if capture.UsageState(used, cap) == "full" {
 		if fileRefs > 0 {
 			return nil, fmt.Errorf("store: %w", ErrStorageFull)
 		}
@@ -716,15 +920,159 @@ func (s *PostgresStore) CanReadAgentSession(ctx context.Context, userID, session
 }
 
 func (s *PostgresStore) GrantAgentSession(ctx context.Context, sessionID, granteeUserID, grantedBy string) error {
+	return s.GrantAgentSessionOpts(ctx, sessionID, granteeUserID, grantedBy, SessionGrantOpts{Live: true})
+}
+
+func (s *PostgresStore) GrantAgentSessionOpts(ctx context.Context, sessionID, granteeUserID, grantedBy string, opts SessionGrantOpts) error {
 	if !looksLikeUUID(sessionID) || !looksLikeUUID(granteeUserID) {
 		return errors.New("store: grant ids must be uuids")
 	}
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO session_grants (session_id, grantee_user_id, granted_by)
-		VALUES ($1::uuid, $2::uuid, $3)
+	opts, err := normalizeGrantOpts(opts)
+	if err != nil {
+		return err
+	}
+	if opts.VersionID != "" && !looksLikeUUID(opts.VersionID) {
+		return errors.New("store: version_id must be a uuid")
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO session_grants (session_id, grantee_user_id, granted_by, live, version_id)
+		VALUES ($1::uuid, $2::uuid, $3, $4, $5::uuid)
 		ON CONFLICT (session_id, grantee_user_id) WHERE revoked_at IS NULL AND grantee_user_id IS NOT NULL
-		DO NOTHING`, sessionID, granteeUserID, nullUUIDStrict(grantedBy))
+		DO UPDATE SET live = EXCLUDED.live, version_id = EXCLUDED.version_id, granted_by = EXCLUDED.granted_by`,
+		sessionID, granteeUserID, nullUUIDStrict(grantedBy), opts.Live, nullUUIDStrict(opts.VersionID))
 	return err
+}
+
+func (s *PostgresStore) ListVisibleSessionVersions(ctx context.Context, sessionID, userID string) ([]SessionVersion, error) {
+	if !looksLikeUUID(sessionID) || !looksLikeUUID(userID) {
+		return nil, ErrNotFound
+	}
+	ok, err := s.CanReadAgentSession(ctx, userID, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return []SessionVersion{}, nil
+	}
+	var owner string
+	var visibility string
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(owner_user_id::text,''), visibility
+		FROM agent_sessions WHERE id = $1::uuid`, sessionID).Scan(&owner, &visibility); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	onlyID := ""
+	if owner != userID && visibility != "team" {
+		var live bool
+		var versionID *string
+		err := s.pool.QueryRow(ctx, `
+			SELECT live, version_id::text
+			FROM session_grants
+			WHERE session_id = $1::uuid AND grantee_user_id = $2::uuid AND revoked_at IS NULL
+			LIMIT 1`, sessionID, userID).Scan(&live, &versionID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Team membership path: all complete versions.
+		} else if err != nil {
+			return nil, err
+		} else if !live && versionID != nil && *versionID != "" {
+			onlyID = *versionID
+		}
+	}
+	var rows pgx.Rows
+	if onlyID == "" {
+		rows, err = s.pool.Query(ctx, `
+			SELECT id::text, session_id::text, version, created_at, turn_count,
+			       COALESCE(manifest_sha256,''), manifest, COALESCE(uploaded_by_user_id::text,''), state
+			FROM session_versions
+			WHERE session_id = $1::uuid
+			  AND state IN ('complete', 'transcript_only')
+			ORDER BY version`, sessionID)
+	} else {
+		rows, err = s.pool.Query(ctx, `
+			SELECT id::text, session_id::text, version, created_at, turn_count,
+			       COALESCE(manifest_sha256,''), manifest, COALESCE(uploaded_by_user_id::text,''), state
+			FROM session_versions
+			WHERE session_id = $1::uuid
+			  AND state IN ('complete', 'transcript_only')
+			  AND id = $2::uuid
+			ORDER BY version`, sessionID, onlyID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SessionVersion
+	for rows.Next() {
+		v, err := scanSessionVersion(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *v)
+	}
+	if out == nil {
+		out = []SessionVersion{}
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) ListAgentSessionForks(ctx context.Context, parentSessionID string) ([]AgentSession, error) {
+	if !looksLikeUUID(parentSessionID) {
+		return nil, ErrNotFound
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id::text, project_id::text, COALESCE(owner_user_id::text,''), harness, native_id,
+		       origin_machine_id, COALESCE(workspace_root_hint,''), COALESCE(title,''),
+		       started_at, last_active_at, ended_at, visibility,
+		       COALESCE(parent_session_id::text,''), COALESCE(lineage_kind,''), COALESCE(summary,'')
+		FROM agent_sessions
+		WHERE parent_session_id = $1::uuid
+		ORDER BY started_at`, parentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AgentSession
+	for rows.Next() {
+		row, err := scanAgentSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *row)
+	}
+	if out == nil {
+		out = []AgentSession{}
+	}
+	return out, rows.Err()
+}
+
+func (s *PostgresStore) ForkAgentSession(ctx context.Context, parentSessionID, ownerUserID string) (*AgentSession, error) {
+	if !looksLikeUUID(parentSessionID) || !looksLikeUUID(ownerUserID) {
+		return nil, errors.New("store: fork ids must be uuids")
+	}
+	parent, err := s.GetAgentSession(ctx, parentSessionID)
+	if err != nil {
+		return nil, err
+	}
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%1_000_000)
+	native := parent.NativeID + "-fork-" + suffix
+	row := s.pool.QueryRow(ctx, `
+		INSERT INTO agent_sessions (
+			project_id, owner_user_id, harness, native_id, origin_machine_id,
+			workspace_root_hint, title, visibility, summary, parent_session_id, lineage_kind
+		) VALUES (
+			$1::uuid, $2::uuid, $3, $4, $5, NULLIF($6,''), NULLIF($7,''), 'private', NULLIF($8,''),
+			$9::uuid, 'fork'
+		)
+		RETURNING id::text, project_id::text, COALESCE(owner_user_id::text,''), harness, native_id,
+		          origin_machine_id, COALESCE(workspace_root_hint,''), COALESCE(title,''),
+		          started_at, last_active_at, ended_at, visibility,
+		          COALESCE(parent_session_id::text,''), COALESCE(lineage_kind,''), COALESCE(summary,'')`,
+		parent.ProjectID, ownerUserID, parent.Harness, native, parent.OriginMachineID,
+		parent.WorkspaceRootHint, parent.Title, parent.Summary, parent.ID)
+	return scanAgentSession(row)
 }
 
 func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn) error {
@@ -822,10 +1170,17 @@ func (s *PostgresStore) PutBlob(ctx context.Context, projectID, sum, kind, purpo
 		purpose = "file"
 	}
 	if purpose == "file" {
+		var used, cap int64
 		var state string
-		_ = s.pool.QueryRow(ctx, `
-			SELECT state FROM storage_usage WHERE plan_scope = $1`, "project:"+projectID).Scan(&state)
-		if state == "full" {
+		err := s.pool.QueryRow(ctx, `
+			SELECT bytes_used, bytes_cap, state FROM storage_usage WHERE plan_scope = $1`, "project:"+projectID).Scan(&used, &cap, &state)
+		if err != nil || cap <= 0 {
+			planCap, _ := s.planCapForScope(ctx, "project:"+projectID)
+			if cap <= 0 {
+				cap = planCap
+			}
+		}
+		if state == "full" || (cap > 0 && used >= cap) {
 			return fmt.Errorf("store: %w", ErrStorageFull)
 		}
 	}

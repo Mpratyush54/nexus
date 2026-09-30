@@ -1,6 +1,10 @@
 // Command daemon — local-dev entrypoint for the workspace daemon
 // (issue #39, plan target tree).
 //
+// FREEZE (spec 7.8 / P0): keep for Fyne parity until WinUI ships; do not
+// extend the :7272 surface. New capture/headless work goes through
+// `nexus capture --foreground` and embedded nexuscore (no TCP listen).
+//
 // Flag-driven thin wiring only: -root selects the workspace directory,
 // -bind the listen address (default 127.0.0.1; use 0.0.0.0 in containers,
 // issue #126), -port the listen port, -server the central server base URL

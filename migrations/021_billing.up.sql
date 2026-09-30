@@ -22,7 +22,7 @@ VALUES
     'Free',
     'Personal memory for one team.',
     0, 'usd', 'month', true, 10,
-    '{"orgs":1,"projects":3,"members":5,"memories":2000,"github_import":true}',
+    '{"orgs":1,"projects":3,"members":5,"memories":2000,"storage_bytes":5368709120,"github_import":true}',
     '["Project memory","Live presence","GitHub import"]'
   ),
   (
@@ -30,7 +30,7 @@ VALUES
     'Pro',
     'For groups that review and ship together.',
     1600, 'usd', 'month', true, 20,
-    '{"orgs":5,"projects":25,"members":25,"memories":0,"github_import":true}',
+    '{"orgs":5,"projects":25,"members":25,"memories":0,"storage_bytes":107374182400,"github_import":true}',
     '["Everything in Free","25 seats","Unlimited memories","Priority support"]'
   ),
   (
@@ -38,7 +38,7 @@ VALUES
     'Team',
     'Org-wide memory with room to grow.',
     4800, 'usd', 'month', true, 30,
-    '{"orgs":0,"projects":0,"members":250,"memories":0,"github_import":true}',
+    '{"orgs":0,"projects":0,"members":250,"memories":0,"storage_bytes":268435456000,"github_import":true}',
     '["Everything in Pro","Unlimited orgs & projects","250 seats","Admin billing"]'
   )
 ON CONFLICT (id) DO NOTHING;

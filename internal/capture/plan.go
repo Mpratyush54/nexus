@@ -1,6 +1,10 @@
 package capture
 
-import "path"
+import (
+	"path"
+
+	"central-memory/internal/secrets"
+)
 
 // FileEntry is one path the capture walk saw, relative to the workspace root.
 type FileEntry struct {
@@ -11,6 +15,7 @@ type FileEntry struct {
 // TreePlan is the upload decision for one working tree (D8, D19).
 type TreePlan struct {
 	Include []string
+	Secrets []string
 	Exclude []string
 	Rebuild []string
 	Refuse  []string
@@ -85,10 +90,17 @@ func PlanTree(files []FileEntry, m Markers) TreePlan {
 			}
 			continue
 		}
+		if secrets.DetectSecretPath(rel) {
+			plan.Secrets = append(plan.Secrets, rel)
+			continue
+		}
 		plan.Include = append(plan.Include, rel)
 	}
 	if plan.Include == nil {
 		plan.Include = []string{}
+	}
+	if plan.Secrets == nil {
+		plan.Secrets = []string{}
 	}
 	if plan.Exclude == nil {
 		plan.Exclude = []string{}

@@ -106,3 +106,110 @@ func TestWriteToFileCreate(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 }
+
+// F3 rest: interceptor FILE_*/COMMAND_* merge into the same provenance shape
+// as ParseToolCalls, then dedupe by (turn, path, op) when they overlap.
+func TestInterceptorEventsMergeAndDedupeWithToolCalls(t *testing.T) {
+	root := "/workspace"
+	turnPayload := map[string]any{
+		"workspace_root": root,
+		"tool_calls": []any{
+			map[string]any{
+				"name": "Edit",
+				"input": map[string]any{
+					"file_path":  "internal/daemon/runtime.go",
+					"old_string": "r.pushParsedToolOps(ctx, sid, harness, batch)",
+					"new_string": "r.pushParsedToolOps(ctx, sid, harness, batch, inter)",
+				},
+			},
+			map[string]any{
+				"name": "Bash",
+				"args": map[string]any{
+					"command": "go test ./internal/daemon -run Parse",
+				},
+			},
+		},
+	}
+	fromTools := ParseToolCalls(turnPayload, 1)
+	if len(fromTools) < 2 {
+		t.Fatalf("tool_calls parse: %+v", fromTools)
+	}
+
+	// Synthetic interceptor events that overlap the Edit (same path/op) and
+	// add a distinct FILE_READ plus a COMMAND_EXECUTED that overlaps Bash.
+	inter := []ToolEvent{
+		{
+			Type: ToolEventFileModified,
+			Payload: map[string]any{
+				"path":       filepath.Join(root, "internal/daemon/runtime.go"),
+				"diff":       "-old\n+new",
+				"turn_index": 1,
+			},
+		},
+		{
+			Type: ToolEventFileRead,
+			Payload: map[string]any{
+				"path":       filepath.Join(root, "internal/daemon/tool_parser.go"),
+				"preview":    "package daemon",
+				"turn_index": 1,
+			},
+		},
+		{
+			Type: ToolEventCommandExecuted,
+			Payload: map[string]any{
+				"command":    "go",
+				"args":       []string{"test", "./internal/daemon", "-run", "Parse"},
+				"exit_code":  0,
+				"output":     "ok",
+				"turn_index": 1,
+			},
+		},
+	}
+	fromInter := ParseInterceptorEvents(inter, 1, root)
+	if len(fromInter) != 3 {
+		t.Fatalf("interceptor parse want 3, got %+v", fromInter)
+	}
+
+	merged := MergeProvenanceOps([]map[string]any{nil /* turn 0 */, turnPayload}, inter, root)
+	if len(merged) == 0 {
+		t.Fatal("merged provenance ops empty after dedupe")
+	}
+
+	// Overlapping modify on runtime.go and overlapping shell command collapse;
+	// FILE_READ on tool_parser.go survives as unique.
+	var reads, modifies, execs int
+	paths := map[string]int{}
+	for _, p := range merged {
+		switch {
+		case p.Type == "file_op" && p.OpType == "read":
+			reads++
+			paths[p.FilePath]++
+		case p.Type == "file_op" && p.OpType == "modify":
+			modifies++
+			paths[p.FilePath]++
+		case p.Type == "tool_exec":
+			execs++
+		}
+	}
+	if modifies != 1 {
+		t.Fatalf("want 1 modify after dedupe, got %d in %+v", modifies, merged)
+	}
+	if reads != 1 {
+		t.Fatalf("want 1 read (interceptor-only), got %d in %+v", reads, merged)
+	}
+	if execs != 1 {
+		t.Fatalf("want 1 tool_exec after command dedupe, got %d in %+v", execs, merged)
+	}
+	if paths["internal/daemon/runtime.go"] != 1 {
+		t.Fatalf("runtime.go path count=%v want 1: %+v", paths, merged)
+	}
+	if paths["internal/daemon/tool_parser.go"] != 1 {
+		t.Fatalf("tool_parser.go missing: %+v", merged)
+	}
+
+	// Raw concat without dedupe would be longer than merged.
+	raw := append(append([]ParsedToolCall{}, fromTools...), fromInter...)
+	if len(merged) >= len(raw) {
+		t.Fatalf("dedupe did not shrink: merged=%d raw=%d", len(merged), len(raw))
+	}
+}

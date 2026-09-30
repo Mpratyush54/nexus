@@ -2,15 +2,30 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"central-memory/internal/cache"
 	"central-memory/internal/outbox"
+	"central-memory/internal/secrets"
 )
+
+type recordingCloud struct {
+	mu    sync.Mutex
+	posts []string
+}
+
+func (r *recordingCloud) Do(_ context.Context, method, path string, body []byte) ([]byte, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.posts = append(r.posts, method+" "+path)
+	return []byte(`{"ok":true}`), nil
+}
 
 func TestContinueAndOffline(t *testing.T) {
 	raw, _ := json.Marshal(map[string]string{"session_id": "s1", "mode": "here"})
@@ -62,6 +77,74 @@ func TestCacheOutboxAndFile(t *testing.T) {
 	raw, _ = json.Marshal(map[string]string{"path": "../a.txt"})
 	if _, err := Call(context.Background(), "files.read", raw, Deps{Root: dir}); err == nil {
 		t.Fatal("escape")
+	}
+}
+
+func TestSecretsRestoreLocal(t *testing.T) {
+	dir := t.TempDir()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+	plain := []byte("TOKEN=abc\n")
+	ct, err := secrets.Encrypt(key, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]string{
+		"path":           ".env",
+		"ciphertext_b64": base64.StdEncoding.EncodeToString(ct),
+		"data_key_b64":   base64.StdEncoding.EncodeToString(key),
+	})
+	out, err := Call(context.Background(), "secrets.restore", raw, Deps{Root: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["restored"] != true {
+		t.Fatalf("out=%v", out)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, ".env"))
+	if err != nil || string(got) != string(plain) {
+		t.Fatalf("file=%q err=%v", got, err)
+	}
+	if _, err := Call(context.Background(), "secrets.restore", json.RawMessage(`{"path":".env"}`), Deps{Root: dir}); err == nil {
+		t.Fatal("expected clear error without data key")
+	}
+}
+
+func TestUploadsRetryDrainsWhenOnline(t *testing.T) {
+	sp, err := outbox.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := outbox.CaptureEnqueue(sp, "t1", "turn", "POST", "/v1/agent-sessions/s/turns", []byte(`{"idx":1}`)); err != nil {
+		t.Fatal(err)
+	}
+	cloud := &recordingCloud{}
+	out, err := Call(context.Background(), "uploads.retry", nil, Deps{Online: true, Cloud: cloud, Outbox: sp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	if m["pending"].(int) != 0 || m["uploaded"].(int) != 1 {
+		t.Fatalf("retry result = %+v", m)
+	}
+	if len(cloud.posts) != 1 || cloud.posts[0] != "POST /v1/agent-sessions/s/turns" {
+		t.Fatalf("posts = %+v", cloud.posts)
+	}
+	// Offline / no cloud: do not drain.
+	if err := outbox.CaptureEnqueue(sp, "t2", "turn", "POST", "/v1/agent-sessions/s/turns", []byte(`{"idx":2}`)); err != nil {
+		t.Fatal(err)
+	}
+	out, err = Call(context.Background(), "uploads.retry", nil, Deps{Online: false, Cloud: cloud, Outbox: sp})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["pending"].(int) != 1 {
+		t.Fatalf("offline should leave pending: %+v", out)
+	}
+	if len(cloud.posts) != 1 {
+		t.Fatalf("offline should not post: %+v", cloud.posts)
 	}
 }
 

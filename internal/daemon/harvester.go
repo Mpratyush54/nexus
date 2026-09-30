@@ -93,9 +93,10 @@ type TranscriptSource struct {
 
 // Turn is a single parsed dialogue turn.
 type Turn struct {
-	Speaker   string    // "user" | "assistant" (normalized where possible)
-	Content   string    // text content, tool-call blocks stripped
-	Timestamp time.Time // zero if the transcript line carried none
+	Speaker   string           // "user" | "assistant" (normalized where possible)
+	Content   string           // text content (tool_use blocks not inlined into text)
+	Timestamp time.Time        // zero if the transcript line carried none
+	ToolCalls []map[string]any // structured tool_use / function_call blocks (JSON-compatible)
 }
 
 // Harvester tails agent transcript files for one workspace.
@@ -756,20 +757,27 @@ func sessionID(path string) string {
 	return base
 }
 
-// noiseTypes are JSONL record types that carry no dialogue value. Layer 1
-// (tool interception) already captures tool activity, so the harvester skips
-// these to keep CONVERSATION_TURN events to meaningful turns only.
+// noiseTypes are JSONL record types that carry no dialogue or structured
+// tool-call value. tool_use / function_call / tool_call are NOT noise: F3
+// requires retaining structured tool_calls on harvested turns so provenance
+// (ParseToolCalls → pushParsedToolOps) is non-empty for file-edit sessions.
 var noiseTypes = map[string]bool{
-	"tool_use": true, "tool_result": true, "tool_call": true,
-	"function_call": true, "function_result": true,
+	"tool_result": true, "function_result": true, "function_call_output": true,
 	"api_request": true, "api_response": true,
 	"system": true, "summary": true, "snapshot": true,
 	"file-history-snapshot": true, "queue-operation": true,
 	"background_task": true, "mcp_tool_call": true, "mcp_tool_result": true,
-	"thinking": true, "progress": true,
+	"thinking": true, "progress": true, "reasoning": true,
 	// Codex rollout envelope types (dialogue lives under payload).
 	"session_meta": true, "turn_context": true,
 	"token_count": true, "task_complete": true,
+}
+
+// toolRecordTypes are top-level (or payload) types that represent a structured
+// tool invocation rather than dialogue text.
+var toolRecordTypes = map[string]bool{
+	"tool_use": true, "tool_call": true, "function_call": true,
+	"custom_tool_call": true, "server_tool_use": true,
 }
 
 // maxJSONLLineBytes bounds a single JSONL line (issue #118): a 1MB
@@ -808,7 +816,8 @@ func ParseTurns(r io.Reader) ([]Turn, error) {
 // parseTurnLine parses one JSONL line. ok=false means "skip, not an error"
 // (noise, blank, or unparsable line — transcripts must never break tailing).
 // Tolerates Claude/Cursor nested message.content, OpenCode flats, and Codex
-// rollout envelopes ({type, payload:{role|message|content}}).
+// rollout envelopes ({type, payload:{role|message|content}}). Structured
+// tool_use / function_call blocks are retained on Turn.ToolCalls (F3).
 func parseTurnLine(line []byte) (t Turn, ok bool) {
 	if len(strings.TrimSpace(string(line))) == 0 {
 		return Turn{}, false
@@ -826,13 +835,17 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 		pt := strings.ToLower(strField(p, "type"))
 		switch typ {
 		case "response_item":
-			if pt != "" && pt != "message" && pt != "output_text" && pt != "input_text" {
-				if noiseTypes[pt] || pt == "function_call" || pt == "function_call_output" ||
-					pt == "reasoning" || pt == "custom_tool_call" {
+			if toolRecordTypes[pt] {
+				// Keep structured function_call / custom_tool_call as a turn.
+				m = p
+				typ = pt
+			} else if pt != "" && pt != "message" && pt != "output_text" && pt != "input_text" {
+				if noiseTypes[pt] {
 					return Turn{}, false
 				}
+			} else {
+				m = p
 			}
-			m = p
 		case "event_msg":
 			switch pt {
 			case "user_message", "agent_message", "assistant_message", "message":
@@ -842,8 +855,11 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 			}
 		default:
 			// Generic nested payload with role/content — prefer it.
-			if strField(p, "role") != "" || p["content"] != nil || strField(p, "message") != "" {
+			if strField(p, "role") != "" || p["content"] != nil || strField(p, "message") != "" || toolRecordTypes[pt] {
 				m = p
+				if pt != "" {
+					typ = pt
+				}
 			}
 		}
 	}
@@ -860,6 +876,8 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 			role = "user"
 		case "agent_message", "assistant_message", "assistant", "planner_response", "model_response":
 			role = "assistant"
+		case "function_call", "tool_use", "tool_call", "custom_tool_call":
+			role = "assistant"
 		}
 	}
 	// Antigravity brain transcripts: source USER_EXPLICIT / MODEL.
@@ -872,6 +890,12 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 		}
 	}
 	if r := strings.ToLower(role); r == "tool" || r == "function" {
+		// tool_result rows — keep dialogue clean; structured calls live on
+		// the assistant turn that issued them.
+		return Turn{}, false
+	}
+	toolCalls := extractToolCalls(m)
+	if toolRecordTypes[typ] && len(toolCalls) == 0 {
 		return Turn{}, false
 	}
 	content := extractContent(m)
@@ -881,19 +905,197 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 			content = s
 		}
 	}
-	if strings.TrimSpace(content) == "" {
+	if strings.TrimSpace(content) == "" && len(toolCalls) == 0 {
 		return Turn{}, false
 	}
 	t = Turn{
 		Speaker:   normalizeSpeaker(role),
 		Content:   strings.TrimSpace(content),
 		Timestamp: extractTime(m),
+		ToolCalls: toolCalls,
+	}
+	if t.Speaker == "unknown" && len(toolCalls) > 0 {
+		t.Speaker = "assistant"
 	}
 	return t, true
 }
 
-// extractContent pulls text from the common content shapes, dropping
-// tool_use/input blocks (Layer 1 already captures those).
+// extractToolCalls gathers structured tool_use / function_call blocks from a
+// turn map (Claude content arrays, OpenAI tool_calls, Codex function_call).
+func extractToolCalls(m map[string]any) []map[string]any {
+	if m == nil {
+		return nil
+	}
+	var out []map[string]any
+	out = append(out, toolCallsFromContentValue(m["content"])...)
+	if mm, ok := m["message"].(map[string]any); ok {
+		out = append(out, toolCallsFromContentValue(mm["content"])...)
+		out = append(out, normalizeToolCallList(mm["tool_calls"])...)
+		out = append(out, normalizeToolCallList(mm["toolCalls"])...)
+	}
+	out = append(out, normalizeToolCallList(m["tool_calls"])...)
+	out = append(out, normalizeToolCallList(m["toolCalls"])...)
+	typ := strings.ToLower(strField(m, "type"))
+	if toolRecordTypes[typ] {
+		if call := normalizeOneToolCall(m); call != nil {
+			out = append(out, call)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func toolCallsFromContentValue(v any) []map[string]any {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var out []map[string]any
+	for _, item := range arr {
+		im, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		bt := strings.ToLower(strField(im, "type"))
+		if toolRecordTypes[bt] || bt == "" && (strField(im, "name") != "" || strField(im, "tool") != "") {
+			if bt == "" || toolRecordTypes[bt] {
+				if call := normalizeOneToolCall(im); call != nil {
+					out = append(out, call)
+				}
+			}
+		}
+	}
+	return out
+}
+
+func normalizeToolCallList(v any) []map[string]any {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil
+	}
+	var out []map[string]any
+	for _, item := range arr {
+		im, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if call := normalizeOneToolCall(im); call != nil {
+			out = append(out, call)
+		}
+	}
+	return out
+}
+
+// normalizeOneToolCall projects harness-specific tool shapes onto a stable
+// {name, id?, input|args} map that ParseToolCalls / session_turns.tool_calls
+// can consume.
+func normalizeOneToolCall(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	name := firstNonEmpty(
+		strField(m, "name"),
+		strField(m, "tool"),
+		strField(m, "ToolName"),
+		strField(m, "tool_name"),
+	)
+	var fnArgs any
+	if fn, ok := m["function"].(map[string]any); ok {
+		if name == "" {
+			name = strField(fn, "name")
+		}
+		if v, ok := fn["arguments"]; ok {
+			fnArgs = v
+		} else if v, ok := fn["parameters"]; ok {
+			fnArgs = v
+		}
+	}
+	if name == "" {
+		return nil
+	}
+	call := map[string]any{"name": name}
+	if id := firstNonEmpty(strField(m, "id"), strField(m, "tool_use_id"), strField(m, "call_id"), strField(m, "toolCallId")); id != "" {
+		call["id"] = id
+	}
+	args := coerceToolArgs(m)
+	if len(args) == 0 && fnArgs != nil {
+		args = coerceArgsValue(fnArgs)
+	}
+	if len(args) > 0 {
+		call["input"] = args
+		call["args"] = args
+	} else if raw, ok := m["arguments"]; ok {
+		// Codex often ships apply_patch / shell args as a raw string.
+		switch s := raw.(type) {
+		case string:
+			if strings.TrimSpace(s) != "" {
+				call["arguments"] = s
+				if parsed := coerceArgsValue(s); len(parsed) > 0 {
+					call["input"] = parsed
+					call["args"] = parsed
+				}
+			}
+		}
+	}
+	return call
+}
+
+func coerceToolArgs(m map[string]any) map[string]any {
+	for _, k := range []string{"input", "args", "Args", "arguments", "parameters", "parameters_json"} {
+		if v, ok := m[k]; ok {
+			if args := coerceArgsValue(v); len(args) > 0 {
+				return args
+			}
+		}
+	}
+	return nil
+}
+
+func coerceArgsValue(v any) map[string]any {
+	switch t := v.(type) {
+	case map[string]any:
+		return t
+	case string:
+		s := strings.TrimSpace(t)
+		if s == "" {
+			return nil
+		}
+		if s[0] == '{' {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(s), &m); err == nil {
+				return m
+			}
+		}
+		// Codex apply_patch: raw unified-ish patch text — surface as patch.
+		if strings.Contains(s, "*** Begin Patch") || strings.Contains(s, "*** Update File:") {
+			path := codexPatchPath(s)
+			out := map[string]any{"patch": s}
+			if path != "" {
+				out["path"] = path
+				out["TargetFile"] = path
+			}
+			return out
+		}
+	}
+	return nil
+}
+
+func codexPatchPath(patch string) string {
+	for _, line := range strings.Split(patch, "\n") {
+		line = strings.TrimSpace(line)
+		for _, prefix := range []string{"*** Update File:", "*** Add File:", "*** Delete File:"} {
+			if strings.HasPrefix(line, prefix) {
+				return strings.TrimSpace(strings.TrimPrefix(line, prefix))
+			}
+		}
+	}
+	return ""
+}
+
+// extractContent pulls text from the common content shapes. Structured
+// tool_use/input blocks are collected separately via extractToolCalls.
 func extractContent(m map[string]any) string {
 	if s := messageContent(m["content"]); s != "" {
 		return s
@@ -937,7 +1139,7 @@ func messageContent(v any) string {
 					b.WriteString(s)
 				}
 			default:
-				// tool_use, image, server_tool_use, etc.: skipped as noise.
+				// tool_use / image / etc.: not inlined into text; see extractToolCalls.
 			}
 		}
 		return b.String()
@@ -1055,7 +1257,8 @@ func lastNewline(b []byte) int {
 
 // turnPayload renders a Turn into the CONVERSATION_TURN payload shape.
 // Content is secret-screened (issue #132): transcripts routinely contain
-// pasted secrets, and the event stream lands in Postgres.
+// pasted secrets, and the event stream lands in Postgres. Structured
+// tool_calls are retained for provenance (F3 / ParseToolCalls).
 func turnPayload(action, agent, path string, t Turn) map[string]any {
 	p := map[string]any{
 		"action":     action,
@@ -1067,6 +1270,14 @@ func turnPayload(action, agent, path string, t Turn) map[string]any {
 	}
 	if !t.Timestamp.IsZero() {
 		p["timestamp"] = t.Timestamp.UTC().Format(time.RFC3339Nano)
+	}
+	if len(t.ToolCalls) > 0 {
+		// Emit as []any so JSON encoders and ParseToolCalls([]any) agree.
+		flat := make([]any, len(t.ToolCalls))
+		for i, c := range t.ToolCalls {
+			flat[i] = c
+		}
+		p["tool_calls"] = flat
 	}
 	return p
 }
@@ -1290,6 +1501,13 @@ func (h *Harvester) CheckIdle() []Event {
 			m := map[string]any{"speaker": t.Speaker, "content": redact(t.Content)}
 			if !t.Timestamp.IsZero() {
 				m["timestamp"] = t.Timestamp.UTC().Format(time.RFC3339Nano)
+			}
+			if len(t.ToolCalls) > 0 {
+				flatCalls := make([]any, len(t.ToolCalls))
+				for i, c := range t.ToolCalls {
+					flatCalls[i] = c
+				}
+				m["tool_calls"] = flatCalls
 			}
 			flat = append(flat, m)
 		}

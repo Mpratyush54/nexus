@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { apiRequest } from '@/lib/api-client'
+import { formatBytes, storageApi } from '@/api/storage'
 import { formatRelative } from '@/utils/format'
 
 type TimelineCard = {
@@ -26,8 +27,13 @@ export function TimelinePage() {
     queryKey: ['timeline'],
     queryFn: ({ signal }) => apiRequest<TimelineResponse>('/v1/timeline?limit=30', { signal }),
   })
+  const storage = useQuery({
+    queryKey: ['storage', 'usage'],
+    queryFn: ({ signal }) => storageApi.usage(undefined, signal),
+  })
 
   const items = feed.data?.items ?? []
+  const storageFull = storage.data?.state === 'full'
 
   return (
     <div className="space-y-8">
@@ -37,6 +43,14 @@ export function TimelinePage() {
           Sessions you own or that were shared with you, across projects.
         </p>
       </div>
+      {storageFull ? (
+        <GlassPanel className="border-amber/40 p-4">
+          <p className="text-sm text-fg">
+            Storage full ({formatBytes(storage.data?.used ?? 0)} / {formatBytes(storage.data?.cap ?? 0)}).
+            New file blobs are not saved; transcripts and turns continue.
+          </p>
+        </GlassPanel>
+      ) : null}
       {feed.isLoading ? <p className="text-sm text-fg-dim">Loading timeline…</p> : null}
       {feed.isError ? (
         <p className="text-sm text-danger">The timeline could not be loaded.</p>
@@ -60,7 +74,9 @@ export function TimelinePage() {
             <p className="mt-1 text-xs text-fg-dim">
               {item.harness} · {item.native_id}
               {item.turn_count ? ` · ${item.turn_count} turns` : ''}
-              {item.version_state === 'transcript_only' ? ' · files not saved' : ''}
+              {item.version_state === 'transcript_only'
+                ? ' · Files not saved: storage full'
+                : ''}
             </p>
             {item.summary ? <p className="mt-2 text-sm text-fg">{item.summary}</p> : null}
           </GlassPanel>

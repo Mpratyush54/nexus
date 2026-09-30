@@ -46,6 +46,8 @@ public enum NxMethods {
     public static let authCallback = "auth.callback"
     public static let capturePause = "capture.pause"
     public static let captureResume = "capture.resume"
+    public static let captureWalk = "capture.walk"
+    public static let captureRestore = "capture.restore"
     public static let statusGet = "status.get"
     public static let diagnosticsGet = "diagnostics.get"
 }

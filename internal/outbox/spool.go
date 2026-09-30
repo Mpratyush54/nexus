@@ -1,5 +1,6 @@
 // Package outbox is the local upload spool (spec 7.2). Items stay on disk
-// until the cloud acknowledges them.
+// until the cloud acknowledges them. Capture should Enqueue (CaptureEnqueue);
+// Drain uploads pending turn/blob/manifest items when online.
 package outbox
 
 import (
@@ -71,6 +72,19 @@ func (s *Spool) Ack(id string) error {
 	for i := range s.items {
 		if s.items[i].ID == id {
 			s.items[i].Acked = true
+			return s.flushLocked()
+		}
+	}
+	return errors.New("outbox: unknown id")
+}
+
+// BumpAttempt records a failed (or aborted) upload try for id.
+func (s *Spool) BumpAttempt(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.items {
+		if s.items[i].ID == id {
+			s.items[i].Attempt++
 			return s.flushLocked()
 		}
 	}

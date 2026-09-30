@@ -49,6 +49,8 @@ namespace Nexus.Core
         public const string AuthCallback = "auth.callback";
         public const string CapturePause = "capture.pause";
         public const string CaptureResume = "capture.resume";
+        public const string CaptureWalk = "capture.walk";
+        public const string CaptureRestore = "capture.restore";
         public const string StatusGet = "status.get";
         public const string DiagnosticsGet = "diagnostics.get";
     }

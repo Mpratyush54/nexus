@@ -136,5 +136,11 @@ func UsageState(used, cap int64) string {
 	return "ok"
 }
 
-// FreePlanBytes is the proposed Free cap (D19).
-const FreePlanBytes int64 = 5 * 1024 * 1024 * 1024
+const (
+	// FreePlanBytes is the Free storage cap (D19): 5 GiB per user.
+	FreePlanBytes int64 = 5 << 30
+	// ProPlanBytes is the Pro storage cap (D19): 100 GiB per user.
+	ProPlanBytes int64 = 100 << 30
+	// TeamPlanBytes is the Team storage cap (D19): 250 GiB per seat.
+	TeamPlanBytes int64 = 250 << 30
+)

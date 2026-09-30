@@ -84,7 +84,7 @@ func TestNoiseFiltering(t *testing.T) {
 		`{"type":"tool_use","role":"assistant","content":"read file x.go"}`,
 		`{"type":"tool_result","role":"tool","content":"file bytes..."}`,
 		`{"type":"system","content":"session started"}`,
-		`{"role":"assistant","content":[{"type":"text","text":"Use Redis for pub/sub"},{"type":"tool_use","input":{"cmd":"ls"}}],"timestamp":"2026-09-17T10:00:00Z"}`,
+		`{"role":"assistant","content":[{"type":"text","text":"Use Redis for pub/sub"},{"type":"tool_use","name":"Bash","input":{"command":"ls"}}],"timestamp":"2026-09-17T10:00:00Z"}`,
 		`{"role":"user","content":"I prefer tabs","timestamp":"2026-09-17T10:01:00Z"}`,
 		``,
 		`not json at all`,
@@ -100,6 +100,12 @@ func TestNoiseFiltering(t *testing.T) {
 	if turns[0].Speaker != "assistant" || turns[0].Content != "Use Redis for pub/sub" {
 		t.Fatalf("content-block extraction wrong: %+v", turns[0])
 	}
+	if len(turns[0].ToolCalls) != 1 {
+		t.Fatalf("assistant turn should retain tool_calls, got %+v", turns[0].ToolCalls)
+	}
+	if name, _ := turns[0].ToolCalls[0]["name"].(string); name != "Bash" {
+		t.Fatalf("tool name=%q want Bash: %+v", name, turns[0].ToolCalls[0])
+	}
 	if turns[1].Speaker != "user" {
 		t.Fatalf("speaker normalization wrong: %+v", turns[1])
 	}
@@ -108,6 +114,18 @@ func TestNoiseFiltering(t *testing.T) {
 	}
 	if (*got)[0].Payload["speaker"] != "assistant" || (*got)[0].Payload["content"] != "Use Redis for pub/sub" {
 		t.Fatalf("event payload wrong: %+v", (*got)[0].Payload)
+	}
+	switch tc := (*got)[0].Payload["tool_calls"].(type) {
+	case []any:
+		if len(tc) != 1 {
+			t.Fatalf("event tool_calls len=%d", len(tc))
+		}
+	case []map[string]any:
+		if len(tc) != 1 {
+			t.Fatalf("event tool_calls len=%d", len(tc))
+		}
+	default:
+		t.Fatalf("event payload missing tool_calls: %+v", (*got)[0].Payload)
 	}
 }
 
@@ -577,20 +595,26 @@ func TestParseTurnsCodexRollout(t *testing.T) {
 		`{"type":"turn_context","payload":{}}`,
 		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"We decided Codex rollouts must auto-harvest into Nexus portal memory."}]}}`,
 		`{"type":"event_msg","payload":{"type":"agent_message","message":"Agreed. Codex JSONL rollouts are parsed and posted as PROPOSED memories."}}`,
-		`{"type":"response_item","payload":{"type":"function_call","name":"shell"}}`,
+		`{"type":"response_item","payload":{"type":"function_call","name":"shell","arguments":"go test ./..."}}`,
 	}, "\n")
 	turns, err := ParseTurns(strings.NewReader(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(turns) != 2 {
-		t.Fatalf("turns=%d want 2 (noise skipped), got %+v", len(turns), turns)
+	if len(turns) != 3 {
+		t.Fatalf("turns=%d want 3 (dialogue + retained function_call), got %+v", len(turns), turns)
 	}
 	if turns[0].Speaker != "user" || !strings.Contains(turns[0].Content, "Codex rollouts") {
 		t.Fatalf("user turn: %+v", turns[0])
 	}
 	if turns[1].Speaker != "assistant" || !strings.Contains(turns[1].Content, "PROPOSED") {
 		t.Fatalf("assistant turn: %+v", turns[1])
+	}
+	if turns[2].Speaker != "assistant" || len(turns[2].ToolCalls) != 1 {
+		t.Fatalf("function_call turn: %+v", turns[2])
+	}
+	if name, _ := turns[2].ToolCalls[0]["name"].(string); name != "shell" {
+		t.Fatalf("tool name=%q: %+v", name, turns[2].ToolCalls[0])
 	}
 }
 

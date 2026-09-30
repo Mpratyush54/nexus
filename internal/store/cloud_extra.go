@@ -97,10 +97,47 @@ func (m *MemStore) ListSessionVersions(ctx context.Context, sessionID string) ([
 
 func (m *MemStore) StorageUsage(ctx context.Context, scope string) (used, cap int64, err error) {
 	_ = ctx
+	scope = strings.TrimSpace(scope)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	rec := m.storageUsage[strings.TrimSpace(scope)]
-	return rec.Used, rec.Cap, nil
+	rec := m.storageUsage[scope]
+	used, cap = rec.Used, rec.Cap
+	if cap <= 0 {
+		cap = m.planCapForScopeLocked(scope)
+	}
+	return used, cap, nil
+}
+
+func (m *MemStore) planCapForScopeLocked(scope string) int64 {
+	if strings.HasPrefix(scope, "user:") {
+		userID := strings.TrimPrefix(scope, "user:")
+		return m.planStorageCapLocked(OwnerUser, userID)
+	}
+	if p := m.projects[scope]; p != nil && strings.TrimSpace(p.CreatedBy) != "" {
+		return m.planStorageCapLocked(OwnerUser, p.CreatedBy)
+	}
+	if strings.HasPrefix(scope, "project:") {
+		pid := strings.TrimPrefix(scope, "project:")
+		if p := m.projects[pid]; p != nil && strings.TrimSpace(p.CreatedBy) != "" {
+			return m.planStorageCapLocked(OwnerUser, p.CreatedBy)
+		}
+	}
+	return PlanStorageBytes(PlanFree)
+}
+
+func (m *MemStore) planStorageCapLocked(ownerType, ownerID string) int64 {
+	planID := PlanFree
+	if m.billingSubs != nil {
+		if sub, ok := m.billingSubs[subKey(ownerType, ownerID)]; ok && sub != nil {
+			planID = sub.PlanID
+		}
+	}
+	if m.plans != nil {
+		if p, ok := m.plans[planID]; ok && p.Limits.StorageBytes > 0 {
+			return p.Limits.StorageBytes
+		}
+	}
+	return PlanStorageBytes(planID)
 }
 
 func (m *MemStore) PruneSessionVersions(ctx context.Context, now time.Time) (int, error) {
@@ -296,9 +333,51 @@ func (s *PostgresStore) StorageUsage(ctx context.Context, scope string) (int64, 
 	var used, cap int64
 	err := s.pool.QueryRow(ctx, `SELECT bytes_used, bytes_cap FROM storage_usage WHERE plan_scope = $1`, scope).Scan(&used, &cap)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, 0, nil
+		used, cap = 0, 0
+		err = nil
 	}
-	return used, cap, err
+	if err != nil {
+		return 0, 0, err
+	}
+	if cap <= 0 {
+		planCap, perr := s.planCapForScope(ctx, scope)
+		if perr != nil {
+			return used, PlanStorageBytes(PlanFree), nil
+		}
+		cap = planCap
+	}
+	return used, cap, nil
+}
+
+func (s *PostgresStore) planCapForScope(ctx context.Context, scope string) (int64, error) {
+	ownerType, ownerID := OwnerUser, ""
+	switch {
+	case strings.HasPrefix(scope, "user:"):
+		ownerID = strings.TrimPrefix(scope, "user:")
+	case strings.HasPrefix(scope, "project:"):
+		pid := strings.TrimPrefix(scope, "project:")
+		_ = s.pool.QueryRow(ctx, `SELECT COALESCE(created_by::text, '') FROM projects WHERE id::text = $1`, pid).Scan(&ownerID)
+	default:
+		_ = s.pool.QueryRow(ctx, `SELECT COALESCE(created_by::text, '') FROM projects WHERE id::text = $1`, scope).Scan(&ownerID)
+	}
+	if ownerID == "" {
+		return PlanStorageBytes(PlanFree), nil
+	}
+	sub, err := s.GetSubscription(ctx, ownerType, ownerID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return PlanStorageBytes(PlanFree), nil
+		}
+		return 0, err
+	}
+	plan, err := s.GetPlan(ctx, sub.PlanID)
+	if err != nil {
+		return PlanStorageBytes(sub.PlanID), nil
+	}
+	if plan.Limits.StorageBytes > 0 {
+		return plan.Limits.StorageBytes, nil
+	}
+	return PlanStorageBytes(plan.ID), nil
 }
 
 func (s *PostgresStore) CreateTeleport(ctx context.Context, sessionID, fromUser, toUser, preview string) (*Teleport, error) {

@@ -1,6 +1,11 @@
 package secrets
 
-import "crypto/rand"
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"os"
+	"strings"
+)
 
 // Box wraps data keys with a process master key (dev stand-in for KMS, D18).
 // Callers persist only the wrapped bytes. Plaintext keys are returned to
@@ -9,8 +14,16 @@ type Box struct {
 	master []byte
 }
 
-// NewBox creates a box with a random 32-byte master.
+// NewBox creates a box. When NEXUS_DEV_KMS_KEY is set to a base64-encoded
+// 32-byte key, that master is used so wraps survive process restarts.
+// Otherwise a fresh random 32-byte master is generated.
 func NewBox() (*Box, error) {
+	if raw := strings.TrimSpace(os.Getenv("NEXUS_DEV_KMS_KEY")); raw != "" {
+		key, err := base64.StdEncoding.DecodeString(raw)
+		if err == nil && len(key) == 32 {
+			return &Box{master: append([]byte(nil), key...)}, nil
+		}
+	}
 	master := make([]byte, 32)
 	if _, err := rand.Read(master); err != nil {
 		return nil, err

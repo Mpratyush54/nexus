@@ -1,5 +1,8 @@
 // Package desktopui is the native Fyne shell for Nexus Desktop (Win/Mac/Linux).
 // Cockpit layout: portal-aligned sidebar, section content, VS Code-style preview.
+//
+// FREEZE (spec 7.8 / P0): Fyne stays for current releases; WinUI + embedded
+// nexuscore replace it. Do not add features here that belong in the new app.
 package desktopui
 
 import (

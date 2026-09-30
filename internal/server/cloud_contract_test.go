@@ -1,6 +1,9 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -119,6 +122,10 @@ func TestCloudContracts(t *testing.T) {
 	if key.DataKey == "" {
 		t.Fatal("empty data key")
 	}
+	rec = doJSON(t, s, http.MethodPost, "/v1/secrets/blob-1/decrypt", owner, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), key.DataKey) {
+		t.Fatalf("decrypt owner: %d %s", rec.Code, rec.Body.String())
+	}
 	rec = doJSON(t, s, http.MethodPost, "/v1/secrets/blob-1/decrypt", other, nil)
 	if rec.Code != http.StatusForbidden || strings.Contains(rec.Body.String(), key.DataKey) {
 		t.Fatalf("decrypt other: %d %s", rec.Code, rec.Body.String())
@@ -177,6 +184,19 @@ func TestCloudContracts(t *testing.T) {
 	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), title) || !strings.Contains(rec.Body.String(), `"session_content":false`) {
 		t.Fatalf("ops: %d %s", rec.Code, rec.Body.String())
 	}
+	for _, path := range []string{"/ops/v1/tenants", "/ops/v1/queues", "/ops/v1/health"} {
+		rec = doJSON(t, s, http.MethodGet, path, owner, nil)
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), title) || !strings.Contains(rec.Body.String(), `"session_content":false`) {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+	if !strings.Contains(doJSON(t, s, http.MethodGet, "/ops/v1/tenants", owner, nil).Body.String(), org.ID) {
+		t.Fatal("tenants missing org id")
+	}
+	rec = doJSON(t, s, http.MethodGet, "/ops/v1/tenants", other, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("tenants non-admin: %d", rec.Code)
+	}
 
 	mailer := &captureMail{}
 	s.Mail = mailer
@@ -188,6 +208,116 @@ func TestCloudContracts(t *testing.T) {
 	}
 	if mailer.to != "sam@ex.com" || !strings.Contains(mailer.body, "token") {
 		t.Fatalf("mail = %+v", mailer)
+	}
+}
+
+func TestOAuthASMetadataUnauthenticated(t *testing.T) {
+	s := newTestServer()
+	for _, path := range []string{
+		"/.well-known/oauth-authorization-server",
+		"/v1/agent/mcp/.well-known/oauth-authorization-server",
+	} {
+		rec := doJSON(t, s, http.MethodGet, path, "", nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, `"issuer"`) || !strings.Contains(body, `"token_endpoint"`) {
+			t.Fatalf("%s missing AS fields: %s", path, body)
+		}
+		if !strings.Contains(body, "incomplete") {
+			t.Fatalf("%s should be labeled incomplete: %s", path, body)
+		}
+	}
+}
+
+func TestAgentSessionForkRoutes(t *testing.T) {
+	s := newTestServer()
+	mem := s.Store.(*store.MemStore)
+	ctx := t.Context()
+	proj, err := mem.ResolveProject(ctx, "", "", "fork-routes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.ClaimProject(ctx, proj.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	owner := loginAs(t, s, "owner")
+	rec := doJSON(t, s, http.MethodPost, "/v1/agent-sessions", owner, map[string]any{
+		"project_id": proj.ID, "harness": "claude", "native_id": "ses_fork_root",
+		"origin_machine_id": "lap",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("session: %d %s", rec.Code, rec.Body.String())
+	}
+	var parent store.AgentSession
+	decodeBody(t, rec, &parent)
+	rec = doJSON(t, s, http.MethodPost, "/v1/agent-sessions/"+parent.ID+"/fork", owner, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("fork: %d %s", rec.Code, rec.Body.String())
+	}
+	var child store.AgentSession
+	decodeBody(t, rec, &child)
+	if child.ParentSessionID != parent.ID || child.LineageKind != "fork" {
+		t.Fatalf("child=%+v", child)
+	}
+	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+parent.ID+"/forks", owner, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), child.ID) {
+		t.Fatalf("forks: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestGrantLiveAndPointInTimeBody(t *testing.T) {
+	s := newTestServer()
+	mem := s.Store.(*store.MemStore)
+	ctx := t.Context()
+	proj, err := mem.ResolveProject(ctx, "", "", "grant-live")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.ClaimProject(ctx, proj.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	owner := loginAs(t, s, "owner")
+	other := loginAs(t, s, "other")
+	rec := doJSON(t, s, http.MethodPost, "/v1/agent-sessions", owner, map[string]any{
+		"project_id": proj.ID, "harness": "claude", "native_id": "ses_grant_live",
+		"origin_machine_id": "lap",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("session: %d %s", rec.Code, rec.Body.String())
+	}
+	var sess store.AgentSession
+	decodeBody(t, rec, &sess)
+	body := []byte("t")
+	sum := sha256.Sum256(body)
+	hash := hex.EncodeToString(sum[:])
+	if err := mem.PutBlob(ctx, proj.ID, hash, "plain", "transcript", body); err != nil {
+		t.Fatal(err)
+	}
+	ver, err := mem.CreateSessionVersion(ctx, sess.ID, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	man, _ := json.Marshal(map[string]any{"transcript": map[string]string{"blob": "sha256:" + hash}})
+	if _, err := mem.CompleteSessionVersion(ctx, sess.ID, ver.Version, man); err != nil {
+		t.Fatal(err)
+	}
+	rec = doJSON(t, s, http.MethodPut, "/v1/agent-sessions/"+sess.ID+"/grants/other", owner, map[string]any{
+		"live": false, "version_id": ver.ID,
+	})
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"live":false`) {
+		t.Fatalf("pit grant: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+sess.ID+"/summary", other, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("grantee summary: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodPut, "/v1/agent-sessions/"+sess.ID+"/grants/team", owner, map[string]any{
+		"confirm": true, "live": false,
+	})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("team must force live: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
