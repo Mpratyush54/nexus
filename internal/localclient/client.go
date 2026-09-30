@@ -50,14 +50,14 @@ type Status struct {
 
 // Harvest is a subset of /local/harvest.
 type Harvest struct {
-	Root           string         `json:"root"`
-	LastScanAt     string         `json:"last_scan_at"`
-	LastScanFiles  int            `json:"last_scan_files"`
-	LastScanTurns  int            `json:"last_scan_turns"`
-	TurnsEmitted   int            `json:"turns_emitted"`
-	ActiveSessions int            `json:"active_sessions"`
-	ProposalsSaved int            `json:"proposals_saved"`
-	ProposalErrors int            `json:"proposal_errors"`
+	Root           string           `json:"root"`
+	LastScanAt     string           `json:"last_scan_at"`
+	LastScanFiles  int              `json:"last_scan_files"`
+	LastScanTurns  int              `json:"last_scan_turns"`
+	TurnsEmitted   int              `json:"turns_emitted"`
+	ActiveSessions int              `json:"active_sessions"`
+	ProposalsSaved int              `json:"proposals_saved"`
+	ProposalErrors int              `json:"proposal_errors"`
 	Agents         []HarvestAgent   `json:"agents"`
 	Files          []HarvestFileHit `json:"files"`
 	Recent         []HarvestEvent   `json:"recent"`

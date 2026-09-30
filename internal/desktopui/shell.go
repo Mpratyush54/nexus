@@ -22,14 +22,14 @@ import (
 
 // Hooks lets cmd/nexus-desktop wire sign-in, workspace pick, and updates.
 type Hooks struct {
-	OnSignIn         func()
-	OnSignOut        func()
-	OnOpenWebPortal  func() // explicit external: team/org/billing only
-	OnPickFolder     func()
-	OnCheckUpdate    func()
-	OnQuit           func()
-	UpdateLabel      func() string
-	EnsureDaemon     func() error
+	OnSignIn        func()
+	OnSignOut       func()
+	OnOpenWebPortal func() // explicit external: team/org/billing only
+	OnPickFolder    func()
+	OnCheckUpdate   func()
+	OnQuit          func()
+	UpdateLabel     func() string
+	EnsureDaemon    func() error
 }
 
 type section int
@@ -62,8 +62,8 @@ type Shell struct {
 	memoryList   *widget.List
 	memoryItems  []cloudclient.MemoryItem
 
-	harvestList  *widget.List
-	harvestRows  []harvestRow
+	harvestList   *widget.List
+	harvestRows   []harvestRow
 	workspaceList *widget.List
 	workspaceRows []workspaceRow
 
@@ -72,8 +72,8 @@ type Shell struct {
 	mu     sync.Mutex
 	stopCh chan struct{}
 
-	cachedStatus   *localclient.Status
-	cachedHarvest  *localclient.Harvest
+	cachedStatus    *localclient.Status
+	cachedHarvest   *localclient.Harvest
 	cachedWorkspace *localclient.Workspace
 }
 
