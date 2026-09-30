@@ -286,6 +286,16 @@ func (s *Server) handleAdminUserPut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not update super admin: "+err.Error())
 		return
 	}
+	action := "ops.super_admin_granted"
+	if !*req.IsPlatformAdmin {
+		action = "ops.super_admin_revoked"
+	}
+	s.recordAudit(r, store.AuditEvent{
+		ActorKind:    "super_admin",
+		Action:       action,
+		ResourceKind: "user",
+		ResourceID:   id,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":                id,
 		"is_platform_admin": *req.IsPlatformAdmin,
@@ -332,6 +342,12 @@ func (s *Server) handleAdminReleasePublish(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	s.recordAudit(r, store.AuditEvent{
+		ActorKind:    "super_admin",
+		Action:       "ops.release_published",
+		ResourceKind: "release",
+		ResourceID:   rel.App + "/" + rel.Version,
+	})
 	writeJSON(w, http.StatusCreated, rel)
 }
 
@@ -347,5 +363,11 @@ func (s *Server) handleAdminReleaseYank(w http.ResponseWriter, r *http.Request) 
 		writeMemoryEditError(w, err, "could not yank release")
 		return
 	}
+	s.recordAudit(r, store.AuditEvent{
+		ActorKind:    "super_admin",
+		Action:       "ops.release_yanked",
+		ResourceKind: "release",
+		ResourceID:   app + "/" + version,
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"yanked": true, "app": app, "version": version})
 }

@@ -114,6 +114,22 @@ func (m *MemStore) UpsertSessionSnapshot(ctx context.Context, snap *SessionSnaps
 	now := time.Now().UTC()
 	snap.CreatedAt = now
 	snap.UpdatedAt = now
+	// First insert records the uploader. A later upsert cannot claim an
+	// ownerless session or replace an existing owner.
+	if m.sessionOwners == nil {
+		m.sessionOwners = make(map[string]sessionContentOwner)
+	}
+	if row, ok := m.sessionOwners[snap.SessionID]; ok {
+		if row.OwnerUserID != "" {
+			snap.OwnerUserID = row.OwnerUserID
+		} else {
+			snap.OwnerUserID = ""
+		}
+	} else {
+		m.sessionOwners[snap.SessionID] = sessionContentOwner{
+			ProjectID: snap.ProjectID, OwnerUserID: snap.OwnerUserID,
+		}
+	}
 	cp := *snap
 	m.snapshots = append(m.snapshots, cp)
 	return nil

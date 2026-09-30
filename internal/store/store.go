@@ -125,6 +125,10 @@ type MemStore struct {
 	fileOps   []FileOperation
 	toolExecs []ToolExecution
 	snapshots []SessionSnapshot
+	// Session content ACL + audit (migration 029, product spec 4.5 / 10.4).
+	sessionOwners map[string]sessionContentOwner
+	sessionGrants map[string]map[string]sessionContentGrant
+	auditEvents   []AuditEvent
 }
 
 // memSubscription is one in-process event subscriber.
@@ -159,6 +163,8 @@ func NewMemStore() *MemStore {
 		releases:       make(map[string]*AppRelease),
 		plans:          defaultPlanMap(),
 		billingSubs:    make(map[string]*Subscription),
+		sessionOwners:  make(map[string]sessionContentOwner),
+		sessionGrants:  make(map[string]map[string]sessionContentGrant),
 	}
 }
 

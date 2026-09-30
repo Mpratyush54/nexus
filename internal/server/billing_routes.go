@@ -152,6 +152,22 @@ func (s *Server) applyBillingPlan(w http.ResponseWriter, r *http.Request, ownerT
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	kind := "user"
+	tenantID := ""
+	if allowPaid {
+		kind = "super_admin"
+	}
+	if ownerType == store.OwnerOrg {
+		tenantID = ownerID
+	}
+	s.recordAudit(r, store.AuditEvent{
+		ActorKind:    kind,
+		TenantID:     tenantID,
+		Action:       "billing.plan_changed",
+		ResourceKind: "subscription",
+		ResourceID:   ownerType + ":" + ownerID,
+		Metadata:     map[string]any{"plan_id": planID},
+	})
 	s.writeBillingFrom(w, r, bs, sub)
 }
 
