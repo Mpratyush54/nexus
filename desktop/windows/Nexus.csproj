@@ -16,7 +16,9 @@
     <LangVersion>latest</LangVersion>
     <!-- Unpackaged WinUI 3 (D5). Build nexuscore.dll first, then:
          dotnet build -c Release -r win-x64
-         Copy nexuscore.dll next to Nexus.exe. -->
+         Copy nexuscore.dll next to Nexus.exe.
+         Velopack (D5): UpdateService.cs is a no-op stub until Velopack is
+         referenced; pack with `vpk pack` on Windows (see UpdateService.cs). -->
   </PropertyGroup>
 
   <ItemGroup>

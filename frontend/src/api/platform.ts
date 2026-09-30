@@ -93,4 +93,24 @@ export const platformApi = {
   yank(app: string, version: string) {
     return apiRequest(`/admin/releases/${app}/${version}/yank`, { method: 'POST', body: {} })
   },
+  // P7 ops scaffolding (no session titles/content). Prefer these over /admin/* over time.
+  opsTenants() {
+    return apiRequest<{ tenants: { id: string; name: string }[]; session_content: false }>('/ops/v1/tenants')
+  },
+  opsQueues() {
+    return apiRequest<{
+      harvest: {
+        queued: number
+        processing: number
+        done: number
+        failed: number
+        duplicate?: number
+        total: number
+      }
+      session_content: false
+    }>('/ops/v1/queues')
+  },
+  opsHealth() {
+    return apiRequest<{ ok: boolean; status: string; session_content: false }>('/ops/v1/health')
+  },
 }

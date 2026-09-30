@@ -22,6 +22,8 @@ func (s *Server) registerTimelineRoutes() {
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/turns", s.requireAuth(s.handleAgentTurnList))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/versions", s.requireAuth(s.handleAgentVersionCreate))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/versions/{version}/complete", s.requireAuth(s.handleAgentVersionComplete))
+	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/forks", s.requireAuth(s.handleAgentSessionForks))
+	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/fork", s.requireAuth(s.handleAgentSessionFork))
 	s.Mux.HandleFunc("POST /v1/blobs/missing", s.requireAuth(s.handleBlobsMissing))
 	s.Mux.HandleFunc("PUT /v1/blobs/{sha256}", s.requireAuth(s.handleBlobPut))
 	s.Mux.HandleFunc("GET /v1/timeline", s.requireAuth(s.handleTimeline))
@@ -106,6 +108,48 @@ func (s *Server) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, row)
+}
+
+func (s *Server) handleAgentSessionForks(w http.ResponseWriter, r *http.Request) {
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return
+	}
+	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+		return
+	}
+	items, err := cs.ListAgentSessionForks(r.Context(), r.PathValue("id"))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+}
+
+func (s *Server) handleAgentSessionFork(w http.ResponseWriter, r *http.Request) {
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return
+	}
+	parent, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if s.rejectIfCaptureOff(w, r, parent.ProjectID) {
+		return
+	}
+	child, err := cs.ForkAgentSession(r.Context(), parent.ID, authSubject(r))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusCreated, child)
 }
 
 func (s *Server) handleAgentSessionGrant(w http.ResponseWriter, r *http.Request) {

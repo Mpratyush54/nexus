@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -60,6 +61,11 @@ func (s *Server) registerCloudContractRoutes() {
 	s.Mux.HandleFunc("POST /v1/teleports/{id}/revoke", s.requireAuth(s.handleTeleportRevoke))
 	s.Mux.HandleFunc("POST /v1/teleports/{id}/accept", s.requireAuth(s.handleTeleportAccept))
 	s.Mux.HandleFunc("GET /ops/v1/status", s.requireAuth(s.requirePlatformAdmin(s.handleOpsStatus)))
+	s.Mux.HandleFunc("GET /ops/v1/tenants", s.requireAuth(s.requirePlatformAdmin(s.handleOpsTenants)))
+	s.Mux.HandleFunc("GET /ops/v1/queues", s.requireAuth(s.requirePlatformAdmin(s.handleOpsQueues)))
+	s.Mux.HandleFunc("GET /ops/v1/health", s.requireAuth(s.requirePlatformAdmin(s.handleOpsHealth)))
+	s.Mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleOAuthASMetadata)
+	s.Mux.HandleFunc("GET /v1/agent/mcp/.well-known/oauth-authorization-server", s.handleOAuthASMetadata)
 }
 
 func (s *Server) requireSessionOwner(w http.ResponseWriter, r *http.Request, sessionID string) (*store.AgentSession, store.AgentCloudStore, bool) {
@@ -224,15 +230,39 @@ func (s *Server) handleGrantUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "user is required")
 		return
 	}
-	if err := cs.GrantAgentSession(r.Context(), sessionID, userID, authSubject(r)); err != nil {
+	opts := store.SessionGrantOpts{Live: true}
+	if r.Body != nil {
+		raw, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes))
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid body")
+			return
+		}
+		if len(strings.TrimSpace(string(raw))) > 0 {
+			var body struct {
+				Live      *bool  `json:"live"`
+				VersionID string `json:"version_id"`
+			}
+			if err := json.Unmarshal(raw, &body); err != nil {
+				writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
+				return
+			}
+			if body.Live != nil {
+				opts.Live = *body.Live
+			}
+			opts.VersionID = body.VersionID
+		}
+	}
+	if err := cs.GrantAgentSessionOpts(r.Context(), sessionID, userID, authSubject(r), opts); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	s.recordAudit(r, store.AuditEvent{
 		Action: "session.grant_added", ResourceKind: "session", ResourceID: sessionID,
-		Metadata: map[string]any{"grantee_user_id": userID},
+		Metadata: map[string]any{"grantee_user_id": userID, "live": opts.Live, "version_id": opts.VersionID},
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"session_id": sessionID, "user_id": userID})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session_id": sessionID, "user_id": userID, "live": opts.Live, "version_id": opts.VersionID,
+	})
 }
 
 func (s *Server) handleUngrantUser(w http.ResponseWriter, r *http.Request) {
@@ -283,7 +313,8 @@ func (s *Server) handleGrantTeam(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Confirm bool `json:"confirm"`
+		Confirm bool  `json:"confirm"`
+		Live    *bool `json:"live"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -292,15 +323,20 @@ func (s *Server) handleGrantTeam(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "team share needs explicit confirmation")
 		return
 	}
+	// D15: team shares are always live.
+	if body.Live != nil && !*body.Live {
+		writeError(w, http.StatusBadRequest, "team shares must be live")
+		return
+	}
 	if err := setVisibility(r, s, sessionID, "team"); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	s.recordAudit(r, store.AuditEvent{
 		Action: "session.shared_team", ResourceKind: "session", ResourceID: sessionID,
-		ProjectID: row.ProjectID,
+		ProjectID: row.ProjectID, Metadata: map[string]any{"live": true},
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"session_id": sessionID, "visibility": "team"})
+	writeJSON(w, http.StatusOK, map[string]any{"session_id": sessionID, "visibility": "team", "live": true})
 }
 
 func (s *Server) handleUngrantTeam(w http.ResponseWriter, r *http.Request) {
@@ -709,5 +745,70 @@ func (s *Server) handleOpsStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":              true,
 		"session_content": false,
+	})
+}
+
+func (s *Server) handleOpsTenants(w http.ResponseWriter, r *http.Request) {
+	// D22: org id + name only. Never session titles or content.
+	tenants := []map[string]string{}
+	switch st := s.Store.(type) {
+	case *store.MemStore:
+		for _, o := range st.ListAllOrganizations(r.Context()) {
+			tenants = append(tenants, map[string]string{"id": o.ID, "name": o.Name})
+		}
+	case *store.PostgresStore:
+		for _, o := range st.ListAllOrganizations(r.Context()) {
+			tenants = append(tenants, map[string]string{"id": o.ID, "name": o.Name})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tenants":         tenants,
+		"session_content": false,
+	})
+}
+
+func (s *Server) handleOpsQueues(w http.ResponseWriter, r *http.Request) {
+	counts := store.HarvestJobCounts{}
+	if s.Harvest != nil {
+		if c, err := s.Harvest.CountHarvestJobs(r.Context(), ""); err == nil {
+			counts = c
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"harvest": map[string]any{
+			"queued":     counts.Queued,
+			"processing": counts.Processing,
+			"done":       counts.Done,
+			"failed":     counts.Failed,
+			"duplicate":  counts.Duplicate,
+			"total":      counts.Total,
+		},
+		"session_content": false,
+	})
+}
+
+func (s *Server) handleOpsHealth(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":              true,
+		"status":          "ok",
+		"session_content": false,
+	})
+}
+
+// handleOAuthASMetadata is an incomplete RFC 8414 stub for MCP clients.
+// It points at existing portal login / GitHub OAuth surfaces; device and
+// token issuance for MCP are not finished yet.
+func (s *Server) handleOAuthASMetadata(w http.ResponseWriter, r *http.Request) {
+	base := strings.TrimRight(publicAPIBase(r), "/")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issuer":                           base,
+		"authorization_endpoint":           base + "/projects/{id}/github/oauth/start",
+		"token_endpoint":                   base + "/auth/tokens",
+		"response_types_supported":         []string{"code"},
+		"grant_types_supported":            []string{"authorization_code"},
+		"code_challenge_methods_supported": []string{"S256"},
+		"nexus_status":                     "incomplete",
+		"nexus_note":                       "MCP OAuth is scaffolding; use portal API tokens or GitHub OAuth device/link flows until complete.",
+		"nexus_github_oauth_status":        base + "/projects/{id}/github/oauth/status",
 	})
 }

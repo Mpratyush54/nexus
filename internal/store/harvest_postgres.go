@@ -260,11 +260,20 @@ func (q *PostgresHarvestQueue) CountHarvestJobs(ctx context.Context, projectID s
 	if q == nil || q.pool == nil {
 		return c, nil
 	}
-	rows, err := q.pool.Query(ctx, `
-		SELECT status, COUNT(*)::int
-		FROM harvest_jobs
-		WHERE project_id = $1::uuid
-		GROUP BY status`, projectID)
+	var rows pgx.Rows
+	var err error
+	if strings.TrimSpace(projectID) == "" {
+		rows, err = q.pool.Query(ctx, `
+			SELECT status, COUNT(*)::int
+			FROM harvest_jobs
+			GROUP BY status`)
+	} else {
+		rows, err = q.pool.Query(ctx, `
+			SELECT status, COUNT(*)::int
+			FROM harvest_jobs
+			WHERE project_id = $1::uuid
+			GROUP BY status`, projectID)
+	}
 	if err != nil {
 		return c, err
 	}

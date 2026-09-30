@@ -152,6 +152,31 @@ func (s *MemStore) ListOrganizations(ctx context.Context, userID string) ([]*Org
 	return out, nil
 }
 
+// ListAllOrganizations returns every org id+name for platform ops (D22).
+// Callers must not expose project names or session content through this path.
+func (s *MemStore) ListAllOrganizations(ctx context.Context) []*Organization {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*Organization
+	for _, o := range s.orgs {
+		if o == nil {
+			continue
+		}
+		out = append(out, &Organization{ID: o.ID, Name: o.Name})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Name < out[j].Name
+	})
+	if out == nil {
+		out = []*Organization{}
+	}
+	return out
+}
+
 // GetOrganization fetches one org by id.
 func (s *MemStore) GetOrganization(ctx context.Context, id string) (*Organization, error) {
 	id = strings.TrimSpace(id)
@@ -480,6 +505,27 @@ func (s *PostgresStore) ListOrganizations(ctx context.Context, userID string) ([
 		out = []*Organization{}
 	}
 	return out, rows.Err()
+}
+
+// ListAllOrganizations returns every org id+name for platform ops (D22).
+func (s *PostgresStore) ListAllOrganizations(ctx context.Context) []*Organization {
+	rows, err := s.pool.Query(ctx, `SELECT id::text, name FROM organizations ORDER BY name ASC, id::text ASC`)
+	if err != nil {
+		return []*Organization{}
+	}
+	defer rows.Close()
+	var out []*Organization
+	for rows.Next() {
+		var o Organization
+		if err := rows.Scan(&o.ID, &o.Name); err != nil {
+			return out
+		}
+		out = append(out, &o)
+	}
+	if out == nil {
+		out = []*Organization{}
+	}
+	return out
 }
 
 // GetOrganization fetches one org by id.
