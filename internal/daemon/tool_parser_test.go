@@ -1,18 +1,25 @@
 package daemon
 
 import (
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestParseReplaceFileContent(t *testing.T) {
+	root := filepath.Join("D:", "central-memory")
+	if runtime.GOOS != "windows" {
+		root = "/tmp/central-memory"
+	}
+	target := filepath.Join(root, "internal", "store", "memory.go")
 	payload := map[string]any{
-		"workspace_root": `D:\central-memory`,
+		"workspace_root": root,
 		"tool_calls": []any{
 			map[string]any{
 				"name": "replace_file_content",
 				"args": map[string]any{
-					"TargetFile":         `D:\central-memory\internal\store\memory.go`,
+					"TargetFile":         target,
 					"StartLine":          10,
 					"EndLine":            12,
 					"TargetContent":      "old line",
