@@ -50,6 +50,7 @@ func (s *Server) registerRoutes() {
 	s.registerBillingRoutes()
 	s.registerAdminRoutes()
 	s.registerAgentV1Routes()
+	s.registerTimelineRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

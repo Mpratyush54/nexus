@@ -36,6 +36,8 @@ func (s *Server) handleAgentDiscovery(w http.ResponseWriter, r *http.Request) {
 			{"method": "POST", "path": "/v1/agent/memory/search", "body": map[string]any{"query": "string", "project_id": "optional uuid", "limit": 20}},
 			{"method": "POST", "path": "/v1/agent/memory/write", "body": map[string]any{"key": "topic/key", "content": "20-2000 chars", "project_id": "optional", "level": "project", "scope": "fact"}},
 			{"method": "POST", "path": "/v1/agent/mcp", "purpose": "MCP JSON-RPC 2.0 (initialize, tools/list, tools/call) over HTTPS"},
+			{"method": "GET", "path": "/v1/timeline", "purpose": "cross-project session cards the caller can see"},
+			{"method": "POST", "path": "/v1/agent-sessions", "purpose": "create or touch a harness session by native id"},
 		},
 		"mcp_url": base + "/v1/agent/mcp",
 		"tools":   mcp.ListTools(),

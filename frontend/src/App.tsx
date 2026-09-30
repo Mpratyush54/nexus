@@ -17,6 +17,7 @@ import { SettingsPage } from '@/pages/SettingsPage'
 import { SignupPage } from '@/pages/SignupPage'
 import { ForgotPasswordPage } from '@/pages/ForgotPasswordPage'
 import { TeamPage } from '@/pages/TeamPage'
+import { TimelinePage } from '@/pages/TimelinePage'
 import { OrgPage } from '@/pages/OrgPage'
 import { AppProviders } from '@/providers/AppProviders'
 import { GuestRoute, ProtectedRoute } from '@/routes/guards'
@@ -41,6 +42,7 @@ export default function App() {
               <Route path="connect" element={<ConnectPage />} />
               <Route path="onboarding" element={<OnboardingPage />} />
               <Route path="dashboard" element={<DashboardPage />} />
+              <Route path="timeline" element={<TimelinePage />} />
               <Route path="memory" element={<MemoryPage />} />
               <Route path="agents" element={<AgentsPage />} />
               <Route path="team" element={<TeamPage />} />

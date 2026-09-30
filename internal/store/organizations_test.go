@@ -17,7 +17,7 @@ func TestMemStoreOrganizations(t *testing.T) {
 	}
 
 	role, err := s.GetOrgMemberRole(ctx, o.ID, "alice")
-	if err != nil || role != OrgRoleAdmin {
+	if err != nil || role != OrgRoleOwner {
 		t.Fatalf("creator role = %q err=%v", role, err)
 	}
 
@@ -58,7 +58,7 @@ func TestMemStoreOrganizations(t *testing.T) {
 		t.Fatalf("ListOrgProjects: %v %+v", err, projects)
 	}
 
-	// alice and carol are admins; removing alice is fine, last admin is not.
+	// alice is OWNER and carol is ADMIN; removing alice is fine, the last manager is not.
 	if err := s.RemoveOrgMember(ctx, o.ID, "alice"); err != nil {
 		t.Fatalf("RemoveOrgMember alice: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestNormalizeOrgRole(t *testing.T) {
 	if err != nil || r != OrgRoleAdmin {
 		t.Fatalf("admin = %q %v", r, err)
 	}
-	if _, err := NormalizeOrgRole("OWNER"); err == nil {
-		t.Fatal("OWNER should be invalid for orgs")
+	if r, err := NormalizeOrgRole("OWNER"); err != nil || r != OrgRoleOwner {
+		t.Fatalf("owner = %q %v", r, err)
 	}
 }

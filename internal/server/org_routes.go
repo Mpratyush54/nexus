@@ -115,7 +115,7 @@ func (s *Server) authorizeOrgAdmin(w http.ResponseWriter, r *http.Request, os or
 		writeError(w, http.StatusInternalServerError, "could not check org role")
 		return false
 	}
-	if role != store.OrgRoleAdmin {
+	if !store.OrgManages(role) {
 		writeError(w, http.StatusForbidden, "org admin role required")
 		return false
 	}

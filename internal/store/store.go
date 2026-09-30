@@ -129,6 +129,14 @@ type MemStore struct {
 	sessionOwners map[string]sessionContentOwner
 	sessionGrants map[string]map[string]sessionContentGrant
 	auditEvents   []AuditEvent
+	// Cloud agent sessions (migration 030).
+	agentSessions   map[string]*AgentSession
+	agentByNative   map[string]string
+	sessionVersions map[string][]SessionVersion
+	blobs           map[string]blobRec
+	sessionTurns    map[string][]SessionTurn
+	agentGrants     map[string][]agentGrant
+	storageUsage    map[string]storageRec
 }
 
 // memSubscription is one in-process event subscriber.
@@ -143,28 +151,35 @@ var _ Store = (*MemStore)(nil)
 // NewMemStore returns an initialized in-memory store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		projects:       make(map[string]*Project),
-		workspaces:     make(map[string]*Workspace),
-		members:        make(map[string]map[string]bool),
-		memberRoles:    make(map[string]map[string]string),
-		roles:          make(map[string]map[string]*ProjectRole),
-		orgs:           make(map[string]*Organization),
-		orgMembers:     make(map[string]map[string]string),
-		memories:       make(map[string]*MemoryItem),
-		versions:       make(map[string][]*MemoryVersion),
-		shares:         make(map[string]*memShare),
-		episodes:       make(map[string]*Episode),
-		events:         make([]*Event, 0),
-		subs:           make(map[int64]*memSubscription),
-		agentPerms:     make(map[string]map[string]*AgentPermission),
-		githubLinks:    make(map[string]*GitHubLink),
-		githubUsers:    make(map[string]*GitHubUserMap),
-		platformAdmins: make(map[string]bool),
-		releases:       make(map[string]*AppRelease),
-		plans:          defaultPlanMap(),
-		billingSubs:    make(map[string]*Subscription),
-		sessionOwners:  make(map[string]sessionContentOwner),
-		sessionGrants:  make(map[string]map[string]sessionContentGrant),
+		projects:        make(map[string]*Project),
+		workspaces:      make(map[string]*Workspace),
+		members:         make(map[string]map[string]bool),
+		memberRoles:     make(map[string]map[string]string),
+		roles:           make(map[string]map[string]*ProjectRole),
+		orgs:            make(map[string]*Organization),
+		orgMembers:      make(map[string]map[string]string),
+		memories:        make(map[string]*MemoryItem),
+		versions:        make(map[string][]*MemoryVersion),
+		shares:          make(map[string]*memShare),
+		episodes:        make(map[string]*Episode),
+		events:          make([]*Event, 0),
+		subs:            make(map[int64]*memSubscription),
+		agentPerms:      make(map[string]map[string]*AgentPermission),
+		githubLinks:     make(map[string]*GitHubLink),
+		githubUsers:     make(map[string]*GitHubUserMap),
+		platformAdmins:  make(map[string]bool),
+		releases:        make(map[string]*AppRelease),
+		plans:           defaultPlanMap(),
+		billingSubs:     make(map[string]*Subscription),
+		sessionOwners:   make(map[string]sessionContentOwner),
+		sessionGrants:   make(map[string]map[string]sessionContentGrant),
+		agentSessions:   make(map[string]*AgentSession),
+		agentByNative:   make(map[string]string),
+		sessionVersions: make(map[string][]SessionVersion),
+		blobs:           make(map[string]blobRec),
+		sessionTurns:    make(map[string][]SessionTurn),
+		agentGrants:     make(map[string][]agentGrant),
+		storageUsage:    make(map[string]storageRec),
 	}
 }
 
@@ -297,7 +312,7 @@ func (s *MemStore) ListProjectsForUser(ctx context.Context, userID string) ([]*P
 			continue
 		}
 		if p.OrgID != "" {
-			if role := s.orgMembers[p.OrgID][uid]; role == OrgRoleAdmin {
+			if OrgManages(s.orgMembers[p.OrgID][uid]) {
 				out = append(out, cloneProject(p))
 			}
 		}
