@@ -26,13 +26,13 @@ func (s *Shell) connectPage() fyne.CanvasObject {
 			mutedLabel(it.detail),
 		)
 		var actions []fyne.CanvasObject
-		if it.signIn {
+	if it.signIn {
 			btn := widget.NewButton(it.action, func() {
 				if s.hooks.OnSignIn != nil {
 					s.hooks.OnSignIn()
 				}
 			})
-			btn.Importance = widget.HighImportance
+			btn.Importance = widget.MediumImportance
 			actions = append(actions, btn)
 		}
 		if it.pickWS {

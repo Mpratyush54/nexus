@@ -10,24 +10,50 @@ func (s *Shell) buildSidebar() fyne.CanvasObject {
 	brand := widget.NewLabelWithStyle("Nexus", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	sub := mutedLabel("Desktop")
 
+	nav := []struct {
+		label string
+		sec   section
+	}{
+		{"Home", secHome},
+		{"Connect", secConnect},
+		{"Memory", secMemory},
+		{"Harvest", secHarvest},
+		{"Workspace", secWorkspace},
+	}
+
+	items := make([]fyne.CanvasObject, 0, len(nav)+3)
+	for _, n := range nav {
+		n := n
+		btn := widget.NewButton(n.label, func() { s.switchSection(n.sec) })
+		btn.Alignment = widget.ButtonAlignLeading
+		if s.section == n.sec {
+			btn.Importance = widget.MediumImportance
+		} else {
+			btn.Importance = widget.LowImportance
+		}
+		items = append(items, btn)
+	}
+	items = append(items, widget.NewSeparator())
+	settings := widget.NewButton("Settings", func() { s.switchSection(secSettings) })
+	settings.Alignment = widget.ButtonAlignLeading
+	if s.section == secSettings {
+		settings.Importance = widget.MediumImportance
+	} else {
+		settings.Importance = widget.LowImportance
+	}
+	items = append(items, settings)
+
 	return container.NewBorder(
 		container.NewVBox(brand, sub, widget.NewSeparator()),
 		nil, nil, nil,
-		container.NewVBox(
-			leadingButton("Home", func() { s.switchSection(secHome) }),
-			leadingButton("Connect", func() { s.switchSection(secConnect) }),
-			leadingButton("Memory", func() { s.switchSection(secMemory) }),
-			leadingButton("Harvest", func() { s.switchSection(secHarvest) }),
-			leadingButton("Workspace", func() { s.switchSection(secWorkspace) }),
-			widget.NewSeparator(),
-			leadingButton("Settings", func() { s.switchSection(secSettings) }),
-		),
+		container.NewVBox(items...),
 	)
 }
 
 func (s *Shell) switchSection(sec section) {
 	s.section = sec
-	s.renderCenter()
+	s.clearPreviewForSection(sec)
+	s.rebuildChrome()
 }
 
 func (s *Shell) renderCenter() {

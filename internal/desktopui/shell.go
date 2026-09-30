@@ -3,6 +3,7 @@
 package desktopui
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -63,6 +64,8 @@ type Shell struct {
 	mu               sync.Mutex
 	stopCh           chan struct{}
 	signedIn         bool
+	pickingFolder    bool
+	previewKind      string // "", memory, harvest, workspace, system
 	cachedStatus     *localclient.Status
 	cachedHarvest    *localclient.Harvest
 	cachedWorkspace  *localclient.Workspace
@@ -133,7 +136,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 		if it.Key == "" && it.Content == "" {
 			return
 		}
-		s.setPreview("Memory · "+first(it.Key, it.ID), formatMemoryPreview(it))
+		s.setPreviewKind("memory", "Memory · "+first(it.Key, it.ID), formatMemoryPreview(it))
 	}
 
 	s.harvestList = widget.NewList(
@@ -168,9 +171,9 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 		case "file":
 			s.loadFilePreview(row.filePath, "Agent transcript · "+row.title)
 		case "event":
-			s.setPreview("Harvest event · "+row.title, row.detail)
+			s.setPreviewKind("harvest", "Harvest event · "+row.title, row.detail)
 		default:
-			s.setPreview("Agent harness · "+row.title, row.detail)
+			s.setPreviewKind("harvest", "Agent harness · "+row.title, row.detail)
 		}
 	}
 
@@ -208,6 +211,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 	s.root = container.NewStack()
 	win.SetContent(container.NewPadded(s.root))
 	win.Resize(fyne.NewSize(1120, 720))
+	// Close → hide (tray keeps process alive). Quit only from tray / Settings.
 	win.SetCloseIntercept(func() {
 		win.Hide()
 	})
@@ -220,10 +224,39 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 }
 
 // pickWorkspaceFolder opens the Fyne folder dialog on all OS (no auto-launch).
+// Guarded against panics and skips Refresh rebuilds while the modal is open
+// (rebuilding chrome under an open folder dialog has crashed the Windows app).
 func (s *Shell) pickWorkspaceFolder() {
+	defer func() {
+		if r := recover(); r != nil {
+			s.mu.Lock()
+			s.pickingFolder = false
+			s.mu.Unlock()
+			s.setPreviewKind("workspace", "Workspace", "Folder picker failed (recovered):\n"+fmt.Sprint(r)+"\n\nUse a Recent folder below, or try again.")
+		}
+	}()
+	if s.win == nil {
+		s.setPreviewKind("workspace", "Workspace", "Folder picker unavailable: no window parent.")
+		return
+	}
+	s.mu.Lock()
+	if s.pickingFolder {
+		s.mu.Unlock()
+		return
+	}
+	s.pickingFolder = true
+	s.mu.Unlock()
+
+	finishPick := func() {
+		s.mu.Lock()
+		s.pickingFolder = false
+		s.mu.Unlock()
+	}
+
 	d := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
+		finishPick()
 		if err != nil {
-			s.setPreview("Workspace", "Folder picker error:\n"+err.Error())
+			s.setPreviewKind("workspace", "Workspace", "Folder picker error:\n"+err.Error())
 			return
 		}
 		if uri == nil {
@@ -231,6 +264,7 @@ func (s *Shell) pickWorkspaceFolder() {
 		}
 		path := folderURIPath(uri)
 		if path == "" {
+			s.setPreviewKind("workspace", "Workspace", "Could not resolve the selected folder path.")
 			return
 		}
 		s.selectWorkspacePath(path)
@@ -238,9 +272,12 @@ func (s *Shell) pickWorkspaceFolder() {
 	d.Resize(fyne.NewSize(720, 480))
 	if file, err := config.LoadFile(); err == nil {
 		if root := strings.TrimSpace(file.WorkspaceRoot); root != "" {
-			if u, err := storage.ListerForURI(storage.NewFileURI(root)); err == nil {
-				d.SetLocation(u)
-			}
+			func() {
+				defer func() { _ = recover() }()
+				if u, err := storage.ListerForURI(storage.NewFileURI(root)); err == nil && u != nil {
+					d.SetLocation(u)
+				}
+			}()
 		}
 	}
 	d.Show()
@@ -272,6 +309,15 @@ func folderURIPath(uri fyne.ListableURI) string {
 // Refresh pulls daemon status/harvest into widgets (must run on UI thread via fyne.Do).
 func (s *Shell) Refresh() {
 	fyne.Do(func() {
+		s.mu.Lock()
+		picking := s.pickingFolder
+		s.mu.Unlock()
+		if picking {
+			// Do not rebuild chrome/lists under an open folder dialog — that has
+			// panicked/crashed the Windows Fyne shell.
+			return
+		}
+
 		s.cloud = cloudclient.New("", "")
 		signedIn := strings.TrimSpace(config.ResolveToken()) != ""
 		prevMode := s.mode

@@ -21,6 +21,7 @@ func mutedLabel(text string) *widget.Label {
 func leadingButton(label string, tapped func()) *widget.Button {
 	btn := widget.NewButton(label, tapped)
 	btn.Alignment = widget.ButtonAlignLeading
+	btn.Importance = widget.LowImportance
 	return btn
 }
 

@@ -65,7 +65,7 @@ func (s *Shell) runMemorySearch() {
 					s.hooks.OnSignIn()
 				}
 			})
-			s.setPreview("Memory", "Not signed in.")
+			s.setPreviewKind("memory", "Memory", "Not signed in.")
 		})
 		return
 	}
@@ -76,7 +76,7 @@ func (s *Shell) runMemorySearch() {
 			s.setMemoryBanner("Search failed: "+err.Error(), "Open Connect", func() {
 				s.switchSection(secConnect)
 			})
-			s.setPreview("Memory search", err.Error())
+			s.setPreviewKind("memory", "Memory search", err.Error())
 			return
 		}
 		s.mu.Lock()
@@ -87,10 +87,10 @@ func (s *Shell) runMemorySearch() {
 			s.setMemoryBanner("No results for \""+q+"\". Try another query or confirm the linked project on Connect.", "Open Connect", func() {
 				s.switchSection(secConnect)
 			})
-			s.setPreview("Memory search", "No results for \""+q+"\"."+pidHint(usedPID))
+			s.setPreviewKind("memory", "Memory search", "No results for \""+q+"\"."+pidHint(usedPID))
 			return
 		}
 		s.setMemoryBanner("", "", nil)
-		s.setPreview("Memory search", fmt.Sprintf("%d results for \"%s\"%s\n\nSelect a row to preview.", len(items), q, pidHint(usedPID)))
+		s.setPreviewKind("memory", "Memory search", fmt.Sprintf("%d results for \"%s\"%s\n\nSelect a row to preview.", len(items), q, pidHint(usedPID)))
 	})
 }

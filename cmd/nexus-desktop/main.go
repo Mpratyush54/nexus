@@ -147,8 +147,7 @@ func run() error {
 	shell.AttachRefresh(4 * time.Second)
 
 	if desk, ok := a.(desktop.App); ok {
-		desk.SetSystemTrayIcon(fyne.NewStaticResource("icon.png", iconPNG))
-		// Quiet tray: Open / Scan / Updates / Quit only (no Sign in / folder / web clutter).
+		// Menu first (starts systray), then icon, then bind window so X hides to tray.
 		desk.SetSystemTrayMenu(fyne.NewMenu("Nexus",
 			fyne.NewMenuItem("Open Nexus", func() { shell.Show() }),
 			fyne.NewMenuItem("Scan now", func() {
@@ -164,6 +163,13 @@ func run() error {
 			fyne.NewMenuItemSeparator(),
 			fyne.NewMenuItem("Quit", hooks.OnQuit),
 		))
+		desk.SetSystemTrayIcon(fyne.NewStaticResource("icon.png", iconPNG))
+		desk.SetSystemTrayWindow(win)
+		// Re-assert close→hide after SetSystemTrayWindow (which also sets Hide).
+		// Quit is tray-only via OnQuit — never exit from the window chrome.
+		win.SetCloseIntercept(func() {
+			win.Hide()
+		})
 	}
 
 	go func() { _ = installAppShortcuts() }()

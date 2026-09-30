@@ -36,15 +36,18 @@ func (t *nexusTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNamePrimary:
 		return emberAccent
 	case theme.ColorNameHover:
-		return color.NRGBA{R: 0x34, G: 0x32, B: 0x2c, A: 0xff}
+		return color.NRGBA{R: 0x2e, G: 0x2c, B: 0x28, A: 0xff}
 	case theme.ColorNameSelection:
-		return color.NRGBA{R: 0x5c, G: 0x4a, B: 0x36, A: 0xff}
+		// Soft machine highlight — avoid the giant orange full-width bar.
+		return color.NRGBA{R: 0x3a, G: 0x36, B: 0x30, A: 0xff}
 	case theme.ColorNameSeparator:
 		return color.NRGBA{R: 0x32, G: 0x30, B: 0x2b, A: 0xff}
 	case theme.ColorNameShadow:
 		return color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x66}
 	case theme.ColorNameFocus:
 		return emberAccent
+	case theme.ColorNameInputBorder:
+		return color.NRGBA{R: 0x3a, G: 0x36, B: 0x30, A: 0xff}
 	}
 	return t.base.Color(name, variant)
 }

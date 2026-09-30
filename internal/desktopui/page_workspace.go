@@ -11,7 +11,9 @@ func (s *Shell) workspacePage() fyne.CanvasObject {
 	pick := widget.NewButton("Choose workspace folder…", func() {
 		s.pickWorkspaceFolder()
 	})
-	pick.Importance = widget.HighImportance
+	// Medium — HighImportance painted a full-width orange slab that read as placeholder UI.
+	pick.Importance = widget.MediumImportance
+	pick.Alignment = widget.ButtonAlignLeading
 
 	s.mu.Lock()
 	recent := append([]string(nil), s.recentWorkspaces...)
@@ -23,9 +25,12 @@ func (s *Shell) workspacePage() fyne.CanvasObject {
 	} else {
 		for _, path := range recent {
 			path := path
-			recentBox.Add(leadingButton(recentDisplayName(path), func() {
+			btn := widget.NewButton(recentDisplayName(path), func() {
 				s.selectWorkspacePath(path)
-			}))
+			})
+			btn.Alignment = widget.ButtonAlignLeading
+			btn.Importance = widget.LowImportance
+			recentBox.Add(btn)
 		}
 	}
 
@@ -33,7 +38,7 @@ func (s *Shell) workspacePage() fyne.CanvasObject {
 		container.NewVBox(
 			sectionHeading("Workspace"),
 			hint,
-			pick,
+			container.NewHBox(pick),
 			recentBox,
 			widget.NewSeparator(),
 			mutedLabel("Current workspace"),

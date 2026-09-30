@@ -341,6 +341,7 @@ func applyDesktopUpdate(m *desktopManifest, daemonProc **os.Process, mu *sync.Mu
 	}
 	cmd := exec.Command("powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-File", script)
 	cmd.Dir = staging
+	hideConsoleCmd(cmd)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -454,16 +455,22 @@ func stopNexusProcesses(includeDesktop bool) error {
 		names = append(names, "nexus-desktop")
 	}
 	for _, name := range names {
-		_ = exec.Command("taskkill", "/F", "/IM", name+".exe", "/T").Run()
+		kill := exec.Command("taskkill", "/F", "/IM", name+".exe", "/T")
+		hideConsoleCmd(kill)
+		_ = kill.Run()
 	}
 	deadline := time.Now().Add(8 * time.Second)
 	for time.Now().Before(deadline) {
 		still := false
 		for _, name := range names {
-			out, _ := exec.Command("tasklist", "/FI", "IMAGENAME eq "+name+".exe", "/NH").CombinedOutput()
+			list := exec.Command("tasklist", "/FI", "IMAGENAME eq "+name+".exe", "/NH")
+			hideConsoleCmd(list)
+			out, _ := list.CombinedOutput()
 			if strings.Contains(strings.ToLower(string(out)), strings.ToLower(name+".exe")) {
 				still = true
-				_ = exec.Command("taskkill", "/F", "/IM", name+".exe", "/T").Run()
+				kill := exec.Command("taskkill", "/F", "/IM", name+".exe", "/T")
+				hideConsoleCmd(kill)
+				_ = kill.Run()
 			}
 		}
 		if !still {
@@ -507,6 +514,12 @@ func installAppShortcuts() error {
 		return err
 	}
 	binDir := filepath.Dir(exe)
+	startup := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Startup", "Nexus Desktop.lnk")
+	programs := filepath.Join(os.Getenv("APPDATA"), "Microsoft", "Windows", "Start Menu", "Programs", "Nexus", "Nexus Desktop.lnk")
+	// Skip PowerShell when shortcuts already point at this exe — avoids a console flash on every launch.
+	if shortcutsAlreadyInstalled(exe, startup, programs) {
+		return nil
+	}
 	ps := fmt.Sprintf(`
 $ErrorActionPreference='Stop'
 $exe='%s'
@@ -514,15 +527,31 @@ $bin='%s'
 $wsh=New-Object -ComObject WScript.Shell
 $startup=[Environment]::GetFolderPath('Startup')
 $sc=$wsh.CreateShortcut((Join-Path $startup 'Nexus Desktop.lnk'))
-$sc.TargetPath=$exe; $sc.WorkingDirectory=$bin; $sc.Description='Nexus Desktop'; $sc.Save()
+$sc.TargetPath=$exe; $sc.WorkingDirectory=$bin; $sc.Description='Nexus Desktop'; $sc.WindowStyle=7; $sc.Save()
 $programs=Join-Path ([Environment]::GetFolderPath('StartMenu')) 'Programs\Nexus'
 New-Item -ItemType Directory -Force -Path $programs | Out-Null
 $sc2=$wsh.CreateShortcut((Join-Path $programs 'Nexus Desktop.lnk'))
-$sc2.TargetPath=$exe; $sc2.WorkingDirectory=$bin; $sc2.Description='Nexus Desktop'; $sc2.Save()
+$sc2.TargetPath=$exe; $sc2.WorkingDirectory=$bin; $sc2.Description='Nexus Desktop'; $sc2.WindowStyle=7; $sc2.Save()
 `, strings.ReplaceAll(exe, "'", "''"), strings.ReplaceAll(binDir, "'", "''"))
-	out, err := exec.Command("powershell", "-NoProfile", "-Command", ps).CombinedOutput()
+	cmd := exec.Command("powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps)
+	hideConsoleCmd(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("shortcut install: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func shortcutsAlreadyInstalled(exe string, paths ...string) bool {
+	exe = strings.TrimSpace(exe)
+	if exe == "" {
+		return false
+	}
+	for _, p := range paths {
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() || st.Size() < 16 {
+			return false
+		}
+	}
+	return true
 }
