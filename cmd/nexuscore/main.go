@@ -22,18 +22,12 @@ func main() {
 		os.Exit(2)
 	}
 	out, err := core.Call(context.Background(), req.Method, req.Args, core.Deps{})
-	resp := map[string]any{"ok": err == nil}
-	if err != nil {
-		resp["error"] = err.Error()
-	} else {
-		resp["result"] = out
-	}
 	enc := json.NewEncoder(os.Stdout)
-	if err := enc.Encode(resp); err != nil {
+	if err := enc.Encode(json.RawMessage(core.MarshalResult(out, err))); err != nil {
 		fmt.Fprintf(os.Stderr, "nexuscore: %v\n", err)
 		os.Exit(1)
 	}
-	if resp["ok"] != true {
+	if err != nil {
 		os.Exit(1)
 	}
 }

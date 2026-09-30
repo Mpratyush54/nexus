@@ -60,11 +60,51 @@ func Methods() []string {
 		"net.status",
 		"teleport.redaction_preview",
 		"teleport.send",
+		"teleport.inbox",
+		"teleport.sent",
 		"teleport.prepare",
+		"teleport.apply",
+		"teleport.revoke",
+		"sessions.files",
+		"sessions.operations",
+		"sessions.memories",
+		"sessions.versions",
+		"sessions.unshare",
+		"sessions.grants",
+		"agents.list",
+		"agents.configure_mcp",
+		"runs.message",
+		"runs.approve",
+		"runs.cancel",
+		"memory.update",
+		"secrets.list",
+		"secrets.restore",
+		"uploads.resolve_large_file",
+		"projects.list",
+		"git.status",
+		"settings.get",
+		"auth.status",
+		"capture.pause",
+		"capture.resume",
 		"status.get",
 		"diagnostics.get",
 		"auth.callback",
 	}
+}
+
+// MarshalResult is the JSON envelope nx_call and the nexuscore CLI return.
+func MarshalResult(result any, err error) []byte {
+	resp := map[string]any{"ok": err == nil}
+	if err != nil {
+		resp["error"] = err.Error()
+	} else {
+		resp["result"] = result
+	}
+	raw, merr := json.Marshal(resp)
+	if merr != nil {
+		return []byte(`{"ok":false,"error":"could not encode response"}`)
+	}
+	return raw
 }
 
 // Call dispatches one nx_call method.
@@ -125,6 +165,8 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		return map[string]any{"ok": true, "online": deps.Online, "pending_uploads": pendingCount(deps)}, nil
 	case "auth.callback":
 		return map[string]any{"redirect": "nexus://auth/callback"}, nil
+	case "capture.pause", "capture.resume":
+		return nil, errors.New(method + " is handled by the app shell; the core has no capture switch yet")
 	default:
 		if !known(method) {
 			return nil, ErrUnknownMethod
@@ -165,17 +207,19 @@ func known(method string) bool {
 }
 
 func cloudPath(method string) string {
-	switch method {
-	case "timeline.list", "events.subscribe":
+	switch {
+	case method == "timeline.list" || method == "events.subscribe":
 		return "/v1/timeline"
-	case "memory.search", "memory.forget", "memory.pin", "memory.scope":
+	case strings.HasPrefix(method, "memory."):
 		return "/v1/memory"
-	case "sessions.get", "sessions.turns", "sessions.summary", "sessions.share":
+	case strings.HasPrefix(method, "sessions."):
 		return "/v1/agent-sessions"
-	case "files.diff":
-		return "/v1/blobs"
-	case "teleport.send":
+	case strings.HasPrefix(method, "teleport."):
 		return "/v1/teleports"
+	case strings.HasPrefix(method, "secrets."):
+		return "/v1/secrets"
+	case strings.HasPrefix(method, "files."):
+		return "/v1/blobs"
 	default:
 		return "/v1/" + method
 	}

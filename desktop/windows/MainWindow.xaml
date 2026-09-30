@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Nexus.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:tb="using:H.NotifyIcon"
+    Title="Nexus">
+    <Grid>
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="K" Modifiers="Control" Invoked="Search_Invoked"/>
+        </Grid.KeyboardAccelerators>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <InfoBar
+            x:Name="OfflineBar"
+            IsOpen="False"
+            IsClosable="False"
+            Severity="Warning"/>
+        <NavigationView
+            x:Name="Nav"
+            Grid.Row="1"
+            PaneDisplayMode="Left"
+            IsBackButtonVisible="Collapsed"
+            IsSettingsVisible="False"
+            ItemInvoked="Nav_ItemInvoked">
+            <NavigationView.MenuItems>
+                <NavigationViewItem x:Name="TimelineItem" Content="Timeline" Tag="timeline">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE823;"/></NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="Memory" Tag="memory">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE8F1;"/></NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem x:Name="TeleportItem" Content="Teleport" Tag="teleport">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE8AB;"/></NavigationViewItem.Icon>
+                    <NavigationViewItem.InfoBadge>
+                        <InfoBadge x:Name="TeleportBadge" Value="0"/>
+                    </NavigationViewItem.InfoBadge>
+                </NavigationViewItem>
+                <NavigationViewItem Content="Agents" Tag="agents">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE99A;"/></NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="Settings" Tag="settings">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE713;"/></NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+            <Frame x:Name="ContentFrame"/>
+        </NavigationView>
+        <tb:TaskbarIcon
+            x:Name="Tray"
+            Grid.Row="1"
+            Width="0"
+            Height="0"
+            IsHitTestVisible="False"
+            ToolTipText="Nexus"
+            NoLeftClickDelay="True">
+            <tb:TaskbarIcon.ContextFlyout>
+                <MenuFlyout>
+                    <MenuFlyoutItem Text="Open" Click="Tray_Open"/>
+                    <MenuFlyoutItem x:Name="PauseItem" Text="Pause capture" Click="Tray_Pause"/>
+                    <MenuFlyoutItem Text="Teleport inbox" Click="Tray_Teleport"/>
+                    <MenuFlyoutSeparator/>
+                    <MenuFlyoutItem Text="Quit" Click="Tray_Quit"/>
+                </MenuFlyout>
+            </tb:TaskbarIcon.ContextFlyout>
+        </tb:TaskbarIcon>
+    </Grid>
+</Window>
