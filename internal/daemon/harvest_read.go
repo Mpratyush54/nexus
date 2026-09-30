@@ -71,20 +71,54 @@ func (d *Daemon) ReadHarvestFile(absPath string) ([]byte, string, error) {
 	return data, absPath, nil
 }
 
-// FormatTranscriptPreview turns JSONL (or raw text) into a readable conversation.
-func FormatTranscriptPreview(raw []byte, maxTurns int) string {
+// TranscriptTurnDTO is a JSON-friendly dialogue turn for Desktop chat preview.
+type TranscriptTurnDTO struct {
+	Speaker   string `json:"speaker"`
+	Content   string `json:"content"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+// ParseTranscriptTurns extracts the last maxTurns dialogue turns from JSONL.
+func ParseTranscriptTurns(raw []byte, maxTurns int) []TranscriptTurnDTO {
 	if maxTurns <= 0 {
 		maxTurns = 80
 	}
-	lines := strings.Split(string(raw), "\n")
 	var turns []Turn
-	for _, line := range lines {
+	for _, line := range strings.Split(string(raw), "\n") {
 		t, ok := parseTurnLine([]byte(line))
 		if !ok {
 			continue
 		}
 		turns = append(turns, t)
 	}
+	if len(turns) == 0 {
+		return nil
+	}
+	if len(turns) > maxTurns {
+		turns = turns[len(turns)-maxTurns:]
+	}
+	out := make([]TranscriptTurnDTO, 0, len(turns))
+	for _, t := range turns {
+		role := strings.ToUpper(strings.TrimSpace(t.Speaker))
+		if role == "" {
+			role = "UNKNOWN"
+		}
+		content := strings.TrimSpace(t.Content)
+		if len(content) > 4000 {
+			content = content[:4000] + "\n…(turn truncated)…"
+		}
+		dto := TranscriptTurnDTO{Speaker: role, Content: content}
+		if !t.Timestamp.IsZero() {
+			dto.Timestamp = t.Timestamp.UTC().Format("2006-01-02 15:04")
+		}
+		out = append(out, dto)
+	}
+	return out
+}
+
+// FormatTranscriptPreview turns JSONL (or raw text) into a readable conversation.
+func FormatTranscriptPreview(raw []byte, maxTurns int) string {
+	turns := ParseTranscriptTurns(raw, maxTurns)
 	if len(turns) == 0 {
 		// Fallback: show trimmed raw for non-JSONL / sqlite dumps.
 		text := strings.TrimSpace(string(raw))
@@ -96,26 +130,15 @@ func FormatTranscriptPreview(raw []byte, maxTurns int) string {
 		}
 		return "Could not parse dialogue turns — showing raw content:\n\n" + text
 	}
-	if len(turns) > maxTurns {
-		turns = turns[len(turns)-maxTurns:]
-	}
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("%d turns (showing last %d)\n\n", countNonEmptyTurns(raw), len(turns)))
 	for i, t := range turns {
-		role := strings.ToUpper(t.Speaker)
-		if role == "" {
-			role = "UNKNOWN"
-		}
-		b.WriteString("── " + role)
-		if !t.Timestamp.IsZero() {
-			b.WriteString(" · " + t.Timestamp.UTC().Format("2006-01-02 15:04"))
+		b.WriteString("── " + t.Speaker)
+		if t.Timestamp != "" {
+			b.WriteString(" · " + t.Timestamp)
 		}
 		b.WriteString(" ──\n")
-		content := strings.TrimSpace(t.Content)
-		if len(content) > 4000 {
-			content = content[:4000] + "\n…(turn truncated)…"
-		}
-		b.WriteString(content)
+		b.WriteString(t.Content)
 		if i < len(turns)-1 {
 			b.WriteString("\n\n")
 		}

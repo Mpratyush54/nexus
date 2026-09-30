@@ -234,6 +234,43 @@ func withFixedWidth(width float32, obj fyne.CanvasObject) fyne.CanvasObject {
 	return container.New(&fixedWidth{width: width}, obj)
 }
 
+// minWidth ensures a pane does not collapse below a usable column width.
+type minWidth struct {
+	width float32
+}
+
+func (m *minWidth) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	h := float32(0)
+	w := m.width
+	for _, o := range objects {
+		if o == nil {
+			continue
+		}
+		s := o.MinSize()
+		if s.Height > h {
+			h = s.Height
+		}
+		if s.Width > w {
+			w = s.Width
+		}
+	}
+	return fyne.NewSize(w, h)
+}
+
+func (m *minWidth) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, o := range objects {
+		if o == nil {
+			continue
+		}
+		o.Resize(size)
+		o.Move(fyne.NewPos(0, 0))
+	}
+}
+
+func withMinWidth(width float32, obj fyne.CanvasObject) fyne.CanvasObject {
+	return container.New(&minWidth{width: width}, obj)
+}
+
 // dotSize keeps status indicator circles readable in HBox layouts.
 type dotSize struct{}
 

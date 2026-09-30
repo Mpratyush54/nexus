@@ -76,6 +76,43 @@ func TestMemoryBrowseEmptyQuery(t *testing.T) {
 	}
 }
 
+func TestMemorySearchFilteredLevelAndTags(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/memory/search" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.URL.Query().Get("level") != "project" {
+			http.Error(w, "level", http.StatusBadRequest)
+			return
+		}
+		if r.URL.Query().Get("tags") != "redis,cache" {
+			http.Error(w, "tags", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"count": 1,
+			"items": []map[string]any{{"key": "cache/redis", "content": "ok", "level": "project"}},
+		})
+	}))
+	defer srv.Close()
+
+	c := &Client{ServerURL: srv.URL, Token: "tok", HTTP: srv.Client()}
+	items, _, err := c.MemorySearchFiltered(MemorySearchParams{
+		ProjectID: "p1",
+		Query:     "",
+		Limit:     10,
+		Level:     "project",
+		Tags:      []string{"redis", "cache"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Key != "cache/redis" {
+		t.Fatalf("%+v", items)
+	}
+}
+
 func TestMemorySearchRequiresSignIn(t *testing.T) {
 	c := &Client{ServerURL: "http://example.invalid", Token: ""}
 	if _, _, err := c.MemorySearch("x", "p", 5); err == nil {

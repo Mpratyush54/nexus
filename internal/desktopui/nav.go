@@ -19,6 +19,7 @@ func (s *Shell) buildSidebar() fyne.CanvasObject {
 		{"Home", theme.HomeIcon(), secHome},
 		{"Memory", theme.DocumentIcon(), secMemory},
 		{"Harvest", theme.ListIcon(), secHarvest},
+		{"Sessions", theme.MediaReplayIcon(), secSessions},
 		{"Workspace", theme.FolderIcon(), secWorkspace},
 	}
 
@@ -55,6 +56,9 @@ func (s *Shell) switchSection(sec section) {
 	if sec == secMemory {
 		go s.runMemorySearch(true)
 	}
+	if sec == secSessions {
+		go s.loadSessionSnapshots()
+	}
 }
 
 func (s *Shell) renderCenter() {
@@ -67,6 +71,8 @@ func (s *Shell) renderCenter() {
 			page = s.memoryPage()
 		case secHarvest:
 			page = s.harvestPage()
+		case secSessions:
+			page = s.sessionsPage()
 		case secWorkspace:
 			page = s.workspacePage()
 		case secSettings:
@@ -96,7 +102,7 @@ func (s *Shell) sectionShowsPreview() bool {
 		return false
 	}
 	switch s.section {
-	case secMemory, secHarvest, secWorkspace:
+	case secMemory, secHarvest, secWorkspace, secSessions:
 		return true
 	default:
 		return false
@@ -115,14 +121,14 @@ func (s *Shell) rebuildChrome() {
 			container.NewBorder(top, nil, nil, nil, s.center),
 		}
 	} else {
-		content := paneBG(container.NewPadded(s.center), colorBase)
+		content := withMinWidth(contentMinW, paneBG(container.NewPadded(s.center), colorBase))
 		var main fyne.CanvasObject = content
 		if s.sectionShowsPreview() {
 			if s.previewPane == nil {
 				s.previewPane = s.buildPreviewPane()
 			}
 			split := container.NewHSplit(content, s.previewPane)
-			split.SetOffset(0.64)
+			split.SetOffset(previewSplit)
 			main = split
 		}
 		s.root.Objects = []fyne.CanvasObject{

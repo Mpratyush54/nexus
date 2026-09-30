@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -214,11 +215,20 @@ func (c *Client) ReadFile(path string) (*FileRead, error) {
 
 // HarvestFileRead is POST /local/harvest/read (allowlisted transcript outside workspace).
 type HarvestFileRead struct {
-	Path      string `json:"path"`
-	Size      int    `json:"size"`
-	Format    string `json:"format"`
+	Path      string              `json:"path"`
+	Size      int                 `json:"size"`
+	Format    string              `json:"format"`
+	Content   string              `json:"content"`
+	Formatted string              `json:"formatted"`
+	Turns     []TranscriptTurn    `json:"turns"`
+	TurnCount int                 `json:"turn_count"`
+}
+
+// TranscriptTurn is one dialogue block for chat-style Desktop preview.
+type TranscriptTurn struct {
+	Speaker   string `json:"speaker"`
 	Content   string `json:"content"`
-	Formatted string `json:"formatted"`
+	Timestamp string `json:"timestamp"`
 }
 
 // ReadHarvestFile loads a harvested transcript by absolute path.
@@ -242,6 +252,74 @@ func (c *Client) ReadHarvestFile(path string) (*HarvestFileRead, error) {
 		return nil, err
 	}
 	return &fr, nil
+}
+
+// SessionSnapshot is one cloud teleport snapshot meta row.
+type SessionSnapshot struct {
+	SessionID       string `json:"session_id"`
+	Harness         string `json:"harness"`
+	TurnCount       int    `json:"turn_count"`
+	GitBranch       string `json:"git_branch"`
+	SourceMachineID string `json:"source_machine_id"`
+	UpdatedAt       string `json:"updated_at"`
+	AgeSeconds      int    `json:"age_seconds"`
+}
+
+// ListSnapshots proxies GET /local/snapshots (cloud project snapshots).
+func (c *Client) ListSnapshots(projectID string) ([]SessionSnapshot, error) {
+	path := "/local/snapshots"
+	if pid := strings.TrimSpace(projectID); pid != "" {
+		path += "?project_id=" + url.QueryEscape(pid)
+	}
+	var wrap struct {
+		Items []SessionSnapshot `json:"items"`
+		Count int               `json:"count"`
+	}
+	if err := c.getJSON(path, &wrap); err != nil {
+		return nil, err
+	}
+	return wrap.Items, nil
+}
+
+// RestoreSession POSTs /local/session/restore (long timeout — downloads + git).
+func (c *Client) RestoreSession(sessionID, workspace string, force bool) (string, error) {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return "", fmt.Errorf("session_id is required")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"session_id": sessionID,
+		"workspace":  strings.TrimSpace(workspace),
+		"force":      force,
+	})
+	httpClient := c.HTTP
+	if httpClient == nil || httpClient.Timeout < 30*time.Second {
+		httpClient = &http.Client{Timeout: 120 * time.Second}
+	}
+	resp, err := httpClient.Post(c.Base+"/local/session/restore", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var errBody struct {
+			Error string `json:"error"`
+		}
+		_ = json.Unmarshal(raw, &errBody)
+		if errBody.Error != "" {
+			return "", fmt.Errorf("%s", errBody.Error)
+		}
+		return "", fmt.Errorf("restore: %s %s", resp.Status, strings.TrimSpace(string(raw)))
+	}
+	var out struct {
+		OK      bool   `json:"ok"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return "", err
+	}
+	return out.Message, nil
 }
 
 func (c *Client) RecentWorkspaces() ([]string, error) {

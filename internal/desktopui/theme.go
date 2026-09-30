@@ -23,10 +23,12 @@ var (
 )
 
 const (
-	sidebarWidth float32 = 196
-	previewMinW  float32 = 280
-	chromePad    float32 = 8
-	navAccentW   float32 = 3
+	sidebarWidth   float32 = 196
+	previewMinW    float32 = 420
+	contentMinW    float32 = 280
+	previewSplit   float64 = 0.40 // left content / right preview ≈ 40/60
+	chromePad      float32 = 8
+	navAccentW     float32 = 3
 )
 
 type nexusTheme struct {

@@ -17,9 +17,21 @@ const (
 	secConnect
 	secMemory
 	secHarvest
+	secSessions
 	secWorkspace
 	secSettings
 )
+
+// sessionRow is one Sessions list entry (cloud teleport snapshot).
+type sessionRow struct {
+	sessionID string
+	title     string
+	subtitle  string
+	detail    string
+	harness   string
+	branch    string
+	machine   string
+}
 
 // shellMode is the top-level window mode.
 type shellMode int

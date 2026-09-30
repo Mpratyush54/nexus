@@ -55,9 +55,27 @@ func TestReadHarvestFileAllowlist(t *testing.T) {
 	}
 }
 
+func TestParseTranscriptTurns(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		`{"role":"user","content":"Hello Redis"}`,
+		`{"role":"assistant","content":"Use Redis for pub/sub."}`,
+	}, "\n"))
+	turns := ParseTranscriptTurns(raw, 10)
+	if len(turns) != 2 {
+		t.Fatalf("got %d", len(turns))
+	}
+	if turns[0].Speaker != "USER" || !strings.Contains(turns[0].Content, "Hello Redis") {
+		t.Fatalf("%+v", turns[0])
+	}
+	if turns[1].Speaker != "ASSISTANT" {
+		t.Fatalf("%+v", turns[1])
+	}
+}
+
 func TestFormatTranscriptPreviewEmpty(t *testing.T) {
 	got := FormatTranscriptPreview([]byte("not json at all\njust text"), 5)
 	if !strings.Contains(got, "raw content") && !strings.Contains(got, "just text") {
 		t.Fatalf("%s", got)
 	}
 }
+

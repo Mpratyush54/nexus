@@ -51,15 +51,25 @@ type Shell struct {
 	homeBody   *fyne.Container
 	homeUI     *homeWidgets
 
-	previewHead  *widget.Label
-	previewBody  *widget.Entry
-	previewLinks *fyne.Container
-	previewPane  fyne.CanvasObject
+	previewHead   *widget.Label
+	previewMeta   *widget.Label
+	previewLinks  *fyne.Container
+	previewTurns  *fyne.Container
+	previewScroll *container.Scroll
+	previewPane   fyne.CanvasObject
 
-	memorySearch *widget.Entry
-	memoryList   *widget.List
-	memoryItems  []cloudclient.MemoryItem
-	memoryBanner *fyne.Container
+	memorySearch   *widget.Entry
+	memoryLevel    *widget.Select
+	memoryStatus   *widget.Select
+	memoryCategory *widget.Select
+	memoryTags     *widget.Entry
+	memoryList     *widget.List
+	memoryItems    []cloudclient.MemoryItem
+	memoryBanner   *fyne.Container
+
+	sessionList  *widget.List
+	sessionRows  []sessionRow
+	sessionBanner *fyne.Container
 
 	harvestList   *widget.List
 	harvestRows   []harvestRow
@@ -106,17 +116,28 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 	s.topChrome = s.buildTopChrome()
 
 	s.previewHead = widget.NewLabelWithStyle("Preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	s.previewBody = widget.NewMultiLineEntry()
-	s.previewBody.SetText(previewEmptyMessage(secHome))
-	s.previewBody.Wrapping = fyne.TextWrapWord
-	s.previewBody.Disable()
+	s.previewMeta = mutedLabel("")
+	s.previewMeta.Hide()
+	s.previewTurns = container.NewVBox()
 	s.previewPane = s.buildPreviewPane()
+	s.renderPreviewPlain(previewEmptyMessage(secHome), false)
 
 	s.homeBody = container.NewVBox()
 	s.memoryBanner = container.NewVBox()
+	s.sessionBanner = container.NewVBox()
 
 	s.memorySearch = widget.NewEntry()
 	s.memorySearch.SetPlaceHolder("Search project memory…")
+	s.memoryLevel = widget.NewSelect([]string{"All levels", "project", "personal", "organization", "session"}, nil)
+	s.memoryLevel.SetSelected("All levels")
+	s.memoryStatus = widget.NewSelect([]string{"All status", "PROPOSED", "CONFIRMED"}, nil)
+	s.memoryStatus.SetSelected("All status")
+	s.memoryCategory = widget.NewSelect([]string{
+		"All categories", "architecture", "infrastructure", "auth", "api", "conventions", "dependencies", "general",
+	}, nil)
+	s.memoryCategory.SetSelected("All categories")
+	s.memoryTags = widget.NewEntry()
+	s.memoryTags.SetPlaceHolder("Tags (comma-separated)")
 	s.memoryList = widget.NewList(
 		func() int {
 			s.mu.Lock()
@@ -145,6 +166,36 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 			return
 		}
 		s.showMemoryPreview(it)
+	}
+
+	s.sessionList = widget.NewList(
+		func() int {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			return len(s.sessionRows)
+		},
+		listRowTemplate,
+		func(id widget.ListItemID, obj fyne.CanvasObject) {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if id < 0 || id >= len(s.sessionRows) {
+				return
+			}
+			row := s.sessionRows[id]
+			updateListRow(obj, row.title, row.subtitle)
+		},
+	)
+	s.sessionList.OnSelected = func(id widget.ListItemID) {
+		s.mu.Lock()
+		var row sessionRow
+		if id >= 0 && id < len(s.sessionRows) {
+			row = s.sessionRows[id]
+		}
+		s.mu.Unlock()
+		if row.sessionID == "" {
+			return
+		}
+		s.showSessionPreview(row)
 	}
 
 	s.harvestList = widget.NewList(
@@ -225,7 +276,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 	s.center = container.NewStack(s.welcomePage())
 	s.root = container.NewStack()
 	win.SetContent(s.root)
-	win.Resize(fyne.NewSize(1180, 740))
+	win.Resize(fyne.NewSize(1280, 780))
 	win.SetCloseIntercept(func() {
 		win.Hide()
 	})

@@ -137,27 +137,51 @@ func (c *Client) ListProjects() ([]Project, error) {
 
 // MemoryBrowse lists recent memories via portal GET /memory/search (empty q allowed).
 func (c *Client) MemoryBrowse(projectID string, limit int) ([]MemoryItem, string, error) {
-	return c.memoryPortalSearch(projectID, "", limit)
+	return c.MemorySearchFiltered(MemorySearchParams{ProjectID: projectID, Limit: limit})
+}
+
+// MemorySearchParams mirrors portal GET /memory/search query knobs.
+type MemorySearchParams struct {
+	Query     string
+	ProjectID string
+	Limit     int
+	Level     string
+	Tags      []string
 }
 
 // memoryPortalSearch uses the same GET /memory/search the web Memory page uses
 // (empty q = browse recent; returns full item fields including timestamps/files).
-func (c *Client) memoryPortalSearch(projectID, query string, limit int) ([]MemoryItem, string, error) {
+func (c *Client) memoryPortalSearch(p MemorySearchParams) ([]MemoryItem, string, error) {
 	if !c.signedIn() {
 		return nil, "", fmt.Errorf("not signed in")
 	}
-	projectID = strings.TrimSpace(projectID)
+	projectID := strings.TrimSpace(p.ProjectID)
 	if projectID == "" {
 		return nil, "", fmt.Errorf("project_id is required to browse memory")
 	}
+	limit := p.Limit
 	if limit <= 0 {
 		limit = 40
 	}
 	q := url.Values{}
 	q.Set("project_id", projectID)
 	q.Set("limit", fmt.Sprintf("%d", limit))
-	if query = strings.TrimSpace(query); query != "" {
+	if query := strings.TrimSpace(p.Query); query != "" {
 		q.Set("q", query)
+	}
+	if level := strings.TrimSpace(p.Level); level != "" {
+		q.Set("level", level)
+	}
+	if len(p.Tags) > 0 {
+		var tags []string
+		for _, t := range p.Tags {
+			if t = strings.TrimSpace(t); t != "" {
+				tags = append(tags, t)
+			}
+		}
+		if len(tags) > 0 {
+			q.Set("tags", strings.Join(tags, ","))
+		}
 	}
 	req, err := http.NewRequest(http.MethodGet, c.ServerURL+"/memory/search?"+q.Encode(), nil)
 	if err != nil {
@@ -192,6 +216,19 @@ func (c *Client) memoryPortalSearch(projectID, query string, limit int) ([]Memor
 	return out.Items, pid, nil
 }
 
+// MemorySearchFiltered loads memories with optional level/tags filters.
+func (c *Client) MemorySearchFiltered(p MemorySearchParams) ([]MemoryItem, string, error) {
+	if !c.signedIn() {
+		return nil, "", fmt.Errorf("not signed in")
+	}
+	p.Query = strings.TrimSpace(p.Query)
+	p.ProjectID = strings.TrimSpace(p.ProjectID)
+	if p.ProjectID != "" {
+		return c.memoryPortalSearch(p)
+	}
+	return c.MemorySearch(p.Query, "", p.Limit)
+}
+
 // MemorySearch loads memories for the signed-in user.
 // With projectID: portal GET /memory/search (empty query = recent browse, full fields).
 // Without projectID: agent POST (auto-resolves single-project tokens; query required).
@@ -202,7 +239,7 @@ func (c *Client) MemorySearch(query, projectID string, limit int) ([]MemoryItem,
 	query = strings.TrimSpace(query)
 	projectID = strings.TrimSpace(projectID)
 	if projectID != "" {
-		return c.memoryPortalSearch(projectID, query, limit)
+		return c.memoryPortalSearch(MemorySearchParams{Query: query, ProjectID: projectID, Limit: limit})
 	}
 	if query == "" {
 		return nil, "", fmt.Errorf("query is required when project_id is unknown")

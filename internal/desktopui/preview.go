@@ -14,6 +14,13 @@ import (
 	"fyne.io/fyne/v2/widget"
 )
 
+// previewTurn is one chat-style block in the right pane.
+type previewTurn struct {
+	role string
+	meta string
+	body string
+}
+
 func (s *Shell) setPreview(title, body string) {
 	s.setPreviewKind("system", title, body)
 }
@@ -34,10 +41,7 @@ func (s *Shell) setPreviewContent(kind, title, body string, clearLinks bool) {
 		s.previewLinks.Hide()
 		s.previewLinks.Refresh()
 	}
-	if s.previewBody != nil {
-		s.previewBody.SetText(body)
-		s.previewBody.Show()
-	}
+	s.renderPreviewPlain(body, false)
 }
 
 func (s *Shell) showMemoryPreview(it cloudclient.MemoryItem) {
@@ -53,10 +57,17 @@ func (s *Shell) showMemoryPreview(it cloudclient.MemoryItem) {
 	if s.previewHead != nil {
 		s.previewHead.SetText(title)
 	}
-	if s.previewBody != nil {
-		s.previewBody.SetText(formatMemoryDetail(it))
-		s.previewBody.Show()
+
+	meta := formatMemoryMeta(it)
+	content := strings.TrimSpace(it.Content)
+	if snip := strings.TrimSpace(it.ContextSnippet); snip != "" {
+		content = "Context:\n" + snip + "\n\n" + content
 	}
+	s.renderPreviewTurns(meta, []previewTurn{{
+		role: "MEMORY",
+		meta: first(it.Status, it.Level, "entry"),
+		body: content,
+	}}, false)
 
 	refs := memoryFileRefs(it)
 	if s.previewLinks == nil {
@@ -110,7 +121,18 @@ func (s *Shell) openMemoryFile(path, workspaceRoot string) {
 					body = body[:120_000] + "\n\n… truncated …"
 				}
 				fyne.Do(func() {
-					s.setPreviewKind("memory", title, "Path: "+fr.Path+"\nSize: "+fmt.Sprintf("%d", fr.Size)+" bytes\n\n"+body)
+					s.mu.Lock()
+					s.previewKind = "memory"
+					s.mu.Unlock()
+					if s.previewHead != nil {
+						s.previewHead.SetText(title)
+					}
+					meta := fmt.Sprintf("Path: %s · %d bytes", fr.Path, fr.Size)
+					s.renderPreviewTurns(meta, []previewTurn{{
+						role: "FILE",
+						meta: filepath.Base(fr.Path),
+						body: body,
+					}}, false)
 				})
 				return
 			}
@@ -175,8 +197,8 @@ func (s *Shell) showHarnessPreview(row harvestRow, h *localclient.Harvest) {
 			break
 		}
 	}
-	s.loadHarvestTranscript(pick.Path, first(pick.Name, filepath.Base(pick.Path)), pick.Format)
 	s.setPreviewContent("harvest", "Harness · "+row.title, "Loading transcript…\n\n"+header, false)
+	s.loadHarvestTranscript(pick.Path, first(pick.Name, filepath.Base(pick.Path)), pick.Format)
 }
 
 func (s *Shell) loadHarvestTranscript(path, title, format string) {
@@ -200,6 +222,28 @@ func (s *Shell) loadHarvestTranscript(path, title, format string) {
 					false)
 				return
 			}
+			s.mu.Lock()
+			s.previewKind = "harvest"
+			s.mu.Unlock()
+			if s.previewHead != nil {
+				s.previewHead.SetText("Transcript · " + title)
+			}
+			meta := fmt.Sprintf("Path: %s · %d bytes", fr.Path, fr.Size)
+			if fr.TurnCount > 0 {
+				meta += fmt.Sprintf(" · %d turns", fr.TurnCount)
+			}
+			if len(fr.Turns) > 0 {
+				turns := make([]previewTurn, 0, len(fr.Turns))
+				for _, t := range fr.Turns {
+					turns = append(turns, previewTurn{
+						role: first(t.Speaker, "UNKNOWN"),
+						meta: t.Timestamp,
+						body: t.Content,
+					})
+				}
+				s.renderPreviewTurns(meta, turns, true)
+				return
+			}
 			body := strings.TrimSpace(fr.Formatted)
 			if body == "" {
 				body = fr.Content
@@ -207,8 +251,11 @@ func (s *Shell) loadHarvestTranscript(path, title, format string) {
 			if len(body) > 120_000 {
 				body = body[:120_000] + "\n\n… truncated …"
 			}
-			head := "Path: " + fr.Path + "\nSize: " + fmt.Sprintf("%d", fr.Size) + " bytes\n\n"
-			s.setPreviewContent("harvest", "Transcript · "+title, head+body, false)
+			s.renderPreviewTurns(meta, []previewTurn{{
+				role: "TRANSCRIPT",
+				meta: title,
+				body: body,
+			}}, true)
 		})
 	}()
 }
@@ -221,6 +268,8 @@ func previewEmptyMessage(sec section) string {
 		return "Select an item to preview\n\nSelect a harness or transcript to inspect it here."
 	case secWorkspace:
 		return "Select an item to preview\n\nSelect a workspace file or choose a folder. Agent transcripts live under Harvest."
+	case secSessions:
+		return "Select a snapshot to preview\n\nRestore hydrates harness transcript + git diff into your linked workspace."
 	default:
 		return "Select an item to preview"
 	}
@@ -239,6 +288,8 @@ func (s *Shell) clearPreviewForSection(sec section) {
 		keep = kind == "harvest"
 	case secWorkspace:
 		keep = kind == "workspace"
+	case secSessions:
+		keep = kind == "sessions"
 	default:
 		keep = false
 	}
@@ -253,13 +304,104 @@ func (s *Shell) buildPreviewPane() fyne.CanvasObject {
 		s.previewLinks = container.NewVBox()
 		s.previewLinks.Hide()
 	}
-	scrollBody := container.NewVBox(s.previewLinks, s.previewBody)
+	if s.previewMeta == nil {
+		s.previewMeta = mutedLabel("")
+		s.previewMeta.Hide()
+	}
+	if s.previewTurns == nil {
+		s.previewTurns = container.NewVBox()
+	}
+	scrollBody := container.NewVBox(s.previewLinks, s.previewMeta, s.previewTurns)
+	s.previewScroll = container.NewVScroll(scrollBody)
+	// Cap scroll min height so long transcripts grow inside the pane, not the window.
+	s.previewScroll.SetMinSize(fyne.NewSize(previewMinW-24, 280))
+
 	inner := container.NewBorder(
 		container.NewVBox(container.NewPadded(s.previewHead), widget.NewSeparator()),
 		nil, nil, nil,
-		container.NewPadded(container.NewScroll(scrollBody)),
+		container.NewPadded(s.previewScroll),
 	)
-	return paneBG(inner, colorSurface)
+	return withMinWidth(previewMinW, paneBG(inner, colorSurface))
+}
+
+func (s *Shell) renderPreviewPlain(body string, scrollToEnd bool) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		body = " "
+	}
+	s.renderPreviewTurns("", []previewTurn{{
+		role: "",
+		body: body,
+	}}, scrollToEnd)
+}
+
+func (s *Shell) renderPreviewTurns(meta string, turns []previewTurn, scrollToEnd bool) {
+	if s.previewMeta != nil {
+		if strings.TrimSpace(meta) == "" {
+			s.previewMeta.Hide()
+			s.previewMeta.SetText("")
+		} else {
+			s.previewMeta.SetText(meta)
+			s.previewMeta.Show()
+		}
+		s.previewMeta.Refresh()
+	}
+	if s.previewTurns == nil {
+		return
+	}
+	objs := make([]fyne.CanvasObject, 0, len(turns))
+	for _, t := range turns {
+		objs = append(objs, chatTurnBlock(t))
+	}
+	if len(objs) == 0 {
+		objs = append(objs, mutedLabel("(empty)"))
+	}
+	s.previewTurns.Objects = objs
+	s.previewTurns.Refresh()
+	if s.previewScroll != nil {
+		s.previewScroll.Refresh()
+		if scrollToEnd {
+			s.previewScroll.ScrollToBottom()
+		} else {
+			s.previewScroll.Offset = fyne.NewPos(0, 0)
+			s.previewScroll.Refresh()
+		}
+	}
+}
+
+func chatTurnBlock(t previewTurn) fyne.CanvasObject {
+	body := widget.NewLabel(t.body)
+	body.Wrapping = fyne.TextWrapWord
+	if strings.TrimSpace(t.role) == "" {
+		return container.NewPadded(body)
+	}
+	head := t.role
+	if strings.TrimSpace(t.meta) != "" {
+		head = t.role + "  ·  " + t.meta
+	}
+	role := widget.NewLabelWithStyle(head, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	role.SizeName = theme.SizeNameCaptionText
+	return cardWrap(container.NewVBox(role, body))
+}
+
+func formatMemoryMeta(it cloudclient.MemoryItem) string {
+	parts := []string{}
+	if it.Level != "" || it.Scope != "" {
+		parts = append(parts, "Level "+orDash(it.Level)+" · Scope "+orDash(it.Scope))
+	}
+	if it.Status != "" {
+		parts = append(parts, it.Status)
+	}
+	if it.Category != "" {
+		parts = append(parts, it.Category)
+	}
+	if len(it.Tags) > 0 {
+		parts = append(parts, "tags: "+strings.Join(it.Tags, ", "))
+	}
+	if it.UpdatedAt != "" {
+		parts = append(parts, "updated "+it.UpdatedAt)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func (s *Shell) loadFilePreview(path, title string) {
@@ -282,7 +424,18 @@ func (s *Shell) loadFilePreview(path, title string) {
 			if len(body) > 120_000 {
 				body = body[:120_000] + "\n\n… truncated …"
 			}
-			s.setPreviewKind(kind, title, "Path: "+fr.Path+"\nSize: "+fmt.Sprintf("%d", fr.Size)+" bytes\n\n"+body)
+			s.mu.Lock()
+			s.previewKind = kind
+			s.mu.Unlock()
+			if s.previewHead != nil {
+				s.previewHead.SetText(title)
+			}
+			meta := fmt.Sprintf("Path: %s · %d bytes", fr.Path, fr.Size)
+			s.renderPreviewTurns(meta, []previewTurn{{
+				role: "FILE",
+				meta: filepath.Base(fr.Path),
+				body: body,
+			}}, false)
 		})
 	}()
 }

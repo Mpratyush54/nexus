@@ -576,6 +576,16 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		}
 		total = len(items)
 	}
+	if level := strings.TrimSpace(q.Get("level")); level != "" {
+		filtered := items[:0:0]
+		for _, it := range items {
+			if it != nil && strings.EqualFold(strings.TrimSpace(it.Level), level) {
+				filtered = append(filtered, it)
+			}
+		}
+		items = filtered
+		total = len(items)
+	}
 	recordMemoryUse(r.Context(), s.Store, items)
 	if items == nil {
 		items = []*store.MemoryItem{}

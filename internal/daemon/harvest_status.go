@@ -113,13 +113,16 @@ func (d *Daemon) handleHarvestRead(w http.ResponseWriter, r *http.Request) {
 		writeFileErr(w, err)
 		return
 	}
-	formatted := FormatTranscriptPreview(data, 80)
+	turns := ParseTranscriptTurns(data, 120)
+	formatted := FormatTranscriptPreview(data, 120)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"path":      abs,
-		"size":      len(data),
-		"format":    "jsonl",
-		"content":   string(data),
-		"formatted": formatted,
+		"path":       abs,
+		"size":       len(data),
+		"format":     "jsonl",
+		"content":    string(data),
+		"formatted":  formatted,
+		"turns":      turns,
+		"turn_count": countNonEmptyTurns(data),
 	})
 }
 

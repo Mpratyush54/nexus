@@ -24,9 +24,9 @@ Clicking a list row in Memory / Harvest / Workspace opens the **preview pane** (
 | Layer | Role |
 |-------|------|
 | **`cmd/nexus-desktop`** | Single instance, quiet tray, spawns `nexus-daemon`, Windows updater |
-| **`internal/desktopui`** | Fyne **Shell v2**: Welcome, Home (setup + pulse), Memory, Harvest, Workspace, Settings + preview |
-| **`internal/localclient`** | Daemon `:7272` — status, harvest, workspace, file read |
-| **`internal/cloudclient`** | Cloud API — memory browse/search (Bearer token from login) |
+| **`internal/desktopui`** | Fyne **Shell v2**: Welcome, Home, Memory (filters), Harvest, **Sessions (teleport)**, Workspace, Settings + wide chat-style preview |
+| **`internal/localclient`** | Daemon `:7272` — status, harvest, workspace, file read, snapshots/restore |
+| **`internal/cloudclient`** | Cloud API — memory browse/search with level/tags (Bearer token from login) |
 | **`internal/authbrowser`** | System-browser OAuth once; tokens land in local config |
 
 **Why Fyne long-term:** one Go stack with daemon/updater/tray; no second UI runtime; Win/Mac/Linux from the same codebase. Portal React remains the **web** product; desktop does not embed it.
@@ -39,12 +39,23 @@ Clicking a list row in Memory / Harvest / Workspace opens the **preview pane** (
 |---------|-----|
 | **Welcome** | Brand + Sign in (when no token) |
 | **Home** | Portal-style dashboard: stats, GitHub activity heatmap, recent pulse; compact Connect setup strip |
-| **Memory** | Cloud facts; auto-browse recent on open; rich preview with linked-file open |
-| **Harvest** | Agent transcript files + harness status (not repo sources) |
+| **Memory** | Cloud facts; search + level/status/category/tags filters; rich preview with linked-file open |
+| **Harvest** | Agent transcript files + harness status; **chat-style preview** (scrollable turn blocks, ~40/60 split) |
+| **Sessions** | Cloud **Teleport** snapshots — list + restore-to-workspace (same as portal `/app/sessions`) |
 | **Workspace** | Folder pick (Fyne dialog, all OS) + recent list + workspace-relative preview |
 | **Settings** | Account, updates, quit; Team/org/billing → system browser |
 
 No separate **Connect** nav item — setup lives as a **compact strip on Home**. No auto folder dialog on launch. Tray stays quiet: Open / Scan / Updates / Quit.
+
+### Session teleport (where it lives)
+
+| Surface | Route / nav | What you get |
+|---------|-------------|--------------|
+| **Desktop** | Sidebar **Sessions** | Lists `/local/snapshots`, **Restore to workspace** via `/local/session/restore`, copy CLI |
+| **Web portal** | SideNav **Sessions** → `/app/sessions` | Active sessions + **Session snapshots (Teleport)** table (copy restore / download bundle) |
+| **CLI** | `nexus session restore <id> --workspace <path>` | Same restore pipeline as Desktop |
+
+Desktop pushes snapshots while you work; restore reconstitutes harness transcript + git branch/diff onto the linked folder.
 
 ## Web portal feature map (parity checklist)
 
@@ -53,7 +64,7 @@ No separate **Connect** nav item — setup lives as a **compact strip on Home**.
 | `/app/dashboard` | Home | Fyne Home (stats + heatmap + pulse + setup strip) | Native Home |
 | `/app/memory` | Memory | Browse/search + rich preview + file links | Native browse/edit over time |
 | `/app/connect` | Desktop / harvest | Compact setup strip on **Home** | Native Home setup |
-| `/app/sessions` | Sessions | — | Native or labeled web |
+| `/app/sessions` | Sessions | Fyne **Sessions** (snapshots + restore) | Native restore + web parity |
 | `/app/agents` | Agents | — | Native or labeled web |
 | `/app/team`, `/app/org` | Team, Org | Settings → “Team, org & billing (web)” | Labeled web until native |
 | `/app/branches` | Overlays | — | Later |
@@ -71,7 +82,7 @@ No separate **Connect** nav item — setup lives as a **compact strip on Home**.
 ```powershell
 cd d:\central-memory
 go build -o bin\nexus-desktop.exe .\cmd\nexus-desktop
-go build -o bin\nexus-daemon.exe .\cmd\nexus-daemon
+go build -o bin\nexus-daemon.exe .\cmd\daemon
 .\bin\nexus-desktop.exe
 ```
 
