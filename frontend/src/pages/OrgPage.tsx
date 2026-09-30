@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useToast } from '@/components/ui/Toast'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { orgsApi } from '@/api/orgs'
 import {
   useAddOrgMember,
   useCreateOrg,
@@ -15,13 +17,14 @@ import {
   useRemoveOrgMember,
   useSetOrgMemberRole,
 } from '@/hooks/useOrgs'
+import { queryKeys } from '@/lib/query-keys'
 import { useBillingPlans, useOrgBilling } from '@/hooks/useBilling'
 import { PlanGrid } from '@/components/PlanGrid'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 
-const ORG_ROLES = ['ADMIN', 'MEMBER'] as const
+const MANAGER_ROLES = ['ADMIN', 'MEMBER'] as const
 
 function initials(id: string) {
   const s = id.replace(/^user_/, '').slice(0, 2)
@@ -41,6 +44,8 @@ export function OrgPage() {
   const [slug, setSlug] = useState('')
   const [inviteId, setInviteId] = useState('')
   const [inviteRole, setInviteRole] = useState('MEMBER')
+  const [inviteEmail, setInviteEmail] = useState('')
+  const [inviteToken, setInviteToken] = useState('')
   const [folder, setFolder] = useState('')
   const [display, setDisplay] = useState('')
 
@@ -60,14 +65,38 @@ export function OrgPage() {
   const remove = useRemoveOrgMember(selected)
   const createProject = useCreateOrgProject(selected)
   const plans = useBillingPlans()
-  const orgBilling = useOrgBilling(selected)
 
   const myRole = useMemo(() => {
     const uid = user?.userId
     if (!uid) return ''
     return detail.data?.members.find((m) => m.user_id === uid)?.role ?? ''
   }, [detail.data, user?.userId])
-  const isAdmin = myRole === 'ADMIN'
+  const isOwner = myRole === 'OWNER'
+  const canManage = isOwner || myRole === 'ADMIN'
+  const orgBilling = useOrgBilling(isOwner ? selected : null)
+  const qc = useQueryClient()
+  const storage = useQuery({
+    queryKey: queryKeys.orgs.storage(selected ?? ''),
+    enabled: canManage && Boolean(selected),
+    queryFn: () => orgsApi.storage(selected!),
+  })
+  const audit = useQuery({
+    queryKey: queryKeys.orgs.audit(selected ?? ''),
+    enabled: Boolean(selected) && Boolean(detail.data),
+    queryFn: () => orgsApi.audit(selected!),
+  })
+  const capture = useMutation({
+    mutationFn: ({ projectId, enabled }: { projectId: string; enabled: boolean }) =>
+      orgsApi.setCapture(projectId, enabled),
+    onSuccess: () => {
+      if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.storage(selected) })
+      if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.audit(selected) })
+    },
+  })
+  const emailInvite = useMutation({
+    mutationFn: (input: { email: string; role: string }) => orgsApi.createInvite(selected!, input),
+  })
+  const assignableRoles = isOwner ? (['OWNER', 'ADMIN', 'MEMBER'] as const) : MANAGER_ROLES
 
   const onCreateOrg = (e: FormEvent) => {
     e.preventDefault()
@@ -215,7 +244,7 @@ export function OrgPage() {
                     {detail.data.organization.slug ? (
                       <StatusPill>{detail.data.organization.slug}</StatusPill>
                     ) : null}
-                    {myRole ? <StatusPill tone={isAdmin ? 'teal' : 'neutral'}>{myRole}</StatusPill> : null}
+                    {myRole ? <StatusPill tone={canManage ? 'teal' : 'neutral'}>{myRole}</StatusPill> : null}
                   </div>
                   <p className="mt-1 font-mono text-[11px] text-muted">{detail.data.organization.id}</p>
                 </div>
@@ -228,11 +257,12 @@ export function OrgPage() {
                 <div>
                   <h3 className="text-sm font-medium text-fg">Plan</h3>
                   <p className="mt-1 text-xs text-fg-dim">
-                    Org subscription. Paid upgrades stay disabled until checkout is available.
-                    Platform admins can still assign plans from Admin.
+                    {isOwner
+                      ? 'Org subscription. Paid upgrades stay disabled until checkout is available.'
+                      : 'Billing is visible to organization owners.'}
                   </p>
                 </div>
-                {plans.data ? (
+                {isOwner && plans.data ? (
                   <PlanGrid
                     plans={plans.data}
                     current={orgBilling.data}
@@ -246,9 +276,7 @@ export function OrgPage() {
                       })
                     }
                   />
-                ) : (
-                  <p className="text-sm text-muted">Loading plans…</p>
-                )}
+                ) : null}
               </GlassPanel>
 
               <GlassPanel className="space-y-4 p-5">
@@ -256,7 +284,7 @@ export function OrgPage() {
                   <h3 className="text-sm font-medium text-fg">Members</h3>
                   <StatusPill tone="accent">{`${detail.data.members.length} people`}</StatusPill>
                 </div>
-                {isAdmin ? (
+                {canManage ? (
                   <form onSubmit={onInvite} className="flex flex-wrap items-end gap-2">
                     <label className="block min-w-[12rem] flex-1">
                       <span className="mb-1 block text-xs text-fg-dim">Add by user id</span>
@@ -272,7 +300,7 @@ export function OrgPage() {
                       onChange={(e) => setInviteRole(e.target.value)}
                       className="h-10 rounded-lg border border-border bg-raised px-2 text-xs text-fg outline-none focus:border-amber"
                     >
-                      {ORG_ROLES.map((r) => (
+                      {assignableRoles.map((r) => (
                         <option key={r} value={r}>
                           {r}
                         </option>
@@ -283,9 +311,53 @@ export function OrgPage() {
                       Add
                     </Button>
                   </form>
-                ) : (
-                  <p className="text-xs text-muted">Only org admins can manage membership.</p>
-                )}
+                ) : null}
+                {canManage ? (
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      const email = inviteEmail.trim()
+                      if (!email || !selected) return
+                      emailInvite.mutate(
+                        { email, role: inviteRole },
+                        {
+                          onSuccess: (inv) => {
+                            setInviteToken(inv.token ?? '')
+                            setInviteEmail('')
+                            push({ title: 'Invite created', detail: inv.email, tone: 'teal' })
+                          },
+                          onError: (err) =>
+                            push({
+                              title: 'Invite failed',
+                              detail: err instanceof ApiError ? err.message : 'Unknown error',
+                              tone: 'danger',
+                            }),
+                        },
+                      )
+                    }}
+                    className="flex flex-wrap items-end gap-2"
+                  >
+                    <label className="block min-w-[12rem] flex-1">
+                      <span className="mb-1 block text-xs text-fg-dim">Invite by email</span>
+                      <input
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        placeholder="name@company.dev"
+                        type="email"
+                        className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none focus:border-amber"
+                      />
+                    </label>
+                    <Button type="submit" size="sm" disabled={emailInvite.isPending}>
+                      Create link
+                    </Button>
+                  </form>
+                ) : null}
+                {inviteToken ? (
+                  <p className="break-all font-mono text-[11px] text-fg-dim">Invite token: {inviteToken}</p>
+                ) : null}
+                {!canManage ? (
+                  <p className="text-xs text-muted">Only owners and admins can manage membership.</p>
+                ) : null}
                 <ul className="divide-y divide-border">
                   {detail.data.members.map((m) => {
                     const isSelf = m.user_id === user?.userId
@@ -302,7 +374,7 @@ export function OrgPage() {
                         </div>
                         <select
                           value={m.role}
-                          disabled={!isAdmin || setRole.isPending}
+                          disabled={!canManage || setRole.isPending || (m.role === 'OWNER' && !isOwner)}
                           onChange={(e) =>
                             setRole.mutate(
                               { userId: m.user_id, role: e.target.value },
@@ -319,13 +391,13 @@ export function OrgPage() {
                           }
                           className="h-9 rounded-lg border border-border bg-raised px-2 text-xs text-fg outline-none focus:border-amber disabled:opacity-60"
                         >
-                          {ORG_ROLES.map((r) => (
+                          {(m.role === 'OWNER' && !isOwner ? ['OWNER', ...MANAGER_ROLES] : assignableRoles).map((r) => (
                             <option key={r} value={r}>
                               {r}
                             </option>
                           ))}
                         </select>
-                        {isAdmin && !isSelf ? (
+                        {canManage && !isSelf && (m.role !== 'OWNER' || isOwner) ? (
                           <Button
                             type="button"
                             size="sm"
@@ -357,7 +429,7 @@ export function OrgPage() {
                   <h3 className="text-sm font-medium text-fg">Projects</h3>
                   <StatusPill>{`${detail.data.projects.length}`}</StatusPill>
                 </div>
-                {isAdmin ? (
+                {canManage ? (
                   <form onSubmit={onCreateProject} className="flex flex-wrap items-end gap-2">
                     <input
                       value={folder}
@@ -386,24 +458,96 @@ export function OrgPage() {
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: i * 0.03 }}
                     >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setProjectId(p.id)
-                          navigate('/app/memory')
-                        }}
-                        className="flex w-full items-center justify-between gap-3 rounded-lg border border-border bg-raised/40 px-3 py-2.5 text-left transition hover:border-border-strong"
-                      >
-                        <span>
-                          <span className="block text-sm text-fg">{p.display_name || p.folder_name || p.id}</span>
-                          <span className="font-mono text-[11px] text-muted">{p.folder_name}</span>
-                        </span>
-                        <span className="text-xs text-muted">Open →</span>
-                      </button>
+                      <div className="flex items-center gap-2 rounded-lg border border-border bg-raised/40 px-3 py-2.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProjectId(p.id)
+                            navigate('/app/memory')
+                          }}
+                          className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
+                        >
+                          <span>
+                            <span className="block text-sm text-fg">{p.display_name || p.folder_name || p.id}</span>
+                            <span className="font-mono text-[11px] text-muted">{p.folder_name}</span>
+                          </span>
+                          <span className="text-xs text-muted">Open →</span>
+                        </button>
+                        {canManage ? (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            disabled={capture.isPending}
+                            onClick={() => {
+                              const row = storage.data?.projects.find((item) => item.project_id === p.id)
+                              const enabled = row ? row.capture_enabled : true
+                              capture.mutate(
+                                { projectId: p.id, enabled: !enabled },
+                                {
+                                  onSuccess: () =>
+                                    push({
+                                      title: enabled ? 'Capture off' : 'Capture on',
+                                      detail: p.display_name || p.folder_name,
+                                    }),
+                                  onError: (err) =>
+                                    push({
+                                      title: 'Capture update failed',
+                                      detail: err instanceof ApiError ? err.message : 'Unknown error',
+                                      tone: 'danger',
+                                    }),
+                                },
+                              )
+                            }}
+                          >
+                            {storage.data?.projects.find((item) => item.project_id === p.id)?.capture_enabled === false
+                              ? 'Capture off'
+                              : 'Capture on'}
+                          </Button>
+                        ) : null}
+                      </div>
                     </motion.li>
                   ))}
                   {detail.data.projects.length === 0 ? (
                     <li className="text-sm text-muted">No projects in this org yet.</li>
+                  ) : null}
+                </ul>
+              </GlassPanel>
+
+              {canManage ? (
+                <GlassPanel className="space-y-3 p-5">
+                  <h3 className="text-sm font-medium text-fg">Storage</h3>
+                  <p className="text-xs text-fg-dim">
+                    Private sessions are counts, bytes, and last active time. Titles stay with the owner.
+                  </p>
+                  <ul className="space-y-1 text-sm text-fg">
+                    {(storage.data?.members ?? []).map((row) => (
+                      <li key={row.user_id} className="flex justify-between gap-3">
+                        <span className="truncate font-mono text-xs">{row.user_id}</span>
+                        <span className="text-xs text-fg-dim">
+                          {row.session_count} sessions
+                          {row.last_active_at ? ` · ${formatRelative(row.last_active_at)}` : ''}
+                        </span>
+                      </li>
+                    ))}
+                    {(storage.data?.members ?? []).length === 0 ? (
+                      <li className="text-xs text-muted">No captured sessions yet.</li>
+                    ) : null}
+                  </ul>
+                </GlassPanel>
+              ) : null}
+
+              <GlassPanel className="space-y-3 p-5">
+                <h3 className="text-sm font-medium text-fg">Audit</h3>
+                <ul className="space-y-1">
+                  {(audit.data?.items ?? []).map((ev, i) => (
+                    <li key={`${ev.at}-${ev.action}-${i}`} className="text-xs text-fg-dim">
+                      <span className="text-fg">{ev.action}</span>
+                      {ev.actor_user_id ? ` · ${ev.actor_user_id}` : ''} · {formatRelative(ev.at)}
+                    </li>
+                  ))}
+                  {(audit.data?.items ?? []).length === 0 ? (
+                    <li className="text-xs text-muted">No events yet.</li>
                   ) : null}
                 </ul>
               </GlassPanel>

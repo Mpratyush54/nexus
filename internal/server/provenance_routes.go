@@ -48,6 +48,9 @@ func (s *Server) handleSessionOperationsPost(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusForbidden, "not a project member")
 		return
 	}
+	if s.rejectIfCaptureOff(w, r, body.ProjectID) {
+		return
+	}
 	if _, ok := s.claimSessionWrite(w, r, body.ProjectID, sessionID); !ok {
 		return
 	}

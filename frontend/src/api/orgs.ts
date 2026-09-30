@@ -38,4 +38,46 @@ export const orgsApi = {
   ) {
     return apiRequest<Project>(`/orgs/${orgId}/projects`, { method: 'POST', body: input })
   },
+  storage(orgId: string) {
+    return apiRequest<OrgStorageReport>(`/orgs/${orgId}/storage`)
+  },
+  audit(orgId: string) {
+    return apiRequest<ListResponse<OrgAuditEvent>>(`/orgs/${orgId}/audit?limit=30`)
+  },
+  createInvite(orgId: string, input: { email: string; role?: string }) {
+    return apiRequest<OrgInvite>(`/orgs/${orgId}/invites`, { method: 'POST', body: input })
+  },
+  setCapture(projectId: string, enabled: boolean) {
+    return apiRequest<{ project_id: string; enabled: boolean }>(`/projects/${projectId}/capture`, {
+      method: 'PUT',
+      body: { enabled },
+    })
+  },
+}
+
+export type OrgStorageReport = {
+  members: { user_id: string; session_count: number; last_active_at?: string }[]
+  projects: {
+    project_id: string
+    folder_name: string
+    display_name?: string
+    capture_enabled: boolean
+    session_count: number
+    storage_bytes: number
+  }[]
+}
+
+export type OrgAuditEvent = {
+  at: string
+  actor_user_id?: string
+  action: string
+  resource_kind?: string
+  outcome: string
+}
+
+export type OrgInvite = {
+  id: string
+  email: string
+  role: string
+  token?: string
 }

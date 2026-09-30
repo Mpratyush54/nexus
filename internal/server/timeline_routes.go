@@ -54,6 +54,9 @@ func (s *Server) handleAgentSessionUpsert(w http.ResponseWriter, r *http.Request
 	if !s.authorizeProject(w, r, body.ProjectID) {
 		return
 	}
+	if s.rejectIfCaptureOff(w, r, body.ProjectID) {
+		return
+	}
 	row, err := cs.UpsertAgentSession(r.Context(), &store.AgentSession{
 		ProjectID: body.ProjectID, OwnerUserID: authSubject(r), Harness: body.Harness,
 		NativeID: body.NativeID, OriginMachineID: body.OriginMachineID, Title: body.Title,
@@ -152,7 +155,11 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if s.rejectIfCaptureOff(w, r, row.ProjectID) {
 		return
 	}
 	var body struct {
@@ -203,7 +210,11 @@ func (s *Server) handleAgentVersionCreate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if s.rejectIfCaptureOff(w, r, row.ProjectID) {
 		return
 	}
 	v, err := cs.CreateSessionVersion(r.Context(), r.PathValue("id"), authSubject(r))
@@ -220,7 +231,11 @@ func (s *Server) handleAgentVersionComplete(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if s.rejectIfCaptureOff(w, r, row.ProjectID) {
 		return
 	}
 	version, err := strconv.Atoi(r.PathValue("version"))
@@ -297,6 +312,9 @@ func (s *Server) handleBlobPut(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authorizeProject(w, r, body.ProjectID) {
+		return
+	}
+	if s.rejectIfCaptureOff(w, r, body.ProjectID) {
 		return
 	}
 	raw, err := base64.StdEncoding.DecodeString(body.BodyB64)

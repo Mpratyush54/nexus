@@ -50,6 +50,7 @@ func (s *Server) registerOrgRoutes() {
 	s.Mux.HandleFunc("PUT /orgs/{id}/members/{userId}/role", s.requireAuth(s.handleOrgMemberSetRole))
 	s.Mux.HandleFunc("DELETE /orgs/{id}/members/{userId}", s.requireAuth(s.handleOrgMemberRemove))
 	s.Mux.HandleFunc("POST /orgs/{id}/projects", s.requireAuth(s.handleOrgProjectCreate))
+	s.registerOrgAdminRoutes()
 }
 
 type orgCreateRequest struct {
@@ -227,6 +228,9 @@ func (s *Server) handleOrgMemberAdd(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "user_id is required")
 		return
 	}
+	if !s.ownerMayChangeRole(w, r, os, id, "", req.Role, false) {
+		return
+	}
 	if !s.enforcePlanDimension(w, r, store.OwnerOrg, id, "members") {
 		return
 	}
@@ -264,6 +268,9 @@ func (s *Server) handleOrgMemberSetRole(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, "role is required")
 		return
 	}
+	if !s.ownerMayChangeRole(w, r, os, id, userID, req.Role, false) {
+		return
+	}
 	m, err := os.SetOrgMemberRole(r.Context(), id, userID, req.Role)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -296,6 +303,9 @@ func (s *Server) handleOrgMemberRemove(w http.ResponseWriter, r *http.Request) {
 	}
 	if userID == "" {
 		writeError(w, http.StatusBadRequest, "userId is required")
+		return
+	}
+	if !s.ownerMayChangeRole(w, r, os, id, userID, "", true) {
 		return
 	}
 	if err := os.RemoveOrgMember(r.Context(), id, userID); err != nil {

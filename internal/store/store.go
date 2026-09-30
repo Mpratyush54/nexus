@@ -137,6 +137,10 @@ type MemStore struct {
 	sessionTurns    map[string][]SessionTurn
 	agentGrants     map[string][]agentGrant
 	storageUsage    map[string]storageRec
+	// Org admin (migration 032): capture switch and link invites.
+	projectCapture map[string]bool
+	orgInvites     map[string]*OrgInvite
+	inviteByToken  map[string]string
 }
 
 // memSubscription is one in-process event subscriber.
@@ -180,6 +184,9 @@ func NewMemStore() *MemStore {
 		sessionTurns:    make(map[string][]SessionTurn),
 		agentGrants:     make(map[string][]agentGrant),
 		storageUsage:    make(map[string]storageRec),
+		projectCapture:  make(map[string]bool),
+		orgInvites:      make(map[string]*OrgInvite),
+		inviteByToken:   make(map[string]string),
 	}
 }
 

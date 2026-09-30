@@ -58,12 +58,21 @@ func TestMemStoreOrganizations(t *testing.T) {
 		t.Fatalf("ListOrgProjects: %v %+v", err, projects)
 	}
 
-	// alice is OWNER and carol is ADMIN; removing alice is fine, the last manager is not.
+	// The last owner stays even when another admin remains.
+	if err := s.RemoveOrgMember(ctx, o.ID, "alice"); err == nil {
+		t.Fatal("expected conflict removing last owner")
+	}
+	if _, err := s.SetOrgMemberRole(ctx, o.ID, "alice", OrgRoleAdmin); err == nil {
+		t.Fatal("expected conflict demoting last owner")
+	}
+	if _, err := s.SetOrgMemberRole(ctx, o.ID, "carol", OrgRoleOwner); err != nil {
+		t.Fatalf("promote carol to owner: %v", err)
+	}
 	if err := s.RemoveOrgMember(ctx, o.ID, "alice"); err != nil {
-		t.Fatalf("RemoveOrgMember alice: %v", err)
+		t.Fatalf("RemoveOrgMember alice after a second owner: %v", err)
 	}
 	if err := s.RemoveOrgMember(ctx, o.ID, "carol"); err == nil {
-		t.Fatal("expected conflict removing last admin")
+		t.Fatal("expected conflict removing last owner")
 	}
 }
 

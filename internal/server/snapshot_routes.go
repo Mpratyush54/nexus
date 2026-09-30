@@ -58,6 +58,9 @@ func (s *Server) handleSnapshotPost(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeProject(w, r, body.ProjectID) {
 		return
 	}
+	if s.rejectIfCaptureOff(w, r, body.ProjectID) {
+		return
+	}
 	decodeB64 := func(s string) ([]byte, error) {
 		s = strings.TrimSpace(s)
 		if s == "" {

@@ -1,7 +1,8 @@
 // organizations.go — org CRUD + membership (issue #168 / Phase 8).
 //
-// Organizations sit above projects. Creators become ADMIN; org ADMINS get
-// full access to every project with projects.org_id set (see IsProjectMember).
+// Organizations sit above projects. Creators become OWNER. OWNER and ADMIN
+// get project-settings access for every project with projects.org_id set
+// (see IsProjectMember). Session content stays owner-or-grantee.
 // Both MemStore and PostgresStore implement the same surface so HTTP handlers
 // stay store-agnostic via the orgStore seam in the server package.
 package store
@@ -23,6 +24,16 @@ const (
 	OrgRoleAdmin  = "ADMIN"
 	OrgRoleMember = "MEMBER"
 )
+
+func countOrgRole(members map[string]string, role string) int {
+	n := 0
+	for _, r := range members {
+		if r == role {
+			n++
+		}
+	}
+	return n
+}
 
 // OrgManages reports whether an org role inherits project-settings access.
 // Session content stays owner-or-grantee either way.
@@ -275,8 +286,12 @@ func (s *MemStore) SetOrgMemberRole(ctx context.Context, orgID, userID, role str
 	if _, ok := s.orgs[orgID]; !ok {
 		return nil, fmt.Errorf("store: organization %s: %w", orgID, ErrNotFound)
 	}
-	if _, ok := s.orgMembers[orgID][userID]; !ok {
+	current, ok := s.orgMembers[orgID][userID]
+	if !ok {
 		return nil, fmt.Errorf("store: org member %s/%s: %w", orgID, userID, ErrNotFound)
+	}
+	if current == OrgRoleOwner && norm != OrgRoleOwner && countOrgRole(s.orgMembers[orgID], OrgRoleOwner) <= 1 {
+		return nil, fmt.Errorf("store: cannot demote last org owner: %w", ErrConflict)
 	}
 	if !OrgManages(norm) {
 		managers := 0
@@ -308,6 +323,9 @@ func (s *MemStore) RemoveOrgMember(ctx context.Context, orgID, userID string) er
 	role, ok := s.orgMembers[orgID][userID]
 	if !ok {
 		return nil
+	}
+	if role == OrgRoleOwner && countOrgRole(s.orgMembers[orgID], OrgRoleOwner) <= 1 {
+		return fmt.Errorf("store: cannot remove last org owner: %w", ErrConflict)
 	}
 	if OrgManages(role) {
 		managers := 0
@@ -604,23 +622,34 @@ func (s *PostgresStore) SetOrgMemberRole(ctx context.Context, orgID, userID, rol
 	if orgID == "" || userID == "" {
 		return nil, errors.New("store: org id and user id are required")
 	}
+	var current string
+	cerr := s.pool.QueryRow(ctx,
+		`SELECT role FROM organization_members
+		  WHERE org_id = $1::uuid AND user_id = $2::uuid`,
+		orgID, userID).Scan(&current)
+	if errors.Is(cerr, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("store: org member %s/%s: %w", orgID, userID, ErrNotFound)
+	}
+	if cerr != nil {
+		return nil, fmt.Errorf("store: get org member: %w", cerr)
+	}
+	if current == OrgRoleOwner && norm != OrgRoleOwner {
+		var owners int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM organization_members
+			  WHERE org_id = $1::uuid AND role = 'OWNER'`, orgID).Scan(&owners); err != nil {
+			return nil, fmt.Errorf("store: count org owners: %w", err)
+		}
+		if owners <= 1 {
+			return nil, fmt.Errorf("store: cannot demote last org owner: %w", ErrConflict)
+		}
+	}
 	if !OrgManages(norm) {
 		var admins int
 		if err := s.pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM organization_members
 			  WHERE org_id = $1::uuid AND role IN ('OWNER', 'ADMIN')`, orgID).Scan(&admins); err != nil {
 			return nil, fmt.Errorf("store: count org admins: %w", err)
-		}
-		var current string
-		cerr := s.pool.QueryRow(ctx,
-			`SELECT role FROM organization_members
-			  WHERE org_id = $1::uuid AND user_id = $2::uuid`,
-			orgID, userID).Scan(&current)
-		if errors.Is(cerr, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: org member %s/%s: %w", orgID, userID, ErrNotFound)
-		}
-		if cerr != nil {
-			return nil, fmt.Errorf("store: get org member: %w", cerr)
 		}
 		if OrgManages(current) && admins <= 1 {
 			return nil, fmt.Errorf("store: cannot demote last org admin: %w", ErrConflict)
@@ -657,6 +686,17 @@ func (s *PostgresStore) RemoveOrgMember(ctx context.Context, orgID, userID strin
 	}
 	if err != nil {
 		return fmt.Errorf("store: get org member: %w", err)
+	}
+	if role == OrgRoleOwner {
+		var owners int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM organization_members
+			  WHERE org_id = $1::uuid AND role = 'OWNER'`, orgID).Scan(&owners); err != nil {
+			return fmt.Errorf("store: count org owners: %w", err)
+		}
+		if owners <= 1 {
+			return fmt.Errorf("store: cannot remove last org owner: %w", ErrConflict)
+		}
 	}
 	if OrgManages(role) {
 		var admins int

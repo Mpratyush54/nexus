@@ -36,16 +36,15 @@ func TestAgentSessionPostgresRoundTrip(t *testing.T) {
 	}
 
 	native := "ses_pg_roundtrip"
+	body := []byte("hello-cloud")
+	sum := sha256.Sum256(body)
+	hash := hex.EncodeToString(sum[:])
 	cleanup := func() {
 		bg := context.Background()
-		var id string
-		_ = s.pool.QueryRow(bg, `
-			SELECT id::text FROM agent_sessions
-			WHERE project_id = $1::uuid AND native_id = $2`, projectID, native).Scan(&id)
-		if id != "" {
-			_, _ = s.pool.Exec(bg, `DELETE FROM agent_sessions WHERE id = $1::uuid`, id)
-		}
-		_, _ = s.pool.Exec(bg, `DELETE FROM blobs WHERE project_id = $1::uuid AND sha256 LIKE 'aa%'`, projectID)
+		_, _ = s.pool.Exec(bg, `
+			DELETE FROM agent_sessions
+			WHERE project_id = $1::uuid AND native_id = $2`, projectID, native)
+		_, _ = s.pool.Exec(bg, `DELETE FROM blobs WHERE project_id = $1::uuid AND sha256 = $2`, projectID, hash)
 	}
 	cleanup()
 	t.Cleanup(cleanup)
@@ -64,9 +63,6 @@ func TestAgentSessionPostgresRoundTrip(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("owner read %v %v", ok, err)
 	}
-	body := []byte("hello-cloud")
-	sum := sha256.Sum256(body)
-	hash := hex.EncodeToString(sum[:])
 	missing, err := s.MissingBlobs(ctx, projectID, []string{hash})
 	if err != nil || len(missing) != 1 {
 		t.Fatalf("missing=%v err=%v", missing, err)

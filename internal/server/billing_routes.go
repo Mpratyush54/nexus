@@ -71,7 +71,7 @@ func (s *Server) handleOrgBillingGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("id"))
-	if !s.authorizeOrgMember(w, r, os, id) {
+	if !s.authorizeOrgOwner(w, r, os, id) {
 		return
 	}
 	s.writeBillingSnapshot(w, r, store.OwnerOrg, id)
@@ -83,7 +83,7 @@ func (s *Server) handleOrgBillingSet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := strings.TrimSpace(r.PathValue("id"))
-	if !s.authorizeOrgAdmin(w, r, os, id) {
+	if !s.authorizeOrgOwner(w, r, os, id) {
 		return
 	}
 	var req billingSetRequest
