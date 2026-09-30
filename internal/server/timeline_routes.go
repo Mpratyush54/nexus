@@ -25,6 +25,7 @@ func (s *Server) registerTimelineRoutes() {
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/versions/{version}/complete", s.requireAuth(s.handleAgentVersionComplete))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/forks", s.requireAuth(s.handleAgentSessionForks))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/fork", s.requireAuth(s.handleAgentSessionFork))
+	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/merge-code", s.requireAuth(s.handleAgentSessionMergeCode))
 	s.Mux.HandleFunc("POST /v1/blobs/missing", s.requireAuth(s.handleBlobsMissing))
 	s.Mux.HandleFunc("PUT /v1/blobs/{sha256}", s.requireAuth(s.handleBlobPut))
 	s.Mux.HandleFunc("GET /v1/timeline", s.requireAuth(s.handleTimeline))
@@ -151,6 +152,81 @@ func (s *Server) handleAgentSessionFork(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusCreated, child)
+}
+
+func (s *Server) handleAgentSessionMergeCode(w http.ResponseWriter, r *http.Request) {
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return
+	}
+	target, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	var body struct {
+		FromSessionID string `json:"from_session_id"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	fromID := strings.TrimSpace(body.FromSessionID)
+	if fromID == "" {
+		writeError(w, http.StatusBadRequest, "from_session_id is required")
+		return
+	}
+	from, ok := s.requireAgentRead(w, r, fromID)
+	if !ok {
+		return
+	}
+	if from.ID == target.ID {
+		writeError(w, http.StatusBadRequest, "from_session_id must differ from the target session")
+		return
+	}
+	targetBranch := forkBranchName(target)
+	fromBranch := forkBranchName(from)
+	marked, err := cs.MarkAgentSessionCodeMerged(r.Context(), from.ID, target.ID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"target_session_id": target.ID,
+		"from_session_id":   from.ID,
+		"target_branch":     targetBranch,
+		"from_branch":       fromBranch,
+		"new_session":       false,
+		"note":              "Code-only merge (D17): conversations stay separate; no new session was created",
+		"instructions": []string{
+			"git fetch --all",
+			"git checkout " + targetBranch,
+			"git merge --no-ff " + fromBranch,
+			"# resolve conflicts in your editor, then: git commit",
+			"# or open a PR: gh pr create --base " + targetBranch + " --head " + fromBranch,
+		},
+		"merged_marker": map[string]any{
+			"from_session_id":  marked.ID,
+			"code_merged_into": marked.CodeMergedInto,
+			"code_merged_at":   marked.CodeMergedAt,
+			"lineage_kind":     marked.LineageKind,
+		},
+	})
+}
+
+func forkBranchName(sess *store.AgentSession) string {
+	if sess == nil {
+		return "fork/unknown"
+	}
+	owner := strings.TrimSpace(sess.OwnerUserID)
+	if owner == "" {
+		owner = "user"
+	}
+	slug := strings.TrimSpace(sess.NativeID)
+	if slug == "" {
+		slug = sess.ID
+	}
+	replacer := strings.NewReplacer(" ", "-", "/", "-", "\\", "-", ":", "-")
+	return "fork/" + replacer.Replace(owner) + "/" + replacer.Replace(slug)
 }
 
 func (s *Server) handleAgentSessionGrant(w http.ResponseWriter, r *http.Request) {

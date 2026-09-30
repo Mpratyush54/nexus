@@ -15,6 +15,7 @@ namespace Nexus.Core
         public const string SessionsShare = "sessions.share";
         public const string SessionsUnshare = "sessions.unshare";
         public const string SessionsGrants = "sessions.grants";
+        public const string SessionsRestoreIdeHistory = "sessions.restore_ide_history";
         public const string FilesRead = "files.read";
         public const string FilesDiff = "files.diff";
         public const string ContinueStart = "continue.start";

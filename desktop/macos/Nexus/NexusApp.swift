@@ -27,6 +27,7 @@ struct NexusApp: App {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NxClient.shared.start()
+        UpdateService.shared.start()
         Task { @MainActor in
             await ShellModel.shared.refreshBanner()
         }

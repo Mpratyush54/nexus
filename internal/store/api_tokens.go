@@ -158,3 +158,33 @@ func (s *APITokenStore) Revoke(ctx context.Context, userID, tokenID string) erro
 	}
 	return nil
 }
+
+// CountActiveForUser returns the number of non-revoked API tokens for userID.
+func (s *APITokenStore) CountActiveForUser(ctx context.Context, userID string) (int, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return 0, errors.New("store: user_id is required")
+	}
+	var n int
+	err := s.db.QueryRow(ctx,
+		`SELECT COUNT(*)::int FROM api_tokens WHERE user_id = $1 AND revoked_at IS NULL`, userID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("store: count api tokens: %w", err)
+	}
+	return n, nil
+}
+
+// RevokeAllForUser soft-deletes every active API token for userID.
+func (s *APITokenStore) RevokeAllForUser(ctx context.Context, userID string) (int, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return 0, errors.New("store: user_id is required")
+	}
+	tag, err := s.db.Exec(ctx,
+		`UPDATE api_tokens SET revoked_at = now()
+		 WHERE user_id = $1 AND revoked_at IS NULL`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("store: revoke all api tokens: %w", err)
+	}
+	return int(tag.RowsAffected()), nil
+}

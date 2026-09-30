@@ -278,3 +278,56 @@ func TestOffboardCountsOmitSessionContent(t *testing.T) {
 		t.Fatalf("missing member.offboarded audit: %+v", evs)
 	}
 }
+
+func TestOffboardPreviewCountsOnly(t *testing.T) {
+	s := newTestServer()
+	s.registerGuestOffboardRoutes()
+	mem := s.Store.(*store.MemStore)
+	ctx := t.Context()
+
+	org, err := mem.CreateOrganization(ctx, "Acme", "acme-preview", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.AddOrgMember(ctx, org.ID, "carol", store.OrgRoleAdmin, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.AddOrgMember(ctx, org.ID, "leaver", store.OrgRoleMember, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := mem.CreateOrgProject(ctx, org.ID, "org-repo", "Org", "", "", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.GrantMember(ctx, proj.ID, "leaver", "alice"); err != nil {
+		t.Fatal(err)
+	}
+	carol := loginAs(t, s, "carol")
+	leaver := loginAs(t, s, "leaver")
+
+	const title = "SECRET-TITLE"
+	rec := doJSON(t, s, http.MethodPost, "/v1/agent-sessions", leaver, map[string]any{
+		"project_id": proj.ID, "harness": "claude", "native_id": "ses_preview",
+		"title": title, "summary": "SECRET-SUMMARY", "visibility": "private",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("session: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := mem.PutSecretKey(ctx, "blob-preview", "leaver", []byte("wrapped-key-bytes")); err != nil {
+		t.Fatal(err)
+	}
+
+	rec = doJSON(t, s, http.MethodGet, "/orgs/"+org.ID+"/offboard/preview?user=leaver", carol, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("preview: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, title) || strings.Contains(body, "SECRET-SUMMARY") || strings.Contains(body, "blob-preview") {
+		t.Fatalf("preview leaked content: %s", body)
+	}
+	var prev store.OffboardPreview
+	decodeBody(t, rec, &prev)
+	if prev.Sessions != 1 || prev.Grants < 1 {
+		t.Fatalf("preview = %+v", prev)
+	}
+}

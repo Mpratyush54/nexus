@@ -13,6 +13,7 @@ import (
 	"central-memory/internal/blobs"
 	"central-memory/internal/cache"
 	"central-memory/internal/continuex"
+	"central-memory/internal/idehistory"
 	"central-memory/internal/outbox"
 	"central-memory/internal/secrets"
 	"central-memory/internal/teleport"
@@ -306,5 +307,44 @@ func TestTeleportPreparePlanAndApply(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(dest, "hello.txt"))
 	if err != nil || string(got) != string(content) {
 		t.Fatalf("restored=%q err=%v", got, err)
+	}
+}
+
+func TestRestoreIDEHistoryCursor(t *testing.T) {
+	idehistory.AllowlistedCursorVersions["0.0-core-test"] = true
+	t.Cleanup(func() { delete(idehistory.AllowlistedCursorVersions, "0.0-core-test") })
+
+	root := t.TempDir()
+	chats := filepath.Join(root, "globalStorage")
+	if err := os.MkdirAll(chats, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(chats, "state.vscdb")
+	if err := os.WriteFile(target, []byte("db"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{
+		"agent":      "cursor",
+		"backup_dir": filepath.Join(root, "bak"),
+		"target_db":  target,
+		"session_id": "core-sess-1",
+		"version":    "0.0-core-test",
+		"title":      "from core",
+	})
+	out, err := Call(context.Background(), "sessions.restore_ide_history", raw, Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(*idehistory.Result)
+	if res.Mode != "sidecar" {
+		t.Fatalf("%+v", res)
+	}
+	if _, err := os.Stat(res.SidecarPath); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = Call(context.Background(), "sessions.restore_ide_history", json.RawMessage(`{"agent":"windsurf","session_id":"w","backup_dir":"/tmp","target_db":"/tmp/x"}`), Deps{})
+	if err == nil || !strings.Contains(err.Error(), "experimental") {
+		t.Fatalf("windsurf: %v", err)
 	}
 }

@@ -28,6 +28,7 @@ func (s *Server) registerOrgAdminRoutes() {
 	s.Mux.HandleFunc("POST /orgs/invites/accept", s.requireAuth(s.handleOrgInviteAccept))
 	s.Mux.HandleFunc("GET /projects/{id}/capture", s.requireAuth(s.handleProjectCaptureGet))
 	s.Mux.HandleFunc("PUT /projects/{id}/capture", s.requireAuth(s.handleProjectCaptureSet))
+	s.registerLegalHoldRoutes()
 }
 
 func (s *Server) orgSharesStore() (store.OrgSharesStore, bool) {

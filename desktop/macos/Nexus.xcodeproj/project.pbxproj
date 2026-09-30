@@ -14,6 +14,7 @@
 		B10000000000000000000005 /* Screens.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000005 /* Screens.swift */; };
 		B10000000000000000000006 /* AgentCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000006 /* AgentCatalog.swift */; };
 		B10000000000000000000007 /* NxMethods.swift in Sources */ = {isa = PBXBuildFile; fileRef = F10000000000000000000007 /* NxMethods.swift */; };
+		B10000000000000000000008 /* UpdateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1000000000000000000000C /* UpdateService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 		F10000000000000000000009 /* Nexus-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Nexus-Bridging-Header.h"; sourceTree = "<group>"; };
 		F1000000000000000000000A /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		F1000000000000000000000B /* Nexus.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Nexus.entitlements; sourceTree = "<group>"; };
+		F1000000000000000000000C /* UpdateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -50,6 +52,7 @@
 				F10000000000000000000004 /* ShellView.swift */,
 				F10000000000000000000005 /* Screens.swift */,
 				F10000000000000000000006 /* AgentCatalog.swift */,
+				F1000000000000000000000C /* UpdateService.swift */,
 				F10000000000000000000009 /* Nexus-Bridging-Header.h */,
 				F1000000000000000000000A /* Info.plist */,
 				F1000000000000000000000B /* Nexus.entitlements */,
@@ -143,6 +146,7 @@
 				B10000000000000000000005 /* Screens.swift in Sources */,
 				B10000000000000000000006 /* AgentCatalog.swift in Sources */,
 				B10000000000000000000007 /* NxMethods.swift in Sources */,
+				B10000000000000000000008 /* UpdateService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -204,6 +208,7 @@
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/lib";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1;
+				/* TODO(Sparkle): add -framework Sparkle here once appcast + SUFeedURL are ready. */
 				OTHER_LDFLAGS = "-lnexuscore";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.pratyushes.nexus;
 				PRODUCT_NAME = Nexus;
@@ -232,6 +237,7 @@
 				LIBRARY_SEARCH_PATHS = "$(SRCROOT)/lib";
 				MACOSX_DEPLOYMENT_TARGET = 14.0;
 				MARKETING_VERSION = 0.1;
+				/* TODO(Sparkle): add -framework Sparkle here once appcast + SUFeedURL are ready. */
 				OTHER_LDFLAGS = "-lnexuscore";
 				PRODUCT_BUNDLE_IDENTIFIER = dev.pratyushes.nexus;
 				PRODUCT_NAME = Nexus;

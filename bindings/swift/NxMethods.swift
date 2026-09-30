@@ -12,6 +12,7 @@ public enum NxMethods {
     public static let sessionsShare = "sessions.share"
     public static let sessionsUnshare = "sessions.unshare"
     public static let sessionsGrants = "sessions.grants"
+    public static let sessionsRestoreIdeHistory = "sessions.restore_ide_history"
     public static let filesRead = "files.read"
     public static let filesDiff = "files.diff"
     public static let continueStart = "continue.start"

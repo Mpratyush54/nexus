@@ -299,6 +299,75 @@ func TestAgentSessionForkRoutes(t *testing.T) {
 	}
 }
 
+func TestAgentSessionMergeCodeStub(t *testing.T) {
+	s := newTestServer()
+	mem := s.Store.(*store.MemStore)
+	ctx := t.Context()
+	proj, err := mem.ResolveProject(ctx, "", "", "merge-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.ClaimProject(ctx, proj.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	owner := loginAs(t, s, "owner")
+	rec := doJSON(t, s, http.MethodPost, "/v1/agent-sessions", owner, map[string]any{
+		"project_id": proj.ID, "harness": "claude", "native_id": "ses_merge_root",
+		"origin_machine_id": "lap",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("session: %d %s", rec.Code, rec.Body.String())
+	}
+	var parent store.AgentSession
+	decodeBody(t, rec, &parent)
+	rec = doJSON(t, s, http.MethodPost, "/v1/agent-sessions/"+parent.ID+"/fork", owner, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("fork: %d %s", rec.Code, rec.Body.String())
+	}
+	var child store.AgentSession
+	decodeBody(t, rec, &child)
+
+	before, err := mem.GetAgentSession(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.CodeMergedInto != "" {
+		t.Fatalf("precondition: already marked %+v", before)
+	}
+
+	rec = doJSON(t, s, http.MethodPost, "/v1/agent-sessions/"+parent.ID+"/merge-code", owner, map[string]any{
+		"from_session_id": child.ID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge-code: %d %s", rec.Code, rec.Body.String())
+	}
+	var out map[string]any
+	decodeBody(t, rec, &out)
+	if out["new_session"] != false {
+		t.Fatalf("must not create a session: %+v", out)
+	}
+	if out["from_branch"] == nil || out["target_branch"] == nil {
+		t.Fatalf("missing branches: %+v", out)
+	}
+	instr, _ := out["instructions"].([]any)
+	if len(instr) < 2 {
+		t.Fatalf("instructions=%v", instr)
+	}
+
+	marked, err := mem.GetAgentSession(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked.CodeMergedInto != parent.ID || marked.CodeMergedAt == nil {
+		t.Fatalf("lineage marker missing: %+v", marked)
+	}
+	// Still exactly one fork child; merge must not mint a new session.
+	forks, err := mem.ListAgentSessionForks(ctx, parent.ID)
+	if err != nil || len(forks) != 1 || forks[0].ID != child.ID {
+		t.Fatalf("forks after merge: %+v err=%v", forks, err)
+	}
+}
+
 func TestGrantLiveAndPointInTimeBody(t *testing.T) {
 	s := newTestServer()
 	mem := s.Store.(*store.MemStore)

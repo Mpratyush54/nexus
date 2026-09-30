@@ -28,6 +28,7 @@ func (s *Server) registerGuestOffboardRoutes() {
 	}
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/guest-links", s.requireAuth(s.handleGuestLinkCreate))
 	s.Mux.HandleFunc("POST /v1/guest-links/accept", s.requireAuth(s.handleGuestLinkAccept))
+	s.Mux.HandleFunc("GET /orgs/{id}/offboard/preview", s.requireAuth(s.handleOrgOffboardPreview))
 	s.Mux.HandleFunc("POST /orgs/{id}/offboard", s.requireAuth(s.handleOrgOffboard))
 }
 
@@ -130,6 +131,42 @@ func (s *Server) handleGuestLinkAccept(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleOrgOffboardPreview(w http.ResponseWriter, r *http.Request) {
+	os, ok := s.requireOrgStore(w)
+	if !ok {
+		return
+	}
+	gs, ok := s.guestOffboardStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "offboarding unavailable")
+		return
+	}
+	orgID := strings.TrimSpace(r.PathValue("id"))
+	if !s.authorizeOrgAdmin(w, r, os, orgID) {
+		return
+	}
+	fromUser := strings.TrimSpace(r.URL.Query().Get("user"))
+	if fromUser == "" {
+		writeError(w, http.StatusBadRequest, "user query parameter is required")
+		return
+	}
+	prev, err := gs.PreviewOffboard(r.Context(), orgID, fromUser)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "organization not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if s.Tokens != nil {
+		if n, err := s.Tokens.CountActiveForUser(r.Context(), fromUser); err == nil {
+			prev.Tokens = n
+		}
+	}
+	writeJSON(w, http.StatusOK, prev)
+}
+
 func (s *Server) handleOrgOffboard(w http.ResponseWriter, r *http.Request) {
 	os, ok := s.requireOrgStore(w)
 	if !ok {
@@ -170,6 +207,11 @@ func (s *Server) handleOrgOffboard(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if s.Tokens != nil {
+		if n, err := s.Tokens.RevokeAllForUser(r.Context(), fromUser); err == nil {
+			res.TokensRevoked = n
+		}
+	}
 	s.recordAudit(r, store.AuditEvent{
 		Action:       "member.offboarded",
 		ResourceKind: "user",
@@ -177,9 +219,11 @@ func (s *Server) handleOrgOffboard(w http.ResponseWriter, r *http.Request) {
 		TenantID:     orgID,
 		ActorKind:    "admin",
 		Metadata: map[string]any{
-			"to_user_id":           toUser,
-			"sessions_transferred": res.SessionsTransferred,
-			"grants_kept":          res.GrantsKept,
+			"to_user_id":                toUser,
+			"sessions_transferred":      res.SessionsTransferred,
+			"grants_kept":               res.GrantsKept,
+			"secret_grants_transferred": res.SecretGrantsTransferred,
+			"tokens_revoked":            res.TokensRevoked,
 		},
 	})
 	writeJSON(w, http.StatusOK, res)

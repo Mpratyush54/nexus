@@ -18,6 +18,7 @@ import (
 	"central-memory/internal/cache"
 	"central-memory/internal/capture"
 	"central-memory/internal/continuex"
+	"central-memory/internal/idehistory"
 	"central-memory/internal/outbox"
 	"central-memory/internal/secrets"
 	"central-memory/internal/teleport"
@@ -77,6 +78,7 @@ func Methods() []string {
 		"sessions.versions",
 		"sessions.unshare",
 		"sessions.grants",
+		"sessions.restore_ide_history",
 		"agents.list",
 		"agents.configure_mcp",
 		"runs.message",
@@ -235,6 +237,8 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		return readWorkspace(deps.Root, body.Path)
 	case "secrets.restore":
 		return restoreSecret(deps, args)
+	case "sessions.restore_ide_history":
+		return restoreIDEHistory(args)
 	case "status.get", "diagnostics.get":
 		return map[string]any{"ok": true, "online": deps.Online, "pending_uploads": pendingCount(deps)}, nil
 	case "auth.callback":
@@ -583,4 +587,71 @@ func restoreSecret(deps Deps, args json.RawMessage) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"path": rel, "restored": true}, nil
+}
+
+func restoreIDEHistory(args json.RawMessage) (any, error) {
+	var body struct {
+		Agent          string          `json:"agent"`
+		BackupDir      string          `json:"backup_dir"`
+		TargetDB       string          `json:"target_db"`
+		SessionID      string          `json:"session_id"`
+		Version        string          `json:"version"`
+		Title          string          `json:"title"`
+		Turns          json.RawMessage `json:"turns"`
+		SessionPayload json.RawMessage `json:"session_payload"`
+	}
+	if err := decode(args, &body); err != nil {
+		return nil, err
+	}
+	agent := strings.ToLower(strings.TrimSpace(body.Agent))
+	payload := idehistory.SessionPayload{
+		SessionID: strings.TrimSpace(body.SessionID),
+		Agent:     agent,
+		Version:   strings.TrimSpace(body.Version),
+		Title:     strings.TrimSpace(body.Title),
+		Turns:     body.Turns,
+	}
+	if len(body.SessionPayload) > 0 {
+		var embedded idehistory.SessionPayload
+		if err := json.Unmarshal(body.SessionPayload, &embedded); err != nil {
+			return nil, err
+		}
+		if payload.SessionID == "" {
+			payload.SessionID = embedded.SessionID
+		}
+		if payload.Version == "" {
+			payload.Version = embedded.Version
+		}
+		if payload.Title == "" {
+			payload.Title = embedded.Title
+		}
+		if len(payload.Turns) == 0 {
+			payload.Turns = embedded.Turns
+		}
+		if len(embedded.Raw) > 0 {
+			payload.Raw = embedded.Raw
+		} else {
+			payload.Raw = body.SessionPayload
+		}
+	}
+	var (
+		res *idehistory.Result
+		err error
+	)
+	switch agent {
+	case "cursor", "cursor-ide":
+		res, err = idehistory.WriteCursorHistory(body.BackupDir, body.TargetDB, payload)
+	case "antigravity", "antigravity-ide", "agy-ide":
+		res, err = idehistory.WriteAntigravityHistory(body.BackupDir, body.TargetDB, payload)
+	case "windsurf", "devin", "devin-desktop":
+		res, err = idehistory.WriteWindsurfHistory(body.BackupDir, body.TargetDB, payload)
+	case "":
+		return nil, errors.New("sessions.restore_ide_history requires agent")
+	default:
+		return nil, errors.New("sessions.restore_ide_history: unsupported agent " + agent)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }

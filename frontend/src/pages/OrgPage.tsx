@@ -48,6 +48,13 @@ export function OrgPage() {
   const [inviteToken, setInviteToken] = useState('')
   const [folder, setFolder] = useState('')
   const [display, setDisplay] = useState('')
+  const [offboardUser, setOffboardUser] = useState('')
+  const [offboardReceiver, setOffboardReceiver] = useState('')
+  const [offboardPreview, setOffboardPreview] = useState<{
+    sessions: number
+    grants: number
+    tokens: number
+  } | null>(null)
 
   useEffect(() => {
     if (orgIdParam) {
@@ -85,12 +92,42 @@ export function OrgPage() {
     enabled: Boolean(selected) && Boolean(detail.data),
     queryFn: () => orgsApi.audit(selected!),
   })
+  const shares = useQuery({
+    queryKey: queryKeys.orgs.shares(selected ?? ''),
+    enabled: canManage && Boolean(selected),
+    queryFn: () => orgsApi.shares(selected!),
+  })
   const capture = useMutation({
     mutationFn: ({ projectId, enabled }: { projectId: string; enabled: boolean }) =>
       orgsApi.setCapture(projectId, enabled),
     onSuccess: () => {
       if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.storage(selected) })
       if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.audit(selected) })
+    },
+  })
+  const revokeShare = useMutation({
+    mutationFn: ({ sessionId, userId }: { sessionId: string; userId: string }) =>
+      orgsApi.revokeShare(selected!, sessionId, userId),
+    onSuccess: () => {
+      if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.shares(selected) })
+      if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.audit(selected) })
+    },
+  })
+  const previewOffboard = useMutation({
+    mutationFn: (userId: string) => orgsApi.offboardPreview(selected!, userId),
+    onSuccess: (data) => setOffboardPreview(data),
+  })
+  const runOffboard = useMutation({
+    mutationFn: (input: { from_user_id: string; to_user_id: string }) =>
+      orgsApi.offboard(selected!, input),
+    onSuccess: () => {
+      setOffboardPreview(null)
+      setOffboardUser('')
+      setOffboardReceiver('')
+      if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.audit(selected) })
+      if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.storage(selected) })
+      if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.shares(selected) })
+      if (selected) void qc.invalidateQueries({ queryKey: queryKeys.orgs.detail(selected) })
     },
   })
   const emailInvite = useMutation({
@@ -534,6 +571,150 @@ export function OrgPage() {
                       <li className="text-xs text-muted">No captured sessions yet.</li>
                     ) : null}
                   </ul>
+                </GlassPanel>
+              ) : null}
+
+              {canManage ? (
+                <GlassPanel className="space-y-3 p-5">
+                  <h3 className="text-sm font-medium text-fg">Shares</h3>
+                  <p className="text-xs text-fg-dim">
+                    Active person grants across org projects. Session titles are never shown.
+                  </p>
+                  <ul className="divide-y divide-border">
+                    {(shares.data?.items ?? []).map((row) => (
+                      <li
+                        key={`${row.session_id}-${row.grantee_id}`}
+                        className="flex flex-wrap items-center gap-3 py-2.5"
+                      >
+                        <div className="min-w-0 flex-1 font-mono text-[11px] text-fg-dim">
+                          <span className="block truncate text-fg">{row.session_id}</span>
+                          <span className="block truncate">
+                            {row.owner_id} → {row.grantee_id}
+                            {row.live ? ' · live' : ''}
+                          </span>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          disabled={revokeShare.isPending}
+                          onClick={() =>
+                            revokeShare.mutate(
+                              { sessionId: row.session_id, userId: row.grantee_id },
+                              {
+                                onSuccess: () =>
+                                  push({ title: 'Share revoked', detail: row.grantee_id, tone: 'teal' }),
+                                onError: (err) =>
+                                  push({
+                                    title: 'Revoke failed',
+                                    detail: err instanceof ApiError ? err.message : 'Unknown error',
+                                    tone: 'danger',
+                                  }),
+                              },
+                            )
+                          }
+                        >
+                          Revoke
+                        </Button>
+                      </li>
+                    ))}
+                    {(shares.data?.items ?? []).length === 0 ? (
+                      <li className="py-2 text-xs text-muted">No active shares.</li>
+                    ) : null}
+                  </ul>
+                </GlassPanel>
+              ) : null}
+
+              {canManage ? (
+                <GlassPanel className="space-y-3 p-5">
+                  <h3 className="text-sm font-medium text-fg">Offboard</h3>
+                  <p className="text-xs text-fg-dim">
+                    Transfer org session ownership, revoke tokens, and move secret grants. Preview shows
+                    counts only.
+                  </p>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      const from = offboardUser.trim()
+                      if (!from || !selected) return
+                      previewOffboard.mutate(from, {
+                        onError: (err) =>
+                          push({
+                            title: 'Preview failed',
+                            detail: err instanceof ApiError ? err.message : 'Unknown error',
+                            tone: 'danger',
+                          }),
+                      })
+                    }}
+                    className="flex flex-wrap items-end gap-2"
+                  >
+                    <label className="block min-w-[10rem] flex-1">
+                      <span className="mb-1 block text-xs text-fg-dim">Departing user id</span>
+                      <input
+                        value={offboardUser}
+                        onChange={(e) => {
+                          setOffboardUser(e.target.value)
+                          setOffboardPreview(null)
+                        }}
+                        placeholder="user uuid"
+                        className="h-10 w-full rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber"
+                      />
+                    </label>
+                    <label className="block min-w-[10rem] flex-1">
+                      <span className="mb-1 block text-xs text-fg-dim">Receiver user id</span>
+                      <input
+                        value={offboardReceiver}
+                        onChange={(e) => setOffboardReceiver(e.target.value)}
+                        placeholder="user uuid"
+                        className="h-10 w-full rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber"
+                      />
+                    </label>
+                    <Button type="submit" size="sm" disabled={previewOffboard.isPending}>
+                      Preview
+                    </Button>
+                  </form>
+                  {offboardPreview ? (
+                    <div className="space-y-2 rounded-lg border border-border bg-raised/40 px-3 py-2.5">
+                      <p className="text-xs text-fg">
+                        {offboardPreview.sessions} sessions · {offboardPreview.grants} grants ·{' '}
+                        {offboardPreview.tokens} tokens
+                      </p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        disabled={
+                          runOffboard.isPending ||
+                          !offboardUser.trim() ||
+                          !offboardReceiver.trim() ||
+                          offboardUser.trim() === offboardReceiver.trim()
+                        }
+                        onClick={() =>
+                          runOffboard.mutate(
+                            {
+                              from_user_id: offboardUser.trim(),
+                              to_user_id: offboardReceiver.trim(),
+                            },
+                            {
+                              onSuccess: (res) =>
+                                push({
+                                  title: 'Offboard complete',
+                                  detail: `${res.sessions_transferred} sessions transferred`,
+                                  tone: 'teal',
+                                }),
+                              onError: (err) =>
+                                push({
+                                  title: 'Offboard failed',
+                                  detail: err instanceof ApiError ? err.message : 'Unknown error',
+                                  tone: 'danger',
+                                }),
+                            },
+                          )
+                        }
+                      >
+                        Confirm offboard
+                      </Button>
+                    </div>
+                  ) : null}
                 </GlassPanel>
               ) : null}
 

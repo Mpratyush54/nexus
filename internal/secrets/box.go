@@ -48,7 +48,11 @@ func (b *Box) Generate() (plain, wrapped []byte, err error) {
 }
 
 // Unwrap opens a wrapped data key.
+// When premium E2E is Enabled, the server must not decrypt (D14).
 func (b *Box) Unwrap(wrapped []byte) ([]byte, error) {
+	if Enabled {
+		return nil, ErrE2EEnabled
+	}
 	if b == nil {
 		return nil, ErrKeySize
 	}

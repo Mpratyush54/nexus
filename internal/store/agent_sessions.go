@@ -45,6 +45,9 @@ type AgentSession struct {
 	ParentSessionID   string     `json:"parent_session_id,omitempty"`
 	LineageKind       string     `json:"lineage_kind,omitempty"`
 	Summary           string     `json:"summary,omitempty"`
+	// CodeMergedInto / CodeMergedAt mark a code-only merge (D17); conversations stay separate.
+	CodeMergedInto string     `json:"code_merged_into,omitempty"`
+	CodeMergedAt   *time.Time `json:"code_merged_at,omitempty"`
 }
 
 // SessionVersion is one upload of a session. uploading versions are not restorable.
@@ -113,6 +116,7 @@ type AgentCloudStore interface {
 	ListVisibleSessionVersions(ctx context.Context, sessionID, userID string) ([]SessionVersion, error)
 	ListAgentSessionForks(ctx context.Context, parentSessionID string) ([]AgentSession, error)
 	ForkAgentSession(ctx context.Context, parentSessionID, ownerUserID string) (*AgentSession, error)
+	MarkAgentSessionCodeMerged(ctx context.Context, fromSessionID, intoSessionID string) (*AgentSession, error)
 	AppendSessionTurn(ctx context.Context, turn SessionTurn) error
 	ListSessionTurns(ctx context.Context, sessionID string) ([]SessionTurn, error)
 	CreateSessionVersion(ctx context.Context, sessionID, uploadedBy string) (*SessionVersion, error)
@@ -456,6 +460,33 @@ func (m *MemStore) ForkAgentSession(ctx context.Context, parentSessionID, ownerU
 	m.agentSessions[id] = row
 	m.agentByNative[key] = id
 	cp := *row
+	return &cp, nil
+}
+
+// MarkAgentSessionCodeMerged records a code-only merge marker on the source
+// fork's lineage (D17). No new session is created and turns are unchanged.
+func (m *MemStore) MarkAgentSessionCodeMerged(ctx context.Context, fromSessionID, intoSessionID string) (*AgentSession, error) {
+	_ = ctx
+	fromSessionID = strings.TrimSpace(fromSessionID)
+	intoSessionID = strings.TrimSpace(intoSessionID)
+	if fromSessionID == "" || intoSessionID == "" {
+		return nil, errors.New("store: code merge requires from and into session ids")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureAgentMaps()
+	from := m.agentSessions[fromSessionID]
+	into := m.agentSessions[intoSessionID]
+	if from == nil || into == nil {
+		return nil, ErrNotFound
+	}
+	now := time.Now().UTC()
+	from.CodeMergedInto = into.ID
+	from.CodeMergedAt = &now
+	if from.LineageKind == "" || from.LineageKind == "fork" {
+		from.LineageKind = "fork"
+	}
+	cp := *from
 	return &cp, nil
 }
 
@@ -1075,6 +1106,40 @@ func (s *PostgresStore) ForkAgentSession(ctx context.Context, parentSessionID, o
 		parent.ProjectID, ownerUserID, parent.Harness, native, parent.OriginMachineID,
 		parent.WorkspaceRootHint, parent.Title, parent.Summary, parent.ID)
 	return scanAgentSession(row)
+}
+
+// MarkAgentSessionCodeMerged records a code-only merge on the source session.
+// Without a dedicated column yet, the marker is appended to summary and also
+// returned on CodeMergedInto / CodeMergedAt for API consumers.
+func (s *PostgresStore) MarkAgentSessionCodeMerged(ctx context.Context, fromSessionID, intoSessionID string) (*AgentSession, error) {
+	fromSessionID = strings.TrimSpace(fromSessionID)
+	intoSessionID = strings.TrimSpace(intoSessionID)
+	if !looksLikeUUID(fromSessionID) || !looksLikeUUID(intoSessionID) {
+		return nil, errors.New("store: code merge requires session uuids")
+	}
+	from, err := s.GetAgentSession(ctx, fromSessionID)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.GetAgentSession(ctx, intoSessionID); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	marker := fmt.Sprintf("code merged into %s at %s", intoSessionID, now.Format(time.RFC3339))
+	summary := strings.TrimSpace(from.Summary)
+	if summary == "" {
+		summary = marker
+	} else if !strings.Contains(summary, "code merged into "+intoSessionID) {
+		summary = summary + " · " + marker
+	}
+	_, err = s.pool.Exec(ctx, `UPDATE agent_sessions SET summary = $2 WHERE id = $1::uuid`, fromSessionID, summary)
+	if err != nil {
+		return nil, err
+	}
+	from.Summary = summary
+	from.CodeMergedInto = intoSessionID
+	from.CodeMergedAt = &now
+	return from, nil
 }
 
 func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn) error {

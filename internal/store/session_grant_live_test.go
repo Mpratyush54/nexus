@@ -126,3 +126,42 @@ func TestForkAgentSessionTree(t *testing.T) {
 		t.Fatalf("forks=%+v err=%v", forks, err)
 	}
 }
+
+func TestMarkAgentSessionCodeMerged(t *testing.T) {
+	m := NewMemStore()
+	ctx := t.Context()
+	proj, err := m.ResolveProject(ctx, "", "", "merge-marker")
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent, err := m.UpsertAgentSession(ctx, &AgentSession{
+		ProjectID: proj.ID, OwnerUserID: "alice", Harness: "claude",
+		NativeID: "ses_merge_parent", OriginMachineID: "m1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := m.ForkAgentSession(ctx, parent.ID, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked, err := m.MarkAgentSessionCodeMerged(ctx, child.ID, parent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if marked.CodeMergedInto != parent.ID || marked.CodeMergedAt == nil {
+		t.Fatalf("marker: %+v", marked)
+	}
+	got, err := m.GetAgentSession(ctx, child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CodeMergedInto != parent.ID {
+		t.Fatalf("persisted marker: %+v", got)
+	}
+	// No extra session minted.
+	forks, err := m.ListAgentSessionForks(ctx, parent.ID)
+	if err != nil || len(forks) != 1 {
+		t.Fatalf("forks=%+v err=%v", forks, err)
+	}
+}
