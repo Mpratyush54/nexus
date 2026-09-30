@@ -1,11 +1,10 @@
 name: Release Desktop (all OS)
 
-# Cross-compiles Nexus Desktop + daemon + CLI for Windows / macOS / Linux,
-# publishes a GitHub Release on tags, and syncs every artifact to S3.
+# Builds Nexus Desktop (Fyne, CGO, native runners) + cross-compiles daemon + CLI,
+# publishes a GitHub Release on tags, and syncs artifacts to S3.
+# latest.json is promoted only for tagged / explicit versions (not master SHA).
 
 on:
-  # Every master push + every version tag + manual run → build all OS → S3.
-  # (Do not combine path filters with tags — GitHub would skip tag releases.)
   push:
     branches: [master]
     tags:
@@ -14,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version label (e.g. 0.2.0) — defaults to tag or short SHA
+        description: Version label (e.g. 0.3.1) — defaults to tag or short SHA
         required: false
 
 permissions:
@@ -49,9 +48,10 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-  build:
+  # Pure-Go CLI + daemon — safe to cross-compile with CGO_ENABLED=0.
+  build-tools:
     needs: meta
-    name: ${{ matrix.goos }}/${{ matrix.goarch }}
+    name: tools-${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -72,7 +72,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
-      - name: Build
+      - name: Build CLI + daemon
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -87,9 +87,6 @@ jobs:
           LD_COMMON="-s -w -X central-memory/internal/buildinfo.Version=${VER} -X central-memory/internal/buildinfo.Commit=${GITHUB_SHA} -X central-memory/internal/buildinfo.BuiltAt=${BUILT_AT} -X main.defaultServerURL=${API_URL}"
           go build -trimpath -ldflags "${LD_COMMON}" -o "dist/nexus-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus
           go build -trimpath -ldflags "${LD_COMMON}" -o "dist/nexus-daemon-${GOOS}-${GOARCH}${EXT}" ./cmd/daemon
-          DESKTOP_LD="${LD_COMMON}"
-          if [ "$GOOS" = "windows" ]; then DESKTOP_LD="${LD_COMMON} -H windowsgui"; fi
-          go build -trimpath -ldflags "${DESKTOP_LD}" -o "dist/nexus-desktop-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus-desktop
           if [ "$GOOS" = "windows" ] && [ "$GOARCH" = "amd64" ]; then
             cp scripts/install-windows.ps1 dist/install-windows.ps1
           fi
@@ -104,12 +101,69 @@ jobs:
           ls -la dist
       - uses: actions/upload-artifact@v4
         with:
-          name: nexus-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: tools-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/
+          if-no-files-found: error
+
+  # Fyne desktop needs CGO + native OS toolchains (no Linux→macOS cross).
+  build-desktop:
+    needs: meta
+    name: desktop-${{ matrix.goos }}-${{ matrix.goarch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: windows
+            goarch: amd64
+            runner: windows-latest
+          - goos: darwin
+            goarch: arm64
+            runner: macos-latest
+          - goos: darwin
+            goarch: amd64
+            runner: macos-latest
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - name: Install Linux GUI deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
+      - name: Build desktop
+        shell: bash
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "1"
+          VER: ${{ needs.meta.outputs.version }}
+          BUILT_AT: ${{ needs.meta.outputs.built_at }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+          LD_COMMON="-s -w -X central-memory/internal/buildinfo.Version=${VER} -X central-memory/internal/buildinfo.Commit=${GITHUB_SHA} -X central-memory/internal/buildinfo.BuiltAt=${BUILT_AT} -X main.defaultServerURL=${API_URL}"
+          DESKTOP_LD="${LD_COMMON}"
+          if [ "$GOOS" = "windows" ]; then DESKTOP_LD="${LD_COMMON} -H windowsgui"; fi
+          # On macOS runners, GOARCH may need explicit set for amd64 under arm host.
+          export GOOS GOARCH CGO_ENABLED
+          go build -trimpath -ldflags "${DESKTOP_LD}" -o "dist/nexus-desktop-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus-desktop
+          ls -la dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
           if-no-files-found: error
 
   publish:
-    needs: [meta, build]
+    needs: [meta, build-tools, build-desktop]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -199,10 +253,21 @@ jobs:
           if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
           aws s3 sync dist "s3://${BUCKET}/desktop/${VER}/" --exclude "*" --include "nexus-*" --include "install-*" --include "SHA256SUMS.txt" --include "latest.json"
           aws s3 sync dist "s3://${BUCKET}/cli/${VER}/" --exclude "*" --include "nexus-*" --include "install-*" --include "SHA256SUMS.txt"
-          aws s3 cp dist/latest.json "s3://${BUCKET}/desktop/latest.json" --cache-control "no-cache, max-age=60" --content-type application/json
-          for f in install-windows.ps1 install-macos.sh install-linux.sh; do
-            if [ -f "dist/$f" ]; then
-              aws s3 cp "dist/$f" "s3://${BUCKET}/desktop/latest/$f" --cache-control "no-cache, max-age=60"
-            fi
-          done
+
+          PROMOTE=0
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then PROMOTE=1; fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.version }}" ]; then PROMOTE=1; fi
+          if [[ "$VER" == 0.0.0-* ]]; then PROMOTE=0; fi
+
+          if [ "$PROMOTE" = "1" ]; then
+            aws s3 cp dist/latest.json "s3://${BUCKET}/desktop/latest.json" --cache-control "no-cache, max-age=60" --content-type application/json
+            for f in install-windows.ps1 install-macos.sh install-linux.sh; do
+              if [ -f "dist/$f" ]; then
+                aws s3 cp "dist/$f" "s3://${BUCKET}/desktop/latest/$f" --cache-control "no-cache, max-age=60"
+              fi
+            done
+            echo "Promoted desktop/latest.json → ${VER}"
+          else
+            echo "Skipped latest.json promote (CI/SHA build ${VER}); artifacts at desktop/${VER}/ only"
+          fi
           echo "Desktop release: s3://${BUCKET}/desktop/${VER}/"

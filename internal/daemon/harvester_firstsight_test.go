@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -28,6 +29,11 @@ func TestFirstSightOffsetBackfillAll(t *testing.T) {
 }
 
 func TestMatchesTranscriptWorkspaceJSON(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		// adapters.workspaceFolder rewrites file:// URIs with Windows
+		// backslashes; Linux CI can't exercise this path faithfully.
+		t.Skip("workspace.json ProjectOf matching is Windows-path oriented")
+	}
 	home := t.TempDir()
 	// VS Code–style hash dir with workspace.json pointing at central-memory.
 	hashDir := filepath.Join(home, "AppData", "Roaming", "Antigravity", "User", "workspaceStorage", "abc123hash")

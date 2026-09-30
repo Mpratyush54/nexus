@@ -1,16 +1,14 @@
-// Command nexus-desktop — Windows tray app for Nexus.
+// Command nexus-desktop — native Nexus Desktop (Fyne) for Windows / macOS / Linux.
 //
-// Menu: Sign in (browser → web login → localhost callback), Open dashboard,
-// Status page, Start/stop workspace daemon helpers, Quit.
+// System tray + in-process window (no browser-to-127.0.0.1). Speaks to the
+// local daemon via internal/localclient; updater replaces locked binaries.
 package main
 
 import (
 	"context"
 	_ "embed"
-	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,15 +20,16 @@ import (
 	"central-memory/internal/authbrowser"
 	"central-memory/internal/buildinfo"
 	"central-memory/internal/config"
+	"central-memory/internal/desktopui"
+	"central-memory/internal/localclient"
 
-	"github.com/gogpu/systray"
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/driver/desktop"
 )
 
 //go:embed icon.png
 var iconPNG []byte
-
-//go:embed icon-dark.png
-var iconDarkPNG []byte
 
 var defaultServerURL = "https://api-nexus.pratyushes.dev"
 
@@ -40,8 +39,7 @@ func main() {
 	detachFromParentConsole()
 	release, ok := acquireSingleInstance()
 	if !ok {
-		// Second launch: keep the existing tray instance; do not spawn another.
-		log.Println("Nexus Desktop is already running in the system tray")
+		log.Println("Nexus Desktop is already running")
 		return
 	}
 	defer release()
@@ -52,6 +50,11 @@ func main() {
 
 func setupDesktopLog() {
 	dir := filepath.Join(os.Getenv("LOCALAPPDATA"), "Nexus", "logs")
+	if runtime.GOOS != "windows" {
+		if home, err := os.UserHomeDir(); err == nil {
+			dir = filepath.Join(home, ".nexus", "logs")
+		}
+	}
 	_ = os.MkdirAll(dir, 0o755)
 	f, err := os.OpenFile(filepath.Join(dir, "desktop.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -61,51 +64,21 @@ func setupDesktopLog() {
 }
 
 func run() error {
-	tray := systray.New()
+	a := app.NewWithID("dev.pratyushes.nexus.desktop")
+	a.SetIcon(fyne.NewStaticResource("icon.png", iconPNG))
+
 	var (
 		mu         sync.Mutex
-		statusItem *systray.MenuItem
 		daemonProc *os.Process
 	)
+	client := localclient.New("")
+	win := a.NewWindow("Nexus")
 
-	refreshStatus := func() {
-		file, _ := config.LoadFile()
-		label := "● Status: Not signed in"
-		tip := "Nexus — not signed in"
-		root := resolveWorkspaceRoot()
-		if root == "" {
-			label = "⚠ No workspace folder set"
-			tip = "Nexus — set a workspace folder"
-		} else if strings.TrimSpace(file.Token) != "" {
-			name := file.Username
-			if name == "" {
-				name = file.UserID
-			}
-			label = "● Signed in as " + name
-			tip = "Nexus — " + name
-			n := harvestHarnessCount()
-			if n > 0 {
-				label += fmt.Sprintf(" · %d harnesses active", n)
-			} else if daemonOnline() {
-				label += " · daemon online"
-				tip += " (connected)"
-			}
-			base := filepath.Base(root)
-			if base != "" && base != "." {
-				tip += " · " + base
-			}
-		}
-		mu.Lock()
-		if statusItem != nil {
-			statusItem.SetLabel(label)
-		}
-		mu.Unlock()
-		tray.SetTooltip(tip)
-	}
+	var shell *desktopui.Shell
 
 	doLogin := func() {
 		go func() {
-			tray.ShowNotification("Nexus", "Opening browser to sign in…")
+			a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Opening browser to sign in…"})
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
 			res, err := authbrowser.Login(ctx, authbrowser.Options{
@@ -113,252 +86,187 @@ func run() error {
 				ServerURL: config.ResolveServerURL(defaultServerURL),
 			})
 			if err != nil {
-				tray.ShowNotification("Nexus", "Sign-in failed: "+err.Error())
+				a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Sign-in failed: " + err.Error()})
 				return
 			}
-			tray.ShowNotification("Nexus", "Signed in as "+res.Username)
-			refreshStatus()
-			ensureDaemon(&mu, &daemonProc)
-			refreshStatus()
+			a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Signed in as " + res.Username})
+			_ = ensureDaemon(&mu, &daemonProc)
+			if shell != nil {
+				shell.Refresh()
+			}
 		}()
 	}
 
-	menu := systray.NewMenu()
-	statusItem = menu.Add("Status: …", nil)
-	statusItem.SetDisabled(true)
-	menu.AddSeparator()
-	menu.Add("Sign in with browser…", doLogin)
-	menu.Add("Sign out", func() {
-		_ = config.ClearCredentials()
-		tray.ShowNotification("Nexus", "Signed out")
-		refreshStatus()
-	})
-	menu.AddSeparator()
-	menu.Add("Open Nexus home", func() {
-		_ = authbrowser.OpenBrowser(config.ResolveAppURL() + "/app/dashboard")
-	})
-	menu.Add("Open Cockpit Dashboard", func() {
-		_ = authbrowser.OpenBrowser("http://127.0.0.1:7272/")
-	})
-	menu.Add("Start workspace daemon", func() {
-		if err := ensureDaemon(&mu, &daemonProc); err != nil {
-			tray.ShowNotification("Nexus", "Daemon: "+err.Error())
-			return
-		}
-		tray.ShowNotification("Nexus", "Workspace daemon started")
-		refreshStatus()
-	})
-	wsMenu := systray.NewMenu()
-	file, _ := config.LoadFile()
-	for _, path := range file.RecentWorkspaces {
-		p := path
-		label := filepath.Base(p)
-		if label == "" || label == "." || label == string(filepath.Separator) {
-			label = p
-		}
-		wsMenu.Add(label, func() {
-			go switchToWorkspace(tray, &mu, &daemonProc, refreshStatus, p)
-		})
-	}
-	wsMenu.AddSeparator()
-	wsMenu.Add("Browse for folder…", func() {
-		go pickWorkspaceFolder(tray, &mu, &daemonProc, refreshStatus)
-	})
-	menu.AddSubmenu("Switch workspace", wsMenu)
-	menu.Add("Scan Now", func() {
-		go func() {
-			if err := postLocalHarvest(); err != nil {
-				tray.ShowNotification("Nexus", "Scan: "+err.Error())
-				return
+	hooks := desktopui.Hooks{
+		OnSignIn: doLogin,
+		OnSignOut: func() {
+			_ = config.ClearCredentials()
+			_ = client.Logout()
+			a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Signed out"})
+			if shell != nil {
+				shell.Refresh()
 			}
-			tray.ShowNotification("Nexus", "Harvest scan requested")
-			refreshStatus()
-		}()
-	})
-	menu.AddSeparator()
-	menu.Add("Check for updates…", func() {
-		go checkAndApplyUpdate(tray)
-	})
-	menu.Add("Repair Start Menu shortcuts", func() {
-		go func() {
-			if err := installAppShortcuts(); err != nil {
-				tray.ShowNotification("Nexus", err.Error())
-				return
-			}
-			tray.ShowNotification("Nexus", "Shortcuts ready — Start Menu → Programs → Nexus")
-		}()
-	})
-	verLabel := "Version: " + strings.TrimPrefix(buildinfo.Version, "v")
-	if buildinfo.Version == "" || buildinfo.Version == "dev" {
-		verLabel = "Version: dev"
-	}
-	vi := menu.Add(verLabel, nil)
-	vi.SetDisabled(true)
-	menu.AddSeparator()
-	menu.Add("Quit Nexus Desktop", func() {
-		mu.Lock()
-		if daemonProc != nil {
-			_ = daemonProc.Kill()
-			daemonProc = nil
-		}
-		mu.Unlock()
-		tray.Remove()
-		os.Exit(0)
-	})
-
-	tray.SetIcon(iconPNG).
-		SetDarkModeIcon(iconDarkPNG).
-		SetTooltip("Nexus").
-		SetMenu(menu).
-		OnClick(func() {
-			file, _ := config.LoadFile()
-			if strings.TrimSpace(file.Token) == "" {
-				doLogin()
-				return
-			}
+		},
+		OnOpenWebPortal: func() {
 			_ = authbrowser.OpenBrowser(config.ResolveAppURL() + "/app/dashboard")
-		}).
-		OnDoubleClick(func() {
-			_ = authbrowser.OpenBrowser(config.ResolveAppURL() + "/app/dashboard")
-		})
+		},
+		OnPickFolder: func() {
+			go pickWorkspaceFolder(a, &mu, &daemonProc, func() {
+				if shell != nil {
+					shell.Refresh()
+				}
+			})
+		},
+		OnCheckUpdate: func() {
+			go checkAndApplyUpdate(a, &mu, &daemonProc, func() {
+				if shell != nil {
+					shell.Refresh()
+				}
+			})
+		},
+		OnQuit: func() {
+			mu.Lock()
+			if daemonProc != nil {
+				_ = daemonProc.Kill()
+				daemonProc = nil
+			}
+			mu.Unlock()
+			_ = stopNexusProcesses(false)
+			if shell != nil {
+				shell.Stop()
+			}
+			a.Quit()
+		},
+		UpdateLabel: versionLabel,
+		EnsureDaemon: func() error {
+			return ensureDaemon(&mu, &daemonProc)
+		},
+	}
 
-	// Show() must run before notifications — otherwise Shell_NotifyIcon fails
-	// and Windows may never surface the icon.
-	tray.Show()
-	refreshStatus()
-	tray.ShowNotification("Nexus", "Nexus is running in the system tray — click ^ if the icon is hidden")
+	shell = desktopui.NewShell(win, client, hooks)
+	shell.AttachRefresh(4 * time.Second)
+
+	if desk, ok := a.(desktop.App); ok {
+		desk.SetSystemTrayIcon(fyne.NewStaticResource("icon.png", iconPNG))
+		desk.SetSystemTrayMenu(fyne.NewMenu("Nexus",
+			fyne.NewMenuItem("Open Nexus", func() { shell.Show() }),
+			fyne.NewMenuItem("Sign in…", doLogin),
+			fyne.NewMenuItem("Team & org (web)", hooks.OnOpenWebPortal),
+			fyne.NewMenuItem("Choose workspace…", hooks.OnPickFolder),
+			fyne.NewMenuItem("Scan now", func() {
+				go func() {
+					if err := client.TriggerHarvest(); err != nil {
+						a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Scan: " + err.Error()})
+						return
+					}
+					a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Harvest scan requested"})
+					shell.Refresh()
+				}()
+			}),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Check for updates…", hooks.OnCheckUpdate),
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItem("Quit", hooks.OnQuit),
+		))
+	}
+
 	go func() { _ = installAppShortcuts() }()
 	go func() {
-		for {
-			time.Sleep(8 * time.Second)
-			refreshStatus()
-		}
-	}()
-	go func() {
-		time.Sleep(15 * time.Second)
-		silentUpdateCheck(tray)
+		time.Sleep(12 * time.Second)
+		silentUpdateCheck(a, func() {
+			if shell != nil {
+				shell.Refresh()
+			}
+		})
 		t := time.NewTicker(6 * time.Hour)
 		defer t.Stop()
 		for range t.C {
-			silentUpdateCheck(tray)
+			silentUpdateCheck(a, func() {
+				if shell != nil {
+					shell.Refresh()
+				}
+			})
 		}
 	}()
-
 	if file, _ := config.LoadFile(); strings.TrimSpace(file.Token) != "" {
 		go func() {
 			if err := ensureDaemon(&mu, &daemonProc); err != nil {
 				log.Printf("ensureDaemon: %v", err)
 			}
+			shell.Refresh()
 		}()
 	}
 
-	log.Println("tray message loop starting")
-	return tray.Run()
+	win.Show()
+	a.SendNotification(&fyne.Notification{
+		Title:   "Nexus",
+		Content: "Nexus Desktop is running — use the tray icon or this window",
+	})
+	a.Run()
+	shell.Stop()
+	return nil
 }
 
-func checkAndApplyUpdate(tray *systray.SystemTray) {
-	tray.ShowNotification("Nexus", "Checking for updates…")
+func checkAndApplyUpdate(a fyne.App, mu *sync.Mutex, daemonProc **os.Process, refresh func()) {
+	globalUpdate.set(updateChecking, "Checking for updates")
+	refresh()
+	a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Checking for updates…"})
 	m, err := fetchDesktopManifest(nil)
 	if err != nil {
-		tray.ShowNotification("Nexus", "Update check failed: "+err.Error())
+		globalUpdate.fail(err)
+		refresh()
+		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Update check failed: " + err.Error()})
 		return
 	}
+	globalUpdate.setRemote(m.Version)
 	if !versionNewer(m.Version, buildinfo.Version) {
-		tray.ShowNotification("Nexus", "Up to date ("+buildinfo.Version+")")
+		globalUpdate.set(updateOK, "up to date")
+		refresh()
+		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Up to date (" + normalizeVersion(buildinfo.Version) + ")"})
 		return
 	}
-	tray.ShowNotification("Nexus", "Updating to "+m.Version+"…")
-	if err := applyDesktopUpdate(m); err != nil {
-		tray.ShowNotification("Nexus", "Update failed: "+err.Error())
+	globalUpdate.set(updateAvailable, "Update "+m.Version+" available")
+	refresh()
+	globalUpdate.set(updateDownloading, "Downloading "+m.Version)
+	refresh()
+	a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Updating to " + m.Version + "…"})
+	globalUpdate.set(updateApplying, "Stopping daemon and replacing binaries")
+	refresh()
+	if err := applyDesktopUpdate(m, daemonProc, mu); err != nil {
+		globalUpdate.fail(err)
+		refresh()
+		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Update failed: " + err.Error()})
 		return
 	}
-	tray.ShowNotification("Nexus", "Update downloaded — restarting…")
+	globalUpdate.set(updateRestarting, "Restart required")
+	refresh()
+	a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Update " + m.Version + " ready — restarting…"})
 	time.Sleep(800 * time.Millisecond)
 	os.Exit(0)
 }
 
-func silentUpdateCheck(tray *systray.SystemTray) {
+func silentUpdateCheck(a fyne.App, refresh func()) {
 	m, err := fetchDesktopManifest(nil)
 	if err != nil || m == nil {
 		return
 	}
+	globalUpdate.setRemote(m.Version)
 	if !versionNewer(m.Version, buildinfo.Version) {
+		globalUpdate.set(updateOK, "up to date")
+		refresh()
 		return
 	}
-	tray.ShowNotification("Nexus", "Update "+m.Version+" available — tray menu → Check for updates")
-}
-
-func daemonOnline() bool {
-	client := &http.Client{Timeout: 800 * time.Millisecond}
-	resp, err := client.Get("http://127.0.0.1:7272/local/status")
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == 200
-}
-
-func harvestHarnessCount() int {
-	client := &http.Client{Timeout: time.Second}
-	resp, err := client.Get("http://127.0.0.1:7272/local/harvest")
-	if err != nil {
-		return 0
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return 0
-	}
-	var body struct {
-		Agents []any `json:"agents"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return 0
-	}
-	return len(body.Agents)
-}
-
-func postLocalHarvest() error {
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Post("http://127.0.0.1:7272/local/harvest", "application/json", strings.NewReader("{}"))
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %s", resp.Status)
-	}
-	return nil
-}
-
-func switchToWorkspace(tray *systray.SystemTray, mu *sync.Mutex, proc **os.Process, refresh func(), path string) {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return
-	}
-	if st, err := os.Stat(path); err != nil || !st.IsDir() {
-		tray.ShowNotification("Nexus", "Folder missing: "+path)
-		return
-	}
-	if err := config.SaveFile(config.File{WorkspaceRoot: path}); err != nil {
-		tray.ShowNotification("Nexus", "Could not save folder: "+err.Error())
-		return
-	}
-	mu.Lock()
-	if *proc != nil {
-		_ = (*proc).Kill()
-		*proc = nil
-	}
-	mu.Unlock()
-	if err := ensureDaemon(mu, proc); err != nil {
-		tray.ShowNotification("Nexus", "Saved "+path+" — daemon: "+err.Error())
-	} else {
-		tray.ShowNotification("Nexus", "Watching "+path)
-	}
+	globalUpdate.set(updateAvailable, "Update "+m.Version+" available")
 	refresh()
+	a.SendNotification(&fyne.Notification{
+		Title:   "Nexus",
+		Content: "Update " + m.Version + " available — Open Nexus → Check for updates",
+	})
 }
 
 func ensureDaemon(mu *sync.Mutex, proc **os.Process) error {
-	if daemonOnline() {
+	client := localclient.New("")
+	if client.Online() {
 		return nil
 	}
 	bin, err := resolveDaemonBinary()
@@ -367,7 +275,7 @@ func ensureDaemon(mu *sync.Mutex, proc **os.Process) error {
 	}
 	root := resolveWorkspaceRoot()
 	if root == "" {
-		return fmt.Errorf("no workspace folder set — use tray → Set workspace folder (do not rely on the terminal's current directory)")
+		return fmt.Errorf("no workspace folder set — Choose workspace…")
 	}
 	file, _ := config.LoadFile()
 	server := firstNonEmpty(file.ServerURL, config.ResolveServerURL(defaultServerURL))
@@ -388,10 +296,9 @@ func ensureDaemon(mu *sync.Mutex, proc **os.Process) error {
 	mu.Lock()
 	*proc = cmd.Process
 	mu.Unlock()
-	// Wait briefly for proxy.
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if daemonOnline() {
+		if client.Online() {
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -411,22 +318,23 @@ func resolveWorkspaceRoot() string {
 			return v
 		}
 	}
-	// Never fall back to Getwd(): Start Menu / terminal cwd is often the user
-	// profile or a drive root and would mint junk portal projects
-	// ("\", "Pratyush Mishra", etc.).
 	return ""
 }
 
-func pickWorkspaceFolder(tray *systray.SystemTray, mu *sync.Mutex, proc **os.Process, refresh func()) {
+func pickWorkspaceFolder(a fyne.App, mu *sync.Mutex, proc **os.Process, refresh func()) {
 	if runtime.GOOS != "windows" {
-		tray.ShowNotification("Nexus", "Set NEXUS_WORKSPACE or workspace_root in config.json")
+		// Fyne folder open dialog is preferred on all platforms; Windows keeps
+		// the legacy PowerShell picker until Fyne dialog is wired in-window.
+		a.SendNotification(&fyne.Notification{
+			Title:   "Nexus",
+			Content: "Set workspace from the Open Nexus window (or NEXUS_WORKSPACE)",
+		})
 		return
 	}
-	// Native folder picker via PowerShell (no extra GUI deps).
 	ps := `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Nexus workspace folder'; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath }`
 	out, err := exec.Command("powershell", "-NoProfile", "-Command", ps).Output()
 	if err != nil {
-		tray.ShowNotification("Nexus", "Folder picker failed")
+		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Folder picker failed"})
 		return
 	}
 	path := strings.TrimSpace(string(out))
@@ -434,7 +342,7 @@ func pickWorkspaceFolder(tray *systray.SystemTray, mu *sync.Mutex, proc **os.Pro
 		return
 	}
 	if err := config.SaveFile(config.File{WorkspaceRoot: path}); err != nil {
-		tray.ShowNotification("Nexus", "Could not save folder: "+err.Error())
+		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Could not save folder: " + err.Error()})
 		return
 	}
 	mu.Lock()
@@ -444,9 +352,9 @@ func pickWorkspaceFolder(tray *systray.SystemTray, mu *sync.Mutex, proc **os.Pro
 	}
 	mu.Unlock()
 	if err := ensureDaemon(mu, proc); err != nil {
-		tray.ShowNotification("Nexus", "Saved "+path+" — daemon: "+err.Error())
+		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Saved " + path + " — daemon: " + err.Error()})
 	} else {
-		tray.ShowNotification("Nexus", "Watching "+path)
+		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Watching " + path})
 	}
 	refresh()
 }
