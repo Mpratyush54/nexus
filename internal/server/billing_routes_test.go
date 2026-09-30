@@ -51,7 +51,7 @@ func TestBillingPlansPublicAndPersonalUpgrade(t *testing.T) {
 		t.Fatalf("self-serve upgrade = %d %s (want 402 until checkout)", rec.Code, rec.Body.String())
 	}
 
-	t.Setenv("PLATFORM_ADMIN_USERNAMES", "alice")
+	t.Setenv("PLATFORM_ADMIN_USER_IDS", "alice")
 	rec = doJSON(t, s, http.MethodPut, "/admin/subscriptions", alice, map[string]any{
 		"owner_type": "user",
 		"owner_id":   "alice",
@@ -94,7 +94,7 @@ func TestBillingOrgPlanAndLimit(t *testing.T) {
 		t.Fatalf("self-serve upgrade = %d %s (want 402)", rec.Code, rec.Body.String())
 	}
 
-	t.Setenv("PLATFORM_ADMIN_USERNAMES", "alice")
+	t.Setenv("PLATFORM_ADMIN_USER_IDS", "alice")
 	rec = doJSON(t, s, http.MethodPut, "/admin/subscriptions", alice, map[string]any{
 		"owner_type": "user",
 		"owner_id":   "alice",

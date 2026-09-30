@@ -17,7 +17,9 @@ func TestPlatformAdminRequired(t *testing.T) {
 }
 
 func TestPlatformAdminEnvBootstrapAndRelease(t *testing.T) {
-	t.Setenv("PLATFORM_ADMIN_USERNAMES", "alice")
+	// Bootstrap by user ID only (JWT subject). Username matching is rejected.
+	t.Setenv("PLATFORM_ADMIN_USER_IDS", "alice")
+	t.Setenv("PLATFORM_ADMIN_USERNAMES", "bob") // must NOT grant bob admin
 	t.Setenv("AWS_REGION", "ap-south-1")
 	s := newTestServer()
 	alice := loginAs(t, s, "alice")
@@ -31,17 +33,14 @@ func TestPlatformAdminEnvBootstrapAndRelease(t *testing.T) {
 	if overview["role"] != "SUPER_ADMIN" {
 		t.Fatalf("role = %+v", overview["role"])
 	}
+	if overview["bootstrap_env"] != "PLATFORM_ADMIN_USER_IDS" {
+		t.Fatalf("bootstrap_env = %+v", overview["bootstrap_env"])
+	}
 
 	bob := loginAs(t, s, "bob")
-	rec = doJSON(t, s, http.MethodPut, "/admin/users/bob", alice, map[string]any{
-		"is_platform_admin": true,
-	})
-	if rec.Code != http.StatusOK {
-		t.Fatalf("grant bob = %d %s", rec.Code, rec.Body.String())
-	}
 	rec = doJSON(t, s, http.MethodGet, "/admin/overview", bob, nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("bob overview after grant = %d %s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("bob must not be admin via PLATFORM_ADMIN_USERNAMES = %d %s", rec.Code, rec.Body.String())
 	}
 
 	rec = doJSON(t, s, http.MethodPost, "/admin/releases", alice, map[string]any{
@@ -82,6 +81,12 @@ func TestPlatformAdminEnvBootstrapAndRelease(t *testing.T) {
 		t.Fatalf("yanked latest = %d, want 404", rec.Code)
 	}
 
+	rec = doJSON(t, s, http.MethodPut, "/admin/users/bob", alice, map[string]any{
+		"is_platform_admin": true,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("grant bob = %d %s", rec.Code, rec.Body.String())
+	}
 	rec = doJSON(t, s, http.MethodPut, "/admin/users/alice", bob, map[string]any{
 		"is_platform_admin": false,
 	})
