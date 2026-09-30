@@ -1,9 +1,8 @@
-// Package desktopui is the native Fyne shell for Nexus Desktop (Win/Mac/Linux).
-// Cockpit layout: portal-aligned sidebar, section content, VS Code-style preview.
+// Package desktopui is the native Fyne Shell v2 for Nexus Desktop (Win/Mac/Linux).
+// Layout: Welcome (signed out) or sidebar + content + preview (signed in).
 package desktopui
 
 import (
-	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -11,36 +10,27 @@ import (
 
 	"central-memory/internal/buildinfo"
 	"central-memory/internal/cloudclient"
+	"central-memory/internal/config"
 	"central-memory/internal/localclient"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/storage"
 	"fyne.io/fyne/v2/widget"
 )
 
-// Hooks lets cmd/nexus-desktop wire sign-in, workspace pick, and updates.
+// Hooks lets cmd/nexus-desktop wire sign-in, workspace, and updates.
 type Hooks struct {
 	OnSignIn        func()
 	OnSignOut       func()
 	OnOpenWebPortal func() // explicit external: team/org/billing only
-	OnPickFolder    func()
+	OnSetWorkspace  func(path string)
 	OnCheckUpdate   func()
 	OnQuit          func()
 	UpdateLabel     func() string
 	EnsureDaemon    func() error
 }
-
-type section int
-
-const (
-	secHome section = iota
-	secMemory
-	secHarvest
-	secWorkspace
-	secSettings
-)
 
 // Shell owns the main window content and a refresh loop.
 type Shell struct {
@@ -49,8 +39,10 @@ type Shell struct {
 	cloud  *cloudclient.Client
 	hooks  Hooks
 
+	mode    shellMode
 	section section
 
+	root        *fyne.Container
 	statusLine  *widget.Label
 	center      *fyne.Container
 	previewHead *widget.Label
@@ -61,33 +53,20 @@ type Shell struct {
 	memorySearch *widget.Entry
 	memoryList   *widget.List
 	memoryItems  []cloudclient.MemoryItem
+	memoryBanner *fyne.Container
 
 	harvestList   *widget.List
 	harvestRows   []harvestRow
 	workspaceList *widget.List
 	workspaceRows []workspaceRow
 
-	settingsBox fyne.CanvasObject
-
-	mu     sync.Mutex
-	stopCh chan struct{}
-
-	cachedStatus    *localclient.Status
-	cachedHarvest   *localclient.Harvest
-	cachedWorkspace *localclient.Workspace
-}
-
-type harvestRow struct {
-	kind     string // agent, file, event
-	title    string
-	subtitle string
-	filePath string
-	detail   string
-}
-
-type workspaceRow struct {
-	title string
-	path  string
+	mu               sync.Mutex
+	stopCh           chan struct{}
+	signedIn         bool
+	cachedStatus     *localclient.Status
+	cachedHarvest    *localclient.Harvest
+	cachedWorkspace  *localclient.Workspace
+	recentWorkspaces []string
 }
 
 // NewShell builds the native window content. Call AttachRefresh after Show.
@@ -101,6 +80,7 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 		cloud:  cloudclient.New("", ""),
 		hooks:  hooks,
 		stopCh: make(chan struct{}),
+		mode:   modeWelcome,
 	}
 	win.SetTitle("Nexus")
 	if app := fyne.CurrentApp(); app != nil {
@@ -113,11 +93,12 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 	s.previewHead = widget.NewLabel("Preview")
 	s.previewHead.TextStyle = fyne.TextStyle{Bold: true}
 	s.previewBody = widget.NewMultiLineEntry()
-	s.previewBody.SetPlaceHolder("Select a memory entry or agent transcript file to inspect content here.")
+	s.previewBody.SetPlaceHolder("Select a memory entry, harvest transcript, or workspace file to inspect content here.")
 	s.previewBody.Wrapping = fyne.TextWrapWord
 	s.previewBody.Disable()
 
 	s.homeStats = widget.NewRichTextFromMarkdown("### Home\nLoading…")
+	s.memoryBanner = container.NewVBox()
 
 	s.memorySearch = widget.NewEntry()
 	s.memorySearch.SetPlaceHolder("Search project memory…")
@@ -223,269 +204,93 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 		}
 	}
 
-	s.buildSettingsPage()
-	s.center = container.NewStack(s.homePage())
-
-	sidebar := s.buildSidebar()
-	mainSplit := container.NewHSplit(
-		container.NewBorder(nil, nil, nil, nil, s.center),
-		container.NewBorder(
-			s.previewHead, nil, nil, nil,
-			container.NewScroll(s.previewBody),
-		),
-	)
-	mainSplit.SetOffset(0.62)
-
-	root := container.NewBorder(
-		container.NewVBox(s.statusLine, widget.NewSeparator()),
-		nil,
-		sidebar,
-		nil,
-		mainSplit,
-	)
-	win.SetContent(container.NewPadded(root))
+	s.center = container.NewStack(s.welcomePage())
+	s.root = container.NewStack()
+	win.SetContent(container.NewPadded(s.root))
 	win.Resize(fyne.NewSize(1120, 720))
 	win.SetCloseIntercept(func() {
 		win.Hide()
 	})
+
+	signedIn := strings.TrimSpace(config.ResolveToken()) != ""
+	s.signedIn = signedIn
+	s.mode = deriveMode(signedIn)
+	s.rebuildChrome()
 	return s
 }
 
-func (s *Shell) buildSidebar() fyne.CanvasObject {
-	brand := widget.NewLabelWithStyle("Nexus", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	sub := widget.NewLabelWithStyle("Desktop", fyne.TextAlignLeading, fyne.TextStyle{Italic: true})
-	sub.Importance = widget.LowImportance
-
-	nav := func(label string, sec section) fyne.CanvasObject {
-		btn := widget.NewButton(label, func() {
-			s.switchSection(sec)
-		})
-		btn.Alignment = widget.ButtonAlignLeading
-		return btn
-	}
-
-	return container.NewBorder(
-		container.NewVBox(brand, sub, widget.NewSeparator()),
-		nil, nil, nil,
-		container.NewVBox(
-			nav("Home", secHome),
-			nav("Memory", secMemory),
-			nav("Harvest", secHarvest),
-			nav("Workspace files", secWorkspace),
-			widget.NewSeparator(),
-			nav("Settings", secSettings),
-		),
-	)
-}
-
-func (s *Shell) switchSection(sec section) {
-	s.section = sec
-	var page fyne.CanvasObject
-	switch sec {
-	case secMemory:
-		page = s.memoryPage()
-	case secHarvest:
-		page = s.harvestPage()
-	case secWorkspace:
-		page = s.workspacePage()
-	case secSettings:
-		page = s.settingsBox
-	default:
-		page = s.homePage()
-	}
-	s.center.Objects = []fyne.CanvasObject{page}
-	s.center.Refresh()
-}
-
-func (s *Shell) homePage() fyne.CanvasObject {
-	scan := widget.NewButton("Scan workspace now", func() {
-		if err := s.client.TriggerHarvest(); err != nil {
-			dialog.ShowError(err, s.win)
-			return
-		}
-		s.Refresh()
-	})
-	refresh := widget.NewButtonWithIcon("Refresh", theme.ViewRefreshIcon(), func() {
-		if s.hooks.EnsureDaemon != nil {
-			_ = s.hooks.EnsureDaemon()
-		}
-		s.Refresh()
-	})
-	return container.NewBorder(
-		container.NewHBox(refresh, scan),
-		nil, nil, nil,
-		container.NewScroll(s.homeStats),
-	)
-}
-
-func (s *Shell) memoryPage() fyne.CanvasObject {
-	searchBtn := widget.NewButton("Search", func() {
-		go s.runMemorySearch()
-	})
-	s.memorySearch.OnSubmitted = func(string) {
-		go s.runMemorySearch()
-	}
-	hint := widget.NewLabel("Memory entries are durable facts in Nexus cloud — not files on disk.")
-	hint.Wrapping = fyne.TextWrapWord
-	hint.Importance = widget.LowImportance
-	return container.NewBorder(
-		container.NewVBox(hint, container.NewBorder(nil, nil, nil, searchBtn, s.memorySearch)),
-		nil, nil, nil,
-		s.memoryList,
-	)
-}
-
-func (s *Shell) harvestPage() fyne.CanvasObject {
-	hint := widget.NewLabel("Harvest watches agent transcript files (Cursor, Claude Code, …) under your workspace and syncs turns to the portal.")
-	hint.Wrapping = fyne.TextWrapWord
-	hint.Importance = widget.LowImportance
-	return container.NewBorder(hint, nil, nil, nil, s.harvestList)
-}
-
-func (s *Shell) workspacePage() fyne.CanvasObject {
-	hint := widget.NewLabel("Workspace files are paths on your machine (repo sources, configs). Agent transcripts also appear under Harvest.")
-	hint.Wrapping = fyne.TextWrapWord
-	hint.Importance = widget.LowImportance
-	pick := widget.NewButton("Choose workspace folder…", func() {
-		if s.hooks.OnPickFolder != nil {
-			s.hooks.OnPickFolder()
-		}
-	})
-	return container.NewBorder(
-		container.NewVBox(hint, pick),
-		nil, nil, nil,
-		s.workspaceList,
-	)
-}
-
-func (s *Shell) buildSettingsPage() {
-	signIn := widget.NewButton("Sign in", func() {
-		if s.hooks.OnSignIn != nil {
-			s.hooks.OnSignIn()
-		}
-	})
-	signIn.Importance = widget.HighImportance
-	signOut := widget.NewButton("Sign out", func() {
-		if s.hooks.OnSignOut != nil {
-			s.hooks.OnSignOut()
-		}
-		s.Refresh()
-	})
-	folder := widget.NewButton("Choose workspace…", func() {
-		if s.hooks.OnPickFolder != nil {
-			s.hooks.OnPickFolder()
-		}
-	})
-	updateBtn := widget.NewButton("Check for updates", func() {
-		if s.hooks.OnCheckUpdate != nil {
-			s.hooks.OnCheckUpdate()
-		}
-	})
-	webPortal := widget.NewButton("Team, org & billing (web)", func() {
-		if s.hooks.OnOpenWebPortal != nil {
-			s.hooks.OnOpenWebPortal()
-		}
-	})
-	webPortal.Importance = widget.LowImportance
-	quit := widget.NewButton("Quit Nexus", func() {
-		if s.hooks.OnQuit != nil {
-			s.hooks.OnQuit()
-		}
-	})
-
-	note := widget.NewLabel("Full parity for Team, Org, Overlays, and Admin stays on the web portal until the embedded shell ships (see docs/native-app-direction.md).")
-	note.Wrapping = fyne.TextWrapWord
-	note.Importance = widget.LowImportance
-
-	s.settingsBox = container.NewVBox(
-		widget.NewLabelWithStyle("Settings", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		note,
-		widget.NewSeparator(),
-		container.NewHBox(signIn, signOut),
-		folder,
-		updateBtn,
-		widget.NewSeparator(),
-		webPortal,
-		widget.NewSeparator(),
-		quit,
-		widget.NewLabel(versionText(s.hooks)),
-	)
-}
-
-func (s *Shell) runMemorySearch() {
-	q := strings.TrimSpace(s.memorySearch.Text)
-	if q == "" {
-		return
-	}
-	s.mu.Lock()
-	pid := ""
-	if s.cachedHarvest != nil {
-		pid = strings.TrimSpace(s.cachedHarvest.ProjectID)
-	}
-	if pid == "" && s.cachedStatus != nil {
-		pid = strings.TrimSpace(s.cachedStatus.WorkspaceID)
-	}
-	s.mu.Unlock()
-
-	items, usedPID, err := s.cloud.MemorySearch(q, pid, 25)
-	fyne.Do(func() {
+// pickWorkspaceFolder opens the Fyne folder dialog on all OS (no auto-launch).
+func (s *Shell) pickWorkspaceFolder() {
+	d := dialog.NewFolderOpen(func(uri fyne.ListableURI, err error) {
 		if err != nil {
-			dialog.ShowError(err, s.win)
+			s.setPreview("Workspace", "Folder picker error:\n"+err.Error())
 			return
 		}
-		s.mu.Lock()
-		s.memoryItems = items
-		s.mu.Unlock()
-		s.memoryList.Refresh()
-		if len(items) == 0 {
-			s.setPreview("Memory search", "No results for \""+q+"\"."+(pidHint(usedPID)))
+		if uri == nil {
 			return
 		}
-		s.setPreview("Memory search", fmt.Sprintf("%d results for \"%s\"%s\n\nSelect a row to preview.", len(items), q, pidHint(usedPID)))
-	})
-}
-
-func pidHint(projectID string) string {
-	if projectID == "" {
-		return "\n\nTip: link a project in the portal Connect page so search scopes correctly."
+		path := folderURIPath(uri)
+		if path == "" {
+			return
+		}
+		s.selectWorkspacePath(path)
+	}, s.win)
+	d.Resize(fyne.NewSize(720, 480))
+	if file, err := config.LoadFile(); err == nil {
+		if root := strings.TrimSpace(file.WorkspaceRoot); root != "" {
+			if u, err := storage.ListerForURI(storage.NewFileURI(root)); err == nil {
+				d.SetLocation(u)
+			}
+		}
 	}
-	return "\n\nProject: " + projectID
+	d.Show()
 }
 
-func (s *Shell) loadFilePreview(path, title string) {
+func (s *Shell) selectWorkspacePath(path string) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return
 	}
-	go func() {
-		fr, err := s.client.ReadFile(path)
-		fyne.Do(func() {
-			if err != nil {
-				// Transcript paths are often absolute outside repo — show path + error.
-				s.setPreview(title, "Path: "+path+"\n\nCould not read via daemon (workspace-relative paths only):\n"+err.Error())
-				return
-			}
-			body := fr.Content
-			if len(body) > 120_000 {
-				body = body[:120_000] + "\n\n… truncated …"
-			}
-			s.setPreview(title, "Path: "+fr.Path+"\nSize: "+fmt.Sprintf("%d", fr.Size)+" bytes\n\n"+body)
-		})
-	}()
+	if s.hooks.OnSetWorkspace != nil {
+		s.hooks.OnSetWorkspace(path)
+	}
 }
 
-func (s *Shell) setPreview(title, body string) {
-	s.previewHead.SetText(title)
-	s.previewBody.SetText(body)
+// folderURIPath normalizes a Fyne folder URI to an OS filesystem path.
+func folderURIPath(uri fyne.ListableURI) string {
+	if uri == nil {
+		return ""
+	}
+	path := uri.Path()
+	// Windows file URIs often look like /C:/Users/...
+	if len(path) >= 3 && path[0] == '/' && path[2] == ':' {
+		path = path[1:]
+	}
+	return filepath.Clean(path)
 }
 
 // Refresh pulls daemon status/harvest into widgets (must run on UI thread via fyne.Do).
 func (s *Shell) Refresh() {
 	fyne.Do(func() {
 		s.cloud = cloudclient.New("", "")
+		signedIn := strings.TrimSpace(config.ResolveToken()) != ""
+		prevMode := s.mode
+		s.mu.Lock()
+		s.signedIn = signedIn
+		s.mu.Unlock()
+		s.applyMode(signedIn)
+		if s.mode != prevMode {
+			// chrome already rebuilt
+		}
+
+		recent := loadRecentWorkspaces(s.client)
+		s.mu.Lock()
+		s.recentWorkspaces = recent
+		s.mu.Unlock()
+
 		st, err := s.client.GetStatus()
 		if err != nil {
-			s.statusLine.SetText("Daemon offline — local harvest and file preview need nexus-daemon on :7272")
+			s.statusLine.SetText(buildStatusLine(nil, signedIn))
 			s.mu.Lock()
 			s.cachedStatus = nil
 			s.cachedHarvest = nil
@@ -495,30 +300,28 @@ func (s *Shell) Refresh() {
 			s.mu.Unlock()
 			s.harvestList.Refresh()
 			s.workspaceList.Refresh()
-			s.homeStats.ParseMarkdown("### Home\n**Daemon offline.** Choose a workspace in Settings and ensure you are signed in.")
+			s.homeStats.ParseMarkdown(buildHomeMarkdown(nil, nil, signedIn))
+			if s.mode == modeApp && (s.section == secConnect || s.section == secHome || s.section == secWorkspace) {
+				s.renderCenter()
+			}
 			return
 		}
 		s.mu.Lock()
 		s.cachedStatus = st
 		s.mu.Unlock()
-
-		switch {
-		case strings.TrimSpace(st.Root) == "":
-			s.statusLine.SetText("No workspace folder — choose one in Settings or Workspace files")
-		case st.Connected:
-			s.statusLine.SetText("Connected · " + first(st.Username, st.UserID))
-		case st.HasToken:
-			s.statusLine.SetText("Signed in — linking workspace…")
-		default:
-			s.statusLine.SetText("Sign in to sync memory and harvest")
-		}
+		s.statusLine.SetText(buildStatusLine(st, signedIn))
 
 		h, err := s.client.GetHarvest()
 		if err == nil {
 			s.mu.Lock()
 			s.cachedHarvest = h
+			s.harvestRows = buildHarvestRows(h)
 			s.mu.Unlock()
-			s.rebuildHarvestRows(h)
+		} else {
+			s.mu.Lock()
+			s.cachedHarvest = nil
+			s.harvestRows = nil
+			s.mu.Unlock()
 		}
 
 		ws, err := s.client.GetWorkspace()
@@ -526,140 +329,56 @@ func (s *Shell) Refresh() {
 			s.mu.Lock()
 			s.cachedWorkspace = ws
 			s.mu.Unlock()
+		} else {
+			s.mu.Lock()
+			s.cachedWorkspace = nil
+			s.mu.Unlock()
 		}
-		s.rebuildWorkspaceRows()
+
+		s.mu.Lock()
+		s.workspaceRows = buildWorkspaceRows(s.cachedStatus, s.cachedWorkspace)
+		s.mu.Unlock()
 
 		s.harvestList.Refresh()
 		s.workspaceList.Refresh()
-		s.homeStats.ParseMarkdown(s.buildHomeMarkdown(st, h))
+		s.homeStats.ParseMarkdown(buildHomeMarkdown(st, h, signedIn))
+		if s.mode == modeApp && (s.section == secConnect || s.section == secHome || s.section == secWorkspace || s.section == secHarvest) {
+			s.renderCenter()
+		}
 	})
 }
 
-func (s *Shell) rebuildHarvestRows(h *localclient.Harvest) {
-	if h == nil {
-		return
-	}
-	var rows []harvestRow
-	for _, a := range h.Agents {
-		name := first(a.Name, a.Agent, "agent")
-		files := a.FilesSeen
-		if files == 0 {
-			files = a.FileCount
-		}
-		rows = append(rows, harvestRow{
-			kind:     "agent",
-			title:    name,
-			subtitle: fmt.Sprintf("%s · %d transcript files seen", first(a.Format, a.Kind, "—"), files),
-			detail:   fmt.Sprintf("Agent harness **%s** (%s).\n\nThese are **agent transcript files** on disk, not Memory entries.", name, first(a.Format, a.Kind, "")),
-		})
-	}
-	for _, f := range h.Files {
-		label := first(f.Name, filepath.Base(f.Path), "transcript")
-		rows = append(rows, harvestRow{
-			kind:     "file",
-			title:    label,
-			subtitle: first(f.Agent, "agent") + " · " + first(f.Format, "format"),
-			filePath: f.Path,
-		})
-	}
-	for _, ev := range h.Recent {
-		title := first(ev.Type, ev.Event, "event")
-		detail := first(ev.Message, ev.Detail)
-		if t := first(ev.At, ev.Time); t != "" {
-			detail = t + "\n" + detail
-		}
-		rows = append(rows, harvestRow{
-			kind:     "event",
-			title:    title,
-			subtitle: truncate(detail, 80),
-			detail:   detail,
-		})
-	}
-	s.mu.Lock()
-	s.harvestRows = rows
-	s.mu.Unlock()
-}
-
-func (s *Shell) rebuildWorkspaceRows() {
-	s.mu.Lock()
-	st := s.cachedStatus
-	h := s.cachedHarvest
-	ws := s.cachedWorkspace
-	s.mu.Unlock()
-
-	var rows []workspaceRow
-	if ws != nil && ws.Path != "" {
-		rows = append(rows, workspaceRow{
-			title: "📁 " + first(ws.Project, filepath.Base(ws.Path)) + " (root)",
-			path:  ".",
-		})
-		if ws.Branch != "" {
-			rows = append(rows, workspaceRow{
-				title: fmt.Sprintf("Git branch %s @ %s", ws.Branch, truncate(ws.Commit, 8)),
-				path:  "",
-			})
+func loadRecentWorkspaces(client *localclient.Client) []string {
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(list []string) {
+		for _, p := range list {
+			p = config.NormalizeWorkspacePath(strings.TrimSpace(p))
+			if p == "" {
+				continue
+			}
+			if _, ok := seen[p]; ok {
+				continue
+			}
+			seen[p] = struct{}{}
+			out = append(out, p)
+			if len(out) >= 5 {
+				return
+			}
 		}
 	}
-	if h != nil {
-		for _, f := range h.Files {
-			rows = append(rows, workspaceRow{
-				title: "📝 " + first(f.Name, filepath.Base(f.Path)) + " · " + f.Agent,
-				path:  f.Path,
-			})
+	if file, err := config.LoadFile(); err == nil {
+		add(file.RecentWorkspaces)
+		if r := strings.TrimSpace(file.WorkspaceRoot); r != "" {
+			add([]string{r})
 		}
 	}
-	if st != nil && st.Root != "" {
-		rows = append(rows, workspaceRow{
-			title: "Path: " + st.Root,
-			path:  "",
-		})
-	}
-	s.mu.Lock()
-	s.workspaceRows = rows
-	s.mu.Unlock()
-}
-
-func (s *Shell) buildHomeMarkdown(st *localclient.Status, h *localclient.Harvest) string {
-	var b strings.Builder
-	b.WriteString("### Home\n")
-	if st != nil {
-		b.WriteString(fmt.Sprintf("- **Account:** %s\n", orDash(first(st.Username, st.UserID))))
-		b.WriteString(fmt.Sprintf("- **Server:** %s\n", orDash(st.ServerURL)))
-		b.WriteString(fmt.Sprintf("- **Workspace folder:** %s\n", orDash(st.Root)))
-	}
-	if h != nil {
-		b.WriteString(fmt.Sprintf("\n**Harvest** — last scan %s · files/turns %d/%d · active sessions %d · saved/errors %d/%d\n",
-			orDash(h.LastScanAt), h.LastScanFiles, h.LastScanTurns, h.ActiveSessions, h.ProposalsSaved, h.ProposalErrors))
-		if msg := strings.TrimSpace(h.Message); msg != "" {
-			b.WriteString("\n" + msg + "\n")
+	if client != nil {
+		if remote, err := client.RecentWorkspaces(); err == nil {
+			add(remote)
 		}
 	}
-	b.WriteString("\nUse **Memory** for cloud facts, **Harvest** for agent transcripts, **Workspace files** for repo paths.\n")
-	return b.String()
-}
-
-func formatMemoryPreview(it cloudclient.MemoryItem) string {
-	var b strings.Builder
-	if it.Key != "" {
-		b.WriteString("Key: " + it.Key + "\n")
-	}
-	if it.Level != "" || it.Scope != "" {
-		b.WriteString(fmt.Sprintf("Level: %s · Scope: %s\n", it.Level, it.Scope))
-	}
-	if it.Status != "" {
-		b.WriteString("Status: " + it.Status + "\n")
-	}
-	b.WriteString("\n")
-	b.WriteString(it.Content)
-	return b.String()
-}
-
-func truncate(s string, n int) string {
-	s = strings.TrimSpace(s)
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "…"
+	return out
 }
 
 // AttachRefresh starts a background poller until Stop.
@@ -709,20 +428,4 @@ func versionText(h Hooks) string {
 		v = "dev"
 	}
 	return "Version: " + v
-}
-
-func orDash(s string) string {
-	if strings.TrimSpace(s) == "" {
-		return "—"
-	}
-	return s
-}
-
-func first(vals ...string) string {
-	for _, v := range vals {
-		if strings.TrimSpace(v) != "" {
-			return strings.TrimSpace(v)
-		}
-	}
-	return ""
 }

@@ -110,8 +110,8 @@ func run() error {
 		OnOpenWebPortal: func() {
 			_ = authbrowser.OpenBrowser(config.ResolveAppURL() + "/app/dashboard")
 		},
-		OnPickFolder: func() {
-			go pickWorkspaceFolder(a, &mu, &daemonProc, func() {
+		OnSetWorkspace: func(path string) {
+			go applyWorkspacePath(a, path, &mu, &daemonProc, func() {
 				if shell != nil {
 					shell.Refresh()
 				}
@@ -148,22 +148,18 @@ func run() error {
 
 	if desk, ok := a.(desktop.App); ok {
 		desk.SetSystemTrayIcon(fyne.NewStaticResource("icon.png", iconPNG))
+		// Quiet tray: Open / Scan / Updates / Quit only (no Sign in / folder / web clutter).
 		desk.SetSystemTrayMenu(fyne.NewMenu("Nexus",
 			fyne.NewMenuItem("Open Nexus", func() { shell.Show() }),
-			fyne.NewMenuItem("Sign in…", doLogin),
-			fyne.NewMenuItem("Team & org (web)", hooks.OnOpenWebPortal),
-			fyne.NewMenuItem("Choose workspace…", hooks.OnPickFolder),
 			fyne.NewMenuItem("Scan now", func() {
 				go func() {
 					if err := client.TriggerHarvest(); err != nil {
 						a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Scan: " + err.Error()})
 						return
 					}
-					a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Harvest scan requested"})
 					shell.Refresh()
 				}()
 			}),
-			fyne.NewMenuItemSeparator(),
 			fyne.NewMenuItem("Check for updates…", hooks.OnCheckUpdate),
 			fyne.NewMenuItemSeparator(),
 			fyne.NewMenuItem("Quit", hooks.OnQuit),
@@ -321,24 +317,15 @@ func resolveWorkspaceRoot() string {
 	return ""
 }
 
-func pickWorkspaceFolder(a fyne.App, mu *sync.Mutex, proc **os.Process, refresh func()) {
-	if runtime.GOOS != "windows" {
-		// Fyne folder open dialog is preferred on all platforms; Windows keeps
-		// the legacy PowerShell picker until Fyne dialog is wired in-window.
-		a.SendNotification(&fyne.Notification{
-			Title:   "Nexus",
-			Content: "Set workspace from the Open Nexus window (or NEXUS_WORKSPACE)",
-		})
-		return
-	}
-	ps := `Add-Type -AssemblyName System.Windows.Forms; $f = New-Object System.Windows.Forms.FolderBrowserDialog; $f.Description = 'Nexus workspace folder'; if ($f.ShowDialog() -eq 'OK') { $f.SelectedPath }`
-	out, err := exec.Command("powershell", "-NoProfile", "-Command", ps).Output()
-	if err != nil {
-		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Folder picker failed"})
-		return
-	}
-	path := strings.TrimSpace(string(out))
+// applyWorkspacePath persists a folder chosen in-window (Fyne dialog or recent list).
+// Does not open a picker — Shell owns the Fyne folder dialog on all OS.
+func applyWorkspacePath(a fyne.App, path string, mu *sync.Mutex, proc **os.Process, refresh func()) {
+	path = strings.TrimSpace(path)
 	if path == "" {
+		return
+	}
+	if st, err := os.Stat(path); err != nil || !st.IsDir() {
+		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Not a folder: " + path})
 		return
 	}
 	if err := config.SaveFile(config.File{WorkspaceRoot: path}); err != nil {
@@ -351,6 +338,13 @@ func pickWorkspaceFolder(a fyne.App, mu *sync.Mutex, proc **os.Process, refresh 
 		*proc = nil
 	}
 	mu.Unlock()
+	// Prefer in-daemon switch when already online; else respawn with new root.
+	client := localclient.New("")
+	if client.Online() {
+		if err := client.SwitchWorkspace(path); err != nil {
+			log.Printf("SwitchWorkspace: %v", err)
+		}
+	}
 	if err := ensureDaemon(mu, proc); err != nil {
 		a.SendNotification(&fyne.Notification{Title: "Nexus", Content: "Saved " + path + " — daemon: " + err.Error()})
 	} else {

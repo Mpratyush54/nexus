@@ -7,7 +7,10 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-// nexusTheme is a warm neutral palette (aligned with the web portal, not default purple).
+// emberAccent is the Shell v2 primary (warm copper, not gold/purple).
+var emberAccent = color.NRGBA{R: 0xc4, G: 0x78, B: 0x3a, A: 0xff}
+
+// nexusTheme is a warm neutral palette with ember primary.
 type nexusTheme struct {
 	base fyne.Theme
 }
@@ -31,15 +34,17 @@ func (t *nexusTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) 
 	case theme.ColorNamePlaceHolder:
 		return color.NRGBA{R: 0x8a, G: 0x84, B: 0x7a, A: 0xff}
 	case theme.ColorNamePrimary:
-		return color.NRGBA{R: 0xc4, G: 0xa8, B: 0x6a, A: 0xff}
+		return emberAccent
 	case theme.ColorNameHover:
 		return color.NRGBA{R: 0x34, G: 0x32, B: 0x2c, A: 0xff}
 	case theme.ColorNameSelection:
-		return color.NRGBA{R: 0x5c, G: 0x53, B: 0x46, A: 0xff}
+		return color.NRGBA{R: 0x5c, G: 0x4a, B: 0x36, A: 0xff}
 	case theme.ColorNameSeparator:
 		return color.NRGBA{R: 0x32, G: 0x30, B: 0x2b, A: 0xff}
 	case theme.ColorNameShadow:
 		return color.NRGBA{R: 0x00, G: 0x00, B: 0x00, A: 0x66}
+	case theme.ColorNameFocus:
+		return emberAccent
 	}
 	return t.base.Color(name, variant)
 }
