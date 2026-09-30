@@ -20,12 +20,82 @@ func (s *Server) orgAdminStore() (store.OrgAdminStore, bool) {
 func (s *Server) registerOrgAdminRoutes() {
 	s.Mux.HandleFunc("GET /orgs/{id}/audit", s.requireAuth(s.handleOrgAudit))
 	s.Mux.HandleFunc("GET /orgs/{id}/storage", s.requireAuth(s.handleOrgStorage))
+	s.Mux.HandleFunc("GET /orgs/{id}/shares", s.requireAuth(s.handleOrgSharesList))
+	s.Mux.HandleFunc("DELETE /orgs/{id}/shares/{session}/{user}", s.requireAuth(s.handleOrgShareRevoke))
 	s.Mux.HandleFunc("POST /orgs/{id}/invites", s.requireAuth(s.handleOrgInviteCreate))
 	s.Mux.HandleFunc("GET /orgs/{id}/invites", s.requireAuth(s.handleOrgInviteList))
 	s.Mux.HandleFunc("DELETE /orgs/{id}/invites/{inviteId}", s.requireAuth(s.handleOrgInviteRevoke))
 	s.Mux.HandleFunc("POST /orgs/invites/accept", s.requireAuth(s.handleOrgInviteAccept))
 	s.Mux.HandleFunc("GET /projects/{id}/capture", s.requireAuth(s.handleProjectCaptureGet))
 	s.Mux.HandleFunc("PUT /projects/{id}/capture", s.requireAuth(s.handleProjectCaptureSet))
+}
+
+func (s *Server) orgSharesStore() (store.OrgSharesStore, bool) {
+	ss, ok := s.Store.(store.OrgSharesStore)
+	return ss, ok
+}
+
+func (s *Server) handleOrgSharesList(w http.ResponseWriter, r *http.Request) {
+	os, ok := s.requireOrgStore(w)
+	if !ok {
+		return
+	}
+	id := r.PathValue("id")
+	if !s.authorizeOrgAdmin(w, r, os, id) {
+		return
+	}
+	ss, ok := s.orgSharesStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "org shares unavailable")
+		return
+	}
+	items, err := ss.ListOrgSessionShares(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "organization not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+}
+
+func (s *Server) handleOrgShareRevoke(w http.ResponseWriter, r *http.Request) {
+	os, ok := s.requireOrgStore(w)
+	if !ok {
+		return
+	}
+	orgID := r.PathValue("id")
+	if !s.authorizeOrgAdmin(w, r, os, orgID) {
+		return
+	}
+	ss, ok := s.orgSharesStore()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "org shares unavailable")
+		return
+	}
+	sessionID := strings.TrimSpace(r.PathValue("session"))
+	userID := strings.TrimSpace(r.PathValue("user"))
+	if sessionID == "" || userID == "" {
+		writeError(w, http.StatusBadRequest, "session and user are required")
+		return
+	}
+	if err := ss.RevokeOrgSessionShare(r.Context(), orgID, sessionID, userID); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "share not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.recordAudit(r, store.AuditEvent{
+		Action: "session.grant_revoked", ResourceKind: "session", ResourceID: sessionID,
+		Metadata: map[string]any{"grantee_user_id": userID, "org_id": orgID, "by_org_admin": true},
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"session_id": sessionID, "user_id": userID, "revoked": true,
+	})
 }
 
 func (s *Server) authorizeOrgOwner(w http.ResponseWriter, r *http.Request, os orgStore, orgID string) bool {

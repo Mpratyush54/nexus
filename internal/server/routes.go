@@ -56,6 +56,7 @@ func (s *Server) registerRoutes() {
 	s.registerGuestOffboardRoutes()
 	s.registerAgentSessionToolRoutes()
 	s.registerCloudContractRoutes()
+	s.registerOpsRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

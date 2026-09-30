@@ -113,4 +113,34 @@ export const platformApi = {
   opsHealth() {
     return apiRequest<{ ok: boolean; status: string; session_content: false }>('/ops/v1/health')
   },
+  opsUsers(org?: string) {
+    const q = org ? `?org=${encodeURIComponent(org)}` : ''
+    return apiRequest<{
+      users: { id: string; username?: string; email_hash?: string }[]
+      count: number
+      session_content: false
+    }>(`/ops/v1/users${q}`)
+  },
+  opsPlans() {
+    return apiRequest<{ plans: { id: string; name: string }[]; count: number; session_content: false }>(
+      '/ops/v1/plans',
+    )
+  },
+  opsFlags() {
+    return apiRequest<{ flags: unknown[]; count: number; session_content: false }>('/ops/v1/flags')
+  },
+  opsReleases(app?: string) {
+    const q = app ? `?app=${encodeURIComponent(app)}` : ''
+    return apiRequest<{
+      releases: { app: string; version: string; channel: string }[]
+      count: number
+      session_content: false
+    }>(`/ops/v1/releases${q}`)
+  },
+  opsSuspendTenant(id: string, reason: string) {
+    return apiRequest<{ id: string; suspended: true; reason: string; session_content: false }>(
+      `/ops/v1/tenants/${id}/suspend`,
+      { method: 'POST', body: { reason } },
+    )
+  },
 }

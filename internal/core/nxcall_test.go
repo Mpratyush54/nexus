@@ -10,9 +10,12 @@ import (
 	"sync"
 	"testing"
 
+	"central-memory/internal/blobs"
 	"central-memory/internal/cache"
+	"central-memory/internal/continuex"
 	"central-memory/internal/outbox"
 	"central-memory/internal/secrets"
+	"central-memory/internal/teleport"
 )
 
 type recordingCloud struct {
@@ -28,6 +31,7 @@ func (r *recordingCloud) Do(_ context.Context, method, path string, body []byte)
 }
 
 func TestContinueAndOffline(t *testing.T) {
+	ResetRunsForTest()
 	raw, _ := json.Marshal(map[string]string{"session_id": "s1", "mode": "here"})
 	out, err := Call(context.Background(), "continue.start", raw, Deps{})
 	if err != nil {
@@ -42,6 +46,75 @@ func TestContinueAndOffline(t *testing.T) {
 	}
 	if _, err := Call(context.Background(), "nope", nil, Deps{}); err != ErrUnknownMethod {
 		t.Fatalf("unknown: %v", err)
+	}
+}
+
+func TestContinueRunnerRecordsArgv(t *testing.T) {
+	ResetRunsForTest()
+	runner := &continuex.Controllable{NextID: "op_runner_1"}
+	raw, _ := json.Marshal(map[string]string{"session_id": "s9", "mode": "here", "prompt": "hi"})
+	out, err := Call(context.Background(), "continue.start", raw, Deps{ContinueRunner: runner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	if m["op_id"] != "op_runner_1" {
+		t.Fatalf("op = %v", m["op_id"])
+	}
+	argv := runner.LastArgv()
+	if len(argv) == 0 || argv[0] != "nexus" {
+		t.Fatalf("recorded argv=%v", argv)
+	}
+	cmd, _ := m["command"].([]string)
+	if len(cmd) == 0 {
+		t.Fatal("missing command in result")
+	}
+}
+
+func TestRunsApproveCancelTransitions(t *testing.T) {
+	ResetRunsForTest()
+	raw, _ := json.Marshal(map[string]string{"session_id": "run1", "mode": "here"})
+	out, err := Call(context.Background(), "continue.start", raw, Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opID := out.(map[string]any)["op_id"].(string)
+
+	msgRaw, _ := json.Marshal(map[string]string{"op_id": opID, "message": "do it"})
+	got, err := Call(context.Background(), "runs.message", msgRaw, Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.(map[string]any)["status"] != "awaiting_approval" {
+		t.Fatalf("after message: %+v", got)
+	}
+
+	apRaw, _ := json.Marshal(map[string]string{"op_id": opID})
+	got, err = Call(context.Background(), "runs.approve", apRaw, Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.(map[string]any)["status"] != "approved" {
+		t.Fatalf("after approve: %+v", got)
+	}
+
+	// Fresh run for cancel path.
+	ResetRunsForTest()
+	out, err = Call(context.Background(), "continue.start", raw, Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	opID = out.(map[string]any)["op_id"].(string)
+	cancelRaw, _ := json.Marshal(map[string]string{"op_id": opID})
+	got, err = Call(context.Background(), "runs.cancel", cancelRaw, Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.(map[string]any)["status"] != "cancelled" {
+		t.Fatalf("after cancel: %+v", got)
+	}
+	if _, err := Call(context.Background(), "runs.approve", cancelRaw, Deps{}); err == nil {
+		t.Fatal("approve after cancel should fail")
 	}
 }
 
@@ -166,5 +239,72 @@ func TestBindingsMatchIDL(t *testing.T) {
 	cb, err := Call(context.Background(), "auth.callback", nil, Deps{})
 	if err != nil || cb.(map[string]any)["redirect"] != "nexus://auth/callback" {
 		t.Fatalf("callback: %v %v", cb, err)
+	}
+}
+
+func TestTeleportPreparePlanAndApply(t *testing.T) {
+	dir := t.TempDir()
+	raw, _ := json.Marshal(map[string]any{
+		"session_id": "s-prepare",
+		"from_os":    "mac",
+		"to_os":      "unix",
+		"from_home":  "/Users/a",
+		"to_home":    "/home/b",
+		"agent":      "claude",
+		"commit":     "abc12345deadbeef",
+		"secrets":    []string{".env"},
+		"text":       "mail ada@ex.com",
+		"home":       "/Users/a",
+	})
+	out, err := Call(context.Background(), "teleport.prepare", raw, Deps{Root: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, ok := out.(teleport.PreparePlan)
+	if !ok {
+		// json-shaped via map when? BuildPreparePlan returns struct directly.
+		t.Fatalf("type %T", out)
+	}
+	if !plan.DryRun || !plan.Repo.Found || plan.Secrets.Mode != "names_only" {
+		t.Fatalf("plan=%+v", plan)
+	}
+	if len(plan.Continue) < 2 || plan.Target.Mode != "worktree" {
+		t.Fatalf("checklist incomplete: %+v", plan)
+	}
+
+	stub, err := Call(context.Background(), "teleport.apply", json.RawMessage(`{"session_id":"s1"}`), Deps{Root: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sm := stub.(map[string]any)
+	if sm["applied"] != false {
+		t.Fatalf("stub apply: %+v", sm)
+	}
+	if _, ok := sm["next_steps"]; !ok {
+		t.Fatalf("missing next_steps: %+v", sm)
+	}
+
+	dest := filepath.Join(dir, "restore-out")
+	content := []byte("hello teleport")
+	sum := blobs.HashBytes(content)
+	applyArgs, _ := json.Marshal(map[string]any{
+		"session_id": "s1",
+		"dest":       dest,
+		"files": []map[string]any{{
+			"path": "hello.txt", "sha256": sum, "size": len(content),
+			"bytes_b64": base64.StdEncoding.EncodeToString(content),
+		}},
+	})
+	applied, err := Call(context.Background(), "teleport.apply", applyArgs, Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	am := applied.(map[string]any)
+	if am["applied"] != true || am["verified"].(int) != 1 {
+		t.Fatalf("apply: %+v", am)
+	}
+	got, err := os.ReadFile(filepath.Join(dest, "hello.txt"))
+	if err != nil || string(got) != string(content) {
+		t.Fatalf("restored=%q err=%v", got, err)
 	}
 }

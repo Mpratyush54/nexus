@@ -65,6 +65,15 @@ func runCapture(_ Config, args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "nexus capture --foreground: outbox at %s (pending=%d)\n", dir, len(sp.Pending()))
 	fmt.Fprintln(stdout, "placeholder: harvester wires into outbox in a later P0 slice; refusing :7272")
 
+	demoOnce := false
+	if v := strings.TrimSpace(strings.ToLower(os.Getenv("NEXUS_CAPTURE_DEMO_ENQUEUE"))); v == "1" || v == "true" {
+		if err := outbox.DemoEnqueue(sp, "capture-demo"); err != nil {
+			return err
+		}
+		demoOnce = true
+		fmt.Fprintf(stdout, "nexus capture: DemoEnqueue pending=%d (path: CaptureEnqueue → Drain)\n", len(sp.Pending()))
+	}
+
 	// NEXUS_CAPTURE_ONCE=1: setup-only (tests / CI smoke).
 	if v := strings.TrimSpace(strings.ToLower(os.Getenv("NEXUS_CAPTURE_ONCE"))); v == "1" || v == "true" {
 		fmt.Fprintln(stdout, "nexus capture: once mode, exiting")
@@ -82,6 +91,11 @@ func runCapture(_ Config, args []string, stdout io.Writer) error {
 			fmt.Fprintln(stdout, "nexus capture: stopped")
 			return nil
 		case <-ticker.C:
+			// Document the capture → outbox path: optional periodic DemoEnqueue
+			// when NEXUS_CAPTURE_DEMO_ENQUEUE=loop (after the first once above).
+			if v := strings.TrimSpace(strings.ToLower(os.Getenv("NEXUS_CAPTURE_DEMO_ENQUEUE"))); v == "loop" && !demoOnce {
+				_ = outbox.DemoEnqueue(sp, "capture-demo")
+			}
 			fmt.Fprintf(stdout, "nexus capture: heartbeat pending=%d\n", len(sp.Pending()))
 		}
 	}

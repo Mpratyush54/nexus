@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // CloudClient is the thin /v1 client Drain uses (same shape as core.Cloud).
@@ -52,6 +53,19 @@ func CaptureEnqueue(s *Spool, id, kind, method, path string, body []byte) error 
 		return err
 	}
 	return s.Enqueue(id, kind, raw)
+}
+
+// DemoEnqueue enqueues a synthetic turn envelope so Drain / uploads.retry can
+// be demonstrated without a real harvester. sessionID may be empty (uses "demo").
+func DemoEnqueue(s *Spool, sessionID string) error {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		sessionID = "demo"
+	}
+	id := fmt.Sprintf("demo-%d", time.Now().UnixNano())
+	path := "/v1/agent-sessions/" + sessionID + "/turns"
+	body := []byte(`{"idx":1,"role":"user","demo":true}`)
+	return CaptureEnqueue(s, id, "turn", "POST", path, body)
 }
 
 // Drain uploads pending items in kind order (turn, blob, manifest) and Acks

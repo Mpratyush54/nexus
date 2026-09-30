@@ -1,5 +1,7 @@
 // Package continuex builds Continue launch plans (D2 / P3).
-// Plans return argv only — they never spawn agents.
+// Plan/Command return argv only. Optional Runner implementations may record
+// or spawn; unit tests use Controllable / PATH-overridden ExecRunner so no
+// real agent binary is required.
 package continuex
 
 import (

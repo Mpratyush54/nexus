@@ -130,6 +130,7 @@ type agentGrant struct {
 	Revoked   bool
 	Live      bool
 	VersionID string
+	CreatedAt time.Time
 }
 
 type blobRec struct {
@@ -337,6 +338,7 @@ func (m *MemStore) GrantAgentSessionOpts(ctx context.Context, sessionID, grantee
 	}
 	m.agentGrants[sessionID] = append(m.agentGrants[sessionID], agentGrant{
 		Grantee: granteeUserID, By: grantedBy, Live: opts.Live, VersionID: opts.VersionID,
+		CreatedAt: time.Now().UTC(),
 	})
 	return nil
 }

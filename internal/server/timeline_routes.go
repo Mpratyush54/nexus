@@ -20,6 +20,7 @@ func (s *Server) registerTimelineRoutes() {
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/grants", s.requireAuth(s.handleAgentSessionGrant))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/turns", s.requireAuth(s.handleAgentTurnPost))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/turns", s.requireAuth(s.handleAgentTurnList))
+	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/versions", s.requireAuth(s.handleAgentVersionList))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/versions", s.requireAuth(s.handleAgentVersionCreate))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/versions/{version}/complete", s.requireAuth(s.handleAgentVersionComplete))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/forks", s.requireAuth(s.handleAgentSessionForks))
@@ -246,6 +247,75 @@ func (s *Server) handleAgentTurnList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": turns, "count": len(turns)})
+}
+
+// handleAgentVersionList returns complete versions the caller may see.
+// Point-in-time grants only include the pinned version (D15).
+func (s *Server) handleAgentVersionList(w http.ResponseWriter, r *http.Request) {
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return
+	}
+	sessionID := strings.TrimSpace(r.PathValue("id"))
+	if _, ok := s.requireAgentRead(w, r, sessionID); !ok {
+		return
+	}
+	items, err := cs.ListVisibleSessionVersions(r.Context(), sessionID, authSubject(r))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+}
+
+// requireVisibleVersion loads a version the caller can read under their grant.
+// PIT grantees cannot select newer complete versions than their pin.
+func (s *Server) requireVisibleVersion(w http.ResponseWriter, r *http.Request, sessionID string, version int) (*store.SessionVersion, bool) {
+	if _, ok := s.requireAgentRead(w, r, sessionID); !ok {
+		return nil, false
+	}
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return nil, false
+	}
+	visible, err := cs.ListVisibleSessionVersions(r.Context(), sessionID, authSubject(r))
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "session not found")
+			return nil, false
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if version <= 0 {
+		// "latest" = highest visible complete version.
+		var best *store.SessionVersion
+		for i := range visible {
+			if best == nil || visible[i].Version > best.Version {
+				cp := visible[i]
+				best = &cp
+			}
+		}
+		if best == nil {
+			writeError(w, http.StatusNotFound, "version not found")
+			return nil, false
+		}
+		return best, true
+	}
+	for i := range visible {
+		if visible[i].Version == version {
+			cp := visible[i]
+			return &cp, true
+		}
+	}
+	writeError(w, http.StatusNotFound, "version not found")
+	return nil, false
 }
 
 func (s *Server) handleAgentVersionCreate(w http.ResponseWriter, r *http.Request) {

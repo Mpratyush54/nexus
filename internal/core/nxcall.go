@@ -36,11 +36,12 @@ type Cloud interface {
 
 // Deps are the local subsystems nx_call can touch.
 type Deps struct {
-	Cloud  Cloud
-	Cache  *cache.Cache
-	Outbox *outbox.Spool
-	Root   string
-	Online bool
+	Cloud          Cloud
+	Cache          *cache.Cache
+	Outbox         *outbox.Spool
+	Root           string
+	Online         bool
+	ContinueRunner continuex.Runner // optional; when set, continue.start records/starts via Runner
 }
 
 // Methods is the IDL. Bindings in bindings/ must list the same names.
@@ -150,8 +151,52 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"op_id": "op_" + req.SessionID, "command": argv}, nil
-	case "teleport.redaction_preview", "teleport.prepare":
+		opID := "op_" + req.SessionID
+		if deps.ContinueRunner != nil {
+			plan := continuex.LaunchPlan{
+				Agent: strings.TrimSpace(req.Agent),
+				Mode:  strings.TrimSpace(req.Mode),
+				Argv:  argv,
+			}
+			if id, err := deps.ContinueRunner.Start(ctx, plan); err != nil {
+				return nil, err
+			} else if strings.TrimSpace(id) != "" {
+				opID = id
+			}
+		}
+		trackRun(opID, argv)
+		return map[string]any{"op_id": opID, "command": argv}, nil
+	case "runs.message":
+		var body struct {
+			OpID    string `json:"op_id"`
+			Message string `json:"message"`
+			Text    string `json:"text"`
+		}
+		if err := decode(args, &body); err != nil {
+			return nil, err
+		}
+		msg := body.Message
+		if strings.TrimSpace(msg) == "" {
+			msg = body.Text
+		}
+		return runMessage(body.OpID, msg)
+	case "runs.approve":
+		var body struct {
+			OpID string `json:"op_id"`
+		}
+		if err := decode(args, &body); err != nil {
+			return nil, err
+		}
+		return runApprove(body.OpID)
+	case "runs.cancel":
+		var body struct {
+			OpID string `json:"op_id"`
+		}
+		if err := decode(args, &body); err != nil {
+			return nil, err
+		}
+		return runCancel(body.OpID)
+	case "teleport.redaction_preview":
 		var body struct {
 			Text     string `json:"text"`
 			Path     string `json:"path"`
@@ -168,6 +213,18 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 			"preview": teleport.RedactPreview(body.Text, body.Home),
 			"path":    teleport.Remap(body.Path, body.FromOS, body.ToOS, body.FromHome, body.ToHome),
 		}, nil
+	case "teleport.prepare":
+		var body teleport.PrepareArgs
+		if err := decode(args, &body); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(body.Root) == "" {
+			body.Root = strings.TrimSpace(deps.Root)
+		}
+		plan := teleport.BuildPreparePlan(body)
+		return plan, nil
+	case "teleport.apply":
+		return teleportApply(deps, args)
 	case "files.read":
 		var body struct {
 			Path string `json:"path"`
@@ -407,6 +464,69 @@ func captureRestore(deps Deps, args json.RawMessage) (any, error) {
 		})
 	}
 	return map[string]any{"verified": rep.Verified, "rebuilds": rebuilds}, nil
+}
+
+func teleportApply(deps Deps, args json.RawMessage) (any, error) {
+	var body struct {
+		SessionID string `json:"session_id"`
+		Dest      string `json:"dest"`
+		Files     []struct {
+			Path     string `json:"path"`
+			SHA256   string `json:"sha256"`
+			Size     int64  `json:"size"`
+			BytesB64 string `json:"bytes_b64"`
+		} `json:"files"`
+	}
+	if err := decode(args, &body); err != nil {
+		return nil, err
+	}
+	dest := strings.TrimSpace(body.Dest)
+	if dest != "" && len(body.Files) > 0 {
+		store := blobs.NewByteaStore()
+		man := &capture.Manifest{}
+		for _, f := range body.Files {
+			if strings.TrimSpace(f.BytesB64) != "" {
+				raw, err := base64.StdEncoding.DecodeString(f.BytesB64)
+				if err != nil {
+					return nil, errors.New("teleport.apply: bad bytes_b64 for " + f.Path)
+				}
+				sum := f.SHA256
+				if sum == "" {
+					sum = blobs.HashBytes(raw)
+				}
+				if _, err := store.Put(sum, raw); err != nil {
+					return nil, err
+				}
+				f.SHA256 = sum
+			}
+			man.Files = append(man.Files, capture.FileRecord{Path: f.Path, SHA256: f.SHA256, Size: f.Size})
+		}
+		rep, err := capture.RestoreTree(dest, man, store)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"applied":    true,
+			"dest":       dest,
+			"verified":   rep.Verified,
+			"session_id": strings.TrimSpace(body.SessionID),
+		}, nil
+	}
+	next := []string{
+		"Run teleport.prepare to review the Restore checklist",
+		"Confirm worktree or clean checkout target",
+		"Provide files[] with bytes_b64 (or local blob cache) and dest to apply tree restore",
+		"Fill secret name-only templates, then continue.start",
+	}
+	if deps.Root != "" {
+		next = append([]string{"Workspace root is " + deps.Root}, next...)
+	}
+	return map[string]any{
+		"applied":    false,
+		"session_id": strings.TrimSpace(body.SessionID),
+		"next_steps": next,
+		"note":       "teleport.apply is a stub unless files and dest are provided; then it restores via capture.RestoreTree",
+	}, nil
 }
 
 func restoreSecret(deps Deps, args json.RawMessage) (any, error) {

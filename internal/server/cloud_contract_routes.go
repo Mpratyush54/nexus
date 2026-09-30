@@ -66,6 +66,8 @@ func (s *Server) registerCloudContractRoutes() {
 	s.Mux.HandleFunc("GET /ops/v1/health", s.requireAuth(s.requirePlatformAdmin(s.handleOpsHealth)))
 	s.Mux.HandleFunc("GET /.well-known/oauth-authorization-server", s.handleOAuthASMetadata)
 	s.Mux.HandleFunc("GET /v1/agent/mcp/.well-known/oauth-authorization-server", s.handleOAuthASMetadata)
+	// P7 expansions (users/plans/flags/releases/suspend) live in ops_routes.go.
+	s.registerOpsRoutes()
 }
 
 func (s *Server) requireSessionOwner(w http.ResponseWriter, r *http.Request, sessionID string) (*store.AgentSession, store.AgentCloudStore, bool) {
@@ -136,9 +138,6 @@ func (s *Server) handleBlobPresign(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleVersionPreflight(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.PathValue("id"))
-	if _, ok := s.requireAgentRead(w, r, sessionID); !ok {
-		return
-	}
 	version, err := strconv.Atoi(r.PathValue("version"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "version must be an integer")
@@ -149,16 +148,29 @@ func (s *Server) handleVersionPreflight(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	ver, err := getVersion(r, s, sessionID, version)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "version not found")
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err.Error())
+	row, ok := s.requireAgentRead(w, r, sessionID)
+	if !ok {
 		return
 	}
-	row, _ := cs.GetAgentSession(r.Context(), sessionID)
+	caller := authSubject(r)
+	var ver *store.SessionVersion
+	if row.OwnerUserID == caller {
+		// Owners may preflight uploading versions (not yet in the visible set).
+		ver, err = getVersion(r, s, sessionID, version)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "version not found")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	} else {
+		ver, ok = s.requireVisibleVersion(w, r, sessionID, version)
+		if !ok {
+			return
+		}
+	}
 	refs, _, merr := manifestRefs(ver.Manifest)
 	if merr != nil && len(ver.Manifest) > 0 {
 		writeError(w, http.StatusBadRequest, merr.Error())
@@ -170,7 +182,7 @@ func (s *Server) handleVersionPreflight(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version": version,
+		"version": ver.Version,
 		"state":   ver.State,
 		"ready":   len(missing) == 0 && (ver.State == "complete" || ver.State == "transcript_only"),
 		"missing": missing,
@@ -750,15 +762,26 @@ func (s *Server) handleOpsStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleOpsTenants(w http.ResponseWriter, r *http.Request) {
 	// D22: org id + name only. Never session titles or content.
-	tenants := []map[string]string{}
+	// suspended comes from P7 ops suspend map (ops_routes.go).
+	tenants := []map[string]any{}
 	switch st := s.Store.(type) {
 	case *store.MemStore:
 		for _, o := range st.ListAllOrganizations(r.Context()) {
-			tenants = append(tenants, map[string]string{"id": o.ID, "name": o.Name})
+			row := map[string]any{"id": o.ID, "name": o.Name, "suspended": false}
+			if reason, ok := tenantSuspended(o.ID); ok {
+				row["suspended"] = true
+				row["suspend_reason"] = reason
+			}
+			tenants = append(tenants, row)
 		}
 	case *store.PostgresStore:
 		for _, o := range st.ListAllOrganizations(r.Context()) {
-			tenants = append(tenants, map[string]string{"id": o.ID, "name": o.Name})
+			row := map[string]any{"id": o.ID, "name": o.Name, "suspended": false}
+			if reason, ok := tenantSuspended(o.ID); ok {
+				row["suspended"] = true
+				row["suspend_reason"] = reason
+			}
+			tenants = append(tenants, row)
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{

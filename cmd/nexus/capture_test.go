@@ -42,3 +42,17 @@ func TestCaptureForegroundOnce(t *testing.T) {
 		t.Fatalf("missing no-tcp line: %q", out)
 	}
 }
+
+func TestCaptureForegroundDemoEnqueue(t *testing.T) {
+	t.Setenv("NEXUS_CAPTURE_ONCE", "1")
+	t.Setenv("NEXUS_CAPTURE_DEMO_ENQUEUE", "1")
+	dir := t.TempDir()
+	var buf bytes.Buffer
+	if err := runCapture(Config{}, []string{"--foreground", "--outbox", dir}, &buf); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "DemoEnqueue") {
+		t.Fatalf("expected DemoEnqueue log: %q", out)
+	}
+}

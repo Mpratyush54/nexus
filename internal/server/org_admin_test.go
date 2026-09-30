@@ -166,3 +166,80 @@ func TestOrgOwnerBillingCaptureAuditAndStorage(t *testing.T) {
 		t.Fatalf("second accept: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestOrgSharesListAndAdminRevoke(t *testing.T) {
+	s := newTestServer()
+	mem := s.Store.(*store.MemStore)
+	ctx := t.Context()
+
+	org, err := mem.CreateOrganization(ctx, "SharesCo", "shares-co", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.AddOrgMember(ctx, org.ID, "carol", store.OrgRoleAdmin, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.AddOrgMember(ctx, org.ID, "bob", store.OrgRoleMember, "alice"); err != nil {
+		t.Fatal(err)
+	}
+	proj, err := mem.CreateOrgProject(ctx, org.ID, "app", "App", "", "", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	alice := loginAs(t, s, "alice")
+	carol := loginAs(t, s, "carol")
+	bob := loginAs(t, s, "bob")
+
+	rec := doJSON(t, s, http.MethodPost, "/v1/agent-sessions", alice, map[string]any{
+		"project_id": proj.ID, "harness": "claude", "native_id": "ses_share_tab",
+		"origin_machine_id": "lap", "title": "SECRET-TITLE", "summary": "SECRET-SUMMARY",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("session: %d %s", rec.Code, rec.Body.String())
+	}
+	var sess store.AgentSession
+	decodeBody(t, rec, &sess)
+	rec = doJSON(t, s, http.MethodPut, "/v1/agent-sessions/"+sess.ID+"/grants/bob", alice, map[string]any{
+		"live": true,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("grant: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, s, http.MethodGet, "/orgs/"+org.ID+"/shares", bob, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("member shares: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodGet, "/orgs/"+org.ID+"/shares", carol, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin shares: %d %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "SECRET-TITLE") || strings.Contains(body, "SECRET-SUMMARY") {
+		t.Fatalf("shares leaked content: %s", body)
+	}
+	var listed struct {
+		Items []store.OrgSessionShare `json:"items"`
+		Count int                     `json:"count"`
+	}
+	decodeBody(t, rec, &listed)
+	if listed.Count != 1 || listed.Items[0].SessionID != sess.ID || listed.Items[0].GranteeID != "bob" {
+		t.Fatalf("listed=%+v", listed)
+	}
+	if listed.Items[0].OwnerID != "alice" || listed.Items[0].ProjectID != proj.ID || !listed.Items[0].Live {
+		t.Fatalf("row=%+v", listed.Items[0])
+	}
+
+	rec = doJSON(t, s, http.MethodDelete, "/orgs/"+org.ID+"/shares/"+sess.ID+"/bob", carol, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke: %d %s", rec.Code, rec.Body.String())
+	}
+	ok, err := mem.CanReadAgentSession(ctx, "bob", sess.ID)
+	if err != nil || ok {
+		t.Fatalf("bob still reads after admin revoke: %v %v", ok, err)
+	}
+	rec = doJSON(t, s, http.MethodGet, "/orgs/"+org.ID+"/shares", carol, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"count":0`) {
+		t.Fatalf("after revoke: %d %s", rec.Code, rec.Body.String())
+	}
+}

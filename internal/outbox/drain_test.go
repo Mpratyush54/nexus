@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -155,5 +156,27 @@ func TestDrainMidFailureThenRetryZeroLoss(t *testing.T) {
 	}
 	if blobPosts != 1 {
 		t.Fatalf("successful blob posts = %d", blobPosts)
+	}
+}
+
+func TestDemoEnqueue(t *testing.T) {
+	s, err := Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := DemoEnqueue(s, "sess-demo"); err != nil {
+		t.Fatal(err)
+	}
+	pending := s.Pending()
+	if len(pending) != 1 || pending[0].Kind != "turn" {
+		t.Fatalf("pending=%+v", pending)
+	}
+	cloud := &fakeCloud{}
+	res, err := Drain(context.Background(), s, cloud)
+	if err != nil || res.Uploaded != 1 {
+		t.Fatalf("drain=%+v err=%v", res, err)
+	}
+	if len(cloud.posts) != 1 || !strings.Contains(cloud.posts[0].Path, "sess-demo") {
+		t.Fatalf("posts=%+v", cloud.posts)
 	}
 }

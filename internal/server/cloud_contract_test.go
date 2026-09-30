@@ -198,6 +198,38 @@ func TestCloudContracts(t *testing.T) {
 		t.Fatalf("tenants non-admin: %d", rec.Code)
 	}
 
+	// P7 ops expansions: users/plans/flags/releases/suspend — never content keys.
+	for _, path := range []string{"/ops/v1/users", "/ops/v1/users?org=" + org.ID, "/ops/v1/plans", "/ops/v1/flags", "/ops/v1/releases"} {
+		rec = doJSON(t, s, http.MethodGet, path, owner, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body.String())
+		}
+		if err := assertOpsNoContentKeys(rec.Body.Bytes()); err != nil {
+			t.Fatalf("%s: %v body=%s", path, err, rec.Body.String())
+		}
+		if strings.Contains(rec.Body.String(), title) || !strings.Contains(rec.Body.String(), `"session_content":false`) {
+			t.Fatalf("%s leaked or missing flag: %s", path, rec.Body.String())
+		}
+	}
+	rec = doJSON(t, s, http.MethodPost, "/ops/v1/tenants/"+org.ID+"/suspend", owner, map[string]any{"reason": "abuse"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("suspend: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := assertOpsNoContentKeys(rec.Body.Bytes()); err != nil {
+		t.Fatalf("suspend keys: %v", err)
+	}
+	rec = doJSON(t, s, http.MethodGet, "/ops/v1/tenants", owner, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"suspended":true`) {
+		t.Fatalf("tenants after suspend: %d %s", rec.Code, rec.Body.String())
+	}
+	if err := assertOpsNoContentKeys(rec.Body.Bytes()); err != nil {
+		t.Fatalf("tenants keys: %v", err)
+	}
+	rec = doJSON(t, s, http.MethodGet, "/ops/v1/users", other, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("users non-admin: %d", rec.Code)
+	}
+
 	mailer := &captureMail{}
 	s.Mail = mailer
 	rec = doJSON(t, s, http.MethodPost, "/orgs/"+org.ID+"/invites", owner, map[string]any{
@@ -318,6 +350,89 @@ func TestGrantLiveAndPointInTimeBody(t *testing.T) {
 	})
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("team must force live: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPointInTimeGrantVersionsListHidesNewer(t *testing.T) {
+	s := newTestServer()
+	mem := s.Store.(*store.MemStore)
+	ctx := t.Context()
+	proj, err := mem.ResolveProject(ctx, "", "", "pit-versions-http")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.ClaimProject(ctx, proj.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	owner := loginAs(t, s, "owner")
+	grantee := loginAs(t, s, "grantee")
+	rec := doJSON(t, s, http.MethodPost, "/v1/agent-sessions", owner, map[string]any{
+		"project_id": proj.ID, "harness": "claude", "native_id": "ses_pit_http",
+		"origin_machine_id": "lap",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("session: %d %s", rec.Code, rec.Body.String())
+	}
+	var sess store.AgentSession
+	decodeBody(t, rec, &sess)
+
+	putComplete := func(label string) store.SessionVersion {
+		t.Helper()
+		raw := []byte(label)
+		sum := sha256.Sum256(raw)
+		hash := hex.EncodeToString(sum[:])
+		if err := mem.PutBlob(ctx, proj.ID, hash, "plain", "transcript", raw); err != nil {
+			t.Fatal(err)
+		}
+		ver, err := mem.CreateSessionVersion(ctx, sess.ID, "owner")
+		if err != nil {
+			t.Fatal(err)
+		}
+		man, _ := json.Marshal(map[string]any{"transcript": map[string]string{"blob": "sha256:" + hash}})
+		done, err := mem.CompleteSessionVersion(ctx, sess.ID, ver.Version, man)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return *done
+	}
+	v1 := putComplete("v1-body")
+	rec = doJSON(t, s, http.MethodPut, "/v1/agent-sessions/"+sess.ID+"/grants/grantee", owner, map[string]any{
+		"live": false, "version_id": v1.ID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pit grant: %d %s", rec.Code, rec.Body.String())
+	}
+	v2 := putComplete("v2-newer")
+
+	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+sess.ID+"/versions", grantee, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("grantee versions: %d %s", rec.Code, rec.Body.String())
+	}
+	var listed struct {
+		Items []store.SessionVersion `json:"items"`
+		Count int                    `json:"count"`
+	}
+	decodeBody(t, rec, &listed)
+	if listed.Count != 1 || len(listed.Items) != 1 || listed.Items[0].ID != v1.ID {
+		t.Fatalf("PIT list want only v1=%s, got %+v (v2=%s)", v1.ID, listed, v2.ID)
+	}
+
+	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+sess.ID+"/versions/2/preflight", grantee, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("PIT preflight v2: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+sess.ID+"/versions/1/preflight", grantee, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PIT preflight v1: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+sess.ID+"/versions", owner, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner versions: %d %s", rec.Code, rec.Body.String())
+	}
+	decodeBody(t, rec, &listed)
+	if listed.Count != 2 {
+		t.Fatalf("owner should see both versions, got %+v", listed)
 	}
 }
 
