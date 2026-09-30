@@ -36,6 +36,8 @@ type harvestRow struct {
 	subtitle string
 	filePath string
 	detail   string
+	agent    string
+	format   string
 }
 
 // workspaceRow is one Workspace list entry (repo root / path — not harvest).
@@ -182,11 +184,22 @@ func buildHarvestRows(h *localclient.Harvest) []harvestRow {
 		if files == 0 {
 			files = a.FileCount
 		}
+		format := first(a.Format, a.Kind, "—")
+		nForAgent := 0
+		for _, f := range h.Files {
+			if strings.EqualFold(first(f.Agent, ""), name) {
+				nForAgent++
+			}
+		}
+		detail := fmt.Sprintf("Harness %s (%s).\n%d transcript file(s) in latest scan list · %d files seen overall.\n\nSelect this row to preview the newest transcript, or pick a file row below.",
+			name, format, nForAgent, files)
 		rows = append(rows, harvestRow{
 			kind:     "agent",
 			title:    name,
-			subtitle: fmt.Sprintf("%s · %d transcript files seen", first(a.Format, a.Kind, "—"), files),
-			detail:   fmt.Sprintf("Agent harness %s (%s).\n\nThese are agent transcript files on disk, not Memory entries.", name, first(a.Format, a.Kind, "")),
+			subtitle: fmt.Sprintf("%s · %d listed · %d seen", format, nForAgent, files),
+			detail:   detail,
+			agent:    name,
+			format:   format,
 		})
 	}
 	for _, f := range h.Files {
@@ -196,6 +209,8 @@ func buildHarvestRows(h *localclient.Harvest) []harvestRow {
 			title:    label,
 			subtitle: first(f.Agent, "agent") + " · " + first(f.Format, "format"),
 			filePath: f.Path,
+			agent:    first(f.Agent, ""),
+			format:   first(f.Format, ""),
 		})
 	}
 	for _, ev := range h.Recent {
@@ -212,6 +227,20 @@ func buildHarvestRows(h *localclient.Harvest) []harvestRow {
 		})
 	}
 	return rows
+}
+
+// harvestFilesForAgent returns scan-listed transcript files for one harness.
+func harvestFilesForAgent(h *localclient.Harvest, agent string) []localclient.HarvestFileHit {
+	if h == nil || strings.TrimSpace(agent) == "" {
+		return nil
+	}
+	var out []localclient.HarvestFileHit
+	for _, f := range h.Files {
+		if strings.EqualFold(f.Agent, agent) {
+			out = append(out, f)
+		}
+	}
+	return out
 }
 
 // buildWorkspaceRows lists workspace root / git metadata only — never harvest transcripts.

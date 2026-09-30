@@ -1,6 +1,7 @@
 package desktopui
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -67,25 +68,33 @@ func TestFormatMemoryDetail(t *testing.T) {
 func TestResolveReadPath(t *testing.T) {
 	root := `D:\central-memory`
 	if got := resolveReadPath(`internal\foo.go`, root); got != "internal/foo.go" && got != `internal\foo.go` {
-		// ToSlash on Windows yields internal/foo.go
 		if got != "internal/foo.go" {
 			t.Fatalf("rel got %q", got)
 		}
 	}
 	abs := `D:\central-memory\internal\desktopui\shell.go`
 	got := resolveReadPath(abs, root)
-	if !strings.Contains(got, "desktopui") || strings.HasPrefix(got, "D:") {
-		// should be relative under root
-		if got != "internal/desktopui/shell.go" && got != `internal\desktopui\shell.go` {
-			// filepath.Rel + ToSlash
-			wantSlash := strings.ReplaceAll(got, `\`, `/`)
-			if wantSlash != "internal/desktopui/shell.go" {
-				t.Fatalf("abs under root got %q", got)
-			}
-		}
+	wantSlash := strings.ReplaceAll(got, `\`, `/`)
+	if wantSlash != "internal/desktopui/shell.go" {
+		t.Fatalf("abs under root got %q", got)
 	}
 	outside := `C:\Windows\System32\drivers\etc\hosts`
-	if got := resolveReadPath(outside, root); got != outside {
+	if got := resolveReadPath(outside, root); !strings.EqualFold(filepath.Clean(got), filepath.Clean(outside)) && got != filepath.ToSlash(filepath.Clean(outside)) {
 		t.Fatalf("outside got %q", got)
+	}
+}
+
+func TestReadPathCandidatesStripsProjectPrefix(t *testing.T) {
+	root := `D:\central-memory`
+	cands := readPathCandidates("central-memory/internal/store/models.go", root)
+	found := false
+	for _, c := range cands {
+		if strings.ReplaceAll(c, `\`, `/`) == "internal/store/models.go" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("candidates=%v", cands)
 	}
 }

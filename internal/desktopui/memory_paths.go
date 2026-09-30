@@ -140,25 +140,75 @@ func formatMemoryDetail(it cloudclient.MemoryItem) string {
 // resolveReadPath maps an extracted path to a daemon ReadFile argument.
 // Prefers workspace-relative when the path sits under root.
 func resolveReadPath(path, workspaceRoot string) string {
+	cands := readPathCandidates(path, workspaceRoot)
+	if len(cands) == 0 {
+		return strings.TrimSpace(path)
+	}
+	return cands[0]
+}
+
+// readPathCandidates returns daemon ReadFile path attempts for a memory file link.
+// Tries workspace-relative forms first (SecureJoin), including stripping a leading
+// project folder segment that memories sometimes include (e.g. central-memory/internal/…).
+func readPathCandidates(path, workspaceRoot string) []string {
 	path = strings.TrimSpace(path)
+	path = strings.Trim(path, `"'`)
 	if path == "" {
-		return ""
+		return nil
 	}
 	root := strings.TrimSpace(workspaceRoot)
-	if root == "" {
-		return path
+	seen := map[string]struct{}{}
+	var out []string
+	add := func(p string) {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			return
+		}
+		// Daemon SecureJoin accepts either slash style; prefer ToSlash for stability.
+		p = filepath.ToSlash(filepath.Clean(p))
+		if filepath.IsAbs(p) {
+			// Keep OS abs for allow check; Rel below may replace it.
+		}
+		key := strings.ToLower(p)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, p)
 	}
-	root = filepath.Clean(root)
-	if !filepath.IsAbs(path) {
-		return filepath.ToSlash(filepath.Clean(path))
+
+	if root != "" {
+		rootClean := filepath.Clean(root)
+		base := filepath.Base(rootClean)
+
+		if filepath.IsAbs(path) {
+			abs := filepath.Clean(path)
+			if rel, err := filepath.Rel(rootClean, abs); err == nil && !strings.HasPrefix(rel, "..") {
+				add(rel)
+			}
+			add(abs) // last resort; daemon will 403 if outside
+		} else {
+			add(path)
+			slash := filepath.ToSlash(path)
+			add(slash)
+			// Strip leading "./"
+			add(strings.TrimPrefix(slash, "./"))
+			// Strip project folder prefix: "central-memory/internal/…" → "internal/…"
+			if base != "" && base != "." && base != string(filepath.Separator) {
+				prefix := filepath.ToSlash(base) + "/"
+				if strings.HasPrefix(strings.ToLower(slash), strings.ToLower(prefix)) {
+					add(slash[len(prefix):])
+				}
+				// Also "central-memory\" on Windows-style stored paths
+				prefixWin := base + `\`
+				if strings.HasPrefix(strings.ToLower(path), strings.ToLower(prefixWin)) {
+					add(path[len(prefixWin):])
+				}
+			}
+		}
+	} else {
+		add(path)
+		add(filepath.ToSlash(path))
 	}
-	abs := filepath.Clean(path)
-	rel, err := filepath.Rel(root, abs)
-	if err != nil {
-		return path
-	}
-	if strings.HasPrefix(rel, "..") {
-		return path
-	}
-	return filepath.ToSlash(rel)
+	return out
 }

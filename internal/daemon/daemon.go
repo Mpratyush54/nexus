@@ -105,6 +105,9 @@ type Daemon struct {
 	// Lax when nil (zero-value Daemons in tests); NewDaemon installs both.
 	eventLimiter   *security.Limiter
 	fileOpsLimiter *security.Limiter
+
+	// harvestAllowExtra is an absolute-path allowlist for tests.
+	harvestAllowExtra []string
 }
 
 // NewDaemon builds a daemon bound to root, authenticated by token.

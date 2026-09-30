@@ -93,6 +93,36 @@ func (d *Daemon) handleLocalHarvest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+type harvestReadReq struct {
+	Path string `json:"path"`
+}
+
+// handleHarvestRead serves POST /local/harvest/read — allowlisted transcript
+// preview for Desktop (paths outside the workspace sandbox).
+func (d *Daemon) handleHarvestRead(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req harvestReadReq
+	if !decodeBody(w, r, &req) {
+		return
+	}
+	data, abs, err := d.ReadHarvestFile(req.Path)
+	if err != nil {
+		writeFileErr(w, err)
+		return
+	}
+	formatted := FormatTranscriptPreview(data, 80)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"path":      abs,
+		"size":      len(data),
+		"format":    "jsonl",
+		"content":   string(data),
+		"formatted": formatted,
+	})
+}
+
 // HarvestSnapshot builds the portal Connect harvest view.
 func (d *Daemon) HarvestSnapshot() HarvestStatus {
 	st := HarvestStatus{OK: true, Root: "", Agents: []HarvestAgentStat{}, Recent: []HarvestLogLine{}}

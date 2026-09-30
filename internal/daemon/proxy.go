@@ -74,6 +74,7 @@ func (p *CORSProxy) Handler() http.Handler {
 	mux.HandleFunc("/local/file/read", d.withPortalIdentityGate(d.handleFileRead))
 	mux.HandleFunc("/local/workspace", d.withPortalIdentityGate(d.handleLocalWorkspace))
 	mux.HandleFunc("/local/harvest", d.withPortalIdentityGate(d.handleLocalHarvest))
+	mux.HandleFunc("/local/harvest/read", d.withPortalIdentityGate(d.handleHarvestRead))
 	mux.HandleFunc("/local/workspace/switch", d.withPortalIdentityGate(d.handleWorkspaceSwitch))
 	mux.HandleFunc("/local/workspace/recent", d.withPortalIdentityGate(d.handleWorkspaceRecent))
 	mux.HandleFunc("/local/diagnostics", d.withPortalIdentityGate(d.handleDiagnostics))

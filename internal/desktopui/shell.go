@@ -170,14 +170,22 @@ func NewShell(win fyne.Window, client *localclient.Client, hooks Hooks) *Shell {
 		if id >= 0 && id < len(s.harvestRows) {
 			row = s.harvestRows[id]
 		}
+		h := s.cachedHarvest
 		s.mu.Unlock()
 		switch row.kind {
 		case "file":
-			s.loadFilePreview(row.filePath, "Agent transcript · "+row.title)
+			if s.previewLinks != nil {
+				s.previewLinks.Objects = nil
+				s.previewLinks.Hide()
+				s.previewLinks.Refresh()
+			}
+			s.loadHarvestTranscript(row.filePath, row.title, row.format)
+		case "agent":
+			s.showHarnessPreview(row, h)
 		case "event":
 			s.setPreviewKind("harvest", "Harvest event · "+row.title, row.detail)
 		default:
-			s.setPreviewKind("harvest", "Agent harness · "+row.title, row.detail)
+			s.setPreviewKind("harvest", "Harvest · "+row.title, row.detail)
 		}
 	}
 

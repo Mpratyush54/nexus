@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"central-memory/internal/cloudclient"
+	"central-memory/internal/localclient"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -18,13 +19,17 @@ func (s *Shell) setPreview(title, body string) {
 }
 
 func (s *Shell) setPreviewKind(kind, title, body string) {
+	s.setPreviewContent(kind, title, body, true)
+}
+
+func (s *Shell) setPreviewContent(kind, title, body string, clearLinks bool) {
 	s.mu.Lock()
 	s.previewKind = kind
 	s.mu.Unlock()
 	if s.previewHead != nil {
 		s.previewHead.SetText(title)
 	}
-	if s.previewLinks != nil {
+	if clearLinks && s.previewLinks != nil {
 		s.previewLinks.Objects = nil
 		s.previewLinks.Hide()
 		s.previewLinks.Refresh()
@@ -87,32 +92,123 @@ func (s *Shell) openMemoryFile(path, workspaceRoot string) {
 	if path == "" {
 		return
 	}
-	readPath := resolveReadPath(path, workspaceRoot)
+	candidates := readPathCandidates(path, workspaceRoot)
 	title := "File · " + filepath.Base(path)
-	outside := filepath.IsAbs(path) && readPath == path && workspaceRoot != "" &&
-		!strings.HasPrefix(strings.ToLower(filepath.Clean(path)), strings.ToLower(filepath.Clean(workspaceRoot))+string(filepath.Separator)) &&
-		!strings.EqualFold(filepath.Clean(path), filepath.Clean(workspaceRoot))
 
 	go func() {
-		fr, err := s.client.ReadFile(readPath)
-		fyne.Do(func() {
-			if err != nil {
-				msg := "Path: " + path + "\n"
-				if readPath != path {
-					msg += "Daemon path: " + readPath + "\n"
+		var lastErr error
+		var tried []string
+		for _, readPath := range candidates {
+			if readPath == "" {
+				continue
+			}
+			tried = append(tried, readPath)
+			fr, err := s.client.ReadFile(readPath)
+			if err == nil {
+				body := fr.Content
+				if len(body) > 120_000 {
+					body = body[:120_000] + "\n\n… truncated …"
 				}
-				msg += "\nCould not read via daemon:\n" + err.Error()
-				if outside {
-					msg += "\n\nThis path looks outside the current workspace. Choose that folder on Home/Workspace, or copy the path above."
-				}
-				s.setPreviewKind("memory", title, msg)
+				fyne.Do(func() {
+					s.setPreviewKind("memory", title, "Path: "+fr.Path+"\nSize: "+fmt.Sprintf("%d", fr.Size)+" bytes\n\n"+body)
+				})
 				return
 			}
-			body := fr.Content
+			lastErr = err
+		}
+		fyne.Do(func() {
+			msg := "Path: " + path + "\nWorkspace: " + orDash(workspaceRoot) + "\n"
+			if len(tried) > 0 {
+				msg += "Tried: " + strings.Join(tried, " · ") + "\n"
+			}
+			msg += "\nCould not read via daemon:\n" + errString(lastErr)
+			msg += "\n\nDaemon reads are sandboxed to the workspace root (relative paths via SecureJoin)."
+			msg += " If this file moved or lived only in a memory note, pick the matching folder on Home/Workspace."
+			s.setPreviewKind("memory", title, msg)
+		})
+	}()
+}
+
+func errString(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	return err.Error()
+}
+
+func (s *Shell) showHarnessPreview(row harvestRow, h *localclient.Harvest) {
+	files := harvestFilesForAgent(h, row.agent)
+	header := row.detail
+	if len(files) == 0 {
+		s.setPreviewKind("harvest", "Harness · "+row.title, header+"\n\nNo transcript files in the latest scan list yet. Run Scan on Home, then select a file row when it appears.")
+		if s.previewLinks != nil {
+			s.previewLinks.Objects = nil
+			s.previewLinks.Hide()
+			s.previewLinks.Refresh()
+		}
+		return
+	}
+
+	// File picker buttons in the preview pane.
+	if s.previewLinks != nil {
+		objs := []fyne.CanvasObject{sectionHeading("Transcripts · " + row.title)}
+		for _, f := range files {
+			f := f
+			label := first(f.Name, filepath.Base(f.Path))
+			fmtLabel := first(f.Format, "file")
+			btn := widget.NewButtonWithIcon(label+"  ·  "+fmtLabel, theme.DocumentIcon(), func() {
+				s.loadHarvestTranscript(f.Path, label, f.Format)
+			})
+			btn.Alignment = widget.ButtonAlignLeading
+			objs = append(objs, btn)
+		}
+		s.previewLinks.Objects = objs
+		s.previewLinks.Show()
+		s.previewLinks.Refresh()
+	}
+
+	// Auto-load newest JSONL (prefer jsonl over sqlite).
+	pick := files[0]
+	for _, f := range files {
+		if strings.EqualFold(f.Format, "jsonl") || strings.HasSuffix(strings.ToLower(f.Path), ".jsonl") {
+			pick = f
+			break
+		}
+	}
+	s.loadHarvestTranscript(pick.Path, first(pick.Name, filepath.Base(pick.Path)), pick.Format)
+	s.setPreviewContent("harvest", "Harness · "+row.title, "Loading transcript…\n\n"+header, false)
+}
+
+func (s *Shell) loadHarvestTranscript(path, title, format string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	format = strings.ToLower(strings.TrimSpace(format))
+	if format == "sqlite" || strings.HasSuffix(strings.ToLower(path), ".db") {
+		s.setPreviewKind("harvest", "Transcript · "+title,
+			"Path: "+path+"\n\nSQLite agent DBs are harvested for turns but not rendered as a conversation preview yet.\nPick a .jsonl transcript when available.")
+		return
+	}
+	go func() {
+		fr, err := s.client.ReadHarvestFile(path)
+		fyne.Do(func() {
+			if err != nil {
+				s.setPreviewContent("harvest", "Transcript · "+title,
+					"Path: "+path+"\n\nCould not read harvest transcript:\n"+err.Error()+
+						"\n\nTranscripts live outside the workspace; Desktop uses /local/harvest/read with an allowlist from the latest scan.",
+					false)
+				return
+			}
+			body := strings.TrimSpace(fr.Formatted)
+			if body == "" {
+				body = fr.Content
+			}
 			if len(body) > 120_000 {
 				body = body[:120_000] + "\n\n… truncated …"
 			}
-			s.setPreviewKind("memory", title, "Path: "+fr.Path+"\nSize: "+fmt.Sprintf("%d", fr.Size)+" bytes\n\n"+body)
+			head := "Path: " + fr.Path + "\nSize: " + fmt.Sprintf("%d", fr.Size) + " bytes\n\n"
+			s.setPreviewContent("harvest", "Transcript · "+title, head+body, false)
 		})
 	}()
 }

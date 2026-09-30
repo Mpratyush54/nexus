@@ -212,6 +212,38 @@ func (c *Client) ReadFile(path string) (*FileRead, error) {
 	return &fr, nil
 }
 
+// HarvestFileRead is POST /local/harvest/read (allowlisted transcript outside workspace).
+type HarvestFileRead struct {
+	Path      string `json:"path"`
+	Size      int    `json:"size"`
+	Format    string `json:"format"`
+	Content   string `json:"content"`
+	Formatted string `json:"formatted"`
+}
+
+// ReadHarvestFile loads a harvested transcript by absolute path.
+func (c *Client) ReadHarvestFile(path string) (*HarvestFileRead, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+	body, _ := json.Marshal(map[string]string{"path": path})
+	resp, err := c.HTTP.Post(c.Base+"/local/harvest/read", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("harvest read: %s %s", resp.Status, strings.TrimSpace(string(b)))
+	}
+	var fr HarvestFileRead
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 3<<20)).Decode(&fr); err != nil {
+		return nil, err
+	}
+	return &fr, nil
+}
+
 func (c *Client) RecentWorkspaces() ([]string, error) {
 	var raw json.RawMessage
 	if err := c.getJSON("/local/workspace/recent", &raw); err != nil {
