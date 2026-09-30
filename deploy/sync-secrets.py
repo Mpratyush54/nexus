@@ -93,6 +93,13 @@ def main():
         import secrets
         existing_db_pw = secrets.token_hex(16)
 
+    # Preserve PLATFORM_ADMIN_USER_IDS across rewrites (bootstrap by user UUID only)
+    print("[*] Checking existing PLATFORM_ADMIN_USER_IDS on Lightsail...")
+    res = run_ssh("grep '^PLATFORM_ADMIN_USER_IDS=' /opt/central-memory/repo/.env 2>/dev/null || true")
+    existing_admin_ids = ""
+    if res.returncode == 0 and res.stdout.strip():
+        existing_admin_ids = res.stdout.strip().split("=", 1)[1].strip()
+
     env_lines = [
         f"DB_PASSWORD={existing_db_pw}",
         f"JWT_SECRET={jwt_secret}",
@@ -109,6 +116,8 @@ def main():
         f"OPENROUTER_API_KEY={openrouter_api_key}",
         "CENTRAL_MEMORY_LOCAL_DEV=1",
     ]
+    if existing_admin_ids:
+        env_lines.append(f"PLATFORM_ADMIN_USER_IDS={existing_admin_ids}")
     env_content = "\n".join(env_lines) + "\n"
 
     print("[*] Securely writing .env to Lightsail instance...")

@@ -1,7 +1,8 @@
 -- 020_platform: Super Admin allowlist + app release registry.
 --
 -- Platform Super Admin is orthogonal to project OWNER/ADMIN and org ADMIN.
--- Bootstrap additional operators with PLATFORM_ADMIN_USERNAMES (comma-separated)
+-- Bootstrap additional operators with PLATFORM_ADMIN_USER_IDS (comma-separated user UUIDs).
+-- PLATFORM_ADMIN_USERNAMES is ignored (username matching was a privilege-escalation hole).
 -- even before any row exists here. Releases back the CLI/desktop update
 -- channel (GET /platform/releases/latest) and the Super Admin console.
 

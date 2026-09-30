@@ -41,6 +41,7 @@ services:
       SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
       MAIL_FROM: "${MAIL_FROM:-Nexus <noreply@pratyushes.dev>}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
+      PLATFORM_ADMIN_USER_IDS: "${PLATFORM_ADMIN_USER_IDS:-}"
     ports:
       - "80:8080"
       - "8080:8080"

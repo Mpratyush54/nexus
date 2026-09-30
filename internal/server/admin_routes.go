@@ -29,8 +29,12 @@ func (s *Server) platformStore() (store.PlatformStore, bool) {
 	return ps, ok
 }
 
-func envPlatformAdmins() []string {
-	raw := strings.TrimSpace(os.Getenv("PLATFORM_ADMIN_USERNAMES"))
+// envPlatformAdminIDs returns immutable user IDs from PLATFORM_ADMIN_USER_IDS
+// (preferred) or legacy PLATFORM_ADMIN_IDS. Username bootstrap
+// (PLATFORM_ADMIN_USERNAMES) is intentionally ignored — matching by username
+// lets anyone who registers that name become super admin.
+func envPlatformAdminIDs() []string {
+	raw := strings.TrimSpace(os.Getenv("PLATFORM_ADMIN_USER_IDS"))
 	if raw == "" {
 		raw = strings.TrimSpace(os.Getenv("PLATFORM_ADMIN_IDS"))
 	}
@@ -48,19 +52,21 @@ func envPlatformAdmins() []string {
 	return out
 }
 
-func matchEnvAdmin(userID, username string) bool {
+func matchEnvAdmin(userID string) bool {
 	userID = strings.TrimSpace(userID)
-	username = strings.TrimSpace(username)
-	for _, name := range envPlatformAdmins() {
-		if strings.EqualFold(name, userID) || (username != "" && strings.EqualFold(name, username)) {
+	if userID == "" {
+		return false
+	}
+	for _, id := range envPlatformAdminIDs() {
+		if strings.EqualFold(id, userID) {
 			return true
 		}
 	}
 	return false
 }
 
-func (s *Server) userIsPlatformAdmin(ctx context.Context, userID, username string) bool {
-	if matchEnvAdmin(userID, username) {
+func (s *Server) userIsPlatformAdmin(ctx context.Context, userID, _ string) bool {
+	if matchEnvAdmin(userID) {
 		return true
 	}
 	ps, ok := s.platformStore()
@@ -165,7 +171,7 @@ func (s *Server) handleAdminOverview(w http.ResponseWriter, r *http.Request) {
 			"ecs_service":     os.Getenv("ECS_SERVICE"),
 			"releases_bucket": firstNonEmptyEnv("RELEASES_S3_BUCKET", "NEXUS_RELEASES_BUCKET"),
 		},
-		"bootstrap_env": "PLATFORM_ADMIN_USERNAMES",
+		"bootstrap_env": "PLATFORM_ADMIN_USER_IDS",
 	})
 }
 
@@ -220,7 +226,7 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 		for _, u := range users {
 			admin := s.userIsPlatformAdmin(r.Context(), u.ID, u.Username)
 			src := ""
-			if matchEnvAdmin(u.ID, u.Username) {
+			if matchEnvAdmin(u.ID) {
 				src = "env"
 			}
 			add(u.ID, u.Username, u.Email, src, admin)
@@ -232,8 +238,8 @@ func (s *Server) handleAdminUsers(w http.ResponseWriter, r *http.Request) {
 			add(id, id, "", "grant", true)
 		}
 	}
-	for _, name := range envPlatformAdmins() {
-		add(name, name, "", "env", true)
+	for _, id := range envPlatformAdminIDs() {
+		add(id, id, "", "env", true)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
 }
@@ -254,8 +260,8 @@ func (s *Server) handleAdminUserPut(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "is_platform_admin is required")
 		return
 	}
-	if matchEnvAdmin(id, "") {
-		writeError(w, http.StatusConflict, "cannot change an env-bootstrap super admin; unset PLATFORM_ADMIN_USERNAMES first")
+	if matchEnvAdmin(id) {
+		writeError(w, http.StatusConflict, "cannot change an env-bootstrap super admin; unset PLATFORM_ADMIN_USER_IDS first")
 		return
 	}
 	ps, ok := s.platformStore()
@@ -271,7 +277,7 @@ func (s *Server) handleAdminUserPut(w http.ResponseWriter, r *http.Request) {
 				remaining++
 			}
 		}
-		if remaining == 0 && len(envPlatformAdmins()) == 0 {
+		if remaining == 0 && len(envPlatformAdminIDs()) == 0 {
 			writeError(w, http.StatusConflict, "cannot revoke the last super admin")
 			return
 		}
