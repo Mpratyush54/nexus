@@ -58,9 +58,16 @@ func TestMemStoreSearchMemoryVector(t *testing.T) {
 	if got[0].Key != "vec/hit" {
 		t.Fatalf("top hit = %q, want vec/hit", got[0].Key)
 	}
+	var sawProposed bool
 	for _, m := range got {
 		if m.Key == "vec/proposed" {
-			t.Fatal("PROPOSED rows must not appear in vector search")
+			sawProposed = true
 		}
+		if m.Key == "vec/miss" {
+			t.Fatal("orthogonal vector must not outrank the query")
+		}
+	}
+	if !sawProposed {
+		t.Fatal("PROPOSED rows are active on write and must appear in vector search")
 	}
 }

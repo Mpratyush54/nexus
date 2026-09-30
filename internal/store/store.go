@@ -137,6 +137,8 @@ type MemStore struct {
 	sessionTurns    map[string][]SessionTurn
 	agentGrants     map[string][]agentGrant
 	storageUsage    map[string]storageRec
+	teleports       map[string]*Teleport
+	secretKeys      map[string]*secretKeyRec
 	// Org admin (migration 032): capture switch and link invites.
 	projectCapture map[string]bool
 	orgInvites     map[string]*OrgInvite
@@ -184,6 +186,8 @@ func NewMemStore() *MemStore {
 		sessionTurns:    make(map[string][]SessionTurn),
 		agentGrants:     make(map[string][]agentGrant),
 		storageUsage:    make(map[string]storageRec),
+		teleports:       make(map[string]*Teleport),
+		secretKeys:      make(map[string]*secretKeyRec),
 		projectCapture:  make(map[string]bool),
 		orgInvites:      make(map[string]*OrgInvite),
 		inviteByToken:   make(map[string]string),
@@ -639,9 +643,20 @@ func (s *MemStore) SearchMemoryPage(ctx context.Context, projectID string, query
 }
 
 // SearchMemoryVector ranks memories by cosine similarity (issue #165).
-// Mirrors PostgresStore.SearchMemoryVector: CONFIRMED only, confidence > 0.3,
-// non-empty embeddings. Used by local MCP/mem wiring and tests so vector
-// search works without Postgres.
+// Active rows are CONFIRMED and PROPOSED (spec 2.2). Confidence must be
+// above 0.3 and the embedding must be non-empty. Pinned items rank first.
+func memoryPinned(item *MemoryItem) bool {
+	if item == nil {
+		return false
+	}
+	for _, tag := range item.Tags {
+		if strings.EqualFold(strings.TrimSpace(tag), "pinned") {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
 	if len(queryVec) == 0 {
 		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
@@ -663,7 +678,7 @@ func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, que
 		if !memoryVisibleToProject(item, projectID) {
 			continue
 		}
-		if item.Status != StatusConfirmed {
+		if item.Status != StatusConfirmed && item.Status != StatusProposed {
 			continue
 		}
 		if item.Confidence <= 0.3 {
@@ -677,6 +692,10 @@ func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, que
 		}
 	}
 	sort.Slice(ranked, func(i, j int) bool {
+		pi, pj := memoryPinned(ranked[i].item), memoryPinned(ranked[j].item)
+		if pi != pj {
+			return pi
+		}
 		if ranked[i].sim == ranked[j].sim {
 			return ranked[i].item.ID < ranked[j].item.ID
 		}

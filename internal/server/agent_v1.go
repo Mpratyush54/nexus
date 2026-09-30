@@ -366,7 +366,7 @@ func (s *Server) handleAgentMCP(w http.ResponseWriter, r *http.Request) {
 		Access:      access,
 		RateLimiter: s.agentMCPLimiter(),
 	}
-	srv := mcp.NewServer(agentMCPStore{Store: s.Store}, cfg)
+	srv := mcp.NewServer(agentMCPStore{Store: s.Store, UserID: authSubject(r)}, cfg)
 	resp := srv.Handle(r.Context(), raw)
 	if resp == nil {
 		w.WriteHeader(http.StatusNoContent)
@@ -386,7 +386,8 @@ func firstNonEmpty(vals ...string) string {
 
 // agentMCPStore adapts store.Store to mcp.Store for cloud MCP JSON-RPC.
 type agentMCPStore struct {
-	Store store.Store
+	Store  store.Store
+	UserID string
 }
 
 func (a agentMCPStore) SearchMemory(ctx context.Context, projectID, query string, tags []string, limit int) ([]*mcp.MemoryItem, error) {

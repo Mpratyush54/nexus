@@ -306,9 +306,18 @@ func (s *Server) handleOrgInviteCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	emailSent := false
+	if s.Mail != nil && s.Mail.Configured() && strings.TrimSpace(inv.Email) != "" {
+		body := "You have been invited to a Nexus organization.\n\nAccept with this token:\n" + inv.Token + "\n"
+		if err := s.Mail.Send(inv.Email, "Nexus organization invite", body); err != nil {
+			s.Log.Printf("invite mail: %v", err)
+		} else {
+			emailSent = true
+		}
+	}
 	s.recordAudit(r, store.AuditEvent{
 		TenantID: id, Action: "member.invited", ResourceKind: "org_invite", ResourceID: inv.ID,
-		Metadata: map[string]any{"email": inv.Email, "role": inv.Role},
+		Metadata: map[string]any{"email": inv.Email, "role": inv.Role, "email_sent": emailSent},
 	})
 	writeJSON(w, http.StatusCreated, inv)
 }

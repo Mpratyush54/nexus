@@ -27,12 +27,18 @@ func StartSnapshotRetention(ctx context.Context, st store.Store, interval time.D
 		case *store.PostgresStore:
 			if err := x.PruneAllSnapshotsKeepN(sctx, 5); err != nil {
 				log.Printf("server: snapshot prune: %v", err)
-				return
+			} else {
+				log.Printf("server: snapshot prune keepN=5 ok")
 			}
-			log.Printf("server: snapshot prune keepN=5 ok")
+			if _, err := x.PruneSessionVersions(sctx, time.Now()); err != nil {
+				log.Printf("server: version retention: %v", err)
+			}
 		case *store.MemStore:
 			for _, sid := range x.ListSnapshotSessionIDs() {
 				_ = x.PruneOldSnapshots(sctx, sid, 5)
+			}
+			if _, err := x.PruneSessionVersions(sctx, time.Now()); err != nil {
+				log.Printf("server: version retention: %v", err)
 			}
 		default:
 			if ps, ok := st.(store.ProvenanceStore); ok {
