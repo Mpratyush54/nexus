@@ -171,3 +171,31 @@ func TestAgentSessionNativeIDTimelineAndComplete(t *testing.T) {
 		t.Fatalf("file at cap: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestTimelineShowsOwnerLegacySnapshotsWhenNoAgentSessionsExist(t *testing.T) {
+	s := newTestServer()
+	mem := s.Store.(*store.MemStore)
+	ctx := t.Context()
+	project, err := mem.ResolveProject(ctx, "", "", "legacy-timeline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.ClaimProject(ctx, project.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.UpsertSessionSnapshot(ctx, &store.SessionSnapshot{
+		SessionID: "legacy-session", ProjectID: project.ID, OwnerUserID: "owner",
+		Harness: "codex", ConversationID: "thread-1", TurnCount: 23,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ownerTok := loginAs(t, s, "owner")
+	rec := doJSON(t, s, http.MethodGet, "/v1/timeline", ownerTok, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "legacy-session") || !strings.Contains(rec.Body.String(), "legacy_snapshot") {
+		t.Fatalf("legacy timeline: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/legacy-session", ownerTok, nil)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "legacy_snapshot") {
+		t.Fatalf("legacy read model: %d %s", rec.Code, rec.Body.String())
+	}
+}

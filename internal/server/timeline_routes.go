@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -86,6 +87,16 @@ func (s *Server) requireAgentRead(w http.ResponseWriter, r *http.Request, sessio
 	row, err := cs.GetAgentSession(r.Context(), sessionID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			// Snapshots captured before the agent-session store shipped still
+			// belong to their owners. Present those records through the same
+			// read model so a desktop upgrade does not make existing history
+			// appear to vanish. This is deliberately read-only: a legacy
+			// snapshot cannot be shared, edited, or teleported until it is
+			// explicitly imported by a future migration flow.
+			legacy, legacyOK := s.legacySnapshotSession(r.Context(), authSubject(r), sessionID)
+			if legacyOK {
+				return legacy, true
+			}
 			writeError(w, http.StatusNotFound, "session not found")
 			return nil, false
 		}
@@ -549,5 +560,129 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if len(items) == 0 {
+		// The agent-session store was introduced after snapshot capture had
+		// already been in production. Fall back only when the new store has
+		// nothing, preventing a duplicate card for sessions captured after
+		// the migration while keeping pre-existing history visible.
+		items, next, err = s.legacyTimeline(r.Context(), authSubject(r), projectID, strings.TrimSpace(r.URL.Query().Get("harness")), r.URL.Query().Get("cursor"), limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not list captured snapshots")
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
+}
+
+// legacySnapshotSession turns an owner-visible historical snapshot into the
+// read-only subset of AgentSession used by the desktop's session page.
+func (s *Server) legacySnapshotSession(ctx context.Context, userID, sessionID string) (*store.AgentSession, bool) {
+	ps := provenanceStore(s.Store)
+	if ps == nil {
+		return nil, false
+	}
+	snap, err := ps.GetLatestSnapshot(ctx, sessionID)
+	if err != nil || !s.canReadSnapshot(ctx, userID, snap) {
+		return nil, false
+	}
+	return legacyAgentSession(snap), true
+}
+
+func (s *Server) canReadSnapshot(ctx context.Context, userID string, snap *store.SessionSnapshot) bool {
+	if snap == nil {
+		return false
+	}
+	if snap.OwnerUserID != "" && snap.OwnerUserID == userID {
+		return true
+	}
+	if snap.OwnerUserID == "" {
+		// Ownerless historical rows retain the existing project-admin rule.
+		// This method intentionally has no ResponseWriter: callers can use it
+		// while building a filtered list without leaking private records.
+		return false
+	}
+	acl, ok := s.sessionContent()
+	if !ok {
+		return false
+	}
+	granted, err := acl.HasSessionContentGrant(ctx, snap.SessionID, userID)
+	return err == nil && granted
+}
+
+func legacyAgentSession(snap *store.SessionSnapshot) *store.AgentSession {
+	if snap == nil {
+		return nil
+	}
+	title := "Captured " + firstNonEmpty(snap.Harness, "agent") + " snapshot"
+	return &store.AgentSession{
+		ID: snap.SessionID, ProjectID: snap.ProjectID, OwnerUserID: snap.OwnerUserID,
+		Harness: snap.Harness, NativeID: snap.ConversationID, OriginMachineID: snap.SourceMachineID,
+		Title: title, Summary: "Archived snapshot", StartedAt: snap.CreatedAt,
+		LastActiveAt: snap.UpdatedAt, Visibility: "private", LineageKind: "legacy_snapshot",
+	}
+}
+
+func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness, cursor string, limit int) ([]store.TimelineItem, string, error) {
+	ps := provenanceStore(s.Store)
+	if ps == nil {
+		return []store.TimelineItem{}, "", nil
+	}
+	projects := []*store.Project{}
+	if projectID != "" {
+		project, err := s.Store.GetProject(ctx, projectID)
+		if err != nil {
+			return nil, "", err
+		}
+		projects = append(projects, project)
+	} else {
+		var err error
+		projects, err = s.Store.ListProjectsForUser(ctx, userID)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	items := make([]store.TimelineItem, 0)
+	for _, project := range projects {
+		if project == nil || project.ID == "" {
+			continue
+		}
+		snaps, err := ps.ListSnapshotsForProject(ctx, project.ID, 100)
+		if err != nil {
+			return nil, "", err
+		}
+		for i := range snaps {
+			snap := &snaps[i]
+			if harness != "" && !strings.EqualFold(harness, snap.Harness) {
+				continue
+			}
+			if !s.canReadSnapshot(ctx, userID, snap) {
+				continue
+			}
+			legacy := legacyAgentSession(snap)
+			items = append(items, store.TimelineItem{
+				SessionID: legacy.ID, ProjectID: legacy.ProjectID, Harness: legacy.Harness,
+				NativeID: legacy.NativeID, Title: legacy.Title, Summary: legacy.Summary,
+				Visibility: legacy.Visibility, OwnerUserID: legacy.OwnerUserID,
+				LastActiveAt: legacy.LastActiveAt, TurnCount: snap.TurnCount, VersionState: "legacy_snapshot",
+			})
+		}
+	}
+	// Match the native timeline ordering. Cursor paging will be enabled for
+	// the legacy adapter when the desktop exposes a Load more control.
+	_ = cursor
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
+	for i := 0; i < len(items); i++ {
+		for j := i + 1; j < len(items); j++ {
+			if items[j].LastActiveAt.After(items[i].LastActiveAt) ||
+				(items[j].LastActiveAt.Equal(items[i].LastActiveAt) && items[j].SessionID > items[i].SessionID) {
+				items[i], items[j] = items[j], items[i]
+			}
+		}
+	}
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	return items, "", nil
 }
