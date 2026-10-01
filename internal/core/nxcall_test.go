@@ -24,6 +24,22 @@ type recordingCloud struct {
 	posts []string
 }
 
+type routeCloud struct {
+	method string
+	path   string
+	body   []byte
+	result []byte
+}
+
+func (r *routeCloud) Do(_ context.Context, method, path string, body []byte) ([]byte, error) {
+	r.method, r.path = method, path
+	r.body = append([]byte(nil), body...)
+	if r.result != nil {
+		return r.result, nil
+	}
+	return []byte(`{"items":[]}`), nil
+}
+
 func (r *recordingCloud) Do(_ context.Context, method, path string, body []byte) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -47,6 +63,57 @@ func TestContinueAndOffline(t *testing.T) {
 	}
 	if _, err := Call(context.Background(), "nope", nil, Deps{}); err != ErrUnknownMethod {
 		t.Fatalf("unknown: %v", err)
+	}
+}
+
+func TestCloudMethodsUseContractRoutes(t *testing.T) {
+	c := &routeCloud{}
+	deps := Deps{Cloud: c, Online: true}
+
+	if _, err := Call(context.Background(), "timeline.list", json.RawMessage(`{"project":"p1","agent":"codex","limit":50}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || !strings.HasPrefix(c.path, "/v1/timeline?") || !strings.Contains(c.path, "project_id=p1") || !strings.Contains(c.path, "harness=codex") || !strings.Contains(c.path, "limit=50") {
+		t.Fatalf("timeline = %s %s", c.method, c.path)
+	}
+
+	if _, err := Call(context.Background(), "memory.search", json.RawMessage(`{"q":"hello","project":"p1","scope":"project"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "POST" || c.path != "/v1/agent/memory/search" {
+		t.Fatalf("memory route = %s %s", c.method, c.path)
+	}
+	var memoryBody map[string]any
+	if err := json.Unmarshal(c.body, &memoryBody); err != nil {
+		t.Fatal(err)
+	}
+	if memoryBody["query"] != "hello" || memoryBody["project_id"] != "p1" || memoryBody["level"] != "project" {
+		t.Fatalf("memory body = %#v", memoryBody)
+	}
+	if _, forwarded := memoryBody["q"]; forwarded {
+		t.Fatalf("strict endpoint received alias: %#v", memoryBody)
+	}
+
+	if _, err := Call(context.Background(), "sessions.turns", json.RawMessage(`{"session_id":"s/1"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || c.path != "/v1/agent-sessions/s%2F1/turns" {
+		t.Fatalf("turns route = %s %s", c.method, c.path)
+	}
+
+	c.result = []byte(`{"items":[{"harness":"codex","project_id":"p1"}]}`)
+	if _, err := Call(context.Background(), "agents.list", nil, deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || c.path != "/v1/timeline?limit=100" {
+		t.Fatalf("agents route = %s %s", c.method, c.path)
+	}
+
+	if _, err := Call(context.Background(), "teleport.apply", json.RawMessage(`{"id":"tp/1"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "POST" || c.path != "/v1/teleports/tp%2F1/accept" {
+		t.Fatalf("teleport accept = %s %s", c.method, c.path)
 	}
 }
 

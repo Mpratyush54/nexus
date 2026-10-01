@@ -8,7 +8,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -43,6 +46,18 @@ type Deps struct {
 	Root           string
 	Online         bool
 	ContinueRunner continuex.Runner // optional; when set, continue.start records/starts via Runner
+}
+
+// capturedAgentSummary deliberately describes only harnesses that actually
+// reached the signed-in account.  A static support catalogue made the native
+// desktop claim dozens of agents were connected when no capture existed.
+type capturedAgentSummary struct {
+	Name          string `json:"name"`
+	Harness       string `json:"harness"`
+	ProjectID     string `json:"project_id,omitempty"`
+	Status        string `json:"status"`
+	ResumeMode    string `json:"resume_mode"`
+	CapturedCount int    `json:"captured_count"`
 }
 
 // Methods is the IDL. Bindings in bindings/ must list the same names.
@@ -226,6 +241,21 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		plan := teleport.BuildPreparePlan(body)
 		return plan, nil
 	case "teleport.apply":
+		// The desktop's inbox action carries only a teleport id: acknowledge it
+		// on the cloud before opening a local restore plan.  Keep the existing
+		// file/destination form local for the CLI restore workflow.
+		if deps.Cloud != nil && argString(args, "id", "teleport_id") != "" && !hasJSONKey(args, "files") && !hasJSONKey(args, "dest") {
+			id := argString(args, "id", "teleport_id")
+			raw, err := deps.Cloud.Do(ctx, http.MethodPost, "/v1/teleports/"+url.PathEscape(id)+"/accept", args)
+			if err != nil {
+				return nil, err
+			}
+			var out any
+			if len(raw) > 0 && json.Unmarshal(raw, &out) == nil {
+				return out, nil
+			}
+			return map[string]any{"id": id, "status": "accepted"}, nil
+		}
 		return teleportApply(deps, args)
 	case "files.read":
 		var body struct {
@@ -273,6 +303,8 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 			ProxyCommand: body.ProxyCommand,
 			ProxyArgs:    body.ProxyArgs,
 		})
+	case "agents.list":
+		return capturedAgents(ctx, deps)
 	default:
 		if !known(method) {
 			return nil, ErrUnknownMethod
@@ -280,8 +312,14 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		if deps.Cloud == nil {
 			return nil, ErrOffline
 		}
-		path := cloudPath(method)
-		raw, err := deps.Cloud.Do(ctx, "POST", path, args)
+		httpMethod, path, body, err := cloudRequest(method, args)
+		if err != nil {
+			if errors.Is(err, errEmptyLocal) {
+				return map[string]any{"items": []any{}}, nil
+			}
+			return nil, err
+		}
+		raw, err := deps.Cloud.Do(ctx, httpMethod, path, body)
 		if err != nil {
 			return nil, err
 		}
@@ -329,6 +367,207 @@ func cloudPath(method string) string {
 	default:
 		return "/v1/" + method
 	}
+}
+
+// cloudRequest maps the native IDL to the actual HTTP verbs and resource
+// routes.  The old generic POST mapper was the reason the desktop produced
+// 400/404 errors for Memory, Timeline, and Teleport despite a healthy API.
+func cloudRequest(method string, args json.RawMessage) (httpMethod, path string, body []byte, err error) {
+	id := argString(args, "session_id", "id", "teleport_id")
+	switch method {
+	case "timeline.list", "events.subscribe":
+		return http.MethodGet, "/v1/timeline" + queryArgs(args, map[string]string{
+			"project_id": "project_id", "project": "project_id", "agent": "harness",
+			"harness": "harness", "limit": "limit", "cursor": "cursor",
+		}), nil, nil
+	case "memory.search":
+		return http.MethodPost, "/v1/agent/memory/search", normalizeMemorySearchBody(args), nil
+	case "memory.forget":
+		if id == "" {
+			id = argString(args, "memory_id")
+		}
+		if id == "" {
+			return "", "", nil, errors.New("memory id is required")
+		}
+		return http.MethodDelete, "/memory/" + url.PathEscape(id), nil, nil
+	case "memory.pin", "memory.scope", "memory.update":
+		if id == "" {
+			id = argString(args, "memory_id")
+		}
+		if id == "" {
+			return "", "", nil, errors.New("memory id is required")
+		}
+		return http.MethodPut, "/memory/" + url.PathEscape(id), args, nil
+	case "teleport.inbox":
+		return http.MethodGet, "/v1/teleports/inbox", nil, nil
+	case "teleport.sent":
+		return http.MethodGet, "/v1/teleports/sent", nil, nil
+	case "teleport.send":
+		return http.MethodPost, "/v1/teleports", args, nil
+	case "teleport.revoke":
+		if id == "" {
+			return "", "", nil, errors.New("teleport id is required")
+		}
+		return http.MethodPost, "/v1/teleports/" + url.PathEscape(id) + "/revoke", args, nil
+	case "sessions.get":
+		if id == "" {
+			return "", "", nil, errors.New("session id is required")
+		}
+		return http.MethodGet, "/v1/agent-sessions/" + url.PathEscape(id), nil, nil
+	case "sessions.turns":
+		if id == "" {
+			return "", "", nil, errors.New("session id is required")
+		}
+		return http.MethodGet, "/v1/agent-sessions/" + url.PathEscape(id) + "/turns", nil, nil
+	case "sessions.summary":
+		if id == "" {
+			return "", "", nil, errors.New("session id is required")
+		}
+		return http.MethodGet, "/v1/agent-sessions/" + url.PathEscape(id) + "/summary", nil, nil
+	case "sessions.versions":
+		if id == "" {
+			return "", "", nil, errors.New("session id is required")
+		}
+		return http.MethodGet, "/v1/agent-sessions/" + url.PathEscape(id) + "/versions", nil, nil
+	case "sessions.files", "sessions.operations", "sessions.memories":
+		// These panels are intentionally empty until the cloud exposes the
+		// corresponding, permission-checked list routes.  Do not fabricate
+		// a POST to agent-sessions and surface it as a transport error.
+		return "", "", nil, errEmptyLocal
+	case "sessions.share", "sessions.grants":
+		if id == "" {
+			return "", "", nil, errors.New("session id is required")
+		}
+		return http.MethodPost, "/v1/agent-sessions/" + url.PathEscape(id) + "/grants", args, nil
+	case "projects.list":
+		return http.MethodGet, "/v1/agent/projects", nil, nil
+	default:
+		return http.MethodPost, cloudPath(method), args, nil
+	}
+}
+
+var errEmptyLocal = errors.New("empty local result")
+
+func argString(args json.RawMessage, keys ...string) string {
+	var values map[string]any
+	if len(args) == 0 || json.Unmarshal(args, &values) != nil {
+		return ""
+	}
+	for _, key := range keys {
+		if value, ok := values[key].(string); ok && strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func hasJSONKey(args json.RawMessage, key string) bool {
+	var values map[string]json.RawMessage
+	return len(args) > 0 && json.Unmarshal(args, &values) == nil && values[key] != nil
+}
+
+func queryArgs(args json.RawMessage, mapping map[string]string) string {
+	var values map[string]any
+	if len(args) == 0 || json.Unmarshal(args, &values) != nil {
+		return ""
+	}
+	query := make([]string, 0, len(mapping))
+	seen := map[string]bool{}
+	for from, to := range mapping {
+		value, ok := values[from]
+		if !ok || seen[to] {
+			continue
+		}
+		text := strings.TrimSpace(fmt.Sprint(value))
+		if text == "" || text == "<nil>" {
+			continue
+		}
+		seen[to] = true
+		query = append(query, to+"="+url.QueryEscape(text))
+	}
+	if len(query) == 0 {
+		return ""
+	}
+	return "?" + strings.Join(query, "&")
+}
+
+func normalizeMemorySearchBody(args json.RawMessage) []byte {
+	values := map[string]any{}
+	if len(args) > 0 {
+		_ = json.Unmarshal(args, &values)
+	}
+	if _, ok := values["query"]; !ok {
+		if q, ok := values["q"].(string); ok {
+			values["query"] = q
+		}
+	}
+	if _, ok := values["project_id"]; !ok {
+		if project, ok := values["project"].(string); ok && strings.TrimSpace(project) != "" {
+			values["project_id"] = project
+		}
+	}
+	if _, ok := values["level"]; !ok {
+		if level, ok := values["scope"].(string); ok && strings.TrimSpace(level) != "" {
+			values["level"] = level
+		}
+	}
+	// The agent endpoint uses a strict decoder.  Never send desktop-only
+	// aliases with the canonical fields or it returns the observed 400.
+	delete(values, "q")
+	delete(values, "project")
+	delete(values, "scope")
+	raw, _ := json.Marshal(values)
+	return raw
+}
+
+func capturedAgents(ctx context.Context, deps Deps) (any, error) {
+	if deps.Cloud == nil {
+		return map[string]any{"items": []any{}}, nil
+	}
+	raw, err := deps.Cloud.Do(ctx, http.MethodGet, "/v1/timeline?limit=100", nil)
+	if err != nil {
+		return nil, err
+	}
+	var payload struct {
+		Items []struct {
+			Harness      string `json:"harness"`
+			ProjectID    string `json:"project_id"`
+			VersionState string `json:"version_state"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, err
+	}
+	byHarness := map[string]*capturedAgentSummary{}
+	for _, item := range payload.Items {
+		name := strings.TrimSpace(item.Harness)
+		if name == "" {
+			name = "Unknown harness"
+		}
+		key := strings.ToLower(name)
+		entry := byHarness[key]
+		if entry == nil {
+			status := "Captured sessions"
+			if item.VersionState == "legacy_snapshot" {
+				status = "Archived snapshots"
+			}
+			entry = &capturedAgentSummary{Name: name, Harness: name, ProjectID: item.ProjectID, Status: status, ResumeMode: "Open in Timeline"}
+			byHarness[key] = entry
+		}
+		entry.CapturedCount++
+	}
+	items := make([]capturedAgentSummary, 0, len(byHarness))
+	for _, item := range byHarness {
+		items = append(items, *item)
+	}
+	for i := range items {
+		for j := i + 1; j < len(items); j++ {
+			if strings.ToLower(items[j].Name) < strings.ToLower(items[i].Name) {
+				items[i], items[j] = items[j], items[i]
+			}
+		}
+	}
+	return map[string]any{"items": items}, nil
 }
 
 func decode(raw json.RawMessage, dst any) error {

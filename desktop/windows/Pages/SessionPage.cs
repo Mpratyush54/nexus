@@ -53,8 +53,8 @@ public sealed class SessionPage : NexusPage
         seeded.Click += async (_, _) => await ContinueAsync("open_in_agent", "seeded", Selected(_seedAgent));
         _share = new Button { Content = "Share" };
         _share.Click += async (_, _) => await ShareAsync();
-        _teleport = new Button { Content = "Teleport" };
-        _teleport.Click += (_, _) => MainWindow.Current?.OpenTeleport();
+        _teleport = new Button { Content = "Send teleport" };
+        _teleport.Click += async (_, _) => await SendTeleportAsync();
         _send = new Button { Content = "Send" };
         _send.Click += async (_, _) => await SendAsync();
 
@@ -140,6 +140,12 @@ public sealed class SessionPage : NexusPage
             _context.Children.Add(Line("Repo " + NxJson.Text(body, "repo", "project")));
             _context.Children.Add(Line("Branch " + NxJson.Text(body, "branch")));
             _context.Children.Add(Line("Visibility " + NxJson.Text(body, "visibility")));
+            var legacy = NxJson.Text(body, "lineage_kind") == "legacy_snapshot";
+            _teleport.IsEnabled = !legacy && !ShellState.Current.Offline;
+            if (legacy)
+            {
+                _context.Children.Add(Line("This is an archived snapshot. It can be read, but cannot be teleported until a new captured version exists."));
+            }
         }
         else if (!session.Ok)
         {
@@ -236,6 +242,36 @@ public sealed class SessionPage : NexusPage
             live = _live.IsChecked == true
         });
         _context.Children.Add(Line(response.Ok ? "Share sent" : response.Error ?? "Share failed"));
+    }
+
+    private async Task SendTeleportAsync()
+    {
+        if (_id.Length == 0)
+        {
+            return;
+        }
+        var recipient = new TextBox { PlaceholderText = "Recipient user ID" };
+        var home = new TextBox { PlaceholderText = "Recipient home folder (optional)" };
+        var dialog = new ContentDialog
+        {
+            Title = "Send a teleport",
+            Content = new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "The recipient receives the latest completed, redacted session version." }, recipient, home } },
+            PrimaryButtonText = "Send",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = XamlRoot
+        };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        {
+            return;
+        }
+        if (string.IsNullOrWhiteSpace(recipient.Text))
+        {
+            _context.Children.Add(Line("A recipient user ID is required."));
+            return;
+        }
+        var response = await Call(NxMethods.TeleportSend, new { session_id = _id, to_user_id = recipient.Text.Trim(), home = home.Text.Trim() });
+        _context.Children.Add(Line(response.Ok ? "Teleport sent" : response.Error ?? "Teleport could not be sent"));
     }
 
     private static string Selected(ComboBox box) => box.SelectedItem as string ?? "";

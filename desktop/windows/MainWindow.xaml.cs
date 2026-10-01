@@ -14,7 +14,7 @@ public sealed partial class MainWindow : Window
     private bool _quitting;
     private bool _navLock;
 
-    public static MainWindow? Current { get; private set; }
+    public new static MainWindow? Current { get; private set; }
 
     public ShellState State => ShellState.Current;
 

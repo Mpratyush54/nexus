@@ -1268,6 +1268,12 @@ func turnPayload(action, agent, path string, t Turn) map[string]any {
 		"speaker":    t.Speaker,
 		"content":    redact(t.Content),
 	}
+	// Preserve structured calls separately from the redacted preview.  They
+	// drive provenance and the cloud Timeline's tool indicators; embedding
+	// them into conversation text would make both less reliable.
+	if len(t.ToolCalls) > 0 {
+		p["tool_calls"] = t.ToolCalls
+	}
 	if !t.Timestamp.IsZero() {
 		p["timestamp"] = t.Timestamp.UTC().Format(time.RFC3339Nano)
 	}

@@ -341,6 +341,7 @@ func (r *Runtime) Start(ctx context.Context) {
 				}
 				harness := harnessFromEvents(batch)
 				r.noteSessionTurns(sid, harness, len(batch))
+				r.mirrorSessionTurns(ctx, sid, harness, batch)
 				// Attach interceptor window to the first session in this flush
 				// so FILE_*/COMMAND_* are not duplicated across multi-session
 				// batches in the same workspace.
@@ -497,8 +498,20 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	}
 	snap.SessionID = sessionID
 	snap.ProjectID = hs.ProjectID
+	legacyOK := true
 	if err := hs.PushSnapshot(ctx, snap); err != nil {
-		log.Printf("daemon: push snapshot session=%s: %v", sessionID, err)
+		// Keep the historical endpoint best-effort during the transition.
+		// A legacy endpoint failure must not stop the real session/version
+		// publisher below; the latter is what makes Timeline and Teleport work.
+		legacyOK = false
+		log.Printf("daemon: push legacy snapshot session=%s: %v", sessionID, err)
+	}
+	currentOK := true
+	if err := hs.PublishAgentSessionVersion(ctx, snap, r.Daemon.Root); err != nil {
+		currentOK = false
+		log.Printf("daemon: publish cloud session version session=%s: %v", sessionID, err)
+	}
+	if !legacyOK && !currentOK {
 		return
 	}
 	r.snapshotMu.Lock()
@@ -511,6 +524,78 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	}
 	r.sessionHarness[sessionID] = harness
 	r.snapshotMu.Unlock()
+}
+
+// mirrorSessionTurns publishes new harvested dialogue as real cloud session
+// turns.  The source timestamp plus its ordinal within a millisecond is a
+// stable source position, making retries idempotent at the server's unique
+// (session_id, idx) boundary.  Full transcript fidelity is committed by
+// maybePushSnapshot once the harvester declares the session idle.
+func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness string, batch []Event) {
+	hs, ok := r.httpStore()
+	if !ok || hs == nil || r.Daemon == nil || strings.TrimSpace(hs.ProjectID) == "" {
+		return
+	}
+	byMillisecond := map[int64]int64{}
+	turns := make([]MirroredTurn, 0, len(batch))
+	for _, ev := range batch {
+		if ev.Type != EventConversationTurn || ev.Payload == nil {
+			continue
+		}
+		at := ev.CreatedAt
+		if raw, ok := ev.Payload["timestamp"].(string); ok {
+			if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+				at = parsed
+			}
+		}
+		if at.IsZero() {
+			at = time.Now().UTC()
+		}
+		millis := at.UTC().UnixMilli()
+		ordinal := byMillisecond[millis]
+		byMillisecond[millis] = ordinal + 1
+		role, _ := ev.Payload["speaker"].(string)
+		content, _ := ev.Payload["content"].(string)
+		turns = append(turns, MirroredTurn{
+			Idx:         millis*100000 + ordinal,
+			Role:        role,
+			TextPreview: boundedTurnPreview(content),
+			ToolCalls:   mirroredToolCalls(ev.Payload["tool_calls"]),
+		})
+	}
+	if len(turns) == 0 {
+		return
+	}
+	if _, err := hs.MirrorAgentSessionTurns(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, turns); err != nil {
+		log.Printf("daemon: mirror cloud session turns session=%s: %v", nativeID, err)
+	}
+}
+
+const maxMirroredTurnPreviewBytes = 12 << 10
+
+func boundedTurnPreview(text string) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= maxMirroredTurnPreviewBytes {
+		return text
+	}
+	return text[:maxMirroredTurnPreviewBytes] + "…"
+}
+
+func mirroredToolCalls(value any) []map[string]any {
+	if calls, ok := value.([]map[string]any); ok {
+		return calls
+	}
+	items, ok := value.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if call, ok := item.(map[string]any); ok {
+			out = append(out, call)
+		}
+	}
+	return out
 }
 
 func (r *Runtime) httpStore() (*HTTPMemoryStore, bool) {
