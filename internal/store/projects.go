@@ -162,7 +162,7 @@ func (s *PostgresStore) ListProjectsForUser(ctx context.Context, userID string) 
 			UNION
 			SELECT p3.id FROM projects p3
 			INNER JOIN organization_members om ON om.org_id = p3.org_id
-			WHERE om.user_id::TEXT = $1 AND UPPER(om.role) = 'ADMIN'
+			WHERE om.user_id::TEXT = $1 AND UPPER(om.role) IN ('ADMIN', 'OWNER')
 		)
 		ORDER BY COALESCE(NULLIF(p.display_name,''), p.folder_name, p.id::TEXT)`, uid)
 	if err != nil {

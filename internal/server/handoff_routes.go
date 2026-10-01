@@ -65,6 +65,12 @@ func (s *Server) handleHandoffInit(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Handoff reads session content. Only the session owner may start one
+	// (product spec 4.5). Project membership is not enough.
+	if sess.CreatedBy == "" || sess.CreatedBy != fromUser {
+		writeError(w, http.StatusForbidden, "only the session owner can hand off a session")
+		return
+	}
 	projectID := sess.ProjectID
 	sessionID := id
 	pkg, ev := handoff.BuildHandoffFull(projectID, sessionID, fromUser, req.ToUser,

@@ -69,7 +69,7 @@ func TestOrgCreateListGet(t *testing.T) {
 	if detail.Organization == nil || detail.Organization.ID != created.ID {
 		t.Fatalf("detail org: %+v", detail.Organization)
 	}
-	if len(detail.Members) != 1 || detail.Members[0].Role != store.OrgRoleAdmin {
+	if len(detail.Members) != 1 || detail.Members[0].Role != store.OrgRoleOwner {
 		t.Fatalf("members = %+v", detail.Members)
 	}
 	if len(detail.Projects) != 0 {

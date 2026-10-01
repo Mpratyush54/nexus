@@ -36,6 +36,15 @@ func (s *Server) handleAgentDiscovery(w http.ResponseWriter, r *http.Request) {
 			{"method": "POST", "path": "/v1/agent/memory/search", "body": map[string]any{"query": "string", "project_id": "optional uuid", "limit": 20}},
 			{"method": "POST", "path": "/v1/agent/memory/write", "body": map[string]any{"key": "topic/key", "content": "20-2000 chars", "project_id": "optional", "level": "project", "scope": "fact"}},
 			{"method": "POST", "path": "/v1/agent/mcp", "purpose": "MCP JSON-RPC 2.0 (initialize, tools/list, tools/call) over HTTPS"},
+			{"method": "GET", "path": "/v1/timeline", "purpose": "cross-project session cards the caller can see"},
+			{"method": "POST", "path": "/v1/agent-sessions", "purpose": "create or touch a harness session by native id"},
+			{"method": "GET", "path": "/v1/agent-sessions/{id}/fetch", "purpose": "paged raw turns for a session the caller can read"},
+			{"method": "GET", "path": "/v1/agent-sessions/{id}/summary", "purpose": "session summary for a session the caller can read"},
+			{"method": "GET", "path": "/v1/projects/{id}/knowledge", "purpose": "project knowledge; status is active, superseded, or forgotten"},
+			{"method": "POST", "path": "/memory/{id}/pin", "purpose": "pin a memory item"},
+			{"method": "POST", "path": "/memory/{id}/scope", "purpose": "change memory level: session, project, personal, or organization"},
+			{"method": "POST", "path": "/memory/{id}/forget", "purpose": "soft-delete a memory item"},
+			{"method": "POST", "path": "/memory/{id}/auto-promote", "purpose": "promote a session fact after secret and PII redaction"},
 		},
 		"mcp_url": base + "/v1/agent/mcp",
 		"tools":   mcp.ListTools(),
@@ -357,7 +366,7 @@ func (s *Server) handleAgentMCP(w http.ResponseWriter, r *http.Request) {
 		Access:      access,
 		RateLimiter: s.agentMCPLimiter(),
 	}
-	srv := mcp.NewServer(agentMCPStore{Store: s.Store}, cfg)
+	srv := mcp.NewServer(agentMCPStore{Store: s.Store, UserID: authSubject(r)}, cfg)
 	resp := srv.Handle(r.Context(), raw)
 	if resp == nil {
 		w.WriteHeader(http.StatusNoContent)
@@ -377,7 +386,8 @@ func firstNonEmpty(vals ...string) string {
 
 // agentMCPStore adapts store.Store to mcp.Store for cloud MCP JSON-RPC.
 type agentMCPStore struct {
-	Store store.Store
+	Store  store.Store
+	UserID string
 }
 
 func (a agentMCPStore) SearchMemory(ctx context.Context, projectID, query string, tags []string, limit int) ([]*mcp.MemoryItem, error) {

@@ -62,6 +62,13 @@ func main() {
 		runErr = runUpdate(ctx, cfg, rest[1:], os.Stdout)
 	case "daemon":
 		runErr = runDaemonCmd(cfg, rest[1:], os.Stdout)
+	case "mcp-proxy":
+		cancel() // long-running stdio bridge; ignore the 30s CLI timeout
+		runErr = runMCPProxy(cfg, rest[1:], os.Stdout, os.Stdin)
+	case "capture":
+		// Headless capture has no global 30s deadline — it runs until signal.
+		cancel()
+		runErr = runCapture(cfg, rest[1:], os.Stdout)
 	case "help", "-h", "--help":
 		usage(os.Stdout)
 	case "version", "--version":
@@ -211,9 +218,13 @@ Commands:
   episode search [-p ID] "<error or query>"
   doctor                          probe server, daemon, and git
   migrate [--vault PATH] [--dry-run]   import legacy vault
+  migrate firstrun [--src PATH] [--outbox DIR] [--clear-autostart]
+                                  first-run: import daemon state, detect nexus-daemon autostart
   version [--check]               print CLI version (and latest release)
   update [--channel stable] [--yes]    download the latest CLI binary
-  daemon install|uninstall|status      install the local workspace daemon as a login service
+  daemon install|uninstall|status      install the local workspace daemon as a login service (frozen; prefer capture)
+  mcp-proxy                       stdio→HTTPS MCP bridge (no local DB; for Antigravity)
+  capture --foreground            headless capture with outbox (no :7272 TCP)
 
 Global flags (env fallbacks: NEXUS_SERVER / CENTRAL_SERVER_URL, NEXUS_TOKEN, NEXUS_DAEMON, NEXUS_PROJECT):
   --server URL   central server base URL (default: env → ~/.config/central-memory/config.json → compile-time)
@@ -224,5 +235,5 @@ Global flags (env fallbacks: NEXUS_SERVER / CENTRAL_SERVER_URL, NEXUS_TOKEN, NEX
 
 Desktop:
   Nexus Desktop (tray) — Sign in with browser → nexus.pratyushes.dev → callback
-  Local status UI: http://127.0.0.1:7272/`)
+  Embedded nexuscore has no localhost TCP gate; :7272 is frozen with the Fyne/daemon path`)
 }

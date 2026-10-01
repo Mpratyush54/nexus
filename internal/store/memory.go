@@ -400,7 +400,9 @@ func nilTextArray(tags []string) any {
 }
 
 // SearchMemoryVector is the primary semantic path (plan §1.5): cosine
-// similarity over pgvector, CONFIRMED only, confidence floor 0.3.
+// similarity over pgvector. Active rows are PROPOSED and CONFIRMED (spec
+// 2.2: knowledge is searchable on write). Confidence floor is 0.3.
+// Pinned rows rank ahead of similarity.
 func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
 	if len(queryVec) == 0 {
 		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
@@ -414,11 +416,11 @@ func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items
 		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
-		    AND status = 'CONFIRMED'
+		    AND status IN ('CONFIRMED', 'PROPOSED')
 		    AND superseded_by IS NULL
 		    AND confidence > 0.3
 		    AND embedding IS NOT NULL
-		  ORDER BY embedding <=> $2::vector
+		  ORDER BY (CASE WHEN 'pinned' = ANY(tags) THEN 0 ELSE 1 END), embedding <=> $2::vector
 		  LIMIT $3`,
 		nullText(projectID), encodeEmbedding(queryVec), limit)
 	if err != nil {

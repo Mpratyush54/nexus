@@ -50,6 +50,13 @@ func (s *Server) registerRoutes() {
 	s.registerBillingRoutes()
 	s.registerAdminRoutes()
 	s.registerAgentV1Routes()
+	s.registerTimelineRoutes()
+	s.registerMemoryActionRoutes()
+	s.registerBlobChunkRoutes()
+	s.registerGuestOffboardRoutes()
+	s.registerAgentSessionToolRoutes()
+	s.registerCloudContractRoutes()
+	s.registerOpsRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -134,11 +141,18 @@ func (s *Server) handleMemberGrant(w http.ResponseWriter, r *http.Request) {
 	if !s.enforcePlanDimension(w, r, ownerType, ownerID, "members") {
 		return
 	}
-	if err := s.Store.GrantMember(r.Context(), id, strings.TrimSpace(req.UserID), authSubject(r)); err != nil {
+	userID := strings.TrimSpace(req.UserID)
+	if err := s.Store.GrantMember(r.Context(), id, userID, authSubject(r)); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not grant member: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"project_id": id, "user_id": strings.TrimSpace(req.UserID)})
+	s.recordAudit(r, store.AuditEvent{
+		Action:       "member.invited",
+		ResourceKind: "member",
+		ResourceID:   userID,
+		ProjectID:    id,
+	})
+	writeJSON(w, http.StatusCreated, map[string]any{"project_id": id, "user_id": userID})
 }
 
 // handleMemberRevoke removes a grant. Requires member:manage (issue #163).
@@ -156,7 +170,8 @@ func (s *Server) handleMemberRevoke(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "user_id is required")
 		return
 	}
-	if err := s.Store.RevokeMember(r.Context(), id, strings.TrimSpace(req.UserID)); err != nil {
+	userID := strings.TrimSpace(req.UserID)
+	if err := s.Store.RevokeMember(r.Context(), id, userID); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
@@ -164,7 +179,13 @@ func (s *Server) handleMemberRevoke(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not revoke member: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"project_id": id, "user_id": strings.TrimSpace(req.UserID), "revoked": true})
+	s.recordAudit(r, store.AuditEvent{
+		Action:       "member.removed",
+		ResourceKind: "member",
+		ResourceID:   userID,
+		ProjectID:    id,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"project_id": id, "user_id": userID, "revoked": true})
 }
 
 // --- auth ---

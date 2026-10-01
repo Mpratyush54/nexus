@@ -303,18 +303,22 @@ func (r *Runtime) Start(ctx context.Context) {
 
 	// Tool-event window for episode detection (issue #115: DetectEpisodePattern
 	// invoked on ToolEvent windows; episode_summary proposals emitted) plus
-	// the conversation batch for ProcessEvents.
+	// the conversation batch for ProcessEvents. Interceptor FILE_*/COMMAND_*
+	// rows in the same window also feed pushParsedToolOps (F3 provenance).
 	var window []ToolEvent
 	var conv []Event
 	flush := func() {
-		if len(window) > 0 && r.Processor != nil {
-			evs := append([]ToolEvent(nil), window...)
+		var toolWindow []ToolEvent
+		if len(window) > 0 {
+			toolWindow = append([]ToolEvent(nil), window...)
 			window = window[:0]
-			if props, err := r.Processor.ProcessToolEvents(ctx, r.ProjectID, evs); err != nil {
-				log.Printf("daemon: episode process: %v", err)
-				r.noteProposals(0, err)
-			} else if len(props) > 0 {
-				r.noteProposals(len(props), nil)
+			if r.Processor != nil {
+				if props, err := r.Processor.ProcessToolEvents(ctx, r.ProjectID, toolWindow); err != nil {
+					log.Printf("daemon: episode process: %v", err)
+					r.noteProposals(0, err)
+				} else if len(props) > 0 {
+					r.noteProposals(len(props), nil)
+				}
 			}
 		}
 		if len(conv) > 0 && r.Processor != nil {
@@ -329,6 +333,7 @@ func (r *Runtime) Start(ctx context.Context) {
 				bySession[sid] = append(bySession[sid], ev)
 			}
 			conv = conv[:0]
+			interceptorAttached := false
 			for _, sid := range sessionOrder {
 				batch := bySession[sid]
 				if len(batch) == 0 {
@@ -336,7 +341,15 @@ func (r *Runtime) Start(ctx context.Context) {
 				}
 				harness := harnessFromEvents(batch)
 				r.noteSessionTurns(sid, harness, len(batch))
-				r.pushParsedToolOps(ctx, sid, harness, batch)
+				// Attach interceptor window to the first session in this flush
+				// so FILE_*/COMMAND_* are not duplicated across multi-session
+				// batches in the same workspace.
+				var inter []ToolEvent
+				if !interceptorAttached {
+					inter = toolWindow
+					interceptorAttached = true
+				}
+				r.pushParsedToolOps(ctx, sid, harness, batch, inter)
 				if props, err := r.Processor.ProcessEvents(ctx, r.ProjectID, batch); err != nil {
 					log.Printf("daemon: conversation process (session=%s): %v", sid, err)
 					r.noteProposals(len(props), err)
@@ -508,41 +521,40 @@ func (r *Runtime) httpStore() (*HTTPMemoryStore, bool) {
 	return hs, ok
 }
 
-func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID, harness string, batch []Event) {
+func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID, harness string, batch []Event, interceptor []ToolEvent) {
 	hs, ok := r.httpStore()
 	if !ok || hs == nil || strings.TrimSpace(hs.ProjectID) == "" {
 		return
 	}
 	harness = normalizeHarness(harness)
+	root := ""
+	if r.Daemon != nil {
+		root = r.Daemon.Root
+	}
+	payloads := make([]map[string]any, 0, len(batch))
+	for _, ev := range batch {
+		payloads = append(payloads, ev.Payload)
+	}
+	parsed := MergeProvenanceOps(payloads, interceptor, root)
 	var fileOps []map[string]any
 	var toolExecs []map[string]any
-	for i, ev := range batch {
-		payload := ev.Payload
-		if payload == nil {
-			continue
-		}
-		if payload["workspace_root"] == nil && r.Daemon != nil {
-			payload = copyMap(payload)
-			payload["workspace_root"] = r.Daemon.Root
-		}
-		for _, p := range ParseToolCalls(payload, i) {
-			if p.Type == "file_op" {
-				fileOps = append(fileOps, map[string]any{
-					"harness": harness, "tool_name": p.ToolName, "file_path": p.FilePath,
-					"op_type": p.OpType, "line_start": p.LineStart, "line_end": p.LineEnd,
-					"diff_hunk": p.DiffHunk, "turn_index": p.TurnIndex,
-				})
-			} else if p.Type == "tool_exec" {
-				row := map[string]any{
-					"harness": harness, "tool_name": p.ToolName, "command_line": p.CommandLine,
-					"working_directory": p.WorkingDirectory, "output_snippet": p.OutputSnippet,
-					"truncated": p.Truncated,
-				}
-				if p.ExitCode != nil {
-					row["exit_code"] = *p.ExitCode
-				}
-				toolExecs = append(toolExecs, row)
+	for _, p := range parsed {
+		if p.Type == "file_op" {
+			fileOps = append(fileOps, map[string]any{
+				"harness": harness, "tool_name": p.ToolName, "file_path": p.FilePath,
+				"op_type": p.OpType, "line_start": p.LineStart, "line_end": p.LineEnd,
+				"diff_hunk": p.DiffHunk, "turn_index": p.TurnIndex,
+			})
+		} else if p.Type == "tool_exec" {
+			row := map[string]any{
+				"harness": harness, "tool_name": p.ToolName, "command_line": p.CommandLine,
+				"working_directory": p.WorkingDirectory, "output_snippet": p.OutputSnippet,
+				"truncated": p.Truncated,
 			}
+			if p.ExitCode != nil {
+				row["exit_code"] = *p.ExitCode
+			}
+			toolExecs = append(toolExecs, row)
 		}
 	}
 	if len(fileOps) == 0 && len(toolExecs) == 0 {

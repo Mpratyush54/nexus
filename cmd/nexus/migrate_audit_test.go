@@ -74,3 +74,73 @@ func TestAuditMigrateRunDryRunCounts(t *testing.T) {
 		t.Error("missing vault must error")
 	}
 }
+
+func TestAuditMigrateFirstrunImport(t *testing.T) {
+	srcRoot := t.TempDir()
+	cm := filepath.Join(srcRoot, ".central-memory")
+	if err := os.MkdirAll(cm, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cm, "offsets.json"), []byte(`{"f":1}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := filepath.Join(t.TempDir(), "run.txt")
+	if err := os.WriteFile(fake, []byte("X=C:\\bin\\nexus-daemon.exe\nKeep=ok.exe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NEXUS_FIRSTRUN_AUTOSTART_FILE", fake)
+
+	outbox := t.TempDir()
+	var out bytes.Buffer
+	args := []string{
+		"firstrun",
+		"--src", srcRoot,
+		"--outbox", outbox,
+		"--clear-autostart",
+	}
+	if err := runMigrate(context.Background(), Config{}, args, &out); err != nil {
+		t.Fatalf("runMigrate firstrun: %v", err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "copied:") || !strings.Contains(s, "offsets.json") {
+		t.Errorf("output missing import details:\n%s", s)
+	}
+	if !strings.Contains(s, ":7272") {
+		t.Errorf("should note not to recommend :7272:\n%s", s)
+	}
+	copied := filepath.Join(outbox, "migrated-daemon", "offsets.json")
+	if _, err := os.Stat(copied); err != nil {
+		t.Fatalf("expected imported file at %s: %v", copied, err)
+	}
+	raw, _ := os.ReadFile(fake)
+	if strings.Contains(strings.ToLower(string(raw)), "nexus-daemon") {
+		t.Fatalf("autostart not cleared:\n%s", raw)
+	}
+
+	if err := os.WriteFile(fake, []byte("X=nexus-daemon.exe\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var jout bytes.Buffer
+	jsonArgs := []string{"firstrun", "--src", srcRoot, "--outbox", outbox, "--json"}
+	if err := runMigrate(context.Background(), Config{}, jsonArgs, &jout); err != nil {
+		t.Fatalf("firstrun --json: %v", err)
+	}
+	for _, want := range []string{"autostart", "import", "copied_files"} {
+		if !strings.Contains(jout.String(), want) {
+			t.Errorf("json missing %q:\n%s", want, jout.String())
+		}
+	}
+}
+
+func TestParseMigrateFirstrunArgs(t *testing.T) {
+	o, err := parseMigrateFirstrunArgs([]string{"--src", "/tmp/v", "--outbox", "/tmp/o", "--clear-autostart"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Src != "/tmp/v" || o.Outbox != "/tmp/o" || !o.ClearAutostart {
+		t.Fatalf("parse: %+v", o)
+	}
+	if _, err := parseMigrateFirstrunArgs([]string{"extra"}); err == nil {
+		t.Error("positional must fail")
+	}
+}

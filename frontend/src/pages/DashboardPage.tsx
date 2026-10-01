@@ -13,6 +13,7 @@ import { ProjectSwitcher } from '@/components/ProjectSwitcher'
 import { ActivityHeatmap } from '@/components/ActivityHeatmap'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
+import { visibleMemoryStatus } from '@/lib/memory-status'
 import { Button } from '@/components/ui/Button'
 import { useToast } from '@/components/ui/Toast'
 import { useDashboard } from '@/hooks/useDashboard'
@@ -67,9 +68,9 @@ export function DashboardPage() {
   const harvestProjectRow = (summaries.data ?? []).find((s) => s.project.id === hs?.project_id)
 
   const memoryItems = memories.data ?? []
-  const proposed = memoryItems.filter((x) => x.status === 'PROPOSED').slice(0, 8)
-  const confirmed = memoryItems.filter((x) => x.status === 'CONFIRMED').slice(0, 8)
-  const shown = proposed.length ? proposed : confirmed
+  const shown = memoryItems
+    .filter((x) => x.status === 'PROPOSED' || x.status === 'CONFIRMED' || x.status === 'active')
+    .slice(0, 8)
 
   const richer = (summaries.data ?? []).find(
     (s) =>
@@ -133,7 +134,7 @@ export function DashboardPage() {
             <p className="text-sm text-fg">
               <span className="font-medium">{projectLabelOf(richer.project)}</span> has{' '}
               {richer.metrics.proposed > 0
-                ? `${richer.metrics.proposed} proposed`
+                ? `${richer.metrics.proposed} new`
                 : `${richer.metrics.memories} memories`}{' '}
               — more than this project.
             </p>
@@ -182,7 +183,7 @@ export function DashboardPage() {
                 </p>
                 <p className="mt-2 text-xs text-fg-dim">
                   {row.metrics.memories} memories
-                  {row.metrics.proposed ? ` · ${row.metrics.proposed} proposed` : ''}
+                  {row.metrics.proposed ? ` · ${row.metrics.proposed} new` : ''}
                 </p>
               </button>
             )
@@ -198,7 +199,7 @@ export function DashboardPage() {
           <p className="text-[11px] uppercase tracking-wide text-muted">Memories</p>
           <p className="mt-2 text-2xl font-semibold text-fg">{m?.memories ?? memoryItems.length}</p>
           <p className="mt-1 text-xs text-fg-dim">
-            {m ? `${m.confirmed} confirmed · ${m.proposed} proposed` : 'Loading…'}
+            {m ? `${m.confirmed + m.proposed} active` : 'Loading…'}
           </p>
         </GlassPanel>
         <GlassPanel className="p-4">
@@ -238,12 +239,7 @@ export function DashboardPage() {
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2">
               <Layers size={16} className="text-amber" />
-              <h2 className="text-sm font-medium text-fg">
-                {proposed.length ? 'Needs review' : 'Project memories'}
-              </h2>
-              {proposed.length ? (
-                <StatusPill tone="amber">{`${proposed.length} proposed`}</StatusPill>
-              ) : null}
+              <h2 className="text-sm font-medium text-fg">Project memories</h2>
             </div>
             <Link to="/app/memory" className="text-xs text-ember hover:underline">
               Open Memory →
@@ -261,9 +257,7 @@ export function DashboardPage() {
               >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-mono text-xs text-fg">{item.key}</span>
-                  <StatusPill tone={item.status === 'PROPOSED' ? 'amber' : 'teal'}>
-                    {item.status || '—'}
-                  </StatusPill>
+                  <StatusPill tone="teal">{visibleMemoryStatus(item.status)}</StatusPill>
                 </div>
                 <p className="mt-1 line-clamp-2 text-sm text-fg-dim">{item.content}</p>
                 <p className="mt-1 text-[11px] text-muted">
@@ -273,8 +267,7 @@ export function DashboardPage() {
             ))}
             {!shown.length ? (
               <li className="py-8 text-center text-sm text-muted">
-                No memories in this project yet. Chat in Cursor/Claude with the desktop daemon online,
-                or write via MCP — then confirm them in Memory.
+                No memories in this project yet. Chat in Cursor or Claude, or write via MCP.
               </li>
             ) : null}
           </ul>

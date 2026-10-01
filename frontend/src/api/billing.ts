@@ -6,6 +6,7 @@ export type PlanLimits = {
   projects: number
   members: number
   memories: number
+  storage_bytes?: number
   github_import: boolean
 }
 

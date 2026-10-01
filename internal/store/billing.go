@@ -35,13 +35,15 @@ const (
 // ErrPlanLimit is returned when a subscription cap would be exceeded.
 var ErrPlanLimit = errors.New("plan limit reached")
 
-// PlanLimits are numeric caps. Zero on a numeric field means unlimited.
+// PlanLimits are numeric caps. Zero on a numeric field means unlimited,
+// except StorageBytes where zero falls back to the plan default at resolve time.
 type PlanLimits struct {
-	Orgs         int  `json:"orgs"`
-	Projects     int  `json:"projects"`
-	Members      int  `json:"members"`
-	Memories     int  `json:"memories"`
-	GithubImport bool `json:"github_import"`
+	Orgs         int   `json:"orgs"`
+	Projects     int   `json:"projects"`
+	Members      int   `json:"members"`
+	Memories     int   `json:"memories"`
+	StorageBytes int64 `json:"storage_bytes"`
+	GithubImport bool  `json:"github_import"`
 }
 
 // Plan is a public catalog row.
@@ -139,21 +141,42 @@ func DefaultPlans() []*Plan {
 		{
 			ID: PlanFree, Name: "Free", Description: "Personal memory for one team.",
 			PriceCents: 0, Currency: "usd", Interval: "month", Public: true, Rank: 10,
-			Limits:   PlanLimits{Orgs: 1, Projects: 3, Members: 5, Memories: 2000, GithubImport: true},
+			Limits: PlanLimits{
+				Orgs: 1, Projects: 3, Members: 5, Memories: 2000,
+				StorageBytes: 5 << 30, GithubImport: true,
+			},
 			Features: []string{"Project memory", "Live presence", "GitHub import"},
 		},
 		{
 			ID: PlanPro, Name: "Pro", Description: "For groups that review and ship together.",
 			PriceCents: 1600, Currency: "usd", Interval: "month", Public: true, Rank: 20,
-			Limits:   PlanLimits{Orgs: 5, Projects: 25, Members: 25, Memories: 0, GithubImport: true},
+			Limits: PlanLimits{
+				Orgs: 5, Projects: 25, Members: 25, Memories: 0,
+				StorageBytes: 100 << 30, GithubImport: true,
+			},
 			Features: []string{"Everything in Free", "25 seats", "Unlimited memories", "Priority support"},
 		},
 		{
 			ID: PlanTeam, Name: "Team", Description: "Org-wide memory with room to grow.",
 			PriceCents: 4800, Currency: "usd", Interval: "month", Public: true, Rank: 30,
-			Limits:   PlanLimits{Orgs: 0, Projects: 0, Members: 250, Memories: 0, GithubImport: true},
+			Limits: PlanLimits{
+				Orgs: 0, Projects: 0, Members: 250, Memories: 0,
+				StorageBytes: 250 << 30, GithubImport: true,
+			},
 			Features: []string{"Everything in Pro", "Unlimited orgs & projects", "250 seats", "Admin billing"},
 		},
+	}
+}
+
+// PlanStorageBytes returns the D19 storage cap for a plan id.
+func PlanStorageBytes(planID string) int64 {
+	switch NormalizePlanID(planID) {
+	case PlanPro:
+		return 100 << 30
+	case PlanTeam:
+		return 250 << 30
+	default:
+		return 5 << 30
 	}
 }
 

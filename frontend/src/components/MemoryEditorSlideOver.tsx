@@ -53,7 +53,7 @@ export function MemoryEditorSlideOver({
   }, [open, onClose])
 
   const locked = item
-    ? item.status !== 'PROPOSED' && item.status !== 'CONFIRMED'
+    ? item.status !== 'PROPOSED' && item.status !== 'CONFIRMED' && item.status !== 'active'
     : true
 
   const onSubmit = (e: FormEvent) => {
@@ -159,7 +159,7 @@ export function MemoryEditorSlideOver({
               <div className="flex-1 space-y-4 overflow-y-auto px-5 py-4">
                 {locked ? (
                   <p className="rounded-lg border border-border bg-raised px-3 py-2 text-xs text-fg-dim">
-                    {item.status} memories are locked — only PROPOSED / CONFIRMED can be edited.
+                    Forgotten and superseded memories are locked.
                   </p>
                 ) : null}
 

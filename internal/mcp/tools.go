@@ -118,14 +118,14 @@ func ListTools() []Tool {
 	return []Tool{
 		{
 			Name:        "memory_search",
-			Description: "Search confirmed project memories. Returns an inference-ready XML context block plus a voluntary reflection hint.",
+			Description: "Search active project memories. Fresh writes are included. Returns an inference-ready XML context block plus a voluntary reflection hint.",
 			InputSchema: schema([]string{"query"}, map[string]any{
 				"query": str, "tags": strArr, "level": str, "limit": num, "project_id": str,
 			}),
 		},
 		{
 			Name:        "memory_write",
-			Description: "Record a fact, decision, preference, constraint, or pattern as a PROPOSED memory. Content must be natural language, 20-2000 chars. level=personal requires user_id; level=session requires session_id.",
+			Description: "Record a fact, decision, preference, constraint, or pattern. It is active on write. Content must be natural language, 20-2000 chars. level=personal requires user_id; level=session requires session_id.",
 			InputSchema: schema([]string{"key", "content"}, map[string]any{
 				"key": str, "content": str, "scope": str, "level": str,
 				"tags": strArr, "context_snippet": str, "project_id": str,
@@ -180,6 +180,27 @@ func ListTools() []Tool {
 			Description: "Write a file through the workspace sandbox (path must stay inside the workspace root). Writes are logged as events by the daemon.",
 			InputSchema: schema([]string{"path", "content"}, map[string]any{"path": str, "content": str}),
 		},
+		{
+			Name:        "session_summary_get",
+			Description: "Return the summary for one cloud session the caller can read. Raw chat stays on session_fetch.",
+			InputSchema: schema([]string{"session_id"}, map[string]any{
+				"session_id": str, "project_id": str,
+			}),
+		},
+		{
+			Name:        "session_fetch",
+			Description: "Page raw turns for one cloud session the caller can read. Pass cursor from the previous page.",
+			InputSchema: schema([]string{"session_id"}, map[string]any{
+				"session_id": str, "cursor": str, "limit": num, "project_id": str,
+			}),
+		},
+		{
+			Name:        "project_knowledge",
+			Description: "Top project and organization memories for bootstrap. Personal and session rows are omitted. Pinned items rank first.",
+			InputSchema: schema(nil, map[string]any{
+				"project_id": str, "limit": num,
+			}),
+		},
 	}
 }
 
@@ -217,6 +238,12 @@ func (s *Server) CallTool(ctx context.Context, name string, rawArgs json.RawMess
 		result, rpcErr = s.handleFileRead(rawArgs)
 	case "file_write":
 		result, rpcErr = s.handleFileWrite(rawArgs)
+	case "session_summary_get":
+		result, rpcErr = s.handleSessionSummary(ctx, rawArgs)
+	case "session_fetch":
+		result, rpcErr = s.handleSessionFetch(ctx, rawArgs)
+	case "project_knowledge":
+		result, rpcErr = s.handleProjectKnowledgeTool(ctx, rawArgs)
 	default:
 		return nil, &RPCError{Code: ErrMethodNotFound, Message: "unknown tool: " + name}
 	}
@@ -667,7 +694,7 @@ func (s *Server) handleMemoryWrite(ctx context.Context, raw json.RawMessage) (an
 	if err := s.store.CreateMemoryItem(ctx, item); err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: "write failed: " + err.Error()}
 	}
-	return map[string]any{"id": item.ID, "status": item.Status}, nil
+	return map[string]any{"id": item.ID, "status": publicMemoryWord(item.Status)}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -728,7 +755,7 @@ func (s *Server) handleMemoryReflect(ctx context.Context, raw json.RawMessage) (
 		}
 		recorded++
 	}
-	msg := fmt.Sprintf("Recorded %d reflection(s) as PROPOSED.", recorded)
+	msg := fmt.Sprintf("Recorded %d reflection(s).", recorded)
 	if recorded == 0 {
 		msg = "No takeaways submitted — nothing recorded. Thanks for checking in; the daemon harvests session transcripts automatically."
 	}

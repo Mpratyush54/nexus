@@ -45,8 +45,8 @@ func TestMemoryWriteValidation(t *testing.T) {
 				return
 			}
 			m := resultMap(t, r)
-			if m["status"] != "PROPOSED" {
-				t.Errorf("status = %v, want PROPOSED", m["status"])
+			if m["status"] != "active" {
+				t.Errorf("status = %v, want active", m["status"])
 			}
 			if _, ok := m["id"].(string); !ok {
 				t.Errorf("missing id: %v", m)

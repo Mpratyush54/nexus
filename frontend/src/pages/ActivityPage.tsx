@@ -5,6 +5,7 @@ import { StatusPill } from '@/components/ui/StatusPill'
 import { useActivity } from '@/hooks/useActivity'
 import { useAuth } from '@/providers/AuthProvider'
 import { formatRelative } from '@/utils/format'
+import { visibleEventLabel } from '@/lib/memory-status'
 import type { ProjectEvent } from '@/types/api'
 
 const TYPE_OPTIONS = [
@@ -35,7 +36,7 @@ function payloadSnippet(ev: ProjectEvent) {
   if (key) return key
   if (tool && agent) return `${agent} · ${tool}`
   if (tool) return tool
-  return ev.event_type.replaceAll('_', ' ').toLowerCase()
+  return visibleEventLabel(ev.event_type)
 }
 
 export function ActivityPage() {
@@ -73,7 +74,7 @@ export function ActivityPage() {
           >
             {types.map((t) => (
               <option key={t || 'all'} value={t}>
-                {t ? t : 'All types'}
+                {t ? visibleEventLabel(t) : 'All types'}
               </option>
             ))}
           </select>
@@ -112,7 +113,7 @@ export function ActivityPage() {
             animate={{ opacity: 1, y: 0 }}
           >
             <GlassPanel className="flex flex-wrap items-baseline gap-x-3 gap-y-1 p-4">
-              <StatusPill tone={eventTone(ev.event_type)}>{ev.event_type}</StatusPill>
+              <StatusPill tone={eventTone(ev.event_type)}>{visibleEventLabel(ev.event_type)}</StatusPill>
               <span className="min-w-0 flex-1 truncate font-mono text-[13px] text-fg">
                 {payloadSnippet(ev)}
               </span>

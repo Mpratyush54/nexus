@@ -1,5 +1,9 @@
 // Browser-safe CORS proxy for the workspace daemon (issue #169 / Phase 9).
 //
+// FREEZE (spec 7.8 / P0): :7272 is retired in the target architecture.
+// Keep this file for Fyne/daemon parity; new code must not depend on it.
+// Headless path: `nexus capture --foreground` (no TCP).
+//
 // Listens on 127.0.0.1:7272 and exposes an allowlisted, read-only surface
 // under /local/* so the PWA can inspect git/file state without the daemon
 // bearer token. Dangerous write/exec paths are registered only to return

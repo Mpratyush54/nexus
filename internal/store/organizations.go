@@ -1,7 +1,8 @@
 // organizations.go — org CRUD + membership (issue #168 / Phase 8).
 //
-// Organizations sit above projects. Creators become ADMIN; org ADMINS get
-// full access to every project with projects.org_id set (see IsProjectMember).
+// Organizations sit above projects. Creators become OWNER. OWNER and ADMIN
+// get project-settings access for every project with projects.org_id set
+// (see IsProjectMember). Session content stays owner-or-grantee.
 // Both MemStore and PostgresStore implement the same surface so HTTP handlers
 // stay store-agnostic via the orgStore seam in the server package.
 package store
@@ -19,14 +20,36 @@ import (
 
 // Organization role constants (migration 017).
 const (
+	OrgRoleOwner  = "OWNER"
 	OrgRoleAdmin  = "ADMIN"
 	OrgRoleMember = "MEMBER"
 )
 
-// ValidOrgRole reports whether role is ADMIN or MEMBER.
+func countOrgRole(members map[string]string, role string) int {
+	n := 0
+	for _, r := range members {
+		if r == role {
+			n++
+		}
+	}
+	return n
+}
+
+// OrgManages reports whether an org role inherits project-settings access.
+// Session content stays owner-or-grantee either way.
+func OrgManages(role string) bool {
+	switch strings.ToUpper(strings.TrimSpace(role)) {
+	case OrgRoleOwner, OrgRoleAdmin:
+		return true
+	default:
+		return false
+	}
+}
+
+// ValidOrgRole reports whether role is OWNER, ADMIN, or MEMBER.
 func ValidOrgRole(role string) bool {
 	switch strings.ToUpper(strings.TrimSpace(role)) {
-	case OrgRoleAdmin, OrgRoleMember:
+	case OrgRoleOwner, OrgRoleAdmin, OrgRoleMember:
 		return true
 	default:
 		return false
@@ -40,7 +63,7 @@ func NormalizeOrgRole(role string) (string, error) {
 		return OrgRoleMember, nil
 	}
 	if !ValidOrgRole(r) {
-		return "", fmt.Errorf("store: invalid org role %q (want ADMIN|MEMBER)", role)
+		return "", fmt.Errorf("store: invalid org role %q (want OWNER|ADMIN|MEMBER)", role)
 	}
 	return r, nil
 }
@@ -96,7 +119,7 @@ func (s *MemStore) CreateOrganization(ctx context.Context, name, slug, createdBy
 	if s.orgMembers[id] == nil {
 		s.orgMembers[id] = make(map[string]string)
 	}
-	s.orgMembers[id][createdBy] = OrgRoleAdmin
+	s.orgMembers[id][createdBy] = OrgRoleOwner
 	return cloneOrganization(o), nil
 }
 
@@ -127,6 +150,31 @@ func (s *MemStore) ListOrganizations(ctx context.Context, userID string) ([]*Org
 		out = []*Organization{}
 	}
 	return out, nil
+}
+
+// ListAllOrganizations returns every org id+name for platform ops (D22).
+// Callers must not expose project names or session content through this path.
+func (s *MemStore) ListAllOrganizations(ctx context.Context) []*Organization {
+	_ = ctx
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var out []*Organization
+	for _, o := range s.orgs {
+		if o == nil {
+			continue
+		}
+		out = append(out, &Organization{ID: o.ID, Name: o.Name})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name == out[j].Name {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Name < out[j].Name
+	})
+	if out == nil {
+		out = []*Organization{}
+	}
+	return out
 }
 
 // GetOrganization fetches one org by id.
@@ -263,17 +311,21 @@ func (s *MemStore) SetOrgMemberRole(ctx context.Context, orgID, userID, role str
 	if _, ok := s.orgs[orgID]; !ok {
 		return nil, fmt.Errorf("store: organization %s: %w", orgID, ErrNotFound)
 	}
-	if _, ok := s.orgMembers[orgID][userID]; !ok {
+	current, ok := s.orgMembers[orgID][userID]
+	if !ok {
 		return nil, fmt.Errorf("store: org member %s/%s: %w", orgID, userID, ErrNotFound)
 	}
-	if norm != OrgRoleAdmin {
-		admins := 0
+	if current == OrgRoleOwner && norm != OrgRoleOwner && countOrgRole(s.orgMembers[orgID], OrgRoleOwner) <= 1 {
+		return nil, fmt.Errorf("store: cannot demote last org owner: %w", ErrConflict)
+	}
+	if !OrgManages(norm) {
+		managers := 0
 		for _, r := range s.orgMembers[orgID] {
-			if r == OrgRoleAdmin {
-				admins++
+			if OrgManages(r) {
+				managers++
 			}
 		}
-		if s.orgMembers[orgID][userID] == OrgRoleAdmin && admins <= 1 {
+		if OrgManages(s.orgMembers[orgID][userID]) && managers <= 1 {
 			return nil, fmt.Errorf("store: cannot demote last org admin: %w", ErrConflict)
 		}
 	}
@@ -297,14 +349,17 @@ func (s *MemStore) RemoveOrgMember(ctx context.Context, orgID, userID string) er
 	if !ok {
 		return nil
 	}
-	if role == OrgRoleAdmin {
-		admins := 0
+	if role == OrgRoleOwner && countOrgRole(s.orgMembers[orgID], OrgRoleOwner) <= 1 {
+		return fmt.Errorf("store: cannot remove last org owner: %w", ErrConflict)
+	}
+	if OrgManages(role) {
+		managers := 0
 		for _, r := range s.orgMembers[orgID] {
-			if r == OrgRoleAdmin {
-				admins++
+			if OrgManages(r) {
+				managers++
 			}
 		}
-		if admins <= 1 {
+		if managers <= 1 {
 			return fmt.Errorf("store: cannot remove last org admin: %w", ErrConflict)
 		}
 	}
@@ -412,7 +467,7 @@ func (s *PostgresStore) CreateOrganization(ctx context.Context, name, slug, crea
 	}
 	if _, err := tx.Exec(ctx,
 		`INSERT INTO organization_members (org_id, user_id, role, granted_by)
-		 VALUES ($1::uuid, $2::uuid, 'ADMIN', $2::uuid)`,
+		 VALUES ($1::uuid, $2::uuid, 'OWNER', $2::uuid)`,
 		o.ID, createdBy); err != nil {
 		return nil, fmt.Errorf("store: create org admin membership: %w", err)
 	}
@@ -450,6 +505,27 @@ func (s *PostgresStore) ListOrganizations(ctx context.Context, userID string) ([
 		out = []*Organization{}
 	}
 	return out, rows.Err()
+}
+
+// ListAllOrganizations returns every org id+name for platform ops (D22).
+func (s *PostgresStore) ListAllOrganizations(ctx context.Context) []*Organization {
+	rows, err := s.pool.Query(ctx, `SELECT id::text, name FROM organizations ORDER BY name ASC, id::text ASC`)
+	if err != nil {
+		return []*Organization{}
+	}
+	defer rows.Close()
+	var out []*Organization
+	for rows.Next() {
+		var o Organization
+		if err := rows.Scan(&o.ID, &o.Name); err != nil {
+			return out
+		}
+		out = append(out, &o)
+	}
+	if out == nil {
+		out = []*Organization{}
+	}
+	return out
 }
 
 // GetOrganization fetches one org by id.
@@ -592,25 +668,36 @@ func (s *PostgresStore) SetOrgMemberRole(ctx context.Context, orgID, userID, rol
 	if orgID == "" || userID == "" {
 		return nil, errors.New("store: org id and user id are required")
 	}
-	if norm != OrgRoleAdmin {
+	var current string
+	cerr := s.pool.QueryRow(ctx,
+		`SELECT role FROM organization_members
+		  WHERE org_id = $1::uuid AND user_id = $2::uuid`,
+		orgID, userID).Scan(&current)
+	if errors.Is(cerr, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("store: org member %s/%s: %w", orgID, userID, ErrNotFound)
+	}
+	if cerr != nil {
+		return nil, fmt.Errorf("store: get org member: %w", cerr)
+	}
+	if current == OrgRoleOwner && norm != OrgRoleOwner {
+		var owners int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM organization_members
+			  WHERE org_id = $1::uuid AND role = 'OWNER'`, orgID).Scan(&owners); err != nil {
+			return nil, fmt.Errorf("store: count org owners: %w", err)
+		}
+		if owners <= 1 {
+			return nil, fmt.Errorf("store: cannot demote last org owner: %w", ErrConflict)
+		}
+	}
+	if !OrgManages(norm) {
 		var admins int
 		if err := s.pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM organization_members
-			  WHERE org_id = $1::uuid AND role = 'ADMIN'`, orgID).Scan(&admins); err != nil {
+			  WHERE org_id = $1::uuid AND role IN ('OWNER', 'ADMIN')`, orgID).Scan(&admins); err != nil {
 			return nil, fmt.Errorf("store: count org admins: %w", err)
 		}
-		var current string
-		cerr := s.pool.QueryRow(ctx,
-			`SELECT role FROM organization_members
-			  WHERE org_id = $1::uuid AND user_id = $2::uuid`,
-			orgID, userID).Scan(&current)
-		if errors.Is(cerr, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("store: org member %s/%s: %w", orgID, userID, ErrNotFound)
-		}
-		if cerr != nil {
-			return nil, fmt.Errorf("store: get org member: %w", cerr)
-		}
-		if current == OrgRoleAdmin && admins <= 1 {
+		if OrgManages(current) && admins <= 1 {
 			return nil, fmt.Errorf("store: cannot demote last org admin: %w", ErrConflict)
 		}
 	}
@@ -646,11 +733,22 @@ func (s *PostgresStore) RemoveOrgMember(ctx context.Context, orgID, userID strin
 	if err != nil {
 		return fmt.Errorf("store: get org member: %w", err)
 	}
-	if role == OrgRoleAdmin {
+	if role == OrgRoleOwner {
+		var owners int
+		if err := s.pool.QueryRow(ctx,
+			`SELECT COUNT(*) FROM organization_members
+			  WHERE org_id = $1::uuid AND role = 'OWNER'`, orgID).Scan(&owners); err != nil {
+			return fmt.Errorf("store: count org owners: %w", err)
+		}
+		if owners <= 1 {
+			return fmt.Errorf("store: cannot remove last org owner: %w", ErrConflict)
+		}
+	}
+	if OrgManages(role) {
 		var admins int
 		if err := s.pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM organization_members
-			  WHERE org_id = $1::uuid AND role = 'ADMIN'`, orgID).Scan(&admins); err != nil {
+			  WHERE org_id = $1::uuid AND role IN ('OWNER', 'ADMIN')`, orgID).Scan(&admins); err != nil {
 			return fmt.Errorf("store: count org admins: %w", err)
 		}
 		if admins <= 1 {

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -43,24 +44,26 @@ type ToolExecution struct {
 
 // SessionSnapshot mirrors session_snapshots (gzip bytes for diff/transcript).
 type SessionSnapshot struct {
-	ID                string    `json:"id"`
-	SessionID         string    `json:"session_id"`
-	SnapshotVersion   int       `json:"snapshot_version"`
-	ProjectID         string    `json:"project_id"`
-	Harness           string    `json:"harness"`
-	ConversationID    string    `json:"conversation_id"`
-	TurnCount         int       `json:"turn_count"`
-	GitBranch         string    `json:"git_branch,omitempty"`
-	GitCommit         string    `json:"git_commit,omitempty"`
-	GitDirty          bool      `json:"git_dirty"`
-	UncommittedDiff   []byte    `json:"uncommitted_diff,omitempty"`
-	DiffSizeBytes     int       `json:"diff_size_bytes,omitempty"`
-	DiffTruncated     bool      `json:"diff_truncated"`
-	TranscriptPayload []byte    `json:"transcript_payload,omitempty"`
-	ArtifactsBundle   []byte    `json:"artifacts_bundle,omitempty"`
-	SourceMachineID   string    `json:"source_machine_id,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	ID                string `json:"id"`
+	SessionID         string `json:"session_id"`
+	SnapshotVersion   int    `json:"snapshot_version"`
+	ProjectID         string `json:"project_id"`
+	Harness           string `json:"harness"`
+	ConversationID    string `json:"conversation_id"`
+	TurnCount         int    `json:"turn_count"`
+	GitBranch         string `json:"git_branch,omitempty"`
+	GitCommit         string `json:"git_commit,omitempty"`
+	GitDirty          bool   `json:"git_dirty"`
+	UncommittedDiff   []byte `json:"uncommitted_diff,omitempty"`
+	DiffSizeBytes     int    `json:"diff_size_bytes,omitempty"`
+	DiffTruncated     bool   `json:"diff_truncated"`
+	TranscriptPayload []byte `json:"transcript_payload,omitempty"`
+	ArtifactsBundle   []byte `json:"artifacts_bundle,omitempty"`
+	SourceMachineID   string `json:"source_machine_id,omitempty"`
+	// OwnerUserID is the uploader. Empty means the owner could not be resolved.
+	OwnerUserID string    `json:"owner_user_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 // FileOpListOpts filters ListFileOperations.
@@ -205,31 +208,68 @@ func (s *PostgresStore) UpsertSessionSnapshot(ctx context.Context, snap *Session
 	if strings.TrimSpace(snap.SessionID) == "" || strings.TrimSpace(snap.ProjectID) == "" {
 		return fmt.Errorf("snapshot requires session_id and project_id")
 	}
+	if snap.OwnerUserID != "" && !looksLikeUUID(snap.OwnerUserID) {
+		return fmt.Errorf("snapshot owner_user_id must be a uuid")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// A later version keeps the recorded owner. An ownerless session cannot
+	// be claimed by uploading another version; a project admin assigns it.
+	var regOwner string
+	regErr := tx.QueryRow(ctx, `
+		SELECT COALESCE(owner_user_id::text, '')
+		FROM session_content_owners WHERE session_id = $1::uuid`, snap.SessionID).Scan(&regOwner)
+	regFound := regErr == nil
+	if regErr != nil && !errors.Is(regErr, pgx.ErrNoRows) {
+		return regErr
+	}
+	if regFound {
+		if regOwner != "" {
+			snap.OwnerUserID = regOwner
+		} else {
+			snap.OwnerUserID = ""
+		}
+	}
+
 	var ver int
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT COALESCE(MAX(snapshot_version), 0) + 1
 		FROM session_snapshots WHERE session_id = $1::uuid`, snap.SessionID).Scan(&ver)
 	if err != nil {
 		return err
 	}
-	_, err = s.pool.Exec(ctx, `
+	_, err = tx.Exec(ctx, `
 		INSERT INTO session_snapshots (
 			session_id, snapshot_version, project_id, harness, conversation_id, turn_count,
 			git_branch, git_commit, git_dirty, uncommitted_diff, diff_size_bytes, diff_truncated,
-			transcript_payload, artifacts_bundle, source_machine_id
+			transcript_payload, artifacts_bundle, source_machine_id, owner_user_id
 		) VALUES (
 			$1::uuid, $2, $3::uuid, $4, $5, $6,
 			NULLIF($7,''), NULLIF($8,''), $9, $10, $11, $12,
-			$13, $14, NULLIF($15,'')
+			$13, $14, NULLIF($15,''), $16::uuid
 		)`,
 		snap.SessionID, ver, snap.ProjectID, snap.Harness, snap.ConversationID, snap.TurnCount,
 		snap.GitBranch, snap.GitCommit, snap.GitDirty, snap.UncommittedDiff, snap.DiffSizeBytes, snap.DiffTruncated,
-		snap.TranscriptPayload, snap.ArtifactsBundle, snap.SourceMachineID,
+		snap.TranscriptPayload, snap.ArtifactsBundle, snap.SourceMachineID, nullUUIDStrict(snap.OwnerUserID),
 	)
-	if err == nil {
-		snap.SnapshotVersion = ver
+	if err != nil {
+		return err
 	}
-	return err
+	if !regFound {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO session_content_owners (session_id, project_id, owner_user_id)
+			VALUES ($1::uuid, $2::uuid, $3)
+			ON CONFLICT (session_id) DO NOTHING`,
+			snap.SessionID, snap.ProjectID, nullUUIDStrict(snap.OwnerUserID)); err != nil {
+			return err
+		}
+	}
+	snap.SnapshotVersion = ver
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) GetLatestSnapshot(ctx context.Context, sessionID string) (*SessionSnapshot, error) {
@@ -238,6 +278,7 @@ func (s *PostgresStore) GetLatestSnapshot(ctx context.Context, sessionID string)
 		       COALESCE(git_branch,''), COALESCE(git_commit,''), COALESCE(git_dirty,false),
 		       uncommitted_diff, COALESCE(diff_size_bytes,0), diff_truncated,
 		       transcript_payload, artifacts_bundle, COALESCE(source_machine_id,''),
+		       COALESCE(owner_user_id::text,''),
 		       created_at, updated_at
 		FROM session_snapshots
 		WHERE session_id = $1::uuid
@@ -255,6 +296,7 @@ func (s *PostgresStore) ListSnapshotsForProject(ctx context.Context, projectID s
 		       COALESCE(git_branch,''), COALESCE(git_commit,''), COALESCE(git_dirty,false),
 		       NULL::bytea, COALESCE(diff_size_bytes,0), diff_truncated,
 		       NULL::bytea, NULL::bytea, COALESCE(source_machine_id,''),
+		       COALESCE(owner_user_id::text,''),
 		       created_at, updated_at
 		FROM (
 		  SELECT DISTINCT ON (session_id) *
@@ -320,6 +362,7 @@ func scanSnapshot(row pgx.Row) (*SessionSnapshot, error) {
 		&snap.GitBranch, &snap.GitCommit, &snap.GitDirty,
 		&snap.UncommittedDiff, &snap.DiffSizeBytes, &snap.DiffTruncated,
 		&snap.TranscriptPayload, &snap.ArtifactsBundle, &snap.SourceMachineID,
+		&snap.OwnerUserID,
 		&snap.CreatedAt, &snap.UpdatedAt,
 	)
 	if err == pgx.ErrNoRows {
@@ -338,6 +381,7 @@ func scanSnapshotRows(rows pgx.Rows) (*SessionSnapshot, error) {
 		&snap.GitBranch, &snap.GitCommit, &snap.GitDirty,
 		&snap.UncommittedDiff, &snap.DiffSizeBytes, &snap.DiffTruncated,
 		&snap.TranscriptPayload, &snap.ArtifactsBundle, &snap.SourceMachineID,
+		&snap.OwnerUserID,
 		&snap.CreatedAt, &snap.UpdatedAt,
 	)
 	if err != nil {

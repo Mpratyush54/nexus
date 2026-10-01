@@ -29,7 +29,8 @@ import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useToast } from '@/components/ui/Toast'
 import { memoryApi, type HarvestJob } from '@/api/memory'
-import { useConfirmMemory, useHarvestQueue, useMemorySearch, useRejectMemory } from '@/hooks/useMemory'
+import { useHarvestQueue, useMemorySearch } from '@/hooks/useMemory'
+import { isActiveMemory, visibleMemoryStatus } from '@/lib/memory-status'
 import { useLocalHarvest } from '@/hooks/useDaemon'
 import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
@@ -141,8 +142,6 @@ export function MemoryPage() {
   const deferredQ = useDeferredValue(q)
   const search = useMemorySearch(deferredQ, level)
   const harvestQ = useHarvestQueue()
-  const confirm = useConfirmMemory()
-  const reject = useRejectMemory()
 
   const [expandedHarvest, setExpandedHarvest] = useState<string | null>(null)
   const [harvestFull, setHarvestFull] = useState<Record<string, HarvestJob>>({})
@@ -196,8 +195,7 @@ export function MemoryPage() {
     })
   }, [items, tagFilter, selectedCategory])
 
-  const proposed = useMemo(() => filtered.filter((i) => i.status === 'PROPOSED'), [filtered])
-  const confirmed = useMemo(() => filtered.filter((i) => i.status !== 'PROPOSED'), [filtered])
+  const confirmed = useMemo(() => filtered.filter((i) => isActiveMemory(i.status)), [filtered])
 
   // Group confirmed items by category for Hierarchy View
   const itemsByCategory = useMemo(() => {
@@ -238,30 +236,6 @@ export function MemoryPage() {
   const harvestQueued = harvestQ.data?.counts?.queued ?? incomingHarvest.filter((j) => j.status === 'queued').length
   const harvestProcessing =
     harvestQ.data?.counts?.processing ?? incomingHarvest.filter((j) => j.status === 'processing').length
-
-  const onConfirm = (id: string, key: string) => {
-    confirm.mutate(id, {
-      onSuccess: () => push({ title: 'Confirmed', detail: key, tone: 'teal' }),
-      onError: (err) =>
-        push({
-          title: 'Confirm failed',
-          detail: err instanceof ApiError ? err.message : 'Unknown error',
-          tone: 'danger',
-        }),
-      })
-  }
-
-  const onReject = (id: string, key: string) => {
-    reject.mutate(id, {
-      onSuccess: () => push({ title: 'Rejected', detail: key }),
-      onError: (err) =>
-        push({
-          title: 'Reject failed',
-          detail: err instanceof ApiError ? err.message : 'Unknown error',
-          tone: 'danger',
-        }),
-    })
-  }
 
   const harvestTargetId = harvestStatus?.project_id?.trim()
   const harvestMismatch = Boolean(harvestTargetId && projectId && harvestTargetId !== projectId)
@@ -548,32 +522,6 @@ export function MemoryPage() {
         </GlassPanel>
       ) : null}
 
-      {/* Review Queue (Proposed Items) */}
-      {proposed.length > 0 ? (
-        <section className="space-y-2.5">
-          <h2 className="text-xs font-medium uppercase tracking-wide text-amber flex items-center gap-2">
-            <span>Review queue</span>
-            <span className="rounded-full bg-amber/20 px-2 py-0.5 text-[10px] font-bold text-amber">
-              {proposed.length}
-            </span>
-          </h2>
-          <AnimatePresence initial={false}>
-            {proposed.map((item) => (
-              <MemoryCard
-                key={item.id}
-                item={item}
-                busy={confirm.isPending || reject.isPending}
-                onConfirm={() => onConfirm(item.id, item.key)}
-                onReject={() => onReject(item.id, item.key)}
-                onEdit={() => setEditing(item)}
-                onHistory={() => setHistoryItem(item)}
-                onShare={() => setShareItem(item)}
-              />
-            ))}
-          </AnimatePresence>
-        </section>
-      ) : null}
-
       {/* MAIN VIEW: HIERARCHY (ACTIVE TRUTH) */}
       {viewMode === 'hierarchy' && confirmed.length > 0 ? (
         <div className="space-y-6">
@@ -725,20 +673,14 @@ export function MemoryPage() {
 
 function MemoryCard({
   item,
-  onConfirm,
-  onReject,
   onEdit,
   onHistory,
   onShare,
-  busy,
 }: {
   item: MemoryItem
-  onConfirm?: () => void
-  onReject?: () => void
   onEdit?: () => void
   onHistory?: () => void
   onShare?: () => void
-  busy?: boolean
 }) {
   const [expanded, setExpanded] = useState(item.scope === 'episode_summary')
   const proposed = item.status === 'PROPOSED'
@@ -774,8 +716,8 @@ function MemoryCard({
 
           <code className="font-mono text-[13px] font-semibold text-fg">{item.key}</code>
 
-          <StatusPill tone={proposed ? 'amber' : item.status === 'CONFIRMED' ? 'teal' : 'neutral'}>
-            {item.status.toLowerCase()}
+          <StatusPill tone={visibleMemoryStatus(item.status) === 'active' ? 'teal' : 'neutral'}>
+            {visibleMemoryStatus(item.status)}
           </StatusPill>
 
           {item.outcome && item.outcome !== 'active' ? (
@@ -899,16 +841,6 @@ function MemoryCard({
               #{tag}
             </span>
           ))}
-          {proposed && onConfirm && onReject ? (
-            <div className="ml-auto flex gap-2">
-              <Button variant="ghost" size="sm" disabled={busy} onClick={onReject}>
-                Reject
-              </Button>
-              <Button size="sm" disabled={busy} onClick={onConfirm}>
-                Confirm
-              </Button>
-            </div>
-          ) : null}
         </div>
       </GlassPanel>
     </motion.div>

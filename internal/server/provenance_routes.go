@@ -48,6 +48,12 @@ func (s *Server) handleSessionOperationsPost(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusForbidden, "not a project member")
 		return
 	}
+	if s.rejectIfCaptureOff(w, r, body.ProjectID) {
+		return
+	}
+	if _, ok := s.claimSessionWrite(w, r, body.ProjectID, sessionID); !ok {
+		return
+	}
 	harness := strings.TrimSpace(body.Harness)
 	if harness == "" {
 		harness = "unknown"
@@ -90,6 +96,9 @@ func (s *Server) handleSessionOperationsGet(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	sessionID := r.PathValue("id")
+	if !s.authorizeProvenanceSession(w, r, sessionID) {
+		return
+	}
 	opts := store.FileOpListOpts{
 		OpType:   strings.TrimSpace(r.URL.Query().Get("op_type")),
 		FilePath: strings.TrimSpace(r.URL.Query().Get("file_path")),
@@ -114,6 +123,9 @@ func (s *Server) handleSessionFilesGet(w http.ResponseWriter, r *http.Request) {
 	ps := provenanceStore(s.Store)
 	if ps == nil {
 		writeError(w, http.StatusNotImplemented, "provenance store unavailable")
+		return
+	}
+	if !s.authorizeProvenanceSession(w, r, r.PathValue("id")) {
 		return
 	}
 	ops, err := ps.ListFileOperations(r.Context(), r.PathValue("id"), store.FileOpListOpts{})

@@ -125,6 +125,24 @@ type MemStore struct {
 	fileOps   []FileOperation
 	toolExecs []ToolExecution
 	snapshots []SessionSnapshot
+	// Session content ACL + audit (migration 029, product spec 4.5 / 10.4).
+	sessionOwners map[string]sessionContentOwner
+	sessionGrants map[string]map[string]sessionContentGrant
+	auditEvents   []AuditEvent
+	// Cloud agent sessions (migration 030).
+	agentSessions   map[string]*AgentSession
+	agentByNative   map[string]string
+	sessionVersions map[string][]SessionVersion
+	blobs           map[string]blobRec
+	sessionTurns    map[string][]SessionTurn
+	agentGrants     map[string][]agentGrant
+	storageUsage    map[string]storageRec
+	teleports       map[string]*Teleport
+	secretKeys      map[string]*secretKeyRec
+	// Org admin (migration 032): capture switch and link invites.
+	projectCapture map[string]bool
+	orgInvites     map[string]*OrgInvite
+	inviteByToken  map[string]string
 }
 
 // memSubscription is one in-process event subscriber.
@@ -139,26 +157,40 @@ var _ Store = (*MemStore)(nil)
 // NewMemStore returns an initialized in-memory store.
 func NewMemStore() *MemStore {
 	return &MemStore{
-		projects:       make(map[string]*Project),
-		workspaces:     make(map[string]*Workspace),
-		members:        make(map[string]map[string]bool),
-		memberRoles:    make(map[string]map[string]string),
-		roles:          make(map[string]map[string]*ProjectRole),
-		orgs:           make(map[string]*Organization),
-		orgMembers:     make(map[string]map[string]string),
-		memories:       make(map[string]*MemoryItem),
-		versions:       make(map[string][]*MemoryVersion),
-		shares:         make(map[string]*memShare),
-		episodes:       make(map[string]*Episode),
-		events:         make([]*Event, 0),
-		subs:           make(map[int64]*memSubscription),
-		agentPerms:     make(map[string]map[string]*AgentPermission),
-		githubLinks:    make(map[string]*GitHubLink),
-		githubUsers:    make(map[string]*GitHubUserMap),
-		platformAdmins: make(map[string]bool),
-		releases:       make(map[string]*AppRelease),
-		plans:          defaultPlanMap(),
-		billingSubs:    make(map[string]*Subscription),
+		projects:        make(map[string]*Project),
+		workspaces:      make(map[string]*Workspace),
+		members:         make(map[string]map[string]bool),
+		memberRoles:     make(map[string]map[string]string),
+		roles:           make(map[string]map[string]*ProjectRole),
+		orgs:            make(map[string]*Organization),
+		orgMembers:      make(map[string]map[string]string),
+		memories:        make(map[string]*MemoryItem),
+		versions:        make(map[string][]*MemoryVersion),
+		shares:          make(map[string]*memShare),
+		episodes:        make(map[string]*Episode),
+		events:          make([]*Event, 0),
+		subs:            make(map[int64]*memSubscription),
+		agentPerms:      make(map[string]map[string]*AgentPermission),
+		githubLinks:     make(map[string]*GitHubLink),
+		githubUsers:     make(map[string]*GitHubUserMap),
+		platformAdmins:  make(map[string]bool),
+		releases:        make(map[string]*AppRelease),
+		plans:           defaultPlanMap(),
+		billingSubs:     make(map[string]*Subscription),
+		sessionOwners:   make(map[string]sessionContentOwner),
+		sessionGrants:   make(map[string]map[string]sessionContentGrant),
+		agentSessions:   make(map[string]*AgentSession),
+		agentByNative:   make(map[string]string),
+		sessionVersions: make(map[string][]SessionVersion),
+		blobs:           make(map[string]blobRec),
+		sessionTurns:    make(map[string][]SessionTurn),
+		agentGrants:     make(map[string][]agentGrant),
+		storageUsage:    make(map[string]storageRec),
+		teleports:       make(map[string]*Teleport),
+		secretKeys:      make(map[string]*secretKeyRec),
+		projectCapture:  make(map[string]bool),
+		orgInvites:      make(map[string]*OrgInvite),
+		inviteByToken:   make(map[string]string),
 	}
 }
 
@@ -291,7 +323,7 @@ func (s *MemStore) ListProjectsForUser(ctx context.Context, userID string) ([]*P
 			continue
 		}
 		if p.OrgID != "" {
-			if role := s.orgMembers[p.OrgID][uid]; role == OrgRoleAdmin {
+			if OrgManages(s.orgMembers[p.OrgID][uid]) {
 				out = append(out, cloneProject(p))
 			}
 		}
@@ -611,9 +643,20 @@ func (s *MemStore) SearchMemoryPage(ctx context.Context, projectID string, query
 }
 
 // SearchMemoryVector ranks memories by cosine similarity (issue #165).
-// Mirrors PostgresStore.SearchMemoryVector: CONFIRMED only, confidence > 0.3,
-// non-empty embeddings. Used by local MCP/mem wiring and tests so vector
-// search works without Postgres.
+// Active rows are CONFIRMED and PROPOSED (spec 2.2). Confidence must be
+// above 0.3 and the embedding must be non-empty. Pinned items rank first.
+func memoryPinned(item *MemoryItem) bool {
+	if item == nil {
+		return false
+	}
+	for _, tag := range item.Tags {
+		if strings.EqualFold(strings.TrimSpace(tag), "pinned") {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
 	if len(queryVec) == 0 {
 		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
@@ -635,7 +678,7 @@ func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, que
 		if !memoryVisibleToProject(item, projectID) {
 			continue
 		}
-		if item.Status != StatusConfirmed {
+		if item.Status != StatusConfirmed && item.Status != StatusProposed {
 			continue
 		}
 		if item.Confidence <= 0.3 {
@@ -649,6 +692,10 @@ func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, que
 		}
 	}
 	sort.Slice(ranked, func(i, j int) bool {
+		pi, pj := memoryPinned(ranked[i].item), memoryPinned(ranked[j].item)
+		if pi != pj {
+			return pi
+		}
 		if ranked[i].sim == ranked[j].sim {
 			return ranked[i].item.ID < ranked[j].item.ID
 		}

@@ -1,5 +1,8 @@
 // Command nexus-desktop — native Nexus Desktop (Fyne) for Windows / macOS / Linux.
 //
+// FREEZE (spec 7.8 / P0): Fyne desktop is frozen at current parity. WinUI +
+// embedded nexuscore replace it; do not extend beyond bugfixes.
+//
 // System tray + in-process window (no browser-to-127.0.0.1). Speaks to the
 // local daemon via internal/localclient; updater replaces locked binaries.
 package main

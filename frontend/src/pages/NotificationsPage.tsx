@@ -19,8 +19,8 @@ import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 
 const PREF_LABELS: Record<string, string> = {
-  MEMORY_PROPOSED: 'Memory proposed',
-  MEMORY_CONFIRMED: 'Memory confirmed',
+  MEMORY_PROPOSED: 'Memory saved',
+  MEMORY_CONFIRMED: 'Memory saved',
   MEMORY_UPDATED: 'Memory edited',
   MEMORY_REJECTED: 'Memory rejected',
   MEMORY_SUPERSEDED: 'Memory superseded',

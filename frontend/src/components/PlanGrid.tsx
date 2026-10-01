@@ -70,6 +70,9 @@ export function PlanGrid({
               <li>
                 · {formatLimit(plan.limits.orgs)} orgs · {formatLimit(plan.limits.projects)} projects ·{' '}
                 {formatLimit(plan.limits.members)} seats
+                {plan.limits.storage_bytes
+                  ? ` · ${Math.round(plan.limits.storage_bytes / (1 << 30))} GiB storage`
+                  : ''}
               </li>
             </ul>
             {active && current ? (

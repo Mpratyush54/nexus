@@ -10,8 +10,8 @@ import { normalizeMCPFromWs, type MCPToolCall } from '@/api/agents'
 const MAX_BACKOFF_MS = 15_000
 
 const TOAST_EVENTS: Record<string, { title: string; tone: 'teal' | 'amber' | 'neutral' }> = {
-  MEMORY_PROPOSED: { title: 'Memory proposed', tone: 'amber' },
-  MEMORY_CONFIRMED: { title: 'Memory confirmed', tone: 'teal' },
+  MEMORY_PROPOSED: { title: 'Memory saved', tone: 'teal' },
+  MEMORY_CONFIRMED: { title: 'Memory saved', tone: 'teal' },
   MEMORY_UPDATED: { title: 'Memory edited', tone: 'neutral' },
   MEMORY_REJECTED: { title: 'Memory rejected', tone: 'amber' },
   MEMORY_SUPERSEDED: { title: 'Memory superseded', tone: 'neutral' },

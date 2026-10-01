@@ -29,21 +29,27 @@ func (s *MemStore) IsProjectMember(ctx context.Context, userID, projectID string
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.projectMemberLocked(userID, projectID), nil
+}
+
+// projectMemberLocked is IsProjectMember without taking the store lock.
+func (s *MemStore) projectMemberLocked(userID, projectID string) bool {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(projectID) == "" {
+		return false
+	}
 	if p, ok := s.projects[projectID]; ok && p != nil {
 		if p.CreatedBy == userID {
-			return true, nil
+			return true
 		}
-		if p.OrgID != "" {
-			if role, ok := s.orgMembers[p.OrgID][userID]; ok && role == OrgRoleAdmin {
-				return true, nil
-			}
+		if p.OrgID != "" && OrgManages(s.orgMembers[p.OrgID][userID]) {
+			return true
 		}
 	}
 	if s.members[projectID][userID] {
-		return true, nil
+		return true
 	}
 	_, hasRole := s.memberRoles[projectID][userID]
-	return hasRole, nil
+	return hasRole
 }
 
 // ClaimProject records userID as creator iff none is set. Returns true
@@ -149,7 +155,7 @@ func (s *PostgresStore) IsProjectMember(ctx context.Context, userID, projectID s
 		         JOIN organization_members om ON om.org_id = p.org_id
 		          WHERE p.id = $2::uuid
 		            AND om.user_id = $1::uuid
-		            AND om.role = 'ADMIN'
+		            AND om.role IN ('ADMIN', 'OWNER')
 		       )`,
 		userID, projectID).Scan(&member); err != nil {
 		return false, fmt.Errorf("store: membership check: %w", err)

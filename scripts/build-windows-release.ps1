@@ -21,10 +21,13 @@ $env:GOARCH = "amd64"
 $dist = Join-Path $root "dist"
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
+# Fyne (cmd/nexus-desktop + internal/desktopui) is FROZEN — WinUI
+# (desktop/windows) + embedded nexuscore is the shipping path. Keep building
+# the Fyne tray binary for one more release for migration parity only.
 Write-Host "Building Windows amd64 binaries…"
 go build -trimpath -ldflags $ld -o "$dist\nexus-windows-amd64.exe" ./cmd/nexus
 go build -trimpath -ldflags $ld -o "$dist\nexus-daemon-windows-amd64.exe" ./cmd/daemon
-# windowsgui: no console window — tray-only UX
+# windowsgui: no console window — tray-only UX (Fyne freeze; prefer WinUI)
 go build -trimpath -ldflags "$ld -H=windowsgui" -o "$dist\nexus-desktop-windows-amd64.exe" ./cmd/nexus-desktop
 Copy-Item "$root\scripts\install-windows.ps1" "$dist\install-windows.ps1" -Force
 

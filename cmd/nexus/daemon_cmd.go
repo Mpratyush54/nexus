@@ -51,7 +51,7 @@ func runDaemonCmd(cfg Config, args []string, stdout io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(stdout, "installed %s as a login service\n", bin)
-		fmt.Fprintln(stdout, "status UI: http://127.0.0.1:7272/")
+		fmt.Fprintln(stdout, "note: :7272 is frozen; prefer nexus capture --foreground / WinUI embedded core")
 		return nil
 	default:
 		return fmt.Errorf("unknown daemon command %q (want install, uninstall, status)", args[0])

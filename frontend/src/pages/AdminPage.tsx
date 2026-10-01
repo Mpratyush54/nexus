@@ -20,6 +20,9 @@ import type { ReleaseArtifact } from '@/api/platform'
 
 const APPS = ['api', 'pwa', 'cli', 'daemon', 'desktop'] as const
 
+// P7 moves this customer-portal Super Admin page to a separate ops console
+// (`/ops/v1` + admin.nexus…). Prefer platform.ops* helpers over /admin/* over time.
+
 export function AdminPage() {
   const { push } = useToast()
   const me = useMe()

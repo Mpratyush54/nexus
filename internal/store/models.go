@@ -38,7 +38,7 @@ type Organization struct {
 type OrganizationMember struct {
 	OrgID     string    `json:"org_id"`
 	UserID    string    `json:"user_id"`
-	Role      string    `json:"role"` // ADMIN | MEMBER
+	Role      string    `json:"role"` // OWNER | ADMIN | MEMBER
 	GrantedBy string    `json:"granted_by,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }

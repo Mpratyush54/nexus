@@ -33,6 +33,11 @@ export const queryKeys = {
     all: ['orgs'] as const,
     list: ['orgs', 'list'] as const,
     detail: (id: string) => ['orgs', 'detail', id] as const,
+    storage: (id: string) => ['orgs', 'storage', id] as const,
+    audit: (id: string) => ['orgs', 'audit', id] as const,
+    shares: (id: string) => ['orgs', 'shares', id] as const,
+    offboardPreview: (id: string, userId: string) =>
+      ['orgs', 'offboard-preview', id, userId] as const,
   },
   branches: {
     list: (projectId: string) => ['branches', projectId] as const,

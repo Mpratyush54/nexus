@@ -198,7 +198,10 @@ func (q *MemHarvestQueue) CountHarvestJobs(_ context.Context, projectID string) 
 	var c HarvestJobCounts
 	for _, id := range q.order {
 		j := q.jobs[id]
-		if j == nil || j.ProjectID != projectID {
+		if j == nil {
+			continue
+		}
+		if projectID != "" && j.ProjectID != projectID {
 			continue
 		}
 		switch j.Status {

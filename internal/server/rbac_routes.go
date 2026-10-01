@@ -132,6 +132,13 @@ func (s *Server) handleRoleCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not create role: "+err.Error())
 		return
 	}
+	s.recordAudit(r, store.AuditEvent{
+		Action:       "member.role_changed",
+		ResourceKind: "role",
+		ResourceID:   role.ID,
+		ProjectID:    id,
+		Metadata:     map[string]any{"op": "create", "role": role.Name},
+	})
 	writeJSON(w, http.StatusCreated, role)
 }
 
@@ -177,6 +184,13 @@ func (s *Server) handleRoleUpdate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not update role: "+err.Error())
 		return
 	}
+	s.recordAudit(r, store.AuditEvent{
+		Action:       "member.role_changed",
+		ResourceKind: "role",
+		ResourceID:   roleID,
+		ProjectID:    id,
+		Metadata:     map[string]any{"op": "update", "role": role.Name},
+	})
 	writeJSON(w, http.StatusOK, role)
 }
 
@@ -207,6 +221,13 @@ func (s *Server) handleRoleDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not delete role: "+err.Error())
 		return
 	}
+	s.recordAudit(r, store.AuditEvent{
+		Action:       "member.role_changed",
+		ResourceKind: "role",
+		ResourceID:   roleID,
+		ProjectID:    id,
+		Metadata:     map[string]any{"op": "delete"},
+	})
 	writeJSON(w, http.StatusOK, map[string]any{"deleted": true, "id": roleID})
 }
 
@@ -250,6 +271,13 @@ func (s *Server) handleMemberSetRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	role, _ := rs.GetMemberRole(r.Context(), userID, id)
+	s.recordAudit(r, store.AuditEvent{
+		Action:       "member.role_changed",
+		ResourceKind: "member",
+		ResourceID:   userID,
+		ProjectID:    id,
+		Metadata:     map[string]any{"op": "set", "role": role},
+	})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"project_id": id,
 		"user_id":    userID,
