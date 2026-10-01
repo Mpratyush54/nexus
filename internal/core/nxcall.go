@@ -38,6 +38,15 @@ type Cloud interface {
 	Do(ctx context.Context, method, path string, body []byte) ([]byte, error)
 }
 
+// CaptureController owns the host application's background harvester.  The
+// core deliberately knows no daemon implementation: a desktop build can run
+// the harvester in-process, while a CLI may leave this nil.
+type CaptureController interface {
+	Pause() error
+	Resume() error
+	Status() any
+}
+
 // Deps are the local subsystems nx_call can touch.
 type Deps struct {
 	Cloud          Cloud
@@ -45,6 +54,7 @@ type Deps struct {
 	Outbox         *outbox.Spool
 	Root           string
 	Online         bool
+	Capture        CaptureController
 	ContinueRunner continuex.Runner // optional; when set, continue.start records/starts via Runner
 }
 
@@ -273,8 +283,22 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		return map[string]any{"ok": true, "online": deps.Online, "pending_uploads": pendingCount(deps)}, nil
 	case "auth.callback":
 		return map[string]any{"redirect": "nexus://auth/callback"}, nil
-	case "capture.pause", "capture.resume":
-		return nil, errors.New(method + " is handled by the app shell; the core has no capture switch yet")
+	case "capture.pause":
+		if deps.Capture == nil {
+			return nil, errors.New("capture control is unavailable in this host")
+		}
+		if err := deps.Capture.Pause(); err != nil {
+			return nil, err
+		}
+		return deps.Capture.Status(), nil
+	case "capture.resume":
+		if deps.Capture == nil {
+			return nil, errors.New("capture control is unavailable in this host")
+		}
+		if err := deps.Capture.Resume(); err != nil {
+			return nil, err
+		}
+		return deps.Capture.Status(), nil
 	case "capture.walk":
 		return captureWalk(deps, args)
 	case "capture.restore":

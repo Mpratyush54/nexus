@@ -100,6 +100,9 @@ type Runtime struct {
 	Designation DesignationProvider
 	ProjectID   string
 
+	pauseMu sync.RWMutex
+	paused  bool
+
 	Materializer MaterializerRunner
 
 	// harvestCh carries Layer-2 harvester Events to the processor loop.
@@ -242,6 +245,30 @@ func (r *Runtime) Dropped() int64 {
 	return r.Daemon.Dropped()
 }
 
+// SetPaused suspends collection and discards events observed while paused.
+// It keeps the embedded runtime alive so resume does not create a second
+// harvester or lose its source cursors.
+func (r *Runtime) SetPaused(paused bool) {
+	if r == nil {
+		return
+	}
+	r.pauseMu.Lock()
+	r.paused = paused
+	r.pauseMu.Unlock()
+	if r.Harvester != nil {
+		r.Harvester.SetPaused(paused)
+	}
+}
+
+func (r *Runtime) Paused() bool {
+	if r == nil {
+		return true
+	}
+	r.pauseMu.RLock()
+	defer r.pauseMu.RUnlock()
+	return r.paused
+}
+
 // Start runs Harvester + Watcher + Processor event loop + designation sync
 // + dropped-metric logging until ctx ends. The interceptor sink is wired at
 // startup (issue #99): a ChanEmitter is installed via SetEventSink and
@@ -261,6 +288,7 @@ func (r *Runtime) Start(ctx context.Context) {
 	}
 	if r.Harvester != nil {
 		r.Harvester.SetEmitter(&chanEventEmitter{ch: r.harvestCh})
+		r.Harvester.SetPaused(r.Paused())
 	}
 
 	var wg sync.WaitGroup
@@ -308,6 +336,11 @@ func (r *Runtime) Start(ctx context.Context) {
 	var window []ToolEvent
 	var conv []Event
 	flush := func() {
+		if r.Paused() {
+			window = window[:0]
+			conv = conv[:0]
+			return
+		}
 		var toolWindow []ToolEvent
 		if len(window) > 0 {
 			toolWindow = append([]ToolEvent(nil), window...)
@@ -388,11 +421,17 @@ func (r *Runtime) Start(ctx context.Context) {
 			wg.Wait()
 			return
 		case ev := <-sink.Ch:
+			if r.Paused() {
+				continue
+			}
 			window = append(window, ev)
 			if len(window)+len(conv) >= 50 {
 				flush()
 			}
 		case ev := <-r.harvestCh:
+			if r.Paused() {
+				continue
+			}
 			r.noteHarvestEvent(ev)
 			conv = append(conv, ev)
 			if len(window)+len(conv) >= 50 {
@@ -401,7 +440,9 @@ func (r *Runtime) Start(ctx context.Context) {
 		case <-epT.C:
 			flush()
 		case <-snapT.C:
-			r.pushDueSnapshots(ctx)
+			if !r.Paused() {
+				r.pushDueSnapshots(ctx)
+			}
 		case <-desigT.C:
 			r.SyncDesignation()
 		case <-dropT.C:

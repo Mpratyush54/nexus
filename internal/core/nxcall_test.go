@@ -117,6 +117,44 @@ func TestCloudMethodsUseContractRoutes(t *testing.T) {
 	}
 }
 
+type testCaptureController struct {
+	paused bool
+}
+
+func (c *testCaptureController) Pause() error {
+	c.paused = true
+	return nil
+}
+
+func (c *testCaptureController) Resume() error {
+	c.paused = false
+	return nil
+}
+
+func (c *testCaptureController) Status() any {
+	return map[string]any{"paused": c.paused, "running": !c.paused}
+}
+
+func TestCaptureControlsDelegateToHost(t *testing.T) {
+	capture := &testCaptureController{}
+	deps := Deps{Capture: capture}
+
+	paused, err := Call(context.Background(), "capture.pause", nil, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paused.(map[string]any)["paused"]; got != true || !capture.paused {
+		t.Fatalf("pause response=%#v paused=%v", paused, capture.paused)
+	}
+	resumed, err := Call(context.Background(), "capture.resume", nil, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resumed.(map[string]any)["running"]; got != true || capture.paused {
+		t.Fatalf("resume response=%#v paused=%v", resumed, capture.paused)
+	}
+}
+
 func TestContinueRunnerRecordsArgv(t *testing.T) {
 	ResetRunsForTest()
 	runner := &continuex.Controllable{NextID: "op_runner_1"}
