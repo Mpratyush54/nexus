@@ -13,22 +13,29 @@ $api = "https://api-nexus.pratyushes.dev"
 $sha = (git rev-parse --short HEAD)
 $builtAt = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
 $ld = "-s -w -X central-memory/internal/buildinfo.Version=$Version -X central-memory/internal/buildinfo.Commit=$sha -X central-memory/internal/buildinfo.BuiltAt=$builtAt -X main.defaultServerURL=$api"
-
-$env:CGO_ENABLED = "0"
-$env:GOOS = "windows"
-$env:GOARCH = "amd64"
-
 $dist = Join-Path $root "dist"
-New-Item -ItemType Directory -Force -Path $dist | Out-Null
+$app = Join-Path $dist "Nexus"
+$win = Join-Path $root "desktop\windows"
 
-# Fyne (cmd/nexus-desktop + internal/desktopui) is FROZEN — WinUI
-# (desktop/windows) + embedded nexuscore is the shipping path. Keep building
-# the Fyne tray binary for one more release for migration parity only.
-Write-Host "Building Windows amd64 binaries…"
+New-Item -ItemType Directory -Force -Path $dist, $app | Out-Null
+
+# The CLI is intentionally separate. The retired Fyne shell and local daemon
+# are not release artifacts: Nexus.exe hosts nexuscore.dll in-process.
 go build -trimpath -ldflags $ld -o "$dist\nexus-windows-amd64.exe" ./cmd/nexus
-go build -trimpath -ldflags $ld -o "$dist\nexus-daemon-windows-amd64.exe" ./cmd/daemon
-# windowsgui: no console window — tray-only UX (Fyne freeze; prefer WinUI)
-go build -trimpath -ldflags "$ld -H=windowsgui" -o "$dist\nexus-desktop-windows-amd64.exe" ./cmd/nexus-desktop
+
+$props = @("-p:AppxGeneratePriEnabled=false", "-p:WindowsAppSDKSelfContained=false")
+$appxTools = Join-Path $root "desktop\build-stubs\AppxPackage"
+if (Test-Path (Join-Path $appxTools "Microsoft.Build.Packaging.Pri.Tasks.dll")) {
+  $props += ('-p:AppxMSBuildToolsPath={0}\' -f $appxTools)
+}
+dotnet publish "$win\Nexus.csproj" -c Release -r win-x64 --self-contained false -o $app @props
+
+# Publish first, then place the Go library beside Nexus.exe. This makes a
+# stale core impossible even if dotnet cleans its destination.
+$env:CGO_ENABLED = "1"
+go build -tags nexuscorelib -trimpath -ldflags $ld -buildmode=c-shared -o "$app\nexuscore.dll" ./cmd/nexuscore
+
+Compress-Archive -Path "$app\*" -DestinationPath "$dist\nexus-desktop-windows-amd64.zip" -Force
 Copy-Item "$root\scripts\install-windows.ps1" "$dist\install-windows.ps1" -Force
 
 if ($Inno) {
@@ -37,19 +44,20 @@ if ($Inno) {
     "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
   ) | Where-Object { Test-Path $_ } | Select-Object -First 1
   if (-not $iscc) {
-    Write-Warning "Inno Setup 6 not found — skipping NexusSetup.exe (install from https://jrsoftware.org/isinfo.php)"
+    Write-Warning "Inno Setup 6 not found — skipping NexusSetup.exe"
   } else {
     & $iscc "$root\scripts\nexus.iss"
   }
 }
 
 if ($Upload) {
-  aws s3 sync $dist "s3://central-memory-releases/cli/$Version/" `
+  aws s3 sync $dist "s3://central-memory-releases/desktop/$Version/" `
     --exclude "*" `
-    --include "nexus-*-windows-*" `
+    --include "nexus-windows-amd64.exe" `
+    --include "nexus-desktop-windows-amd64.zip" `
     --include "install-windows.ps1" `
     --include "NexusSetup-*"
 }
 
 Get-ChildItem $dist | Format-Table Name, Length, LastWriteTime
-Write-Host "Done."
+Write-Host "Built native Nexus release. The retired nexus-desktop.exe and nexus-daemon.exe are not included."

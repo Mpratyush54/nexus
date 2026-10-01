@@ -11,7 +11,7 @@ public sealed class TimelinePage : NexusPage
     private readonly TextBox _agent = new() { PlaceholderText = "Agent", Width = 160 };
     private readonly TextBox _machine = new() { PlaceholderText = "Machine", Width = 160 };
     private readonly TextBox _person = new() { PlaceholderText = "Person", Width = 160 };
-    private readonly StackPanel _cards = new();
+    private readonly StackPanel _cards = new() { Spacing = 10, HorizontalAlignment = HorizontalAlignment.Stretch };
     private string _query = "";
 
     public TimelinePage()
@@ -20,11 +20,14 @@ public sealed class TimelinePage : NexusPage
         refresh.Click += async (_, _) => await LoadAsync();
         var filters = Row(_project, _agent, _machine, _person, refresh);
         var scroller = new ScrollViewer { Content = _cards };
-        var root = new Grid { Padding = new Thickness(24), RowSpacing = 12 };
+        var root = new Grid { Padding = new Thickness(32, 24, 32, 24), RowSpacing = 16 };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        var title = Line("Timeline", title: true);
+        var header = new StackPanel { Spacing = 4 };
+        header.Children.Add(Line("Timeline", title: true));
+        header.Children.Add(Line("Sessions you own or that were shared with you, across every project."));
+        var title = header;
         Grid.SetRow(filters, 1);
         Grid.SetRow(scroller, 2);
         root.Children.Add(title);
@@ -77,11 +80,9 @@ public sealed class TimelinePage : NexusPage
                 NxJson.Text(item, "machine", "origin_machine_id"),
                 NxJson.Text(item, "person", "owner")
             }.Where(part => part.Length > 0));
-            var open = Action("Open", () => MainWindow.Current?.OpenSession(id));
-            var cont = Action("Continue", () => MainWindow.Current?.OpenSession(id));
+            var open = Action("Open session", () => MainWindow.Current?.OpenSession(id));
             open.IsEnabled = id.Length > 0;
-            cont.IsEnabled = id.Length > 0;
-            _cards.Children.Add(Card(Line(headline.Length > 0 ? headline : id, title: true), Line(meta), Row(open, cont)));
+            _cards.Children.Add(Card(Line(headline.Length > 0 ? headline : id, title: true), Line(meta), open));
         }
     }
 }

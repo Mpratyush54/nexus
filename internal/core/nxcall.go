@@ -405,6 +405,21 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 			"harness": "harness", "limit": "limit", "cursor": "cursor",
 		}), nil, nil
 	case "memory.search":
+		// The remote agent search endpoint intentionally requires a non-empty
+		// query.  A Memory page opening without one should show the selected
+		// project's retained knowledge through the documented, versioned list
+		// route instead of manufacturing the old 404 / 400 combination.
+		if query := argString(args, "query", "q"); query == "" {
+			projectID := argString(args, "project_id", "project")
+			if projectID == "" {
+				return "", "", nil, errors.New("select a project or enter a memory search")
+			}
+			limit := argString(args, "limit")
+			if limit == "" {
+				limit = "50"
+			}
+			return http.MethodGet, "/v1/projects/" + url.PathEscape(projectID) + "/knowledge?limit=" + url.QueryEscape(limit), nil, nil
+		}
 		return http.MethodPost, "/v1/agent/memory/search", normalizeMemorySearchBody(args), nil
 	case "memory.forget":
 		if id == "" {
