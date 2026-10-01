@@ -4,6 +4,7 @@ package cloudclient
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -38,6 +39,53 @@ func New(serverURL, token string) *Client {
 
 func (c *Client) signedIn() bool {
 	return c != nil && strings.TrimSpace(c.Token) != ""
+}
+
+// SignedIn reports whether a Bearer token is configured.
+func (c *Client) SignedIn() bool { return c.signedIn() }
+
+// Do implements core.Cloud: one HTTPS round-trip to ServerURL+path.
+func (c *Client) Do(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	if !c.signedIn() {
+		return nil, fmt.Errorf("not signed in — open Settings and sign in")
+	}
+	method = strings.ToUpper(strings.TrimSpace(method))
+	if method == "" {
+		method = http.MethodGet
+	}
+	path = strings.TrimSpace(path)
+	if path == "" || !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("cloudclient: path must start with /")
+	}
+	var rdr io.Reader
+	if len(body) > 0 && method != http.MethodGet && method != http.MethodHead {
+		rdr = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.ServerURL+path, rdr)
+	if err != nil {
+		return nil, err
+	}
+	if rdr != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		msg := strings.TrimSpace(string(raw))
+		if msg == "" {
+			msg = resp.Status
+		}
+		if resp.StatusCode == http.StatusUnauthorized {
+			return nil, fmt.Errorf("session expired — open Settings and sign in again")
+		}
+		return nil, fmt.Errorf("%s %s: %d %s", method, path, resp.StatusCode, msg)
+	}
+	return raw, nil
 }
 
 // MemoryItem is one search hit from POST /v1/agent/memory/search.

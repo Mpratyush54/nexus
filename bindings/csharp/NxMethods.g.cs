@@ -46,6 +46,7 @@ namespace Nexus.Core
         public const string GitStatus = "git.status";
         public const string SettingsGet = "settings.get";
         public const string AuthStatus = "auth.status";
+        public const string AuthLogin = "auth.login";
         public const string AuthCallback = "auth.callback";
         public const string CapturePause = "capture.pause";
         public const string CaptureResume = "capture.resume";

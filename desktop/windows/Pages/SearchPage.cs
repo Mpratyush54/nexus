@@ -11,19 +11,19 @@ public sealed class SearchPage : NexusPage
 
     public SearchPage()
     {
-        var root = new Grid { Padding = new Thickness(24), RowSpacing = 12 };
+        var root = new Grid { Padding = new Thickness(20, 16, 20, 16), RowSpacing = 10 };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var scroller = new ScrollViewer { Content = _cards };
         Grid.SetRow(scroller, 1);
-        root.Children.Add(Line("Search", title: true));
+        root.Children.Add(PageHeading("Search"));
         root.Children.Add(scroller);
         Content = root;
     }
 
-    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    protected override void OnEnter(object? parameter)
     {
-        _query = e.Parameter as string ?? "";
+        _query = parameter as string ?? "";
         _ = LoadAsync();
     }
 

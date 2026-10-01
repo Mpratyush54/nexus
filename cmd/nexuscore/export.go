@@ -11,10 +11,16 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"sync"
 	"unsafe"
 
+	"central-memory/internal/cache"
+	"central-memory/internal/cloudclient"
+	"central-memory/internal/config"
 	"central-memory/internal/core"
+	"central-memory/internal/outbox"
+	"central-memory/internal/platform"
 )
 
 type coreState struct {
@@ -33,13 +39,49 @@ func nx_init(configJSON *C.char) (rc C.int) {
 		}
 	}()
 	var cfg struct {
-		Online bool `json:"online"`
+		Online    bool   `json:"online"`
+		ServerURL string `json:"server_url"`
+		Token     string `json:"token"`
+		Root      string `json:"workspace_root"`
 	}
+	cfg.Online = true
 	if configJSON != nil {
 		_ = json.Unmarshal([]byte(C.GoString(configJSON)), &cfg)
 	}
+	file, _ := config.LoadFile()
+	if strings.TrimSpace(cfg.ServerURL) == "" {
+		cfg.ServerURL = file.ServerURL
+	}
+	if strings.TrimSpace(cfg.Token) == "" {
+		cfg.Token = file.Token
+	}
+	if strings.TrimSpace(cfg.Root) == "" {
+		cfg.Root = file.WorkspaceRoot
+	}
+
+	var cloud core.Cloud
+	client := cloudclient.New(cfg.ServerURL, cfg.Token)
+	if client.SignedIn() {
+		cloud = client
+	}
+
+	var c cache.Cache
+	spool, _ := outbox.Open("")
+	root := strings.TrimSpace(cfg.Root)
+	if root == "" {
+		if dir, err := platform.ConfigDir(); err == nil {
+			root = dir
+		}
+	}
+
 	nxState.mu.Lock()
-	nxState.deps.Online = cfg.Online
+	nxState.deps = core.Deps{
+		Cloud:  cloud,
+		Cache:  &c,
+		Outbox: spool,
+		Root:   root,
+		Online: cfg.Online,
+	}
 	nxState.mu.Unlock()
 	return 0
 }
@@ -62,7 +104,29 @@ func nx_call(method, request *C.char) (out *C.char) {
 	nxState.mu.Lock()
 	deps := nxState.deps
 	nxState.mu.Unlock()
+
+	// Hot-reload token if the user signed in after init.
+	if deps.Cloud == nil {
+		if tok := config.ResolveToken(); tok != "" {
+			client := cloudclient.New("", tok)
+			if client.SignedIn() {
+				deps.Cloud = client
+				nxState.mu.Lock()
+				nxState.deps.Cloud = client
+				nxState.mu.Unlock()
+			}
+		}
+	}
+
 	result, err := core.Call(context.Background(), name, args, deps)
+	if name == "auth.login" && err == nil {
+		client := cloudclient.New("", "")
+		if client.SignedIn() {
+			nxState.mu.Lock()
+			nxState.deps.Cloud = client
+			nxState.mu.Unlock()
+		}
+	}
 	return C.CString(string(core.MarshalResult(result, err)))
 }
 

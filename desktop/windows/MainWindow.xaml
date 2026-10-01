@@ -21,7 +21,10 @@
         <NavigationView
             x:Name="Nav"
             Grid.Row="1"
+            PaneTitle="Nexus"
             PaneDisplayMode="Left"
+            CompactModeThresholdWidth="760"
+            ExpandedModeThresholdWidth="1060"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
             ItemInvoked="Nav_ItemInvoked">
@@ -41,7 +44,7 @@
                 <NavigationViewItem Content="Agents" Tag="agents">
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xE99A;"/></NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem Content="Settings" Tag="settings">
+                <NavigationViewItem x:Name="SettingsItem" Content="Settings" Tag="settings">
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xE713;"/></NavigationViewItem.Icon>
                 </NavigationViewItem>
             </NavigationView.MenuItems>
@@ -54,14 +57,24 @@
             Height="0"
             IsHitTestVisible="False"
             ToolTipText="Nexus"
-            NoLeftClickDelay="True">
+            NoLeftClickDelay="True"
+            LeftClickCommand="{x:Bind TrayOpenCommand}"
+            MenuActivation="RightClick">
+            <tb:TaskbarIcon.IconSource>
+                <tb:GeneratedIconSource
+                    Text="N"
+                    Background="#2563EB"
+                    Foreground="White"
+                    FontSize="34"
+                    FontWeight="SemiBold"/>
+            </tb:TaskbarIcon.IconSource>
             <tb:TaskbarIcon.ContextFlyout>
                 <MenuFlyout>
-                    <MenuFlyoutItem Text="Open" Click="Tray_Open"/>
-                    <MenuFlyoutItem x:Name="PauseItem" Text="Pause capture" Click="Tray_Pause"/>
-                    <MenuFlyoutItem Text="Teleport inbox" Click="Tray_Teleport"/>
+                    <MenuFlyoutItem Text="Open" Command="{x:Bind TrayOpenCommand}"/>
+                    <MenuFlyoutItem x:Name="PauseItem" Text="Pause capture" Command="{x:Bind TrayPauseCommand}"/>
+                    <MenuFlyoutItem Text="Teleport inbox" Command="{x:Bind TrayTeleportCommand}"/>
                     <MenuFlyoutSeparator/>
-                    <MenuFlyoutItem Text="Quit" Click="Tray_Quit"/>
+                    <MenuFlyoutItem Text="Quit" Command="{x:Bind TrayQuitCommand}"/>
                 </MenuFlyout>
             </tb:TaskbarIcon.ContextFlyout>
         </tb:TaskbarIcon>

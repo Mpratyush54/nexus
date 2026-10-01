@@ -43,6 +43,7 @@ public enum NxMethods {
     public static let gitStatus = "git.status"
     public static let settingsGet = "settings.get"
     public static let authStatus = "auth.status"
+    public static let authLogin = "auth.login"
     public static let authCallback = "auth.callback"
     public static let capturePause = "capture.pause"
     public static let captureResume = "capture.resume"

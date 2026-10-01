@@ -23,6 +23,7 @@ public sealed class SessionPage : NexusPage
     private Button _send = null!;
     private Button _share = null!;
     private Button _teleport = null!;
+    private readonly List<Control> _legacySnapshotDisabled = new();
 
     public SessionPage()
     {
@@ -38,13 +39,7 @@ public sealed class SessionPage : NexusPage
         _seedAgent.SelectedIndex = 0;
 
         var back = new Button { Content = "Timeline" };
-        back.Click += (_, _) =>
-        {
-            if (Frame.CanGoBack)
-            {
-                Frame.GoBack();
-            }
-        };
+        back.Click += (_, _) => MainWindow.Current?.ShowTimeline();
         var here = new Button { Content = "Here in Nexus" };
         here.Click += async (_, _) => await ContinueAsync("here", "native");
         var open = new Button { Content = "Open in agent" };
@@ -57,6 +52,7 @@ public sealed class SessionPage : NexusPage
         _teleport.Click += (_, _) => MainWindow.Current?.OpenTeleport();
         _send = new Button { Content = "Send" };
         _send.Click += async (_, _) => await SendAsync();
+        _legacySnapshotDisabled.AddRange(new Control[] { here, open, seeded, _send, _share, _teleport, _message, _people, _team, _live, _resume, _seedAgent });
 
         var tabs = new Pivot();
         tabs.Items.Add(Tab("Chat", _chat));
@@ -79,7 +75,9 @@ public sealed class SessionPage : NexusPage
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        var actions = Row(back, here, open, _resume, seeded, _seedAgent, _teleport, _share);
+        var actions = new StackPanel { Spacing = 8 };
+        actions.Children.Add(Row(back, here, open, _teleport, _share));
+        actions.Children.Add(Row(Muted("Resume mode"), _resume, Muted("Target agent"), _seedAgent, seeded));
         Grid.SetRow(actions, 1);
         Grid.SetRow(body, 2);
         var composer = new StackPanel { Spacing = 8 };
@@ -94,9 +92,9 @@ public sealed class SessionPage : NexusPage
         CloudOnly(_send, _share, _teleport, here, open, seeded);
     }
 
-    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    protected override void OnEnter(object? parameter)
     {
-        _id = e.Parameter as string ?? "";
+        _id = parameter as string ?? "";
         _header.Text = _id;
         _ = LoadAsync();
     }
@@ -140,6 +138,15 @@ public sealed class SessionPage : NexusPage
             _context.Children.Add(Line("Repo " + NxJson.Text(body, "repo", "project")));
             _context.Children.Add(Line("Branch " + NxJson.Text(body, "branch")));
             _context.Children.Add(Line("Visibility " + NxJson.Text(body, "visibility")));
+            if (string.Equals(NxJson.Text(body, "lineage_kind"), "legacy_snapshot", StringComparison.OrdinalIgnoreCase))
+            {
+                _header.Text = "Archived snapshot · " + _header.Text;
+                foreach (var control in _legacySnapshotDisabled)
+                {
+                    control.IsEnabled = false;
+                }
+                _summary.Children.Add(Line("This is an archived capture from before the cloud session format. Its metadata remains available; sending, sharing, continuing, and Teleport require an explicit migration and are disabled."));
+            }
         }
         else if (!session.Ok)
         {

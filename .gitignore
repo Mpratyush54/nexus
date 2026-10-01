@@ -11,3 +11,10 @@ hackathon-demo/*
 brag-output/*
 dist-desktop/
 skills-lock.json
+# WinUI local build workarounds / caches
+desktop/windows/.runtime-pri/
+desktop/build-stubs/bin/
+desktop/build-stubs/obj/
+desktop/build-stubs/AppxPackage/
+desktop/windows/bin/
+desktop/windows/obj/

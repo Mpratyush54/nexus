@@ -4,58 +4,75 @@ using Nexus.Core;
 
 namespace Nexus.Pages;
 
+/// <summary>
+/// Shows agents that have actually connected to this desktop. It intentionally
+/// does not present the complete supported-harness catalogue as a task list.
+/// </summary>
 public sealed class AgentsPage : NexusPage
 {
-    private readonly StackPanel _cards = new();
+    private readonly StackPanel _connections = new() { Spacing = 8 };
+    private readonly TextBlock _status = Muted("Checking connected agents…");
 
     public AgentsPage()
     {
-        var root = new Grid { Padding = new Thickness(24), RowSpacing = 12 };
+        var header = new StackPanel { Spacing = 4 };
+        header.Children.Add(PageHeading("Captured agents"));
+        header.Children.Add(Muted("This shows harnesses with activity in your account, not a catalogue of agents Nexus merely supports."));
+
+        var summary = Card(Line("Account capture", title: true), _status);
+
+        var root = new Grid { Padding = new Thickness(28, 24, 28, 24), RowSpacing = 16 };
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        var scroller = new ScrollViewer { Content = _cards };
-        Grid.SetRow(scroller, 1);
-        root.Children.Add(Line("Agents", title: true));
+        Grid.SetRow(summary, 1);
+        var scroller = new ScrollViewer { Content = PageBody(_connections, 920) };
+        Grid.SetRow(scroller, 2);
+        root.Children.Add(header);
+        root.Children.Add(summary);
         root.Children.Add(scroller);
         Content = root;
-        Loaded += async (_, _) => await LoadAsync();
     }
+
+    protected override void OnEnter(object? parameter) => _ = LoadAsync();
 
     private async Task LoadAsync()
     {
         var response = await Call(NxMethods.AgentsList);
-        var reported = response.Ok
-            ? NxJson.Items(response.Result).Select(item => NxJson.Text(item, "name", "agent", "harness")).ToHashSet(StringComparer.OrdinalIgnoreCase)
-            : [];
-        _cards.Children.Clear();
-        if (!response.Ok && response.Error is { Length: > 0 })
+        _connections.Children.Clear();
+        if (!response.Ok)
         {
-            _cards.Children.Add(Line(response.Error));
+            _status.Text = response.Error ?? "Could not reach the local core";
+            _connections.Children.Add(EmptyState(
+                "Agent status is unavailable",
+                "Nexus could not read local capture activity. Your existing cloud data is unchanged."));
+            return;
         }
-        foreach (var harness in AgentCatalog.All)
-        {
-            var installed = reported.Contains(harness.Name);
-            var configure = Action("Configure MCP", () => _ = ConfigureAsync(harness.Name));
-            if (ShellState.Current.Offline)
-            {
-                configure.IsEnabled = false;
-                ToolTipService.SetToolTip(configure, "Available when online");
-            }
-            var badge = harness.IdeHistory
-                ? "Doesn't support resume; restores into chat history"
-                : harness.Resume;
-            _cards.Children.Add(Card(
-                Line(harness.Name, title: true),
-                Line(installed ? "Reported by the core" : "Not reported yet"),
-                Line(badge),
-                Line("Capture follows the project switch. There is no per-agent switch."),
-                configure));
-        }
-    }
 
-    private async Task ConfigureAsync(string agent)
-    {
-        var response = await Call(NxMethods.AgentsConfigureMcp, new { agent });
-        _cards.Children.Insert(0, Line(response.Ok ? agent + " MCP config requested" : response.Error ?? "Configure failed"));
+        var agents = NxJson.Items(response.Result).ToList();
+        _status.Text = agents.Count == 0
+            ? "No captured agent activity yet"
+            : $"{agents.Count} captured agent{(agents.Count == 1 ? "" : "s")}";
+
+        if (agents.Count == 0)
+        {
+            _connections.Children.Add(EmptyState(
+                "No captured agents yet",
+                "Open a supported coding agent in a project. Once Nexus captures a session, it appears here and in Timeline."));
+            return;
+        }
+
+        foreach (var item in agents)
+        {
+            var name = NxJson.Text(item, "name", "agent", "harness", "id");
+            var project = NxJson.Text(item, "project", "project_name", "folder_name");
+            var state = NxJson.Text(item, "status", "capture_status");
+            var resume = NxJson.Text(item, "resume", "resume_mode");
+            var captured = NxJson.Text(item, "captured_count");
+            var detail = string.Join(" · ", new[] { project, state, captured.Length > 0 ? captured + " captures" : "", resume }.Where(x => x.Length > 0));
+            _connections.Children.Add(Card(
+                Line(name.Length > 0 ? name : "Connected agent", title: true),
+                Line(detail.Length > 0 ? detail : "Activity captured by Nexus")));
+        }
     }
 }
