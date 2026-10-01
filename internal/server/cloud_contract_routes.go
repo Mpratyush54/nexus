@@ -621,8 +621,17 @@ func (s *Server) handleTeleportSend(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &body) {
 		return
 	}
-	row, _, ok := s.requireSessionOwner(w, r, body.SessionID)
+	row, cs, ok := s.requireSessionOwner(w, r, body.SessionID)
 	if !ok {
+		return
+	}
+	versions, err := cs.ListVisibleSessionVersions(r.Context(), row.ID, authSubject(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(versions) == 0 {
+		writeError(w, http.StatusConflict, "teleport requires a completed session version")
 		return
 	}
 	if strings.TrimSpace(body.ToUserID) == "" {

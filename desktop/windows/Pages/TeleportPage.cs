@@ -10,6 +10,7 @@ public sealed class TeleportPage : NexusPage
     private readonly StackPanel _detail = new() { Spacing = 8 };
     private readonly TextBlock _preview = new() { TextWrapping = TextWrapping.Wrap };
     private string _selected = "";
+    private string _sessionId = "";
     private Button _revoke = null!;
     private Button _prepare = null!;
     private Button _apply = null!;
@@ -27,11 +28,11 @@ public sealed class TeleportPage : NexusPage
         _apply = new Button { Content = "Continue here" };
         _apply.Click += async (_, _) => await Run(NxMethods.TeleportApply);
         var open = new Button { Content = "Open in agent" };
-        open.Click += async (_, _) =>
+        open.Click += (_, _) =>
         {
-            if (_selected.Length > 0)
+            if (_sessionId.Length > 0)
             {
-                MainWindow.Current?.OpenSession(_selected);
+                MainWindow.Current?.OpenSession(_sessionId);
             }
         };
         CloudOnly(_revoke, _prepare, _apply);
@@ -88,11 +89,12 @@ public sealed class TeleportPage : NexusPage
         {
             var id = NxJson.Text(item, "id", "teleport_id");
             var preview = NxJson.Text(item, "preview", "note", "summary");
-            var open = Action("Preview", () => Select(id, preview));
+            var sessionId = NxJson.Text(item, "session_id", "sessionId");
+            var open = Action("Preview", () => Select(id, sessionId, preview));
             _list.Children.Add(Card(Line(preview.Length > 0 ? preview : id, title: true), Line(id), open));
             if (id.Length > 0 && id == _selected)
             {
-                Select(id, preview);
+                Select(id, sessionId, preview);
             }
         }
         if (items.Count == 0)
@@ -101,15 +103,21 @@ public sealed class TeleportPage : NexusPage
         }
     }
 
-    private void Select(string id, string preview)
+    private void Select(string id, string sessionId, string preview)
     {
         _selected = id;
+        _sessionId = sessionId;
         _preview.Text = NxJson.Scrub(preview);
     }
 
     private async Task PrepareAsync()
     {
-        var response = await Call(NxMethods.TeleportPrepare, new { id = _selected, text = _preview.Text });
+		if (_selected.Length == 0 || _sessionId.Length == 0)
+		{
+			_preview.Text = "Select a teleport first.";
+			return;
+		}
+        var response = await Call(NxMethods.TeleportPrepare, new { session_id = _sessionId, id = _selected, text = _preview.Text });
         _preview.Text = response.Ok
             ? NxJson.Scrub(response.Result?.ToString() ?? "")
             : response.Error ?? "Prepare failed";
@@ -117,8 +125,15 @@ public sealed class TeleportPage : NexusPage
 
     private async Task Run(string method)
     {
+		if (_selected.Length == 0)
+		{
+			_preview.Text = "Select a teleport first.";
+			return;
+		}
         var response = await Call(method, new { id = _selected });
-        _preview.Text = response.Ok ? "Done" : response.Error ?? "Request failed";
+        _preview.Text = response.Ok && method == NxMethods.TeleportApply
+            ? "Accepted. Review the restore checklist, then continue in your chosen agent."
+            : response.Ok ? "Done" : response.Error ?? "Request failed";
         if (response.Ok && method == NxMethods.TeleportRevoke)
         {
             await LoadAsync(NxMethods.TeleportInbox);

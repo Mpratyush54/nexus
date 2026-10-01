@@ -47,6 +47,14 @@ func TestCloudContracts(t *testing.T) {
 	}
 	var created store.AgentSession
 	decodeBody(t, rec, &created)
+	// A session record alone is not safely restorable. Teleport must refuse it
+	// until a complete (or transcript-only) version is committed.
+	rec = doJSON(t, s, http.MethodPost, "/v1/teleports", owner, map[string]any{
+		"session_id": created.ID, "to_user_id": "other",
+	})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("teleport without version: %d %s", rec.Code, rec.Body.String())
+	}
 
 	sum := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	rec = doJSON(t, s, http.MethodPost, "/v1/blobs/presign", owner, map[string]any{
@@ -96,6 +104,16 @@ func TestCloudContracts(t *testing.T) {
 	rec = doJSON(t, s, http.MethodPut, "/v1/agent-sessions/"+created.ID+"/grants/team", owner, map[string]any{"confirm": true})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("team: %d %s", rec.Code, rec.Body.String())
+	}
+	transcript := []byte("redacted transcript")
+	digest := sha256.Sum256(transcript)
+	hash := hex.EncodeToString(digest[:])
+	if err := mem.PutBlob(ctx, proj.ID, hash, "plain", "transcript", transcript); err != nil {
+		t.Fatal(err)
+	}
+	manifest, _ := json.Marshal(map[string]any{"transcript": map[string]string{"blob": "sha256:" + hash}})
+	if _, err := mem.CompleteSessionVersion(ctx, created.ID, 1, manifest); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := mem.SetStorageUsage(ctx, "user:owner", 90, 100); err != nil {

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-  Install Nexus Desktop (tray + daemon + CLI) for Windows.
+  Install native Nexus Desktop (tray + embedded capture + CLI) for Windows.
 
 .DESCRIPTION
   Downloads binaries, installs to %LOCALAPPDATA%\Nexus\bin, creates Startup +
@@ -44,38 +44,24 @@ if ($Version -eq "latest") {
 $desktopBase = "$BucketBase/desktop/$Version"
 $cliBase = "$BucketBase/cli/$Version"
 
-$files = @(
-  @{ Name = "nexus-desktop-windows-amd64.exe"; Dest = "nexus-desktop.exe" },
-  @{ Name = "nexus-daemon-windows-amd64.exe"; Dest = "nexus-daemon.exe" },
-  @{ Name = "nexus-windows-amd64.exe"; Dest = "nexus.exe" }
-)
-
 Write-Host "Installing Nexus Desktop $Version into $binDir"
 
-Get-Process nexus-desktop, nexus-daemon -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process Nexus, nexus-desktop, nexus-daemon -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 1
 
-foreach ($f in $files) {
-  $urls = @(
-    "$desktopBase/$($f.Name)",
-    "$cliBase/$($f.Name)"
-  )
-  $dest = Join-Path $binDir $f.Dest
-  $ok = $false
-  foreach ($url in $urls) {
-    try {
-      Write-Host "  downloading $($f.Name)…"
-      Invoke-WebRequest -Uri $url -OutFile $dest -UseBasicParsing -TimeoutSec 120
-      $ok = $true
-      break
-    } catch {
-      # try next mirror
-    }
-  }
-  if (-not $ok) {
-    throw "Could not download $($f.Name). Tried:`n  $($urls -join "`n  ")"
-  }
+function Download-Required([string]$Url, [string]$Dest) {
+  Write-Host "  downloading $(Split-Path $Url -Leaf)…"
+  Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing -TimeoutSec 120
 }
+
+$zip = Join-Path $env:TEMP "nexus-desktop-$Version.zip"
+Download-Required "$desktopBase/nexus-desktop-windows-amd64.zip" $zip
+Expand-Archive -Path $zip -DestinationPath $binDir -Force
+Remove-Item $zip -Force -ErrorAction SilentlyContinue
+Download-Required "$cliBase/nexus-windows-amd64.exe" (Join-Path $binDir "nexus.exe")
+
+# Retire only the obsolete executables; project data and the new app remain.
+Remove-Item (Join-Path $binDir "nexus-desktop.exe"), (Join-Path $binDir "nexus-daemon.exe") -Force -ErrorAction SilentlyContinue
 
 $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($userPath -notlike "*$binDir*") {
@@ -84,41 +70,41 @@ if ($userPath -notlike "*$binDir*") {
   Write-Host "Added $binDir to your user PATH."
 }
 
-$desktopExe = Join-Path $binDir "nexus-desktop.exe"
+$desktopExe = Join-Path $binDir "Nexus.exe"
 $wsh = New-Object -ComObject WScript.Shell
 
 # Autostart (logon)
 $startup = [Environment]::GetFolderPath("Startup")
-$startupLnk = Join-Path $startup "Nexus Desktop.lnk"
+$startupLnk = Join-Path $startup "Nexus.lnk"
 $sc = $wsh.CreateShortcut($startupLnk)
 $sc.TargetPath = $desktopExe
 $sc.WorkingDirectory = $binDir
-$sc.Description = "Nexus Desktop (system tray)"
+$sc.Description = "Nexus (system tray)"
 $sc.Save()
 
 # Start Menu → Apps (so you can launch anytime)
 $programs = Join-Path ([Environment]::GetFolderPath("StartMenu")) "Programs\Nexus"
 New-Item -ItemType Directory -Force -Path $programs | Out-Null
-$menuLnk = Join-Path $programs "Nexus Desktop.lnk"
+$menuLnk = Join-Path $programs "Nexus.lnk"
 $sc2 = $wsh.CreateShortcut($menuLnk)
 $sc2.TargetPath = $desktopExe
 $sc2.WorkingDirectory = $binDir
-$sc2.Description = "Nexus Desktop — memory harvest tray"
+$sc2.Description = "Nexus — memory and sessions"
 $sc2.Save()
 
 # Desktop shortcut (optional convenience)
-$deskLnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "Nexus Desktop.lnk"
+$deskLnk = Join-Path ([Environment]::GetFolderPath("Desktop")) "Nexus.lnk"
 $sc3 = $wsh.CreateShortcut($deskLnk)
 $sc3.TargetPath = $desktopExe
 $sc3.WorkingDirectory = $binDir
-$sc3.Description = "Nexus Desktop"
+$sc3.Description = "Nexus"
 $sc3.Save()
 
 Write-Host ""
 Write-Host "Installed."
-Write-Host "  Start Menu: Programs → Nexus → Nexus Desktop"
+Write-Host "  Start Menu: Programs → Nexus → Nexus"
 Write-Host "  Startup:    launches at logon (system tray)"
-Write-Host "  Quit:       right-click tray icon → Quit Nexus Desktop"
+Write-Host "  Quit:       right-click the Nexus tray icon → Quit"
 Write-Host ""
 # Detached GUI process — closing this PowerShell/terminal must not kill the tray.
 Start-Process -FilePath $desktopExe -WorkingDirectory $binDir -WindowStyle Hidden

@@ -14,7 +14,7 @@ public sealed partial class MainWindow : Window
     private bool _quitting;
     private bool _navLock;
 
-    public static MainWindow? Current { get; private set; }
+    public new static MainWindow? Current { get; private set; }
 
     public ShellState State => ShellState.Current;
 
@@ -115,16 +115,13 @@ public sealed partial class MainWindow : Window
         var method = State.CapturePaused ? NxMethods.CaptureResume : NxMethods.CapturePause;
         var response = await App.Core.CallAsync(method);
         await UiThread.Resume(DispatcherQueue);
-        if (response.Error is { } error && error.Contains("handled by the app shell", StringComparison.Ordinal))
-        {
-            State.CapturePaused = !State.CapturePaused;
-            PauseItem.Text = State.CapturePaused ? "Resume capture" : "Pause capture";
-            return;
-        }
         if (!response.Ok)
         {
             PauseItem.Text = response.Error ?? "Pause capture";
+            return;
         }
+        State.CapturePaused = !State.CapturePaused;
+        PauseItem.Text = State.CapturePaused ? "Resume capture" : "Pause capture";
     }
 
     private void Tray_Teleport(object sender, RoutedEventArgs e) => OpenTeleport();

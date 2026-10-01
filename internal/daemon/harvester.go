@@ -116,6 +116,8 @@ type Harvester struct {
 	now func() time.Time
 
 	mu         sync.Mutex
+	pauseMu    sync.RWMutex
+	paused     bool
 	offsets    map[string]int64     // jsonl/json path -> last-read byte offset
 	sqlite     map[string]fileMeta  // sqlite path -> last observed state
 	lastActive map[string]time.Time // path -> last observed content time
@@ -239,6 +241,27 @@ func (h *Harvester) SetEmitter(emitter EventEmitter) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.emitter = emitter
+}
+
+// SetPaused suspends new filesystem scans without tearing down the
+// harvester's durable cursor state.  A scan already in progress is allowed
+// to finish; callers should also gate downstream processing.
+func (h *Harvester) SetPaused(paused bool) {
+	if h == nil {
+		return
+	}
+	h.pauseMu.Lock()
+	h.paused = paused
+	h.pauseMu.Unlock()
+}
+
+func (h *Harvester) IsPaused() bool {
+	if h == nil {
+		return true
+	}
+	h.pauseMu.RLock()
+	defer h.pauseMu.RUnlock()
+	return h.paused
 }
 
 func (h *Harvester) emit(ev Event) {
@@ -1268,6 +1291,12 @@ func turnPayload(action, agent, path string, t Turn) map[string]any {
 		"speaker":    t.Speaker,
 		"content":    redact(t.Content),
 	}
+	// Preserve structured calls separately from the redacted preview.  They
+	// drive provenance and the cloud Timeline's tool indicators; embedding
+	// them into conversation text would make both less reliable.
+	if len(t.ToolCalls) > 0 {
+		p["tool_calls"] = t.ToolCalls
+	}
 	if !t.Timestamp.IsZero() {
 		p["timestamp"] = t.Timestamp.UTC().Format(time.RFC3339Nano)
 	}
@@ -1775,13 +1804,18 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 func (h *Harvester) Start(ctx context.Context) {
 	t := time.NewTicker(h.PollInterval)
 	defer t.Stop()
-	_ = h.ScanAndTail()
-	_ = h.CheckIdle()
+	if !h.IsPaused() {
+		_ = h.ScanAndTail()
+		_ = h.CheckIdle()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if h.IsPaused() {
+				continue
+			}
 			_ = h.ScanAndTail()
 			_ = h.CheckIdle()
 		}
