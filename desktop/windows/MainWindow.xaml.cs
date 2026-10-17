@@ -178,7 +178,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async Task RefreshBannerAsync()
+    public async Task RefreshBannerAsync()
     {
         var net = await App.Core.CallAsync(NxMethods.NetStatus);
         var uploads = await App.Core.CallAsync(NxMethods.UploadsStatus);

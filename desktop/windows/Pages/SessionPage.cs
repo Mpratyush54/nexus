@@ -9,6 +9,8 @@ public sealed class SessionPage : NexusPage
     private string _id = "";
     private readonly TextBlock _header = new() { TextWrapping = TextWrapping.Wrap, FontSize = 16 };
     private readonly StackPanel _chat = new();
+    private readonly Button _chatMore = new() { Content = "Load more turns" };
+    private string _nextTurnCursor = "";
     private readonly StackPanel _files = new();
     private readonly StackPanel _commands = new();
     private readonly StackPanel _memory = new();
@@ -26,6 +28,7 @@ public sealed class SessionPage : NexusPage
 
     public SessionPage()
     {
+        _chatMore.Click += async (_, _) => await LoadMoreTurnsAsync();
         foreach (var mode in new[] { "native", "fork", "seeded" })
         {
             _resume.Items.Add(mode);
@@ -118,13 +121,15 @@ public sealed class SessionPage : NexusPage
             return;
         }
         var session = await Call(NxMethods.SessionsGet, new { session_id = _id, id = _id });
-        var turns = await Call(NxMethods.SessionsTurns, new { session_id = _id, id = _id });
+        var turns = await Call(NxMethods.SessionsTurns, new { session_id = _id, id = _id, limit = 100 });
         var files = await Call(NxMethods.SessionsFiles, new { session_id = _id, id = _id });
         var ops = await Call(NxMethods.SessionsOperations, new { session_id = _id, id = _id });
         var memories = await Call(NxMethods.SessionsMemories, new { session_id = _id, id = _id });
         var summary = await Call(NxMethods.SessionsSummary, new { session_id = _id, id = _id });
         var versions = await Call(NxMethods.SessionsVersions, new { session_id = _id, id = _id });
-        FillLines(_chat, turns, "role", "text", "content", "message");
+        FillLines(_chat, turns, "text_preview", "text", "content", "message");
+        _nextTurnCursor = turns.Result is { } turnResult ? NxJson.Text(turnResult, "next_cursor") : "";
+        if (_nextTurnCursor.Length > 0) _chat.Children.Add(_chatMore);
         FillLines(_files, files, "path", "name");
         FillLines(_commands, ops, "command", "cmd", "text");
         FillLines(_memory, memories, "text", "title", "content");
@@ -156,9 +161,30 @@ public sealed class SessionPage : NexusPage
         _context.Children.Add(Line("Files " + NxJson.Items(files.Result).Count()));
     }
 
-    private static void FillLines(StackPanel panel, NxResponse response, params string[] keys)
+    private async Task LoadMoreTurnsAsync()
     {
-        panel.Children.Clear();
+        if (_nextTurnCursor.Length == 0) return;
+        _chatMore.IsEnabled = false;
+        var response = await Call(NxMethods.SessionsTurns, new { session_id = _id, id = _id, limit = 100, cursor = _nextTurnCursor });
+        _chat.Children.Remove(_chatMore);
+        if (!response.Ok)
+        {
+            _chat.Children.Add(Line(response.Error ?? "Could not load more turns."));
+        }
+        else
+        {
+            FillLines(_chat, response, true, "text_preview", "text", "content", "message");
+            _nextTurnCursor = response.Result is { } result ? NxJson.Text(result, "next_cursor") : "";
+        }
+        _chatMore.IsEnabled = true;
+        if (_nextTurnCursor.Length > 0) _chat.Children.Add(_chatMore);
+    }
+
+    private static void FillLines(StackPanel panel, NxResponse response, params string[] keys) => FillLines(panel, response, false, keys);
+
+    private static void FillLines(StackPanel panel, NxResponse response, bool append, params string[] keys)
+    {
+        if (!append) panel.Children.Clear();
         if (!response.Ok)
         {
             panel.Children.Add(new TextBlock { Text = response.Error ?? "", TextWrapping = TextWrapping.Wrap });
@@ -176,6 +202,10 @@ public sealed class SessionPage : NexusPage
             if (text.Length == 0)
             {
                 text = item.ToString();
+            }
+            if (keys.Contains("text_preview") && NxJson.Text(item, "role") is { Length: > 0 } role)
+            {
+                text = role + " · " + text;
             }
             if (keys.Contains("text") || keys.Contains("content"))
             {

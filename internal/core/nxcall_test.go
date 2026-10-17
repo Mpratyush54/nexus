@@ -112,6 +112,12 @@ func TestCloudMethodsUseContractRoutes(t *testing.T) {
 	if c.method != "GET" || c.path != "/v1/agent-sessions/s%2F1/turns" {
 		t.Fatalf("turns route = %s %s", c.method, c.path)
 	}
+	if _, err := Call(context.Background(), "sessions.turns", json.RawMessage(`{"session_id":"s/1","limit":100,"cursor":"170000000000000001"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || !strings.HasPrefix(c.path, "/v1/agent-sessions/s%2F1/fetch?") || !strings.Contains(c.path, "limit=100") || !strings.Contains(c.path, "cursor=170000000000000001") {
+		t.Fatalf("paged turns route = %s %s", c.method, c.path)
+	}
 
 	c.result = []byte(`{"items":[{"harness":"codex","project_id":"p1"}]}`)
 	if _, err := Call(context.Background(), "agents.list", nil, deps); err != nil {

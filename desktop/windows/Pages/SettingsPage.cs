@@ -101,7 +101,11 @@ public sealed class SettingsPage : NexusPage
         var connected = await Task.Run(() => App.Core.Init(config));
         await UiThread.Resume(DispatcherQueue);
         _captureStatus.Text = connected ? "Workspace saved. Checking capture…" : "Could not initialize Nexus core.";
-        if (connected) await RefreshStatusAsync();
+        if (connected)
+        {
+            await RefreshStatusAsync();
+            if (MainWindow.Current is { } window) await window.RefreshBannerAsync();
+        }
     }
 
     private async Task Run(string method)

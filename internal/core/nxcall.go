@@ -476,7 +476,13 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 		if id == "" {
 			return "", "", nil, errors.New("session id is required")
 		}
-		return http.MethodGet, "/v1/agent-sessions/" + url.PathEscape(id) + "/turns", nil, nil
+		path := "/v1/agent-sessions/" + url.PathEscape(id)
+		if !hasJSONKey(args, "limit") && !hasJSONKey(args, "cursor") {
+			return http.MethodGet, path + "/turns", nil, nil
+		}
+		return http.MethodGet, path + "/fetch" + queryArgs(args, map[string]string{
+			"limit": "limit", "cursor": "cursor",
+		}), nil, nil
 	case "sessions.summary":
 		if id == "" {
 			return "", "", nil, errors.New("session id is required")
