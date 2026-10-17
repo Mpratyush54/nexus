@@ -77,12 +77,22 @@ type MaterializerRunner interface {
 // ChanEmitter: non-blocking channel sink so transcript tailing never stalls
 // on a slow processor. Drops + counts under backpressure.
 type chanEventEmitter struct {
-	ch chan Event
+	ch   chan Event
+	done <-chan struct{}
 }
 
 // Emit enqueues ev without blocking; drops when full. Nil-safe.
 func (e *chanEventEmitter) Emit(ev Event) {
 	if e == nil || e.ch == nil {
+		return
+	}
+	if e.done != nil {
+		// Historical backfills can contain thousands of turns. Apply bounded
+		// backpressure instead of silently dropping everything after 256.
+		select {
+		case e.ch <- ev:
+		case <-e.done:
+		}
 		return
 	}
 	select {
@@ -287,7 +297,7 @@ func (r *Runtime) Start(ctx context.Context) {
 		r.harvestCh = make(chan Event, DefaultToolEventBuffer)
 	}
 	if r.Harvester != nil {
-		r.Harvester.SetEmitter(&chanEventEmitter{ch: r.harvestCh})
+		r.Harvester.SetEmitter(&chanEventEmitter{ch: r.harvestCh, done: ctx.Done()})
 		r.Harvester.SetPaused(r.Paused())
 	}
 
@@ -595,10 +605,14 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 		millis := at.UTC().UnixMilli()
 		ordinal := byMillisecond[millis]
 		byMillisecond[millis] = ordinal + 1
+		idx := millis*100000 + ordinal
+		if position, ok := ev.Payload["source_position"].(int64); ok && position > 0 {
+			idx = position
+		}
 		role, _ := ev.Payload["speaker"].(string)
 		content, _ := ev.Payload["content"].(string)
 		turns = append(turns, MirroredTurn{
-			Idx:         millis*100000 + ordinal,
+			Idx:         idx,
 			Role:        role,
 			TextPreview: boundedTurnPreview(content),
 			ToolCalls:   mirroredToolCalls(ev.Payload["tool_calls"]),

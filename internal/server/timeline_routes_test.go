@@ -4,7 +4,9 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -197,5 +199,65 @@ func TestTimelineShowsOwnerLegacySnapshotsWhenNoAgentSessionsExist(t *testing.T)
 	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/legacy-session", ownerTok, nil)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "legacy_snapshot") {
 		t.Fatalf("legacy read model: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestTimelinePagesAcrossNewAndLegacySessions(t *testing.T) {
+	s := newTestServer()
+	mem := s.Store.(*store.MemStore)
+	ctx := t.Context()
+	project, err := mem.ResolveProject(ctx, "", "", "mixed-timeline")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.ClaimProject(ctx, project.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := mem.UpsertSessionSnapshot(ctx, &store.SessionSnapshot{
+			SessionID: fmt.Sprintf("old-%d", i), ProjectID: project.ID,
+			OwnerUserID: "owner", Harness: "codex", ConversationID: fmt.Sprintf("codex-%d", i),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := mem.UpsertAgentSession(ctx, &store.AgentSession{
+			ProjectID: project.ID, OwnerUserID: "owner", Harness: "codex",
+			NativeID: fmt.Sprintf("new-%d", i), OriginMachineID: "device-a",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	token := loginAs(t, s, "owner")
+	cursor := ""
+	seen := map[string]bool{}
+	for page := 0; page < 4; page++ {
+		path := "/v1/timeline?limit=2&project_id=" + url.QueryEscape(project.ID)
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		rec := doJSON(t, s, http.MethodGet, path, token, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("page %d: %d %s", page, rec.Code, rec.Body.String())
+		}
+		var body struct {
+			Items []store.TimelineItem `json:"items"`
+			Next  string               `json:"next_cursor"`
+		}
+		decodeBody(t, rec, &body)
+		for _, item := range body.Items {
+			if seen[item.SessionID] {
+				t.Fatalf("duplicate session %s", item.SessionID)
+			}
+			seen[item.SessionID] = true
+		}
+		cursor = body.Next
+		if cursor == "" {
+			break
+		}
+	}
+	if len(seen) != 5 {
+		t.Fatalf("paged timeline has %d sessions, want 5: %+v", len(seen), seen)
 	}
 }

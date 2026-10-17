@@ -35,6 +35,8 @@ type coreState struct {
 	capturePaused     bool
 	captureStarting   bool
 	captureGeneration uint64
+	captureError      string
+	captureProjectID  string
 }
 
 var nxState = coreState{}
@@ -80,6 +82,11 @@ func nx_init(configJSON *C.char) (rc C.int) {
 		serverToken = config.ResolveToken()
 	}
 	root := embeddedWorkspaceRoot(cfg.WorkspaceRoot)
+	if strings.TrimSpace(cfg.WorkspaceRoot) != "" && root != "" {
+		if err := config.SaveFile(config.File{WorkspaceRoot: root}); err != nil {
+			log.Printf("nexuscore: save capture workspace: %v", err)
+		}
+	}
 	deps := core.Deps{Root: root, Online: cfg.Online && serverToken != "", Capture: embeddedCaptureController{}}
 	if deps.Online {
 		deps.Cloud = &core.HTTPCloud{BaseURL: serverURL, Token: serverToken}
@@ -87,6 +94,8 @@ func nx_init(configJSON *C.char) (rc C.int) {
 	nxState.mu.Lock()
 	nxState.deps = deps
 	nxState.capturePaused = false
+	nxState.captureError = ""
+	nxState.captureProjectID = ""
 	nxState.captureGeneration++
 	if root == "" {
 		nxState.captureConfig = nil
@@ -200,21 +209,36 @@ func startEmbeddedCapture(cfg embeddedCaptureConfig) {
 	}
 	nxState.captureCancel, nxState.captureDone, nxState.captureRuntime = cancel, done, runtime
 	nxState.captureStarting = false
+	if serverToken == "" {
+		nxState.captureError = "Sign in to upload captured sessions to Timeline"
+	}
 	nxState.mu.Unlock()
 	go func() {
 		defer close(done)
 		if d.ServerURL != "" && d.ServerToken != "" {
 			if err := d.Register(ctx, d.ServerURL); err != nil {
 				log.Printf("nexuscore: embedded capture registration: %v", err)
+				setCaptureConnection(cfg.generation, "Registration failed: "+err.Error(), "")
 			} else if id, err := d.ResolveProjectIDForRoot(ctx); err != nil {
 				log.Printf("nexuscore: embedded capture project resolution: %v", err)
+				setCaptureConnection(cfg.generation, "Project resolution failed: "+err.Error(), "")
 			} else {
 				runtime.SetServerProjectID(id)
+				setCaptureConnection(cfg.generation, "", id)
 				go d.StartHeartbeat(ctx, d.ServerURL, daemon.HeartbeatInterval)
 			}
 		}
 		runtime.Start(ctx)
 	}()
+}
+
+func setCaptureConnection(generation uint64, problem, projectID string) {
+	nxState.mu.Lock()
+	defer nxState.mu.Unlock()
+	if nxState.captureConfig != nil && nxState.captureConfig.generation == generation {
+		nxState.captureError = problem
+		nxState.captureProjectID = projectID
+	}
 }
 
 func clearCaptureStarting() {
@@ -257,13 +281,25 @@ func (embeddedCaptureController) Resume() error {
 
 func (embeddedCaptureController) Status() any {
 	nxState.mu.Lock()
-	defer nxState.mu.Unlock()
 	configured := nxState.captureConfig != nil
-	return map[string]any{
+	runtime := nxState.captureRuntime
+	status := map[string]any{
 		"configured": configured,
 		"paused":     nxState.capturePaused,
-		"running":    configured && nxState.captureRuntime != nil && nxState.captureCancel != nil,
+		"running":    configured && runtime != nil && nxState.captureCancel != nil,
+		"error":      nxState.captureError,
+		"project_id": nxState.captureProjectID,
 	}
+	nxState.mu.Unlock()
+	if runtime != nil && runtime.Harvester != nil {
+		stats := runtime.Harvester.Stats()
+		status["last_scan_at"] = stats.LastScanAt
+		status["matched_files"] = stats.LastScanFiles
+		status["new_turns_last_scan"] = stats.LastScanTurns
+		status["last_scan_error"] = stats.LastScanError
+		status["agent_files"] = stats.AgentFiles
+	}
+	return status
 }
 
 func stopEmbeddedCapture() {

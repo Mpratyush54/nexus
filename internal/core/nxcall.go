@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"central-memory/internal/agents/mcpconfig"
@@ -280,7 +281,11 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 	case "sessions.restore_ide_history":
 		return restoreIDEHistory(args)
 	case "status.get", "diagnostics.get":
-		return map[string]any{"ok": true, "online": deps.Online, "pending_uploads": pendingCount(deps)}, nil
+		status := map[string]any{"ok": true, "online": deps.Online, "pending_uploads": pendingCount(deps), "workspace_root": deps.Root}
+		if deps.Capture != nil {
+			status["capture"] = deps.Capture.Status()
+		}
+		return status, nil
 	case "auth.callback":
 		return map[string]any{"redirect": "nexus://auth/callback"}, nil
 	case "capture.pause":
@@ -405,6 +410,20 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 			"harness": "harness", "limit": "limit", "cursor": "cursor",
 		}), nil, nil
 	case "memory.search":
+		if hasJSONKey(args, "browse") {
+			projectID := argString(args, "project_id", "project")
+			if projectID == "" {
+				return "", "", nil, errors.New("select a project before browsing memory")
+			}
+			query := url.Values{}
+			query.Set("project_id", projectID)
+			query.Set("limit", argDefault(args, "limit", "50"))
+			query.Set("offset", argDefault(args, "offset", "0"))
+			if term := argString(args, "query", "q"); term != "" {
+				query.Set("q", term)
+			}
+			return http.MethodGet, "/memory/search?" + query.Encode(), nil, nil
+		}
 		// The remote agent search endpoint intentionally requires a non-empty
 		// query.  A Memory page opening without one should show the selected
 		// project's retained knowledge through the documented, versioned list
@@ -500,6 +519,19 @@ func argString(args json.RawMessage, keys ...string) string {
 	return ""
 }
 
+func argDefault(args json.RawMessage, key, fallback string) string {
+	if value := argString(args, key); value != "" {
+		return value
+	}
+	var values map[string]any
+	if json.Unmarshal(args, &values) == nil {
+		if number, ok := values[key].(float64); ok && number >= 0 {
+			return strconv.FormatInt(int64(number), 10)
+		}
+	}
+	return fallback
+}
+
 func hasJSONKey(args json.RawMessage, key string) bool {
 	var values map[string]json.RawMessage
 	return len(args) > 0 && json.Unmarshal(args, &values) == nil && values[key] != nil
@@ -563,37 +595,49 @@ func capturedAgents(ctx context.Context, deps Deps) (any, error) {
 	if deps.Cloud == nil {
 		return map[string]any{"items": []any{}}, nil
 	}
-	raw, err := deps.Cloud.Do(ctx, http.MethodGet, "/v1/timeline?limit=100", nil)
-	if err != nil {
-		return nil, err
-	}
-	var payload struct {
-		Items []struct {
-			Harness      string `json:"harness"`
-			ProjectID    string `json:"project_id"`
-			VersionState string `json:"version_state"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		return nil, err
-	}
 	byHarness := map[string]*capturedAgentSummary{}
-	for _, item := range payload.Items {
-		name := strings.TrimSpace(item.Harness)
-		if name == "" {
-			name = "Unknown harness"
+	cursor := ""
+	for page := 0; page < 100; page++ {
+		path := "/v1/timeline?limit=100"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
 		}
-		key := strings.ToLower(name)
-		entry := byHarness[key]
-		if entry == nil {
-			status := "Captured sessions"
-			if item.VersionState == "legacy_snapshot" {
-				status = "Archived snapshots"
+		raw, err := deps.Cloud.Do(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		var payload struct {
+			Items []struct {
+				Harness      string `json:"harness"`
+				ProjectID    string `json:"project_id"`
+				VersionState string `json:"version_state"`
+			} `json:"items"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			return nil, err
+		}
+		for _, item := range payload.Items {
+			name := strings.TrimSpace(item.Harness)
+			if name == "" {
+				name = "Unknown harness"
 			}
-			entry = &capturedAgentSummary{Name: name, Harness: name, ProjectID: item.ProjectID, Status: status, ResumeMode: "Open in Timeline"}
-			byHarness[key] = entry
+			key := strings.ToLower(name)
+			entry := byHarness[key]
+			if entry == nil {
+				status := "Captured sessions"
+				if item.VersionState == "legacy_snapshot" {
+					status = "Archived snapshots"
+				}
+				entry = &capturedAgentSummary{Name: name, Harness: name, ProjectID: item.ProjectID, Status: status, ResumeMode: "Open in Timeline"}
+				byHarness[key] = entry
+			}
+			entry.CapturedCount++
 		}
-		entry.CapturedCount++
+		if payload.NextCursor == "" || payload.NextCursor == cursor {
+			break
+		}
+		cursor = payload.NextCursor
 	}
 	items := make([]capturedAgentSummary, 0, len(byHarness))
 	for _, item := range byHarness {

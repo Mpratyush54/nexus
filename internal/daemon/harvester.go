@@ -93,10 +93,11 @@ type TranscriptSource struct {
 
 // Turn is a single parsed dialogue turn.
 type Turn struct {
-	Speaker   string           // "user" | "assistant" (normalized where possible)
-	Content   string           // text content (tool_use blocks not inlined into text)
-	Timestamp time.Time        // zero if the transcript line carried none
-	ToolCalls []map[string]any // structured tool_use / function_call blocks (JSON-compatible)
+	Speaker        string           // "user" | "assistant" (normalized where possible)
+	Content        string           // text content (tool_use blocks not inlined into text)
+	Timestamp      time.Time        // zero if the transcript line carried none
+	ToolCalls      []map[string]any // structured tool_use / function_call blocks (JSON-compatible)
+	SourcePosition int64            // stable byte position within an append-only transcript
 }
 
 // Harvester tails agent transcript files for one workspace.
@@ -1300,6 +1301,9 @@ func turnPayload(action, agent, path string, t Turn) map[string]any {
 	if !t.Timestamp.IsZero() {
 		p["timestamp"] = t.Timestamp.UTC().Format(time.RFC3339Nano)
 	}
+	if t.SourcePosition > 0 {
+		p["source_position"] = t.SourcePosition
+	}
 	if len(t.ToolCalls) > 0 {
 		// Emit as []any so JSON encoders and ParseToolCalls([]any) agree.
 		flat := make([]any, len(t.ToolCalls))
@@ -1368,8 +1372,11 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	var turns []Turn
 	sc := bufio.NewScanner(strings.NewReader(string(consumable)))
 	sc.Buffer(make([]byte, 64<<10), maxJSONLLineBytes)
+	position := off
 	for sc.Scan() {
+		position += int64(len(sc.Bytes())) + 1
 		if t, ok := parseTurnLine(sc.Bytes()); ok {
+			t.SourcePosition = position
 			turns = append(turns, t)
 		}
 	}

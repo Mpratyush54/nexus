@@ -56,6 +56,10 @@ func TestTailOffset(t *testing.T) {
 	if len(*got) != 2 || (*got)[0].Type != EventConversationTurn {
 		t.Fatalf("expected 2 CONVERSATION_TURN events, got %+v", *got)
 	}
+	firstPosition, ok := (*got)[0].Payload["source_position"].(int64)
+	if !ok || firstPosition <= 0 || turns[1].SourcePosition <= firstPosition {
+		t.Fatalf("turns need stable, ascending source positions: %+v", turns)
+	}
 
 	// Re-tailing with no new content yields nothing (byte offset held).
 	turns, err = h.TailFile(p)

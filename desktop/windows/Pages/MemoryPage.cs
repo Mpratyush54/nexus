@@ -11,11 +11,17 @@ public sealed class MemoryPage : NexusPage
     private readonly TextBox _query = new() { PlaceholderText = "Search this project's knowledge", Width = 320 };
     private readonly ComboBox _scope = new() { Width = 150 };
     private readonly StackPanel _cards = new() { Spacing = 10, HorizontalAlignment = HorizontalAlignment.Stretch };
+    private readonly Button _more = new() { Content = "Load more memories", Visibility = Visibility.Collapsed };
+    private readonly TextBlock _count = new() { Opacity = 0.7 };
     private bool _projectsLoaded;
+    private bool _loading;
+    private bool _hasMore;
+    private int _offset;
+    private int _shown;
 
     public MemoryPage()
     {
-        foreach (var scope in new[] { "project", "session", "personal", "organization" })
+        foreach (var scope in new[] { "all", "project", "session", "personal", "organization" })
         {
             _scope.Items.Add(scope);
         }
@@ -24,12 +30,21 @@ public sealed class MemoryPage : NexusPage
         {
             if (_projectsLoaded)
             {
-                await LoadAsync();
+                await LoadAsync(false);
             }
+        };
+        _scope.SelectionChanged += async (_, _) =>
+        {
+            if (_projectsLoaded) await LoadAsync(false);
         };
 
         var search = new Button { Content = "Search", MinWidth = 88 };
-        search.Click += async (_, _) => await LoadAsync();
+        search.Click += async (_, _) => await LoadAsync(false);
+        _query.KeyDown += async (_, e) =>
+        {
+            if (e.Key == Windows.System.VirtualKey.Enter) await LoadAsync(false);
+        };
+        _more.Click += async (_, _) => await LoadAsync(true);
         var refresh = new Button { Content = "Refresh projects" };
         refresh.Click += async (_, _) => await LoadProjectsAsync();
 
@@ -42,7 +57,11 @@ public sealed class MemoryPage : NexusPage
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var filters = Row(_project, _query, _scope, search, refresh);
-        var scroller = new ScrollViewer { Content = _cards, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
+        var results = new StackPanel { Spacing = 14 };
+        results.Children.Add(_count);
+        results.Children.Add(_cards);
+        results.Children.Add(_more);
+        var scroller = new ScrollViewer { Content = results, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
         Grid.SetRow(filters, 1);
         Grid.SetRow(scroller, 2);
         root.Children.Add(header);
@@ -90,28 +109,47 @@ public sealed class MemoryPage : NexusPage
             return;
         }
         _project.SelectedIndex = 0;
-        await LoadAsync();
+        await LoadAsync(false);
     }
 
     private string SelectedProjectId() => (_project.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
 
-    private async Task LoadAsync()
+    private async Task LoadAsync(bool append)
     {
+        if (_loading || (append && !_hasMore)) return;
         var projectId = SelectedProjectId();
         if (projectId.Length == 0)
         {
             return;
         }
-        var scope = _scope.SelectedItem as string ?? "project";
-        var response = await Call(NxMethods.MemorySearch, new { q = _query.Text, scope, project_id = projectId, limit = 50 });
-        _cards.Children.Clear();
+        _loading = true;
+        _more.IsEnabled = false;
+        if (!append)
+        {
+            _offset = 0;
+            _shown = 0;
+            _cards.Children.Clear();
+            _count.Text = "Loading memories…";
+        }
+        var scope = _scope.SelectedItem as string ?? "all";
+        var response = await Call(NxMethods.MemorySearch, new { browse = true, q = _query.Text, project_id = projectId, limit = 50, offset = _offset });
+        _loading = false;
         if (!response.Ok)
         {
-            ShowError(_cards, response);
+            if (append) _cards.Children.Add(Line(response.Error ?? "Could not load more memories."));
+            else ShowError(_cards, response);
+            _more.IsEnabled = true;
             return;
         }
-        foreach (var item in NxJson.Items(response.Result))
+        var items = NxJson.Items(response.Result).ToList();
+        _offset += items.Count;
+        _hasMore = response.Result is { } result && NxJson.Text(result, "has_more") == "true";
+        _more.Visibility = _hasMore ? Visibility.Visible : Visibility.Collapsed;
+        _more.IsEnabled = true;
+        foreach (var item in items)
         {
+            var level = NxJson.Text(item, "level");
+            if (scope != "all" && !string.Equals(scope, level, StringComparison.OrdinalIgnoreCase)) continue;
             var id = NxJson.Text(item, "id");
             var text = NxJson.Text(item, "text", "content", "title", "summary", "key");
             var status = NxJson.PublicStatus(NxJson.Text(item, "status"));
@@ -121,13 +159,15 @@ public sealed class MemoryPage : NexusPage
                 Line(text.Length > 0 ? text : id, title: true),
                 Line(status.Length > 0 ? status : "Retained knowledge"),
                 Row(pin, forget)));
+            _shown++;
         }
-        if (_cards.Children.Count == 0)
+        _count.Text = $"{_shown} memories shown" + (_hasMore ? " · more available" : "");
+        if (_cards.Children.Count == 0 && !append)
         {
             var message = string.IsNullOrWhiteSpace(_query.Text)
-                ? "No retained knowledge is available for this project yet."
+                ? "No memories at this level on this page."
                 : "No matching memories were found.";
-            _cards.Children.Add(Card(Line(message, title: true), Line("Try a decision, library, feature, or phrase discussed with an agent.")));
+            _cards.Children.Add(Card(Line(message, title: true), Line(_hasMore ? "Load more to continue browsing this project." : "Try another memory level, project, or search term.")));
         }
     }
 
@@ -139,7 +179,7 @@ public sealed class MemoryPage : NexusPage
             _cards.Children.Insert(0, Line(response.Error ?? "Memory update failed"));
             return;
         }
-        await LoadAsync();
+        await LoadAsync(false);
     }
 
     private Button CloudAction(string label, Action click)

@@ -99,6 +99,12 @@ func TestCloudMethodsUseContractRoutes(t *testing.T) {
 	if c.method != "GET" || c.path != "/v1/projects/p%2F1/knowledge?limit=50" {
 		t.Fatalf("memory default route = %s %s", c.method, c.path)
 	}
+	if _, err := Call(context.Background(), "memory.search", json.RawMessage(`{"browse":true,"project_id":"p/1","q":"hello","limit":50,"offset":100}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || c.path != "/memory/search?limit=50&offset=100&project_id=p%2F1&q=hello" {
+		t.Fatalf("memory browse route = %s %s", c.method, c.path)
+	}
 
 	if _, err := Call(context.Background(), "sessions.turns", json.RawMessage(`{"session_id":"s/1"}`), deps); err != nil {
 		t.Fatal(err)
