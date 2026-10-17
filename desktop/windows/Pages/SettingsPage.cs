@@ -44,7 +44,7 @@ public sealed class SettingsPage : NexusPage
         var actions = Row(_login, _clear, retry, projects);
         var capture = new StackPanel { Spacing = 8 };
         capture.Children.Add(Line("Capture workspace", title: true));
-        capture.Children.Add(Line("Choose the project folder whose local agent chats should appear in Timeline. Capture runs inside Nexus."));
+        capture.Children.Add(Line("Choose your main project folder. Nexus also maps local Codex chats to their existing Git workspaces and captures them under the right project."));
         capture.Children.Add(Row(_workspace, connect));
         capture.Children.Add(_captureStatus);
         var scroller = new ScrollViewer { Content = _body };
@@ -84,8 +84,15 @@ public sealed class SettingsPage : NexusPage
         _captureStatus.Text = root.Length == 0
             ? "No workspace selected. Local chats cannot be captured until you choose a project folder."
             : $"{(running ? "Capturing" : configured ? "Not running" : "Not configured")} · {(paused ? "paused" : "active")} · {(online ? "cloud connected" : "cloud offline")}\n{root}\n" +
-              $"Last scan: {NxJson.Text(capture, "last_scan_at")} · matched files: {NxJson.Text(capture, "matched_files")} · new turns: {NxJson.Text(capture, "new_turns_last_scan")}" +
+              $"Workspaces: {NxJson.Text(capture, "workspaces")} · last scan: {NxJson.Text(capture, "last_scan_at")} · matched files: {NxJson.Text(capture, "matched_files")} · new turns: {NxJson.Text(capture, "new_turns_last_scan")}" +
               (NxJson.Text(capture, "error", "last_scan_error") is { Length: > 0 } issue ? $"\nNeeds attention: {issue}" : "");
+        if (capture.ValueKind == JsonValueKind.Object && capture.TryGetProperty("workspace_errors", out var errors) && errors.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var workspace in errors.EnumerateObject())
+            {
+                _captureStatus.Text += $"\n{workspace.Name}: {workspace.Value.GetString()}";
+            }
+        }
     }
 
     private async Task ReconnectAsync()

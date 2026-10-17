@@ -31,6 +31,8 @@ type coreState struct {
 	captureCancel     context.CancelFunc
 	captureDone       chan struct{}
 	captureRuntime    *daemon.Runtime
+	captureOthers     map[string]*daemon.Runtime
+	captureWorkErrors map[string]string
 	captureConfig     *embeddedCaptureConfig
 	capturePaused     bool
 	captureStarting   bool
@@ -96,6 +98,8 @@ func nx_init(configJSON *C.char) (rc C.int) {
 	nxState.capturePaused = false
 	nxState.captureError = ""
 	nxState.captureProjectID = ""
+	nxState.captureOthers = make(map[string]*daemon.Runtime)
+	nxState.captureWorkErrors = make(map[string]string)
 	nxState.captureGeneration++
 	if root == "" {
 		nxState.captureConfig = nil
@@ -215,29 +219,85 @@ func startEmbeddedCapture(cfg embeddedCaptureConfig) {
 	nxState.mu.Unlock()
 	go func() {
 		defer close(done)
-		if d.ServerURL != "" && d.ServerToken != "" {
-			if err := d.Register(ctx, d.ServerURL); err != nil {
-				log.Printf("nexuscore: embedded capture registration: %v", err)
-				setCaptureConnection(cfg.generation, "Registration failed: "+err.Error(), "")
-			} else if id, err := d.ResolveProjectIDForRoot(ctx); err != nil {
-				log.Printf("nexuscore: embedded capture project resolution: %v", err)
-				setCaptureConnection(cfg.generation, "Project resolution failed: "+err.Error(), "")
-			} else {
-				runtime.SetServerProjectID(id)
-				setCaptureConnection(cfg.generation, "", id)
-				go d.StartHeartbeat(ctx, d.ServerURL, daemon.HeartbeatInterval)
-			}
+		var others sync.WaitGroup
+		for _, extra := range captureRoots(root)[1:] {
+			others.Add(1)
+			go func(extraRoot string) {
+				defer others.Done()
+				runAdditionalCapture(ctx, cfg, extraRoot)
+			}(extra)
 		}
-		runtime.Start(ctx)
+		runCaptureRuntime(ctx, cfg, root, d, runtime)
+		others.Wait()
 	}()
 }
 
-func setCaptureConnection(generation uint64, problem, projectID string) {
+func runAdditionalCapture(ctx context.Context, cfg embeddedCaptureConfig, root string) {
+	localToken, err := daemon.GenerateToken()
+	if err != nil {
+		setCaptureConnection(cfg.generation, root, err.Error(), "")
+		return
+	}
+	d, err := daemon.NewDaemon(root, localToken)
+	if err != nil {
+		setCaptureConnection(cfg.generation, root, err.Error(), "")
+		return
+	}
+	d.ServerURL, d.ServerToken, d.UserID = cfg.serverURL, cfg.serverToken, cfg.userID
+	runtime := daemon.NewRuntime(d, filepath.Base(root), daemon.NewStaticDesignation(d.ServerToken != ""))
+	if runtime == nil {
+		return
+	}
+	d.SetPipeline(runtime)
+	nxState.mu.Lock()
+	if nxState.captureConfig == nil || nxState.captureConfig.generation != cfg.generation || ctx.Err() != nil {
+		nxState.mu.Unlock()
+		return
+	}
+	runtime.SetPaused(nxState.capturePaused)
+	nxState.captureOthers[root] = runtime
+	nxState.mu.Unlock()
+	runCaptureRuntime(ctx, cfg, root, d, runtime)
+}
+
+func runCaptureRuntime(ctx context.Context, cfg embeddedCaptureConfig, root string, d *daemon.Daemon, runtime *daemon.Runtime) {
+	if d.ServerURL != "" && d.ServerToken != "" {
+		for ctx.Err() == nil {
+			if err := d.Register(ctx, d.ServerURL); err != nil {
+				setCaptureConnection(cfg.generation, root, "Registration failed: "+err.Error(), "")
+			} else if id, err := d.ResolveProjectIDForRoot(ctx); err != nil {
+				setCaptureConnection(cfg.generation, root, "Project resolution failed: "+err.Error(), "")
+			} else {
+				runtime.SetServerProjectID(id)
+				setCaptureConnection(cfg.generation, root, "", id)
+				go d.StartHeartbeat(ctx, d.ServerURL, daemon.HeartbeatInterval)
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(30 * time.Second):
+			}
+		}
+	}
+	if ctx.Err() == nil {
+		runtime.Start(ctx)
+	}
+}
+
+func setCaptureConnection(generation uint64, root, problem, projectID string) {
 	nxState.mu.Lock()
 	defer nxState.mu.Unlock()
 	if nxState.captureConfig != nil && nxState.captureConfig.generation == generation {
-		nxState.captureError = problem
-		nxState.captureProjectID = projectID
+		if problem == "" {
+			delete(nxState.captureWorkErrors, root)
+		} else {
+			nxState.captureWorkErrors[root] = problem
+		}
+		if samePath(root, nxState.captureConfig.root) {
+			nxState.captureError = problem
+			nxState.captureProjectID = projectID
+		}
 	}
 }
 
@@ -255,9 +315,16 @@ func (embeddedCaptureController) Pause() error {
 	}
 	nxState.capturePaused = true
 	runtime := nxState.captureRuntime
+	others := make([]*daemon.Runtime, 0, len(nxState.captureOthers))
+	for _, r := range nxState.captureOthers {
+		others = append(others, r)
+	}
 	nxState.mu.Unlock()
 	if runtime != nil {
 		runtime.SetPaused(true)
+	}
+	for _, r := range others {
+		r.SetPaused(true)
 	}
 	return nil
 }
@@ -270,9 +337,16 @@ func (embeddedCaptureController) Resume() error {
 	}
 	nxState.capturePaused = false
 	runtime := nxState.captureRuntime
+	others := make([]*daemon.Runtime, 0, len(nxState.captureOthers))
+	for _, r := range nxState.captureOthers {
+		others = append(others, r)
+	}
 	nxState.mu.Unlock()
 	if runtime != nil {
 		runtime.SetPaused(false)
+		for _, r := range others {
+			r.SetPaused(false)
+		}
 		return nil
 	}
 	startConfiguredEmbeddedCapture()
@@ -283,12 +357,29 @@ func (embeddedCaptureController) Status() any {
 	nxState.mu.Lock()
 	configured := nxState.captureConfig != nil
 	runtime := nxState.captureRuntime
+	others := make([]*daemon.Runtime, 0, len(nxState.captureOthers))
+	for _, r := range nxState.captureOthers {
+		others = append(others, r)
+	}
+	errorsByWorkspace := make(map[string]string, len(nxState.captureWorkErrors))
+	for root, problem := range nxState.captureWorkErrors {
+		errorsByWorkspace[root] = problem
+	}
 	status := map[string]any{
-		"configured": configured,
-		"paused":     nxState.capturePaused,
-		"running":    configured && runtime != nil && nxState.captureCancel != nil,
-		"error":      nxState.captureError,
-		"project_id": nxState.captureProjectID,
+		"configured":          configured,
+		"paused":              nxState.capturePaused,
+		"running":             configured && runtime != nil && nxState.captureCancel != nil,
+		"error":               nxState.captureError,
+		"project_id":          nxState.captureProjectID,
+		"matched_files":       0,
+		"new_turns_last_scan": 0,
+		"workspaces": func() int {
+			if !configured {
+				return 0
+			}
+			return 1 + len(others)
+		}(),
+		"workspace_errors": errorsByWorkspace,
 	}
 	nxState.mu.Unlock()
 	if runtime != nil && runtime.Harvester != nil {
@@ -298,6 +389,13 @@ func (embeddedCaptureController) Status() any {
 		status["new_turns_last_scan"] = stats.LastScanTurns
 		status["last_scan_error"] = stats.LastScanError
 		status["agent_files"] = stats.AgentFiles
+	}
+	for _, other := range others {
+		if other != nil && other.Harvester != nil {
+			stats := other.Harvester.Stats()
+			status["matched_files"] = status["matched_files"].(int) + stats.LastScanFiles
+			status["new_turns_last_scan"] = status["new_turns_last_scan"].(int) + stats.LastScanTurns
+		}
 	}
 	return status
 }
