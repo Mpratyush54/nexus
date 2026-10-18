@@ -558,9 +558,10 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	cursor := r.URL.Query().Get("cursor")
 	harness := strings.TrimSpace(r.URL.Query().Get("harness"))
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	items, modernNext, err := cs.ListTimeline(r.Context(), store.TimelineQuery{
 		UserID: authSubject(r), ProjectID: projectID,
-		Harness: harness, Cursor: cursor, Limit: limit,
+		Harness: harness, Query: query, Cursor: cursor, Limit: limit,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -568,7 +569,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 	// Historical snapshots and agent sessions coexist. Query both on every
 	// page; otherwise the first new capture hides the entire old timeline.
-	legacy, err := s.legacyTimeline(r.Context(), authSubject(r), projectID, harness, cursor)
+	legacy, err := s.legacyTimeline(r.Context(), authSubject(r), projectID, harness, query, cursor)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not list captured snapshots")
 		return
@@ -648,7 +649,7 @@ func legacyAgentSession(snap *store.SessionSnapshot) *store.AgentSession {
 	}
 }
 
-func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness, cursor string) ([]store.TimelineItem, error) {
+func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness, query, cursor string) ([]store.TimelineItem, error) {
 	ps := provenanceStore(s.Store)
 	if ps == nil {
 		return []store.TimelineItem{}, nil
@@ -695,6 +696,9 @@ func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness,
 		for i := range snaps {
 			snap := &snaps[i]
 			if harness != "" && !strings.EqualFold(harness, snap.Harness) {
+				continue
+			}
+			if query != "" && !strings.Contains(strings.ToLower(snap.Harness+" "+snap.ConversationID), strings.ToLower(query)) {
 				continue
 			}
 			if !s.canReadSnapshot(ctx, userID, snap) {

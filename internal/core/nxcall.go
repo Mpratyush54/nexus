@@ -176,6 +176,13 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 			return nil, err
 		}
 		argv, err := continuex.Command(req)
+		if strings.TrimSpace(req.NativeID) != "" && req.Mode == "open_in_agent" {
+			var plan continuex.LaunchPlan
+			plan, err = continuex.Plan(req.Agent, req.Mode, req.NativeID, req.Prompt)
+			if err == nil {
+				argv = plan.Argv
+			}
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -333,7 +340,7 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 			ProxyArgs:    body.ProxyArgs,
 		})
 	case "agents.list":
-		return capturedAgents(ctx, deps)
+		return capturedAgents(ctx, args, deps)
 	default:
 		if !known(method) {
 			return nil, ErrUnknownMethod
@@ -407,7 +414,7 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 	case "timeline.list", "events.subscribe":
 		return http.MethodGet, "/v1/timeline" + queryArgs(args, map[string]string{
 			"project_id": "project_id", "project": "project_id", "agent": "harness",
-			"harness": "harness", "limit": "limit", "cursor": "cursor",
+			"harness": "harness", "q": "q", "limit": "limit", "cursor": "cursor",
 		}), nil, nil
 	case "memory.search":
 		if hasJSONKey(args, "browse") {
@@ -447,8 +454,25 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 		if id == "" {
 			return "", "", nil, errors.New("memory id is required")
 		}
-		return http.MethodDelete, "/memory/" + url.PathEscape(id), nil, nil
-	case "memory.pin", "memory.scope", "memory.update":
+		return http.MethodPost, "/memory/" + url.PathEscape(id) + "/forget", []byte(`{}`), nil
+	case "memory.pin", "memory.scope":
+		if id == "" {
+			id = argString(args, "memory_id")
+		}
+		if id == "" {
+			return "", "", nil, errors.New("memory id is required")
+		}
+		action := strings.TrimPrefix(method, "memory.")
+		if action == "pin" {
+			return http.MethodPost, "/memory/" + url.PathEscape(id) + "/pin", []byte(`{}`), nil
+		}
+		level := argString(args, "level")
+		if level == "" {
+			return "", "", nil, errors.New("memory level is required")
+		}
+		payload, _ := json.Marshal(map[string]string{"level": level})
+		return http.MethodPost, "/memory/" + url.PathEscape(id) + "/scope", payload, nil
+	case "memory.update":
 		if id == "" {
 			id = argString(args, "memory_id")
 		}
@@ -494,15 +518,21 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 		}
 		return http.MethodGet, "/v1/agent-sessions/" + url.PathEscape(id) + "/versions", nil, nil
 	case "sessions.files", "sessions.operations", "sessions.memories":
-		// These panels are intentionally empty until the cloud exposes the
-		// corresponding, permission-checked list routes.  Do not fabricate
-		// a POST to agent-sessions and surface it as a transport error.
-		return "", "", nil, errEmptyLocal
+		if id == "" {
+			return "", "", nil, errors.New("session id is required")
+		}
+		suffix := strings.TrimPrefix(method, "sessions.")
+		return http.MethodGet, "/v1/agent-sessions/" + url.PathEscape(id) + "/" + suffix, nil, nil
 	case "sessions.share", "sessions.grants":
 		if id == "" {
 			return "", "", nil, errors.New("session id is required")
 		}
-		return http.MethodPost, "/v1/agent-sessions/" + url.PathEscape(id) + "/grants", args, nil
+		userID := argString(args, "user_id")
+		if userID == "" {
+			return "", "", nil, errors.New("recipient user id is required")
+		}
+		grantBody, _ := json.Marshal(map[string]string{"user_id": userID})
+		return http.MethodPost, "/v1/agent-sessions/" + url.PathEscape(id) + "/grants", grantBody, nil
 	case "projects.list":
 		return http.MethodGet, "/v1/agent/projects", nil, nil
 	default:
@@ -597,14 +627,18 @@ func normalizeMemorySearchBody(args json.RawMessage) []byte {
 	return raw
 }
 
-func capturedAgents(ctx context.Context, deps Deps) (any, error) {
+func capturedAgents(ctx context.Context, args json.RawMessage, deps Deps) (any, error) {
 	if deps.Cloud == nil {
 		return map[string]any{"items": []any{}}, nil
 	}
 	byHarness := map[string]*capturedAgentSummary{}
 	cursor := ""
+	projectID := argString(args, "project_id", "project")
 	for page := 0; page < 100; page++ {
 		path := "/v1/timeline?limit=100"
+		if projectID != "" {
+			path += "&project_id=" + url.QueryEscape(projectID)
+		}
 		if cursor != "" {
 			path += "&cursor=" + url.QueryEscape(cursor)
 		}

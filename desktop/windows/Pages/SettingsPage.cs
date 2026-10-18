@@ -124,8 +124,20 @@ public sealed class SettingsPage : NexusPage
     private async Task Run(string method)
     {
         var response = await Call(method);
-        _body.Children.Insert(0, Line(response.Ok
-            ? method + " " + NxJson.Scrub(response.Result?.ToString() ?? "ok")
-            : method + " " + (response.Error ?? "failed")));
+        if (!response.Ok)
+        {
+            _body.Children.Insert(0, Card(Line(response.Error ?? "Action failed.")));
+            return;
+        }
+        var detail = method switch
+        {
+            NxMethods.CacheClear => "Local cache cleared.",
+            NxMethods.UploadsRetry => "Upload retry requested. Pending: " +
+                (response.Result is { } retry ? NxJson.Text(retry, "pending") : "unknown"),
+            NxMethods.ProjectsList => "Accessible projects: " + NxJson.Items(response.Result).Count(),
+            _ => "Done."
+        };
+        _body.Children.Insert(0, Card(Line(detail)));
+        await RefreshStatusAsync();
     }
 }

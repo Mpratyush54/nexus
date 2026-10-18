@@ -384,7 +384,7 @@ func (r *Runtime) Start(ctx context.Context) {
 				}
 				harness := harnessFromEvents(batch)
 				r.noteSessionTurns(sid, harness, len(batch))
-				r.mirrorSessionTurns(ctx, sid, harness, batch)
+				cloudSessionID := r.mirrorSessionTurns(ctx, sid, harness, batch)
 				// Attach interceptor window to the first session in this flush
 				// so FILE_*/COMMAND_* are not duplicated across multi-session
 				// batches in the same workspace.
@@ -393,7 +393,10 @@ func (r *Runtime) Start(ctx context.Context) {
 					inter = toolWindow
 					interceptorAttached = true
 				}
-				r.pushParsedToolOps(ctx, sid, harness, batch, inter)
+				if cloudSessionID == "" {
+					cloudSessionID = sid
+				}
+				r.pushParsedToolOps(ctx, cloudSessionID, harness, batch, inter)
 				if props, err := r.Processor.ProcessEvents(ctx, r.ProjectID, batch); err != nil {
 					log.Printf("daemon: conversation process (session=%s): %v", sid, err)
 					r.noteProposals(len(props), err)
@@ -582,10 +585,10 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 // stable source position, making retries idempotent at the server's unique
 // (session_id, idx) boundary.  Full transcript fidelity is committed by
 // maybePushSnapshot once the harvester declares the session idle.
-func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness string, batch []Event) {
+func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness string, batch []Event) string {
 	hs, ok := r.httpStore()
 	if !ok || hs == nil || r.Daemon == nil || strings.TrimSpace(hs.ProjectID) == "" {
-		return
+		return ""
 	}
 	byMillisecond := map[int64]int64{}
 	turns := make([]MirroredTurn, 0, len(batch))
@@ -619,11 +622,14 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 		})
 	}
 	if len(turns) == 0 {
-		return
+		return ""
 	}
-	if _, err := hs.MirrorAgentSessionTurns(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, turns); err != nil {
+	id, err := hs.MirrorAgentSessionTurns(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, turns)
+	if err != nil {
 		log.Printf("daemon: mirror cloud session turns session=%s: %v", nativeID, err)
+		return ""
 	}
+	return id
 }
 
 const maxMirroredTurnPreviewBytes = 12 << 10

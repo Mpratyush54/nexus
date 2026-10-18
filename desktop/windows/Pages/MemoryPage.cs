@@ -81,6 +81,10 @@ public sealed class MemoryPage : NexusPage
 
     private async Task LoadProjectsAsync()
     {
+        var previous = SelectedProjectId();
+        var status = await Call(NxMethods.StatusGet);
+        var preferred = status.Result is { } state && state.TryGetProperty("capture", out var capture)
+            ? NxJson.Text(capture, "project_id") : "";
         var response = await Call(NxMethods.ProjectsList);
         _project.Items.Clear();
         _projectsLoaded = false;
@@ -108,8 +112,16 @@ public sealed class MemoryPage : NexusPage
                 Line("Sign in, then select or create a project before searching shared knowledge.")));
             return;
         }
-        _project.SelectedIndex = 0;
-        await LoadAsync(false);
+        var wanted = previous.Length > 0 ? previous : preferred;
+        var chosen = -1;
+        for (var i = 0; i < _project.Items.Count; i++)
+            if ((_project.Items[i] as ComboBoxItem)?.Tag as string == wanted) { chosen = i; break; }
+        if (chosen >= 0 || _project.Items.Count == 1) _project.SelectedIndex = chosen >= 0 ? chosen : 0;
+        else
+        {
+            _cards.Children.Clear();
+            _cards.Children.Add(Card(Line("Choose a project", title: true), Line("Memory is scoped to one project at a time.")));
+        }
     }
 
     private string SelectedProjectId() => (_project.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
@@ -154,7 +166,7 @@ public sealed class MemoryPage : NexusPage
             var text = NxJson.Text(item, "text", "content", "title", "summary", "key");
             var status = NxJson.PublicStatus(NxJson.Text(item, "status"));
             var pin = CloudAction("Pin", () => _ = Mutate(NxMethods.MemoryPin, id));
-            var forget = CloudAction("Forget", () => _ = Mutate(NxMethods.MemoryForget, id));
+            var forget = CloudAction("Forget", () => _ = ConfirmForgetAsync(id));
             _cards.Children.Add(Card(
                 Line(text.Length > 0 ? text : id, title: true),
                 Line(status.Length > 0 ? status : "Retained knowledge"),
@@ -180,6 +192,20 @@ public sealed class MemoryPage : NexusPage
             return;
         }
         await LoadAsync(false);
+    }
+
+    private async Task ConfirmForgetAsync(string id)
+    {
+        var dialog = new ContentDialog
+        {
+            Title = "Forget this memory?",
+            Content = "This will remove it from active knowledge.",
+            PrimaryButtonText = "Forget",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = XamlRoot
+        };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary) await Mutate(NxMethods.MemoryForget, id);
     }
 
     private Button CloudAction(string label, Action click)

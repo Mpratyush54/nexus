@@ -1,6 +1,9 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Nexus.Core;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using Windows.ApplicationModel.DataTransfer;
 
 namespace Nexus.Pages;
 
@@ -16,44 +19,27 @@ public sealed class SessionPage : NexusPage
     private readonly StackPanel _memory = new();
     private readonly StackPanel _summary = new();
     private readonly StackPanel _context = new() { Spacing = 8 };
-    private readonly TextBox _message = new() { PlaceholderText = "Message the session", AcceptsReturn = true, Height = 80 };
-    private readonly TextBox _people = new() { PlaceholderText = "Named people", Width = 220 };
-    private readonly CheckBox _team = new() { Content = "Everyone in this project" };
-    private readonly CheckBox _live = new() { Content = "Live", IsChecked = true };
-    private readonly ComboBox _resume = new();
-    private readonly ComboBox _seedAgent = new();
-    private Button _send = null!;
+    private readonly TextBlock _notice = new() { TextWrapping = TextWrapping.Wrap, Opacity = 0.8 };
+    private string _agent = "";
+    private string _nativeID = "";
+    private bool _sessionLoaded;
+    private bool _legacy;
+    private bool _hasCompleteVersion;
     private Button _share = null!;
     private Button _teleport = null!;
+    private Button _resume = null!;
 
     public SessionPage()
     {
         _chatMore.Click += async (_, _) => await LoadMoreTurnsAsync();
-        foreach (var mode in new[] { "native", "fork", "seeded" })
-        {
-            _resume.Items.Add(mode);
-        }
-        _resume.SelectedIndex = 0;
-        foreach (var agent in AgentCatalog.Names)
-        {
-            _seedAgent.Items.Add(agent);
-        }
-        _seedAgent.SelectedIndex = 0;
-
-        var back = new Button { Content = "Timeline" };
+        var back = new Button { Content = "← Timeline" };
         back.Click += (_, _) => MainWindow.Current?.ShowTimeline();
-        var here = new Button { Content = "Here in Nexus" };
-        here.Click += async (_, _) => await ContinueAsync("here", "native");
-        var open = new Button { Content = "Open in agent" };
-        open.Click += async (_, _) => await ContinueAsync("open_in_agent", Selected(_resume));
-        var seeded = new Button { Content = "Continue in another agent" };
-        seeded.Click += async (_, _) => await ContinueAsync("open_in_agent", "seeded", Selected(_seedAgent));
+        _resume = new Button { Content = "Copy native resume command" };
+        _resume.Click += async (_, _) => await CopyResumeAsync();
         _share = new Button { Content = "Share" };
         _share.Click += async (_, _) => await ShareAsync();
         _teleport = new Button { Content = "Send teleport" };
         _teleport.Click += async (_, _) => await SendTeleportAsync();
-        _send = new Button { Content = "Send" };
-        _send.Click += async (_, _) => await SendAsync();
 
         var tabs = new Pivot();
         tabs.Items.Add(Tab("Chat", _chat));
@@ -63,8 +49,8 @@ public sealed class SessionPage : NexusPage
         tabs.Items.Add(Tab("Summary", _summary));
 
         var body = new Grid { ColumnSpacing = 16 };
-        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(2, GridUnitType.Star) });
         body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        body.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(280) });
         Grid.SetColumn(tabs, 0);
         var context = new ScrollViewer { Content = _context };
         Grid.SetColumn(context, 1);
@@ -76,25 +62,31 @@ public sealed class SessionPage : NexusPage
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        var actions = Row(back, here, open, _resume, seeded, _seedAgent, _teleport, _share);
+        var actions = Row(back, _resume, _teleport, _share);
         Grid.SetRow(actions, 1);
         Grid.SetRow(body, 2);
-        var composer = new StackPanel { Spacing = 8 };
-        composer.Children.Add(_message);
-        composer.Children.Add(Row(_send, _people, _team, _live));
-        Grid.SetRow(composer, 3);
         root.Children.Add(_header);
         root.Children.Add(actions);
         root.Children.Add(body);
-        root.Children.Add(composer);
+        root.Children.Add(_notice);
+        Grid.SetRow(_notice, 3);
         Content = root;
-        CloudOnly(_send, _share, _teleport, here, open, seeded);
+        Loaded += (_, _) => { ShellState.Changed += HandleShellChanged; UpdateActions(); };
+        Unloaded += (_, _) => ShellState.Changed -= HandleShellChanged;
+        UpdateActions();
     }
 
     protected override void OnEnter(object? parameter)
     {
         _id = parameter as string ?? "";
-        _header.Text = _id;
+        _header.Text = "Loading session…";
+        _notice.Text = "";
+        _sessionLoaded = false;
+        _legacy = false;
+        _hasCompleteVersion = false;
+        _nativeID = "";
+        _agent = "";
+        UpdateActions();
         _ = LoadAsync();
     }
 
@@ -114,45 +106,59 @@ public sealed class SessionPage : NexusPage
             _header.Text = "Session";
             return;
         }
-        var session = await Call(NxMethods.SessionsGet, new { session_id = _id, id = _id });
-        var turns = await Call(NxMethods.SessionsTurns, new { session_id = _id, id = _id, limit = 100 });
-        var files = await Call(NxMethods.SessionsFiles, new { session_id = _id, id = _id });
-        var ops = await Call(NxMethods.SessionsOperations, new { session_id = _id, id = _id });
-        var memories = await Call(NxMethods.SessionsMemories, new { session_id = _id, id = _id });
-        var summary = await Call(NxMethods.SessionsSummary, new { session_id = _id, id = _id });
-        var versions = await Call(NxMethods.SessionsVersions, new { session_id = _id, id = _id });
+        var sessionTask = Call(NxMethods.SessionsGet, new { session_id = _id });
+        var turnsTask = Call(NxMethods.SessionsTurns, new { session_id = _id, limit = 100 });
+        var filesTask = Call(NxMethods.SessionsFiles, new { session_id = _id });
+        var opsTask = Call(NxMethods.SessionsOperations, new { session_id = _id });
+        var memoriesTask = Call(NxMethods.SessionsMemories, new { session_id = _id });
+        var summaryTask = Call(NxMethods.SessionsSummary, new { session_id = _id });
+        var versionsTask = Call(NxMethods.SessionsVersions, new { session_id = _id });
+        await Task.WhenAll(sessionTask, turnsTask, filesTask, opsTask, memoriesTask, summaryTask, versionsTask);
+        var session = await sessionTask;
+        var turns = await turnsTask;
+        var files = await filesTask;
+        var ops = await opsTask;
+        var memories = await memoriesTask;
+        var summary = await summaryTask;
+        var versions = await versionsTask;
         FillLines(_chat, turns, "text_preview", "text", "content", "message");
         _nextTurnCursor = turns.Result is { } turnResult ? NxJson.Text(turnResult, "next_cursor") : "";
         if (_nextTurnCursor.Length > 0) _chat.Children.Add(_chatMore);
-        FillLines(_files, files, "path", "name");
-        FillLines(_commands, ops, "command", "cmd", "text");
-        FillLines(_memory, memories, "text", "title", "content");
+        FillLines(_files, files, "path", "file_path", "name");
+        FillLines(_commands, ops, "command", "command_line", "cmd", "text");
+        FillLines(_memory, memories, "content", "text", "title", "key");
         _summary.Children.Clear();
-        _summary.Children.Add(Line(summary.Ok ? summary.Result?.ToString() ?? "" : summary.Error ?? ""));
+        _summary.Children.Add(Card(Line(summary.Ok && summary.Result is { } summaryBody
+            ? Nonempty(NxJson.Text(summaryBody, "summary", "text"), "No summary has been captured for this session.")
+            : summary.Error ?? "Summary unavailable.")));
         _context.Children.Clear();
-        _context.Children.Add(Line("Context", title: true));
+        _context.Children.Add(Line("Session details", title: true));
         if (session.Ok && session.Result is { } body)
         {
             var title = NxJson.Text(body, "title", "summary", "preview");
-            var agent = NxJson.Text(body, "agent", "harness");
-            _header.Text = string.Join(" · ", new[] { agent, title, _id }.Where(part => part.Length > 0));
-            _context.Children.Add(Line("Repo " + NxJson.Text(body, "repo", "project")));
-            _context.Children.Add(Line("Branch " + NxJson.Text(body, "branch")));
-            _context.Children.Add(Line("Visibility " + NxJson.Text(body, "visibility")));
-            var legacy = NxJson.Text(body, "lineage_kind") == "legacy_snapshot";
-            _teleport.IsEnabled = !legacy && !ShellState.Current.Offline;
-            if (legacy)
+            _agent = NxJson.Text(body, "agent", "harness");
+            _nativeID = NxJson.Text(body, "native_id");
+            _header.Text = Nonempty(title, "Captured " + Nonempty(_agent, "agent") + " session");
+            AddDetail("Agent", _agent);
+            AddDetail("Project", NxJson.Text(body, "project_id", "project"));
+            AddDetail("Workspace", NxJson.Text(body, "workspace_root_hint"));
+            AddDetail("Last activity", NxJson.Text(body, "last_active_at"));
+            AddDetail("Session ID", _id);
+            _legacy = NxJson.Text(body, "lineage_kind") == "legacy_snapshot";
+            _hasCompleteVersion = NxJson.Items(versions.Result).Any(v => NxJson.Text(v, "state").Equals("complete", StringComparison.OrdinalIgnoreCase));
+            _sessionLoaded = true;
+            UpdateActions();
+            if (_legacy)
             {
-                _context.Children.Add(Line("This is an archived snapshot. It can be read, but cannot be teleported until a new captured version exists."));
+                _notice.Text = "Archived snapshot · read-only";
             }
         }
         else if (!session.Ok)
         {
-            _header.Text = session.Error ?? _id;
+            _header.Text = "Session unavailable";
+            _notice.Text = session.Error ?? "Could not load this session.";
+            UpdateActions();
         }
-        _context.Children.Add(Line("Versions " + NxJson.Items(versions.Result).Count()));
-        _context.Children.Add(Line("Memory " + NxJson.Items(memories.Result).Count()));
-        _context.Children.Add(Line("Files " + NxJson.Items(files.Result).Count()));
     }
 
     private async Task LoadMoreTurnsAsync()
@@ -181,15 +187,23 @@ public sealed class SessionPage : NexusPage
         if (!append) panel.Children.Clear();
         if (!response.Ok)
         {
-            panel.Children.Add(new TextBlock { Text = response.Error ?? "", TextWrapping = TextWrapping.Wrap });
+            panel.Children.Add(Card(Line(response.Error ?? "Could not load this content.")));
             return;
         }
         var items = NxJson.Items(response.Result).ToList();
         if (items.Count == 0)
         {
-            panel.Children.Add(new TextBlock { Text = NxJson.Scrub(response.Result?.ToString() ?? "Nothing here yet."), TextWrapping = TextWrapping.Wrap });
+            if (!append || panel.Children.Count == 0)
+            {
+                var message = keys.Contains("text_preview") ? "No readable chat turns have been captured yet." :
+                    keys.Contains("path") ? "No files were captured for this session." :
+                    keys.Contains("command") ? "No commands were captured for this session." :
+                    "No memory is linked to this session. Project knowledge is on the Memory page.";
+                panel.Children.Add(Card(Line(message)));
+            }
             return;
         }
+        var shown = 0;
         foreach (var item in items)
         {
             if (keys.Contains("text_preview") &&
@@ -200,79 +214,112 @@ public sealed class SessionPage : NexusPage
                 continue;
             }
             var text = NxJson.Text(item, keys);
-            if (text.Length == 0)
-            {
-                text = item.ToString();
-            }
+            if (keys.Contains("text_preview")) text = ReadableTurn(text);
+            if (text.Length == 0) continue;
             if (keys.Contains("text_preview") && NxJson.Text(item, "role") is { Length: > 0 } role)
             {
-                text = role + " · " + text;
+                panel.Children.Add(Card(Line(role.Equals("user", StringComparison.OrdinalIgnoreCase) ? "You" : "Agent", title: true), Line(text)));
+                shown++;
+                continue;
             }
-            if (keys.Contains("text") || keys.Contains("content"))
+            var detail = keys.Contains("path") ? JoinArray(item, "operations") :
+                keys.Contains("command") ? NxJson.Text(item, "tool", "tool_name", "directory") :
+                NxJson.Text(item, "scope", "level");
+            panel.Children.Add(string.IsNullOrWhiteSpace(detail) ? Card(Line(text)) : Card(Line(text, title: true), Line(detail)));
+            shown++;
+        }
+        if (shown == 0 && !append) panel.Children.Add(Card(Line("No readable chat turns have been captured yet.")));
+    }
+
+    private static string ReadableTurn(string raw)
+    {
+        raw = raw.Trim();
+        if (raw.StartsWith("{", StringComparison.Ordinal))
+        {
+            try
             {
-                var status = NxJson.PublicStatus(NxJson.Text(item, "status"));
-                if (status.Length > 0 && NxJson.Text(item, "status").Length > 0)
-                {
-                    text = status + " · " + text;
-                }
+                using var doc = JsonDocument.Parse(raw);
+                raw = ExtractText(doc.RootElement);
+                if (raw.Length == 0) return "";
             }
-            panel.Children.Add(new TextBlock { Text = NxJson.Scrub(text), TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 0, 0, 8) });
+            catch (JsonException) { }
         }
+        var query = Regex.Match(raw, "<user_query>(.*?)</user_query>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+        if (query.Success) raw = query.Groups[1].Value;
+        raw = Regex.Replace(raw, "<timestamp>.*?</timestamp>", "", RegexOptions.Singleline | RegexOptions.IgnoreCase).Trim();
+        if (raw.StartsWith("# AGENTS.md instructions", StringComparison.OrdinalIgnoreCase) ||
+            raw.StartsWith("<environment_context>", StringComparison.OrdinalIgnoreCase) ||
+            raw.StartsWith("<external_codex_apps_open_page>", StringComparison.OrdinalIgnoreCase) ||
+            raw.StartsWith("<INSTRUCTIONS>", StringComparison.OrdinalIgnoreCase)) return "";
+        return raw;
     }
 
-    private async Task ContinueAsync(string mode, string resume, string? agent = null)
+    private void UpdateActions()
     {
-        var response = await Call(NxMethods.ContinueStart, new
-        {
-            session_id = _id,
-            mode,
-            resume,
-            agent = agent ?? "",
-            prompt = _message.Text
-        });
-        _summary.Children.Clear();
-        _summary.Children.Add(Line(response.Ok ? response.Result?.ToString() ?? "Started" : response.Error ?? "Continue failed"));
+        _share.IsEnabled = _sessionLoaded && !_legacy && !ShellState.Current.Offline;
+        _teleport.IsEnabled = _sessionLoaded && !_legacy && _hasCompleteVersion && !ShellState.Current.Offline;
+        _resume.IsEnabled = _sessionLoaded && !_legacy && _nativeID.Length > 0 && _agent.Length > 0;
+        ToolTipService.SetToolTip(_resume, _legacy ? "Archived snapshots cannot resume natively" : _nativeID.Length == 0 ? "No native session ID was captured" : "Copies a command for an installed local agent; it does not open a terminal");
+        ToolTipService.SetToolTip(_teleport, _legacy ? "Archived snapshots cannot be teleported" : !_hasCompleteVersion ? "A completed version is required" : null);
     }
 
-    private async Task SendAsync()
+    private void HandleShellChanged(object? sender, EventArgs e) => UpdateActions();
+
+    private static string ExtractText(JsonElement value)
     {
-        var response = await Call(NxMethods.RunsMessage, new { session_id = _id, prompt = _message.Text });
-        _chat.Children.Add(Line(response.Ok ? _message.Text : response.Error ?? "Send failed"));
-        if (response.Ok)
+        if (value.ValueKind == JsonValueKind.String) return value.GetString() ?? "";
+        if (value.ValueKind == JsonValueKind.Array)
+            return string.Join("\n", value.EnumerateArray().Select(ExtractText).Where(v => v.Length > 0));
+        if (value.ValueKind != JsonValueKind.Object) return "";
+        foreach (var key in new[] { "text", "content", "message", "user_query", "prompt" })
         {
-            _message.Text = "";
+            if (value.TryGetProperty(key, out var part))
+            {
+                var text = ExtractText(part);
+                if (text.Length > 0) return text;
+            }
         }
+        return "";
     }
+
+    private static string JoinArray(JsonElement item, string key)
+    {
+        if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty(key, out var values) || values.ValueKind != JsonValueKind.Array) return "";
+        return string.Join(" · ", values.EnumerateArray().Select(v => v.ToString()).Where(v => v.Length > 0));
+    }
+
+    private static string Nonempty(string value, string fallback) => string.IsNullOrWhiteSpace(value) ? fallback : value;
+
+    private void AddDetail(string label, string value)
+    {
+        if (!string.IsNullOrWhiteSpace(value)) _context.Children.Add(Card(Line(label, title: true), Line(value)));
+    }
+
+    private async Task CopyResumeAsync()
+    {
+        var response = await Call(NxMethods.ContinueStart, new { session_id = _id, mode = "open_in_agent", resume = "native", agent = _agent, native_id = _nativeID });
+        if (!response.Ok || response.Result is not { } result || !result.TryGetProperty("command", out var command) || command.ValueKind != JsonValueKind.Array)
+        {
+            _notice.Text = response.Error ?? "A native resume command is not available for this session.";
+            return;
+        }
+        var text = string.Join(" ", command.EnumerateArray().Select(v => QuoteArgument(v.ToString())));
+        var data = new DataPackage();
+        data.SetText(text);
+        Clipboard.SetContent(data);
+        _notice.Text = "Native resume command copied. The agent CLI and original local session must be available; Nexus will not open a terminal window.";
+    }
+
+    private static string QuoteArgument(string value) => value.Any(char.IsWhiteSpace) ? "\"" + value.Replace("\"", "\\\"") + "\"" : value;
 
     private async Task ShareAsync()
     {
-        var team = _team.IsChecked == true;
-        if (team)
-        {
-            var confirm = new ContentDialog
-            {
-                Title = "Share with the project",
-                Content = "All members will see this chat and its files.",
-                PrimaryButtonText = "Share with everyone",
-                CloseButtonText = "Cancel",
-                XamlRoot = XamlRoot,
-                DefaultButton = ContentDialogButton.Close
-            };
-            if (await confirm.ShowAsync() != ContentDialogResult.Primary)
-            {
-                return;
-            }
-        }
-        var people = _people.Text.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        var response = await Call(NxMethods.SessionsShare, new
-        {
-            session_id = _id,
-            people,
-            team,
-            confirm = team,
-            live = _live.IsChecked == true
-        });
-        _context.Children.Add(Line(response.Ok ? "Share sent" : response.Error ?? "Share failed"));
+        var recipient = new TextBox { PlaceholderText = "Recipient user ID" };
+        var dialog = new ContentDialog { Title = "Share session", Content = recipient, PrimaryButtonText = "Share", CloseButtonText = "Cancel", XamlRoot = XamlRoot };
+        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (string.IsNullOrWhiteSpace(recipient.Text)) { _notice.Text = "Enter a recipient user ID."; return; }
+        var response = await Call(NxMethods.SessionsShare, new { session_id = _id, user_id = recipient.Text.Trim() });
+        _notice.Text = response.Ok ? "Session shared with " + recipient.Text.Trim() + "." : response.Error ?? "Sharing failed.";
     }
 
     private async Task SendTeleportAsync()
@@ -282,11 +329,10 @@ public sealed class SessionPage : NexusPage
             return;
         }
         var recipient = new TextBox { PlaceholderText = "Recipient user ID" };
-        var home = new TextBox { PlaceholderText = "Recipient home folder (optional)" };
         var dialog = new ContentDialog
         {
             Title = "Send a teleport",
-            Content = new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "The recipient receives the latest completed, redacted session version." }, recipient, home } },
+            Content = new StackPanel { Spacing = 10, Children = { new TextBlock { Text = "The recipient receives the latest completed, redacted session version." }, recipient } },
             PrimaryButtonText = "Send",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
@@ -298,12 +344,10 @@ public sealed class SessionPage : NexusPage
         }
         if (string.IsNullOrWhiteSpace(recipient.Text))
         {
-            _context.Children.Add(Line("A recipient user ID is required."));
+            _notice.Text = "A recipient user ID is required.";
             return;
         }
-        var response = await Call(NxMethods.TeleportSend, new { session_id = _id, to_user_id = recipient.Text.Trim(), home = home.Text.Trim() });
-        _context.Children.Add(Line(response.Ok ? "Teleport sent" : response.Error ?? "Teleport could not be sent"));
+        var response = await Call(NxMethods.TeleportSend, new { session_id = _id, to_user_id = recipient.Text.Trim() });
+        _notice.Text = response.Ok ? "Teleport sent." : response.Error ?? "Teleport could not be sent.";
     }
-
-    private static string Selected(ComboBox box) => box.SelectedItem as string ?? "";
 }

@@ -27,6 +27,9 @@ func (s *Server) registerAgentSessionToolRoutes() {
 	}
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/fetch", s.requireAuth(s.handleAgentSessionFetch))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/summary", s.requireAuth(s.handleAgentSessionSummary))
+	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/files", s.requireAuth(s.handleAgentSessionFiles))
+	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/operations", s.requireAuth(s.handleAgentSessionOperations))
+	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/memories", s.requireAuth(s.handleAgentSessionMemories))
 	s.Mux.HandleFunc("GET /v1/projects/{id}/knowledge", s.requireAuth(s.handleProjectKnowledge))
 }
 

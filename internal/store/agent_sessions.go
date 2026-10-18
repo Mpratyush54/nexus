@@ -94,6 +94,7 @@ type TimelineQuery struct {
 	UserID    string
 	ProjectID string
 	Harness   string
+	Query     string
 	Cursor    string
 	Limit     int
 }
@@ -752,6 +753,9 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 		if q.Harness != "" && row.Harness != q.Harness {
 			continue
 		}
+		if q.Query != "" && !strings.Contains(strings.ToLower(row.Title+" "+row.Summary+" "+row.NativeID), strings.ToLower(q.Query)) {
+			continue
+		}
 		if !cursorAt.IsZero() {
 			if row.LastActiveAt.After(cursorAt) {
 				continue
@@ -1390,10 +1394,11 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		)
 		AND ($2 = '' OR s.project_id::text = $2)
 		AND ($3 = '' OR s.harness = $3)
+		AND ($7 = '' OR s.title ILIKE '%' || $7 || '%' OR s.summary ILIKE '%' || $7 || '%' OR s.native_id ILIKE '%' || $7 || '%')
 		AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
 		ORDER BY s.last_active_at DESC, s.id DESC
 		LIMIT $6`,
-		q.UserID, q.ProjectID, q.Harness, cursorAt, cursorID, q.Limit+1)
+		q.UserID, q.ProjectID, q.Harness, cursorAt, cursorID, q.Limit+1, q.Query)
 	if err != nil {
 		return nil, "", err
 	}
