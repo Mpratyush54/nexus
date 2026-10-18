@@ -232,9 +232,6 @@ func (s *Server) upsertSessionSummary(ctx context.Context, job *store.HarvestJob
 		FilesAffected: []string{},
 		ToolsUsed:     []string{},
 	}
-	if uuidLikeSessionID(sessionID) {
-		item.SessionID = sessionID
-	}
 	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {
 		return nil, err
@@ -349,9 +346,6 @@ func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob
 		SupersedesKey: p.SupersedesKey,
 		Outcome:       outcome,
 		WeekBucket:    week,
-	}
-	if uuidLikeSessionID(sessionID) {
-		item.SessionID = sessionID
 	}
 	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {

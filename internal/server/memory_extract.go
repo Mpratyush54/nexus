@@ -110,9 +110,6 @@ func (s *Server) persistExtractProposal(r *http.Request, projectID string, p ext
 		Outcome:       outcome,
 		WeekBucket:    week,
 	}
-	if uuidLikeSessionID(sessionID) {
-		item.SessionID = sessionID
-	}
 	if level == "personal" {
 		item.UserID = authSubject(r)
 	}

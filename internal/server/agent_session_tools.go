@@ -111,6 +111,22 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 	}
 	summary := strings.TrimSpace(row.Summary)
 	if summary == "" {
+		// The harvest worker stores its processed summary as a project memory
+		// keyed session/<id> (the session_id column stays NULL: those rows are
+		// level 'project'). Prefer that over the extractive fallback so the
+		// Summary tab shows the processed memory once extraction has run.
+		for _, sid := range []string{row.NativeID, row.ID} {
+			sid = strings.TrimSpace(sid)
+			if sid == "" {
+				continue
+			}
+			if item := s.findMemoryByKey(r.Context(), row.ProjectID, "session/"+sid); item != nil {
+				summary = strings.TrimSpace(item.Content)
+				break
+			}
+		}
+	}
+	if summary == "" {
 		if cs, ok := s.agentCloud(); ok {
 			if turns, err := cs.ListSessionTurns(r.Context(), row.ID); err == nil {
 				summary = capturedTurnOverview(turns)
