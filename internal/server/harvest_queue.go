@@ -232,6 +232,9 @@ func (s *Server) upsertSessionSummary(ctx context.Context, job *store.HarvestJob
 		FilesAffected: []string{},
 		ToolsUsed:     []string{},
 	}
+	if uuidLikeSessionID(sessionID) {
+		item.SessionID = sessionID
+	}
 	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {
 		return nil, err
@@ -346,6 +349,9 @@ func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob
 		SupersedesKey: p.SupersedesKey,
 		Outcome:       outcome,
 		WeekBucket:    week,
+	}
+	if uuidLikeSessionID(sessionID) {
+		item.SessionID = sessionID
 	}
 	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {
@@ -554,8 +560,9 @@ func (s *Server) handleMemoryExtractSync(w http.ResponseWriter, r *http.Request)
 	}
 	srcHint := strings.TrimSpace(req.Source)
 	created := make([]*store.MemoryItem, 0, len(result.Proposals))
+	sessionID := extract.SessionIDFromTurns(turns)
 	for _, p := range result.Proposals {
-		item, cerr := s.persistExtractProposal(r, projectID, p, srcHint, result.Provider)
+		item, cerr := s.persistExtractProposal(r, projectID, p, srcHint, result.Provider, sessionID)
 		if cerr != nil {
 			continue
 		}

@@ -307,8 +307,10 @@ func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, 
 	if fetch < 80 {
 		fetch = 80
 	}
-	if fetch > 4000 {
-		fetch = 4000
+	// A 4,000-row ceiling made every page beyond that point permanently empty,
+	// even when the API reported has_more for projects with large histories.
+	if fetch > 100000 {
+		fetch = 100000
 	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items

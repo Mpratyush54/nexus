@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"central-memory/internal/hiddenproc"
 	"central-memory/internal/project"
 )
 
@@ -43,6 +44,7 @@ func runGit(root string, args ...string) (string, error) {
 		return "", err
 	}
 	cmd := exec.CommandContext(ctx, gitBin, append([]string{"-C", root}, args...)...)
+	hiddenproc.Configure(cmd)
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return string(out), ctx.Err()

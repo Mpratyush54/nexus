@@ -416,11 +416,10 @@ func findSQLiteFile(root, conversationID, harness string, maxDepth int) string {
 			exact = path
 			return filepath.SkipAll
 		}
-		// OpenCode: single global DB; harvest session id is "opencode".
+		// OpenCode: one global DB holds many native session IDs. The snapshot
+		// extractor selects only the requested session inside this database.
 		if harness == "opencode" && strings.EqualFold(base, "opencode.db") {
-			if convLower == "opencode" || convLower == "" {
-				global = path
-			}
+			global = path
 		}
 		return nil
 	})

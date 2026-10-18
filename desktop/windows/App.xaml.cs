@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Nexus.Core;
 
@@ -28,7 +29,14 @@ public partial class App : Application
         var background = argv.Any(a => string.Equals(a, "--background", StringComparison.OrdinalIgnoreCase));
         ReadDeepLink(argv);
 
-        Core.Init("""{"online":true}""");
+        Core.Init(JsonSerializer.Serialize(new
+        {
+            online = true,
+            // An explicit workspace is safest. During development, accepting
+            // the current directory only when it is a git worktree keeps an
+            // installed Nexus.exe from accidentally harvesting its own files.
+            workspace_root = CaptureWorkspaceRoot()
+        }));
         var window = new MainWindow();
         _window = window;
         SingleInstance.Listen(payload =>
@@ -46,6 +54,17 @@ public partial class App : Application
         PendingSessionId = null;
         PendingTeleportId = null;
         PendingAuthUrl = null;
+    }
+
+    private static string CaptureWorkspaceRoot()
+    {
+        var configured = Environment.GetEnvironmentVariable("NEXUS_WORKSPACE");
+        if (!string.IsNullOrWhiteSpace(configured) && Directory.Exists(configured))
+        {
+            return configured;
+        }
+        var current = Directory.GetCurrentDirectory();
+        return Directory.Exists(Path.Combine(current, ".git")) ? current : "";
     }
 
     public static void ReadDeepLink(string[] argv)

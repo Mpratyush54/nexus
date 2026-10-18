@@ -20,6 +20,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"central-memory/internal/hiddenproc"
 )
 
 // maxSQLiteScanBytes bounds raw DB reads (8MB).
@@ -54,6 +56,7 @@ func extractViaCLI(dbPath string) []Turn {
 	// .dump is read-only; -readonly flag added when supported (best-effort:
 	// failure falls back to raw scan).
 	cmd := exec.CommandContext(ctx, bin, dbPath, ".dump")
+	hiddenproc.Configure(cmd)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	// Bound output: LimitReader is not directly usable with cmd.Stdout, so

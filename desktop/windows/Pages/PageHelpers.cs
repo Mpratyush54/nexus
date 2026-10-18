@@ -26,6 +26,29 @@ public static class UiThread
 public class NexusPage : Page
 {
     protected NxClient Core => App.Core;
+    private bool _entered;
+
+    public NexusPage()
+    {
+        Loaded += (_, _) =>
+        {
+            if (!_entered) Enter(null);
+        };
+    }
+
+    public void Enter(object? parameter)
+    {
+        _entered = true;
+        OnEnter(parameter);
+    }
+
+    protected virtual void OnEnter(object? parameter) { }
+
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    {
+        base.OnNavigatedTo(e);
+        Enter(e.Parameter);
+    }
 
     protected async Task<NxResponse> Call(string method, object? args = null)
     {
@@ -69,7 +92,7 @@ public class NexusPage : Page
         {
             Text = NxJson.Scrub(text),
             TextWrapping = TextWrapping.Wrap,
-            FontSize = title ? 16 : 14,
+            FontSize = title ? 18 : 14,
             FontWeight = title ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal
         };
     }
@@ -83,18 +106,28 @@ public class NexusPage : Page
         }
         return new Border
         {
-            Padding = new Thickness(16),
-            Margin = new Thickness(0, 0, 0, 8),
-            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(18, 16, 18, 16),
+            Margin = new Thickness(0, 0, 0, 2),
+            MinHeight = 96,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            CornerRadius = new CornerRadius(12),
             BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(Microsoft.UI.Colors.Gray),
+            Background = ResourceBrush("CardBackgroundFillColorDefaultBrush", Windows.UI.Color.FromArgb(26, 255, 255, 255)),
+            BorderBrush = ResourceBrush("CardStrokeColorDefaultBrush", Windows.UI.Color.FromArgb(60, 255, 255, 255)),
             Child = stack
         };
     }
 
+    private static Brush ResourceBrush(string key, Windows.UI.Color fallback)
+    {
+        return Application.Current?.Resources.TryGetValue(key, out var value) == true && value is Brush brush
+            ? brush
+            : new SolidColorBrush(fallback);
+    }
+
     protected static Button Action(string label, Action click)
     {
-        var button = new Button { Content = label };
+        var button = new Button { Content = label, MinHeight = 34, Padding = new Thickness(12, 5, 12, 5) };
         button.Click += (_, _) => click();
         return button;
     }

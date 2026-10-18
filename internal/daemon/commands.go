@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"central-memory/internal/hiddenproc"
 )
 
 // allowedGitSubcommands is the read-only git surface required by Nexus
@@ -231,6 +233,7 @@ func RunCommand(root string, argv []string) (CommandResult, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), CommandTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, argv[1:]...)
+	hiddenproc.Configure(cmd)
 	cmd.Dir = root
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {

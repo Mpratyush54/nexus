@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"central-memory/internal/hiddenproc"
 	"central-memory/internal/platform"
 )
 
@@ -270,7 +271,9 @@ func fpRun(dir string, args ...string) string {
 
 func gitOut(dir string, args ...string) (string, error) {
 	full := append([]string{"-C", dir}, args...)
-	out, err := exec.Command("git", full...).Output()
+	cmd := exec.Command("git", full...)
+	hiddenproc.Configure(cmd)
+	out, err := cmd.Output()
 	return string(out), err
 }
 

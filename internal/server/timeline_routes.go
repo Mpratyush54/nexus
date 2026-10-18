@@ -9,8 +9,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"central-memory/internal/store"
 )
@@ -20,6 +22,7 @@ func (s *Server) registerTimelineRoutes() {
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}", s.requireAuth(s.handleAgentSessionGet))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/grants", s.requireAuth(s.handleAgentSessionGrant))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/turns", s.requireAuth(s.handleAgentTurnPost))
+	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/turns/batch", s.requireAuth(s.handleAgentTurnBatchPost))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/turns", s.requireAuth(s.handleAgentTurnList))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/versions", s.requireAuth(s.handleAgentVersionList))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/versions", s.requireAuth(s.handleAgentVersionCreate))
@@ -319,6 +322,57 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
 }
 
+// Batch ingest avoids one WAN round-trip per captured turn when importing an
+// existing agent database. Duplicate indexes are safe to retry after a
+// partial upload; other failures stop the batch and remain visible to the
+// caller instead of silently discarding chat history.
+func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request) {
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return
+	}
+	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if s.rejectIfCaptureOff(w, r, row.ProjectID) {
+		return
+	}
+	var body struct {
+		Turns []struct {
+			Idx         int             `json:"idx"`
+			Role        string          `json:"role"`
+			TextPreview string          `json:"text_preview"`
+			ToolCalls   json.RawMessage `json:"tool_calls"`
+		} `json:"turns"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if len(body.Turns) == 0 || len(body.Turns) > 50 {
+		writeError(w, http.StatusBadRequest, "turns must contain 1 to 50 items")
+		return
+	}
+	created, duplicates := 0, 0
+	for _, turn := range body.Turns {
+		err := cs.AppendSessionTurn(r.Context(), store.SessionTurn{
+			SessionID: row.ID, Idx: turn.Idx, Role: turn.Role,
+			TextPreview: turn.TextPreview, ToolCalls: turn.ToolCalls,
+		})
+		if errors.Is(err, store.ErrConflict) {
+			duplicates++
+			continue
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		created++
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"created": created, "duplicates": duplicates})
+}
+
 func (s *Server) handleAgentTurnList(w http.ResponseWriter, r *http.Request) {
 	cs, ok := s.agentCloud()
 	if !ok {
@@ -547,29 +601,54 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 100 {
+		limit = 30
+	}
 	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
 	if projectID != "" && !s.authorizeProject(w, r, projectID) {
 		return
 	}
-	items, next, err := cs.ListTimeline(r.Context(), store.TimelineQuery{
+	cursor := r.URL.Query().Get("cursor")
+	harness := strings.TrimSpace(r.URL.Query().Get("harness"))
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	items, modernNext, err := cs.ListTimeline(r.Context(), store.TimelineQuery{
 		UserID: authSubject(r), ProjectID: projectID,
-		Harness: strings.TrimSpace(r.URL.Query().Get("harness")),
-		Cursor:  r.URL.Query().Get("cursor"), Limit: limit,
+		Harness: harness, Query: query, Cursor: cursor, Limit: limit,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if len(items) == 0 {
-		// The agent-session store was introduced after snapshot capture had
-		// already been in production. Fall back only when the new store has
-		// nothing, preventing a duplicate card for sessions captured after
-		// the migration while keeping pre-existing history visible.
-		items, next, err = s.legacyTimeline(r.Context(), authSubject(r), projectID, strings.TrimSpace(r.URL.Query().Get("harness")), r.URL.Query().Get("cursor"), limit)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "could not list captured snapshots")
-			return
+	// Historical snapshots and agent sessions coexist. Query both on every
+	// page; otherwise the first new capture hides the entire old timeline.
+	legacy, err := s.legacyTimeline(r.Context(), authSubject(r), projectID, harness, query, cursor)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list captured snapshots")
+		return
+	}
+	seen := make(map[string]bool, len(items))
+	for _, item := range items {
+		seen[item.SessionID] = true
+	}
+	for _, item := range legacy {
+		if !seen[item.SessionID] {
+			items = append(items, item)
 		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].LastActiveAt.Equal(items[j].LastActiveAt) {
+			return items[i].SessionID > items[j].SessionID
+		}
+		return items[i].LastActiveAt.After(items[j].LastActiveAt)
+	})
+	next := ""
+	hasMore := len(items) > limit || modernNext != ""
+	if len(items) > limit {
+		items = items[:limit]
+	}
+	if hasMore && len(items) > 0 {
+		last := items[len(items)-1]
+		next = last.LastActiveAt.UTC().Format(time.RFC3339Nano) + "|" + last.SessionID
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
 }
@@ -622,43 +701,66 @@ func legacyAgentSession(snap *store.SessionSnapshot) *store.AgentSession {
 	}
 }
 
-func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness, cursor string, limit int) ([]store.TimelineItem, string, error) {
+func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness, query, cursor string) ([]store.TimelineItem, error) {
 	ps := provenanceStore(s.Store)
 	if ps == nil {
-		return []store.TimelineItem{}, "", nil
+		return []store.TimelineItem{}, nil
 	}
 	projects := []*store.Project{}
 	if projectID != "" {
 		project, err := s.Store.GetProject(ctx, projectID)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		projects = append(projects, project)
 	} else {
 		var err error
 		projects, err = s.Store.ListProjectsForUser(ctx, userID)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 	}
 	items := make([]store.TimelineItem, 0)
+	var cursorAt time.Time
+	cursorID := ""
+	if cursor != "" {
+		idx := strings.LastIndex(cursor, "|")
+		if idx <= 0 {
+			return nil, errors.New("bad timeline cursor")
+		}
+		var err error
+		cursorAt, err = time.Parse(time.RFC3339Nano, cursor[:idx])
+		if err != nil {
+			return nil, err
+		}
+		cursorID = cursor[idx+1:]
+	}
 	for _, project := range projects {
 		if project == nil || project.ID == "" {
 			continue
 		}
-		snaps, err := ps.ListSnapshotsForProject(ctx, project.ID, 100)
+		// The provenance API returns metadata only. Allow a substantial
+		// historical backfill instead of the previous hard 100-session cutoff.
+		snaps, err := ps.ListSnapshotsForProject(ctx, project.ID, 10000)
 		if err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		for i := range snaps {
 			snap := &snaps[i]
 			if harness != "" && !strings.EqualFold(harness, snap.Harness) {
 				continue
 			}
+			if query != "" && !strings.Contains(strings.ToLower(snap.Harness+" "+snap.ConversationID), strings.ToLower(query)) {
+				continue
+			}
 			if !s.canReadSnapshot(ctx, userID, snap) {
 				continue
 			}
 			legacy := legacyAgentSession(snap)
+			if !cursorAt.IsZero() && (legacy.LastActiveAt.After(cursorAt) ||
+				(legacy.LastActiveAt.Equal(cursorAt) && legacy.ID >= cursorID)) {
+				continue
+			}
 			items = append(items, store.TimelineItem{
 				SessionID: legacy.ID, ProjectID: legacy.ProjectID, Harness: legacy.Harness,
 				NativeID: legacy.NativeID, Title: legacy.Title, Summary: legacy.Summary,
@@ -667,22 +769,5 @@ func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness,
 			})
 		}
 	}
-	// Match the native timeline ordering. Cursor paging will be enabled for
-	// the legacy adapter when the desktop exposes a Load more control.
-	_ = cursor
-	if limit <= 0 || limit > 100 {
-		limit = 30
-	}
-	for i := 0; i < len(items); i++ {
-		for j := i + 1; j < len(items); j++ {
-			if items[j].LastActiveAt.After(items[i].LastActiveAt) ||
-				(items[j].LastActiveAt.Equal(items[i].LastActiveAt) && items[j].SessionID > items[i].SessionID) {
-				items[i], items[j] = items[j], items[i]
-			}
-		}
-	}
-	if len(items) > limit {
-		items = items[:limit]
-	}
-	return items, "", nil
+	return items, nil
 }

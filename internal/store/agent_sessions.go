@@ -13,6 +13,7 @@ import (
 	"central-memory/internal/capture"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ErrStorageFull means file blobs cannot be accepted until the plan has room.
@@ -94,6 +95,7 @@ type TimelineQuery struct {
 	UserID    string
 	ProjectID string
 	Harness   string
+	Query     string
 	Cursor    string
 	Limit     int
 }
@@ -752,6 +754,9 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 		if q.Harness != "" && row.Harness != q.Harness {
 			continue
 		}
+		if q.Query != "" && !strings.Contains(strings.ToLower(row.Title+" "+row.Summary+" "+row.NativeID), strings.ToLower(q.Query)) {
+			continue
+		}
 		if !cursorAt.IsZero() {
 			if row.LastActiveAt.After(cursorAt) {
 				continue
@@ -1157,6 +1162,10 @@ func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn)
 		VALUES ($1::uuid, $2, $3, $4, NULLIF($5,''), $6::jsonb, NULLIF($7,''))`,
 		turn.SessionID, turn.Idx, turn.Role, turn.At, turn.TextPreview, string(turn.ToolCalls), turn.BlobRef)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrConflict
+		}
 		return err
 	}
 	if tag.RowsAffected() == 0 {
@@ -1390,10 +1399,11 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		)
 		AND ($2 = '' OR s.project_id::text = $2)
 		AND ($3 = '' OR s.harness = $3)
+		AND ($7 = '' OR s.title ILIKE '%' || $7 || '%' OR s.summary ILIKE '%' || $7 || '%' OR s.native_id ILIKE '%' || $7 || '%')
 		AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
 		ORDER BY s.last_active_at DESC, s.id DESC
 		LIMIT $6`,
-		q.UserID, q.ProjectID, q.Harness, cursorAt, cursorID, q.Limit+1)
+		q.UserID, q.ProjectID, q.Harness, cursorAt, cursorID, q.Limit+1, q.Query)
 	if err != nil {
 		return nil, "", err
 	}

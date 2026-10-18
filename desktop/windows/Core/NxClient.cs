@@ -10,7 +10,7 @@ public sealed class NxClient
     private static DispatcherQueue? _queue;
     private static Action<string>? _onEvent;
 
-    public void Init(string configJson) => NxNative.nx_init(configJson);
+    public bool Init(string configJson) => NxNative.nx_init(configJson) == 0;
 
     public void Shutdown() => NxNative.nx_shutdown();
 

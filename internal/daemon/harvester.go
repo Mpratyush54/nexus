@@ -93,10 +93,13 @@ type TranscriptSource struct {
 
 // Turn is a single parsed dialogue turn.
 type Turn struct {
-	Speaker   string           // "user" | "assistant" (normalized where possible)
-	Content   string           // text content (tool_use blocks not inlined into text)
-	Timestamp time.Time        // zero if the transcript line carried none
-	ToolCalls []map[string]any // structured tool_use / function_call blocks (JSON-compatible)
+	Speaker        string           // "user" | "assistant" (normalized where possible)
+	Content        string           // text content (tool_use blocks not inlined into text)
+	Timestamp      time.Time        // zero if the transcript line carried none
+	ToolCalls      []map[string]any // structured tool_use / function_call blocks (JSON-compatible)
+	SourcePosition int64            // stable byte position within an append-only transcript
+	SessionID      string           // native session id for multi-session stores such as OpenCode
+	SessionTitle   string           // native title, when available
 }
 
 // Harvester tails agent transcript files for one workspace.
@@ -116,6 +119,8 @@ type Harvester struct {
 	now func() time.Time
 
 	mu         sync.Mutex
+	pauseMu    sync.RWMutex
+	paused     bool
 	offsets    map[string]int64     // jsonl/json path -> last-read byte offset
 	sqlite     map[string]fileMeta  // sqlite path -> last observed state
 	lastActive map[string]time.Time // path -> last observed content time
@@ -239,6 +244,27 @@ func (h *Harvester) SetEmitter(emitter EventEmitter) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.emitter = emitter
+}
+
+// SetPaused suspends new filesystem scans without tearing down the
+// harvester's durable cursor state.  A scan already in progress is allowed
+// to finish; callers should also gate downstream processing.
+func (h *Harvester) SetPaused(paused bool) {
+	if h == nil {
+		return
+	}
+	h.pauseMu.Lock()
+	h.paused = paused
+	h.pauseMu.Unlock()
+}
+
+func (h *Harvester) IsPaused() bool {
+	if h == nil {
+		return true
+	}
+	h.pauseMu.RLock()
+	defer h.pauseMu.RUnlock()
+	return h.paused
 }
 
 func (h *Harvester) emit(ev Event) {
@@ -889,7 +915,7 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 			role = "assistant"
 		}
 	}
-	if r := strings.ToLower(role); r == "tool" || r == "function" {
+	if r := strings.ToLower(strings.TrimSpace(role)); r == "tool" || r == "function" || r == "system" || r == "developer" {
 		// tool_result rows — keep dialogue clean; structured calls live on
 		// the assistant turn that issued them.
 		return Turn{}, false
@@ -1260,16 +1286,29 @@ func lastNewline(b []byte) int {
 // pasted secrets, and the event stream lands in Postgres. Structured
 // tool_calls are retained for provenance (F3 / ParseToolCalls).
 func turnPayload(action, agent, path string, t Turn) map[string]any {
+	id := sessionID(path)
+	if t.SessionID != "" {
+		id = t.SessionID
+	}
 	p := map[string]any{
 		"action":     action,
 		"agent":      agent,
 		"path":       path,
-		"session_id": sessionID(path),
+		"session_id": id,
 		"speaker":    t.Speaker,
 		"content":    redact(t.Content),
 	}
+	if t.SessionTitle != "" {
+		p["session_title"] = t.SessionTitle
+	}
 	if !t.Timestamp.IsZero() {
 		p["timestamp"] = t.Timestamp.UTC().Format(time.RFC3339Nano)
+	}
+	// Preserve structured calls separately from the redacted preview.  They
+	// drive provenance and the cloud Timeline's tool indicators; embedding
+	// them into conversation text would make both less reliable.
+	if t.SourcePosition > 0 {
+		p["source_position"] = t.SourcePosition
 	}
 	if len(t.ToolCalls) > 0 {
 		// Emit as []any so JSON encoders and ParseToolCalls([]any) agree.
@@ -1339,8 +1378,11 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	var turns []Turn
 	sc := bufio.NewScanner(strings.NewReader(string(consumable)))
 	sc.Buffer(make([]byte, 64<<10), maxJSONLLineBytes)
+	position := off
 	for sc.Scan() {
+		position += int64(len(sc.Bytes())) + 1
 		if t, ok := parseTurnLine(sc.Bytes()); ok {
+			t.SourcePosition = position
 			turns = append(turns, t)
 		}
 	}
@@ -1393,6 +1435,15 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 	h.mu.Lock()
 	prev, seen := h.sqlite[path]
 	cur := fileMeta{size: info.Size(), mtime: info.ModTime()}
+	// OpenCode writes to WAL while the main DB's stat can stay unchanged.
+	if strings.EqualFold(filepath.Base(path), "opencode.db") {
+		if wal, err := os.Stat(path + "-wal"); err == nil {
+			cur.size += wal.Size()
+			if wal.ModTime().After(cur.mtime) {
+				cur.mtime = wal.ModTime()
+			}
+		}
+	}
 	h.sqlite[path] = cur
 	agent := h.agents[path]
 	ex := h.extractors[agent]
@@ -1420,24 +1471,34 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 		if len(turns) == 0 {
 			return false
 		}
-		last := now
 		h.mu.Lock()
 		for i := range turns {
 			if turns[i].Timestamp.IsZero() {
 				turns[i].Timestamp = now
 			}
-			if turns[i].Timestamp.After(last) {
-				last = turns[i].Timestamp
+			turnPath := path
+			if turns[i].SessionID != "" {
+				turnPath = filepath.Join(filepath.Dir(path), ".nexus-opencode-sessions", turns[i].SessionID+".jsonl")
+				h.agents[turnPath] = agent
+			}
+			if turns[i].Timestamp.After(h.lastActive[turnPath]) {
+				h.lastActive[turnPath] = turns[i].Timestamp
+			}
+			delete(h.completed, turnPath)
+			h.batch[turnPath] = append(h.batch[turnPath], turns[i])
+			if turns[i].Timestamp.After(h.lastActive[path]) {
+				h.lastActive[path] = turns[i].Timestamp
 			}
 		}
-		h.lastActive[path] = last
-		delete(h.completed, path)
-		h.batch[path] = append(h.batch[path], turns...)
 		h.mu.Unlock()
 		for _, t := range turns {
+			turnPath := path
+			if t.SessionID != "" {
+				turnPath = filepath.Join(filepath.Dir(path), ".nexus-opencode-sessions", t.SessionID+".jsonl")
+			}
 			h.emit(Event{
 				Type:      EventConversationTurn,
-				Payload:   turnPayload("conversation_turn", agent, path, t),
+				Payload:   turnPayload("conversation_turn", agent, turnPath, t),
 				CreatedAt: now,
 			})
 		}
@@ -1449,6 +1510,12 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 		turns, err := ex.ExtractNewRows(path, since)
 		if err == nil && runExtract(turns) {
 			return true
+		}
+		if strings.EqualFold(filepath.Base(path), "opencode.db") {
+			if err != nil {
+				log.Printf("harvester: OpenCode database read: %v", err)
+			}
+			return false
 		}
 	}
 	if turns := extractSQLiteFallback(path, since); runExtract(turns) {
@@ -1479,6 +1546,9 @@ func (h *Harvester) CheckIdle() []Event {
 	h.mu.Lock()
 	var due []string
 	for path, last := range h.lastActive {
+		if strings.EqualFold(filepath.Base(path), "opencode.db") {
+			continue
+		} // global cursor, not a chat
 		if !h.completed[path] && now.Sub(last) >= h.IdleTimeout {
 			due = append(due, path)
 		}
@@ -1775,13 +1845,18 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 func (h *Harvester) Start(ctx context.Context) {
 	t := time.NewTicker(h.PollInterval)
 	defer t.Stop()
-	_ = h.ScanAndTail()
-	_ = h.CheckIdle()
+	if !h.IsPaused() {
+		_ = h.ScanAndTail()
+		_ = h.CheckIdle()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if h.IsPaused() {
+				continue
+			}
 			_ = h.ScanAndTail()
 			_ = h.CheckIdle()
 		}

@@ -10,9 +10,12 @@ public sealed class TeleportPage : NexusPage
     private readonly StackPanel _detail = new() { Spacing = 8 };
     private readonly TextBlock _preview = new() { TextWrapping = TextWrapping.Wrap };
     private string _selected = "";
+    private string _sessionId = "";
     private Button _revoke = null!;
     private Button _prepare = null!;
     private Button _apply = null!;
+    private Button _open = null!;
+    private bool _sent;
 
     public TeleportPage()
     {
@@ -22,19 +25,21 @@ public sealed class TeleportPage : NexusPage
         sent.Click += async (_, _) => await LoadAsync(NxMethods.TeleportSent);
         _revoke = new Button { Content = "Revoke" };
         _revoke.Click += async (_, _) => await Run(NxMethods.TeleportRevoke);
-        _prepare = new Button { Content = "Prepare" };
+        _prepare = new Button { Content = "Review restore plan" };
         _prepare.Click += async (_, _) => await PrepareAsync();
-        _apply = new Button { Content = "Continue here" };
+        _apply = new Button { Content = "Accept transfer" };
         _apply.Click += async (_, _) => await Run(NxMethods.TeleportApply);
-        var open = new Button { Content = "Open in agent" };
-        open.Click += async (_, _) =>
+        _open = new Button { Content = "View session" };
+        _open.Click += (_, _) =>
         {
-            if (_selected.Length > 0)
+            if (_sessionId.Length > 0)
             {
-                MainWindow.Current?.OpenSession(_selected);
+                MainWindow.Current?.OpenSession(_sessionId);
             }
         };
-        CloudOnly(_revoke, _prepare, _apply);
+        Loaded += (_, _) => ShellState.Changed += HandleShellChanged;
+        Unloaded += (_, _) => ShellState.Changed -= HandleShellChanged;
+        UpdateActions();
 
         var columns = new Grid { ColumnSpacing = 16 };
         columns.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -42,7 +47,7 @@ public sealed class TeleportPage : NexusPage
         var list = new ScrollViewer { Content = _list };
         _detail.Children.Add(Line("Preview", title: true));
         _detail.Children.Add(_preview);
-        _detail.Children.Add(Row(_prepare, _apply, open, _revoke));
+        _detail.Children.Add(Row(_prepare, _apply, _open, _revoke));
         var detail = new ScrollViewer { Content = _detail };
         Grid.SetColumn(detail, 1);
         columns.Children.Add(list);
@@ -61,17 +66,18 @@ public sealed class TeleportPage : NexusPage
         Content = root;
     }
 
-    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    protected override void OnEnter(object? parameter)
     {
-        if (e.Parameter is string id)
-        {
-            _selected = id;
-        }
-        _ = LoadAsync(NxMethods.TeleportInbox);
+        _ = LoadAsync(NxMethods.TeleportInbox, parameter as string ?? "");
     }
 
-    private async Task LoadAsync(string method)
+    private async Task LoadAsync(string method, string requestedID = "")
     {
+        _sent = method == NxMethods.TeleportSent;
+        _selected = "";
+        _sessionId = "";
+        _preview.Text = "Select a transfer to review its redacted preview.";
+        UpdateActions();
         var response = await Call(method);
         _list.Children.Clear();
         if (!response.Ok)
@@ -88,40 +94,75 @@ public sealed class TeleportPage : NexusPage
         {
             var id = NxJson.Text(item, "id", "teleport_id");
             var preview = NxJson.Text(item, "preview", "note", "summary");
-            var open = Action("Preview", () => Select(id, preview));
+            var sessionId = NxJson.Text(item, "session_id", "sessionId");
+            var open = Action("Preview", () => Select(id, sessionId, preview));
             _list.Children.Add(Card(Line(preview.Length > 0 ? preview : id, title: true), Line(id), open));
-            if (id.Length > 0 && id == _selected)
+            if (id.Length > 0 && id == requestedID)
             {
-                Select(id, preview);
+                Select(id, sessionId, preview);
             }
         }
         if (items.Count == 0)
         {
-            _list.Children.Add(Line("No teleports."));
+            _list.Children.Add(Card(Line(_sent ? "No sent teleports." : "Nothing in your inbox.")));
         }
     }
 
-    private void Select(string id, string preview)
+    private void Select(string id, string sessionId, string preview)
     {
         _selected = id;
+        _sessionId = sessionId;
         _preview.Text = NxJson.Scrub(preview);
+        UpdateActions();
     }
+
+    private void UpdateActions()
+    {
+        _prepare.IsEnabled = _selected.Length > 0 && !_sent;
+        _apply.IsEnabled = _selected.Length > 0 && !_sent && !ShellState.Current.Offline;
+        _revoke.IsEnabled = _selected.Length > 0 && _sent && !ShellState.Current.Offline;
+        _open.IsEnabled = _sessionId.Length > 0;
+    }
+
+    private void HandleShellChanged(object? sender, EventArgs e) => DispatcherQueue?.TryEnqueue(UpdateActions);
 
     private async Task PrepareAsync()
     {
-        var response = await Call(NxMethods.TeleportPrepare, new { id = _selected, text = _preview.Text });
-        _preview.Text = response.Ok
-            ? NxJson.Scrub(response.Result?.ToString() ?? "")
-            : response.Error ?? "Prepare failed";
+		if (_selected.Length == 0 || _sessionId.Length == 0)
+		{
+			_preview.Text = "Select a teleport first.";
+			return;
+		}
+        var response = await Call(NxMethods.TeleportPrepare, new { session_id = _sessionId, id = _selected, text = _preview.Text });
+        if (!response.Ok || response.Result is not { } plan)
+        {
+            _preview.Text = response.Error ?? "Could not prepare this transfer.";
+            return;
+        }
+        var repo = plan.TryGetProperty("repo", out var repoValue) ? repoValue : default;
+        var commit = plan.TryGetProperty("commit", out var commitValue) ? commitValue : default;
+        var agent = plan.TryGetProperty("agent", out var agentValue) ? agentValue : default;
+        _preview.Text = "Dry-run restore plan\n" +
+            "Workspace: " + NxJson.Text(repo, "path", "note") + "\n" +
+            "Commit: " + NxJson.Text(commit, "action", "note") + "\n" +
+            "Agent: " + NxJson.Text(agent, "name", "note") + "\n" +
+            "Accepting a transfer does not modify your checkout or open a terminal.";
     }
 
     private async Task Run(string method)
     {
+		if (_selected.Length == 0)
+		{
+			_preview.Text = "Select a teleport first.";
+			return;
+		}
         var response = await Call(method, new { id = _selected });
-        _preview.Text = response.Ok ? "Done" : response.Error ?? "Request failed";
+        _preview.Text = response.Ok && method == NxMethods.TeleportApply
+            ? "Transfer accepted. View its session, then use the resume command when ready. No checkout was changed."
+            : response.Ok ? "Done" : response.Error ?? "Request failed";
         if (response.Ok && method == NxMethods.TeleportRevoke)
         {
-            await LoadAsync(NxMethods.TeleportInbox);
+            await LoadAsync(NxMethods.TeleportSent);
         }
     }
 }

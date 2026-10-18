@@ -21,7 +21,7 @@ const maxSnapshotSQLiteArtifactBytes = 2 << 20 // 2 MiB
 // into JSONL bytes for SessionSnapshot.TranscriptPayload. Reuses the harvest
 // SQLiteExtractor seam / CLI fallback (ADR-033: no mandatory Go SQL driver).
 // No permanent sidecar is written — extraction is collect-time only.
-func extractSnapshotTranscriptJSONL(harness, dbPath, workspaceRoot string) ([]byte, error) {
+func extractSnapshotTranscriptJSONL(harness, dbPath, workspaceRoot string, conversationID ...string) ([]byte, error) {
 	dbPath = strings.TrimSpace(dbPath)
 	if dbPath == "" {
 		return nil, fmt.Errorf("snapshot: empty sqlite path")
@@ -30,16 +30,19 @@ func extractSnapshotTranscriptJSONL(harness, dbPath, workspaceRoot string) ([]by
 		return nil, fmt.Errorf("snapshot: sqlite not found: %s", dbPath)
 	}
 	harness = normalizeHarness(harness)
-	turns := extractSnapshotTurns(harness, dbPath, workspaceRoot)
+	turns := extractSnapshotTurns(harness, dbPath, workspaceRoot, conversationID...)
 	if len(turns) == 0 {
 		return nil, fmt.Errorf("snapshot: no turns extracted from %s", filepath.Base(dbPath))
 	}
 	return turnsToSnapshotJSONL(turns)
 }
 
-func extractSnapshotTurns(harness, dbPath, workspaceRoot string) []Turn {
+func extractSnapshotTurns(harness, dbPath, workspaceRoot string, conversationID ...string) []Turn {
 	// OpenCode: dedicated schema-aware CLI extractor (same as harvest seam).
 	if harness == "opencode" || strings.EqualFold(filepath.Base(dbPath), "opencode.db") {
+		if len(conversationID) > 0 && conversationID[0] != "" && conversationID[0] != "opencode" {
+			return extractOpenCodeSessionTurns(dbPath, workspaceRoot, conversationID[0])
+		}
 		if turns := extractOpenCodeTurns(dbPath, workspaceRoot, time.Time{}); len(turns) > 0 {
 			return turns
 		}
@@ -62,7 +65,7 @@ func turnsToSnapshotJSONL(turns []Turn) ([]byte, error) {
 	n := 0
 	for _, t := range turns {
 		content := strings.TrimSpace(t.Content)
-		if content == "" {
+		if content == "" && len(t.ToolCalls) == 0 {
 			continue
 		}
 		speaker := strings.TrimSpace(t.Speaker)
@@ -72,6 +75,9 @@ func turnsToSnapshotJSONL(turns []Turn) ([]byte, error) {
 		row := map[string]any{
 			"speaker": speaker,
 			"content": content,
+		}
+		if len(t.ToolCalls) > 0 {
+			row["tool_calls"] = t.ToolCalls
 		}
 		if !t.Timestamp.IsZero() {
 			row["timestamp"] = t.Timestamp.UTC().Format(time.RFC3339Nano)

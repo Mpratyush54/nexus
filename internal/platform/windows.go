@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"central-memory/internal/hiddenproc"
 )
 
 func init() { registerBackend("windows", func() Service { return windowsService{} }) }
@@ -29,14 +31,18 @@ func (windowsService) Install(executable string, args []string) error {
 		}
 	}
 	argv := RenderSchtasksCreateArgs(schtasksTaskName, executable, args)
-	if out, err := exec.Command("schtasks", argv...).CombinedOutput(); err != nil {
+	cmd := exec.Command("schtasks", argv...)
+	hiddenproc.Configure(cmd)
+	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("platform: schtasks create: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
 func (windowsService) Uninstall() error {
-	out, err := exec.Command("schtasks", "/Delete", "/TN", schtasksTaskName, "/F").CombinedOutput()
+	cmd := exec.Command("schtasks", "/Delete", "/TN", schtasksTaskName, "/F")
+	hiddenproc.Configure(cmd)
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		// Deleting a missing task is already-uninstalled, not a failure.
 		// schtasks localizes messages (Issue #111): match multilingually.
@@ -49,7 +55,9 @@ func (windowsService) Uninstall() error {
 }
 
 func (windowsService) Status() (ServiceStatus, error) {
-	out, err := exec.Command("schtasks", "/Query", "/TN", schtasksTaskName, "/FO", "LIST").CombinedOutput()
+	cmd := exec.Command("schtasks", "/Query", "/TN", schtasksTaskName, "/FO", "LIST")
+	hiddenproc.Configure(cmd)
+	out, err := cmd.CombinedOutput()
 	// Locale-independent parsing (Issue #111): never match raw English
 	// substrings here; parseSchtasksStatus handles all locales.
 	return parseSchtasksStatus(string(out), err)

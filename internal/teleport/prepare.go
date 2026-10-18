@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"central-memory/internal/hiddenproc"
 )
 
 // PathRemap is one token rewrite shown in the Prepare checklist.
@@ -238,11 +240,13 @@ func agentBinary(agent string) string {
 
 func gitHasCommit(root, sha string) bool {
 	cmd := exec.Command("git", "-C", root, "cat-file", "-e", sha+"^{commit}")
+	hiddenproc.Configure(cmd)
 	return cmd.Run() == nil
 }
 
 func gitWorkingTreeClean(root string) bool {
 	cmd := exec.Command("git", "-C", root, "status", "--porcelain")
+	hiddenproc.Configure(cmd)
 	out, err := cmd.Output()
 	if err != nil {
 		return false

@@ -254,7 +254,7 @@ func ParseToolCalls(turnPayload map[string]any, turnIndex int) []ParsedToolCall 
 			})
 		case "run_command", "bash", "terminal", "shell", "run_terminal_cmd", "runterminalcmd":
 			cmd := firstString(args, "CommandLine", "command_line", "command", "cmd")
-			cwd := firstString(args, "Cwd", "cwd", "working_directory", "WorkingDirectory")
+			cwd := firstString(args, "Cwd", "cwd", "workdir", "working_directory", "WorkingDirectory")
 			outSnippet, trunc := tailCap(firstString(args, "Output", "output", "stdout", "stderr"), maxOutputSnippetKB)
 			var exit *int
 			if v, ok := args["ExitCode"]; ok {

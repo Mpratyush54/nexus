@@ -48,7 +48,8 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-  # Pure-Go CLI + daemon — safe to cross-compile with CGO_ENABLED=0.
+  # Pure-Go CLI is safe to cross-compile. Windows deliberately does not ship
+  # nexus-daemon: capture is hosted by Nexus.exe/nexuscore.dll.
   build-tools:
     needs: meta
     name: tools-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -72,7 +73,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
-      - name: Build CLI + daemon
+      - name: Build CLI and non-Windows daemon
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -86,7 +87,9 @@ jobs:
           if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
           LD_COMMON="-s -w -X central-memory/internal/buildinfo.Version=${VER} -X central-memory/internal/buildinfo.Commit=${GITHUB_SHA} -X central-memory/internal/buildinfo.BuiltAt=${BUILT_AT} -X main.defaultServerURL=${API_URL}"
           go build -trimpath -ldflags "${LD_COMMON}" -o "dist/nexus-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus
-          go build -trimpath -ldflags "${LD_COMMON}" -o "dist/nexus-daemon-${GOOS}-${GOARCH}${EXT}" ./cmd/daemon
+          if [ "$GOOS" != "windows" ]; then
+            go build -trimpath -ldflags "${LD_COMMON}" -o "dist/nexus-daemon-${GOOS}-${GOARCH}${EXT}" ./cmd/daemon
+          fi
           if [ "$GOOS" = "windows" ] && [ "$GOARCH" = "amd64" ]; then
             cp scripts/install-windows.ps1 dist/install-windows.ps1
           fi
@@ -105,7 +108,8 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # Fyne desktop needs CGO + native OS toolchains (no Linux→macOS cross).
+  # Windows ships the native WinUI shell. The legacy Fyne shell remains only
+  # for the non-Windows migration path until the SwiftUI replacement ships.
   build-desktop:
     needs: meta
     name: desktop-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -131,12 +135,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
+      - uses: actions/setup-dotnet@v4
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: '8.0.x'
       - name: Install Linux GUI deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
       - name: Build desktop
+        if: runner.os != 'Windows'
         shell: bash
         env:
           GOOS: ${{ matrix.goos }}
@@ -156,6 +165,21 @@ jobs:
           export GOOS GOARCH CGO_ENABLED
           go build -trimpath -ldflags "${DESKTOP_LD}" -o "dist/nexus-desktop-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus-desktop
           ls -la dist
+      - name: Build native Windows desktop
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+          BUILT_AT: ${{ needs.meta.outputs.built_at }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist, dist/Nexus | Out-Null
+          $ld = "-s -w -X central-memory/internal/buildinfo.Version=$env:VER -X central-memory/internal/buildinfo.Commit=$env:GITHUB_SHA -X central-memory/internal/buildinfo.BuiltAt=$env:BUILT_AT -X main.defaultServerURL=${{ env.API_URL }}"
+          dotnet publish desktop/windows/Nexus.csproj -c Release -r win-x64 --self-contained false -o dist/Nexus -p:AppxGeneratePriEnabled=false -p:WindowsAppSDKSelfContained=false
+          $env:CGO_ENABLED = '1'
+          go build -tags nexuscorelib -trimpath -ldflags $ld -buildmode=c-shared -o dist/Nexus/nexuscore.dll ./cmd/nexuscore
+          Compress-Archive -Path dist/Nexus/* -DestinationPath dist/nexus-desktop-windows-amd64.zip -Force
+          Get-ChildItem dist -Recurse | Select-Object FullName, Length
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.goos }}-${{ matrix.goarch }}
@@ -193,7 +217,7 @@ jobs:
           for name in sorted(os.listdir("dist")):
               if not name.startswith("nexus"):
                   continue
-              stem = name.replace(".exe", "")
+              stem = name.removesuffix(".exe").removesuffix(".zip")
               parts = stem.split("-")
               if len(parts) < 3:
                   continue

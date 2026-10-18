@@ -56,6 +56,10 @@ func TestTailOffset(t *testing.T) {
 	if len(*got) != 2 || (*got)[0].Type != EventConversationTurn {
 		t.Fatalf("expected 2 CONVERSATION_TURN events, got %+v", *got)
 	}
+	firstPosition, ok := (*got)[0].Payload["source_position"].(int64)
+	if !ok || firstPosition <= 0 || turns[1].SourcePosition <= firstPosition {
+		t.Fatalf("turns need stable, ascending source positions: %+v", turns)
+	}
 
 	// Re-tailing with no new content yields nothing (byte offset held).
 	turns, err = h.TailFile(p)
@@ -615,6 +619,21 @@ func TestParseTurnsCodexRollout(t *testing.T) {
 	}
 	if name, _ := turns[2].ToolCalls[0]["name"].(string); name != "shell" {
 		t.Fatalf("tool name=%q: %+v", name, turns[2].ToolCalls[0])
+	}
+}
+
+func TestParseTurnsCodexSkipsInternalInstructions(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"internal app context"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"system","content":[{"type":"input_text","text":"internal system prompt"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"show my chats"}]}}`,
+	}, "\n")
+	turns, err := ParseTurns(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].Speaker != "user" || turns[0].Content != "show my chats" {
+		t.Fatalf("internal instructions leaked into chat: %+v", turns)
 	}
 }
 

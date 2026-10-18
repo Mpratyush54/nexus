@@ -24,6 +24,22 @@ type recordingCloud struct {
 	posts []string
 }
 
+type routeCloud struct {
+	method string
+	path   string
+	body   []byte
+	result []byte
+}
+
+func (r *routeCloud) Do(_ context.Context, method, path string, body []byte) ([]byte, error) {
+	r.method, r.path = method, path
+	r.body = append([]byte(nil), body...)
+	if r.result != nil {
+		return r.result, nil
+	}
+	return []byte(`{"items":[]}`), nil
+}
+
 func (r *recordingCloud) Do(_ context.Context, method, path string, body []byte) ([]byte, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -50,6 +66,145 @@ func TestContinueAndOffline(t *testing.T) {
 	}
 }
 
+func TestCloudMethodsUseContractRoutes(t *testing.T) {
+	c := &routeCloud{}
+	deps := Deps{Cloud: c, Online: true}
+
+	if _, err := Call(context.Background(), "timeline.list", json.RawMessage(`{"project":"p1","agent":"codex","q":"auth","limit":50}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || !strings.HasPrefix(c.path, "/v1/timeline?") || !strings.Contains(c.path, "project_id=p1") || !strings.Contains(c.path, "harness=codex") || !strings.Contains(c.path, "q=auth") || !strings.Contains(c.path, "limit=50") {
+		t.Fatalf("timeline = %s %s", c.method, c.path)
+	}
+
+	if _, err := Call(context.Background(), "memory.search", json.RawMessage(`{"q":"hello","project":"p1","scope":"project"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "POST" || c.path != "/v1/agent/memory/search" {
+		t.Fatalf("memory route = %s %s", c.method, c.path)
+	}
+	var memoryBody map[string]any
+	if err := json.Unmarshal(c.body, &memoryBody); err != nil {
+		t.Fatal(err)
+	}
+	if memoryBody["query"] != "hello" || memoryBody["project_id"] != "p1" || memoryBody["level"] != "project" {
+		t.Fatalf("memory body = %#v", memoryBody)
+	}
+	if _, forwarded := memoryBody["q"]; forwarded {
+		t.Fatalf("strict endpoint received alias: %#v", memoryBody)
+	}
+	if _, err := Call(context.Background(), "memory.search", json.RawMessage(`{"project_id":"p/1"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || c.path != "/v1/projects/p%2F1/knowledge?limit=50" {
+		t.Fatalf("memory default route = %s %s", c.method, c.path)
+	}
+	if _, err := Call(context.Background(), "memory.search", json.RawMessage(`{"browse":true,"project_id":"p/1","q":"hello","limit":50,"offset":100}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || c.path != "/memory/search?limit=50&offset=100&project_id=p%2F1&q=hello" {
+		t.Fatalf("memory browse route = %s %s", c.method, c.path)
+	}
+
+	if _, err := Call(context.Background(), "sessions.turns", json.RawMessage(`{"session_id":"s/1"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || c.path != "/v1/agent-sessions/s%2F1/turns" {
+		t.Fatalf("turns route = %s %s", c.method, c.path)
+	}
+	if _, err := Call(context.Background(), "sessions.turns", json.RawMessage(`{"session_id":"s/1","limit":100,"cursor":"170000000000000001"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || !strings.HasPrefix(c.path, "/v1/agent-sessions/s%2F1/fetch?") || !strings.Contains(c.path, "limit=100") || !strings.Contains(c.path, "cursor=170000000000000001") {
+		t.Fatalf("paged turns route = %s %s", c.method, c.path)
+	}
+	for _, method := range []string{"sessions.files", "sessions.operations", "sessions.memories"} {
+		if _, err := Call(context.Background(), method, json.RawMessage(`{"session_id":"s/1"}`), deps); err != nil {
+			t.Fatal(err)
+		}
+		if c.method != "GET" || c.path != "/v1/agent-sessions/s%2F1/"+strings.TrimPrefix(method, "sessions.") {
+			t.Fatalf("%s route = %s %s", method, c.method, c.path)
+		}
+	}
+	if _, err := Call(context.Background(), "sessions.share", json.RawMessage(`{"session_id":"s/1","user_id":"friend"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "POST" || c.path != "/v1/agent-sessions/s%2F1/grants" || string(c.body) != `{"user_id":"friend"}` {
+		t.Fatalf("share route = %s %s %s", c.method, c.path, c.body)
+	}
+	if _, err := Call(context.Background(), "memory.pin", json.RawMessage(`{"id":"m/1"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "POST" || c.path != "/memory/m%2F1/pin" {
+		t.Fatalf("pin route = %s %s", c.method, c.path)
+	}
+	if _, err := Call(context.Background(), "memory.forget", json.RawMessage(`{"id":"m/1"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "POST" || c.path != "/memory/m%2F1/forget" {
+		t.Fatalf("forget route = %s %s", c.method, c.path)
+	}
+
+	c.result = []byte(`{"items":[{"harness":"codex","project_id":"p1"}]}`)
+	if _, err := Call(context.Background(), "agents.list", nil, deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || c.path != "/v1/timeline?limit=100" {
+		t.Fatalf("agents route = %s %s", c.method, c.path)
+	}
+	if _, err := Call(context.Background(), "agents.list", json.RawMessage(`{"project_id":"p/1"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || c.path != "/v1/timeline?limit=100&project_id=p%2F1" {
+		t.Fatalf("scoped agents route = %s %s", c.method, c.path)
+	}
+
+	if _, err := Call(context.Background(), "teleport.apply", json.RawMessage(`{"id":"tp/1"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "POST" || c.path != "/v1/teleports/tp%2F1/accept" {
+		t.Fatalf("teleport accept = %s %s", c.method, c.path)
+	}
+}
+
+type testCaptureController struct {
+	paused bool
+}
+
+func (c *testCaptureController) Pause() error {
+	c.paused = true
+	return nil
+}
+
+func (c *testCaptureController) Resume() error {
+	c.paused = false
+	return nil
+}
+
+func (c *testCaptureController) Status() any {
+	return map[string]any{"paused": c.paused, "running": !c.paused}
+}
+
+func TestCaptureControlsDelegateToHost(t *testing.T) {
+	capture := &testCaptureController{}
+	deps := Deps{Capture: capture}
+
+	paused, err := Call(context.Background(), "capture.pause", nil, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := paused.(map[string]any)["paused"]; got != true || !capture.paused {
+		t.Fatalf("pause response=%#v paused=%v", paused, capture.paused)
+	}
+	resumed, err := Call(context.Background(), "capture.resume", nil, deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := resumed.(map[string]any)["running"]; got != true || capture.paused {
+		t.Fatalf("resume response=%#v paused=%v", resumed, capture.paused)
+	}
+}
+
 func TestContinueRunnerRecordsArgv(t *testing.T) {
 	ResetRunsForTest()
 	runner := &continuex.Controllable{NextID: "op_runner_1"}
@@ -69,6 +224,19 @@ func TestContinueRunnerRecordsArgv(t *testing.T) {
 	cmd, _ := m["command"].([]string)
 	if len(cmd) == 0 {
 		t.Fatal("missing command in result")
+	}
+}
+
+func TestContinueStartNativeIDReturnsRealAgentCommand(t *testing.T) {
+	ResetRunsForTest()
+	out, err := Call(context.Background(), "continue.start", json.RawMessage(`{"session_id":"cloud-id","mode":"open_in_agent","agent":"codex","native_id":"native-id"}`), Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["command"].([]string)
+	want := []string{"codex", "resume", "native-id"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("command = %v, want %v", got, want)
 	}
 }
 
