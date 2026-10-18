@@ -62,7 +62,9 @@ public sealed partial class MainWindow : Window
 
     public void OpenSession(string sessionId)
     {
-        RestoreWindow();
+        // In-app navigation must not call WindowExtensions.Show: it restores
+        // a maximized window to its smaller normal bounds. Deep-link and tray
+        // entry points already restore the hidden window explicitly.
         ShowPage(new SessionPage(), sessionId);
     }
 
