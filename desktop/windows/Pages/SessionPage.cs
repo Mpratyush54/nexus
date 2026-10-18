@@ -41,13 +41,7 @@ public sealed class SessionPage : NexusPage
         _seedAgent.SelectedIndex = 0;
 
         var back = new Button { Content = "Timeline" };
-        back.Click += (_, _) =>
-        {
-            if (Frame.CanGoBack)
-            {
-                Frame.GoBack();
-            }
-        };
+        back.Click += (_, _) => MainWindow.Current?.ShowTimeline();
         var here = new Button { Content = "Here in Nexus" };
         here.Click += async (_, _) => await ContinueAsync("here", "native");
         var open = new Button { Content = "Open in agent" };
@@ -97,9 +91,9 @@ public sealed class SessionPage : NexusPage
         CloudOnly(_send, _share, _teleport, here, open, seeded);
     }
 
-    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    protected override void OnEnter(object? parameter)
     {
-        _id = e.Parameter as string ?? "";
+        _id = parameter as string ?? "";
         _header.Text = _id;
         _ = LoadAsync();
     }
@@ -198,6 +192,13 @@ public sealed class SessionPage : NexusPage
         }
         foreach (var item in items)
         {
+            if (keys.Contains("text_preview") &&
+                NxJson.Text(item, "role") is { } turnRole &&
+                (turnRole.Equals("system", StringComparison.OrdinalIgnoreCase) ||
+                 turnRole.Equals("developer", StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
             var text = NxJson.Text(item, keys);
             if (text.Length == 0)
             {

@@ -7,8 +7,23 @@ import (
 	"path/filepath"
 	"testing"
 
+	"central-memory/internal/config"
 	"central-memory/internal/daemon"
 )
+
+func TestEmbeddedServerTokenPrefersSavedSignInOverStaleEnvironment(t *testing.T) {
+	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", t.TempDir())
+	t.Setenv("NEXUS_TOKEN", "stale-environment-token")
+	if err := config.SaveFile(config.File{Token: "saved-desktop-token"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := embeddedServerToken(""); got != "saved-desktop-token" {
+		t.Fatalf("desktop token = %q", got)
+	}
+	if got := embeddedServerToken("explicit-token"); got != "explicit-token" {
+		t.Fatalf("explicit desktop token = %q", got)
+	}
+}
 
 func TestEmbeddedWorkspaceRootRequiresRealNonHomeDirectory(t *testing.T) {
 	root := t.TempDir()

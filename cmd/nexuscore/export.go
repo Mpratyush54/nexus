@@ -55,6 +55,20 @@ type embeddedCaptureConfig struct {
 
 type embeddedCaptureController struct{}
 
+// The desktop's saved sign-in is authoritative for this process. A stale
+// NEXUS_TOKEN in the parent environment must not silently sign it out.
+func embeddedServerToken(explicit string) string {
+	if token := strings.TrimSpace(explicit); token != "" {
+		return token
+	}
+	if saved, err := config.LoadFile(); err == nil {
+		if token := strings.TrimSpace(saved.Token); token != "" {
+			return token
+		}
+	}
+	return config.ResolveToken()
+}
+
 //export nx_init
 func nx_init(configJSON *C.char) (rc C.int) {
 	defer func() {
@@ -79,10 +93,7 @@ func nx_init(configJSON *C.char) (rc C.int) {
 	if serverURL == "" {
 		serverURL = config.ResolveServerURL("https://api-nexus.pratyushes.dev")
 	}
-	serverToken := strings.TrimSpace(cfg.ServerToken)
-	if serverToken == "" {
-		serverToken = config.ResolveToken()
-	}
+	serverToken := embeddedServerToken(cfg.ServerToken)
 	root := embeddedWorkspaceRoot(cfg.WorkspaceRoot)
 	if strings.TrimSpace(cfg.WorkspaceRoot) != "" && root != "" {
 		if err := config.SaveFile(config.File{WorkspaceRoot: root}); err != nil {

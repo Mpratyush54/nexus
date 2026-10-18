@@ -21,9 +21,9 @@ public sealed class SearchPage : NexusPage
         Content = root;
     }
 
-    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    protected override void OnEnter(object? parameter)
     {
-        _query = e.Parameter as string ?? "";
+        _query = parameter as string ?? "";
         _ = LoadAsync();
     }
 

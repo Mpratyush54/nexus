@@ -70,9 +70,9 @@ public sealed class MemoryPage : NexusPage
         Content = root;
     }
 
-    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    protected override void OnEnter(object? parameter)
     {
-        if (e.Parameter is string query)
+        if (parameter is string query)
         {
             _query.Text = query;
         }

@@ -622,6 +622,21 @@ func TestParseTurnsCodexRollout(t *testing.T) {
 	}
 }
 
+func TestParseTurnsCodexSkipsInternalInstructions(t *testing.T) {
+	raw := strings.Join([]string{
+		`{"type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"internal app context"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"system","content":[{"type":"input_text","text":"internal system prompt"}]}}`,
+		`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"show my chats"}]}}`,
+	}, "\n")
+	turns, err := ParseTurns(strings.NewReader(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 1 || turns[0].Speaker != "user" || turns[0].Content != "show my chats" {
+		t.Fatalf("internal instructions leaked into chat: %+v", turns)
+	}
+}
+
 func TestMatchesTranscriptCwdPeek(t *testing.T) {
 	dir := t.TempDir()
 	ws := filepath.Join(dir, "central-memory")

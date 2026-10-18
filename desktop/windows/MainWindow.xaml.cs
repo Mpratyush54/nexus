@@ -1,4 +1,6 @@
 using System.Text.Json;
+using CommunityToolkit.Mvvm.Input;
+using H.NotifyIcon;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -6,6 +8,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Nexus.Core;
 using Nexus.Pages;
+using Windows.Graphics;
 
 namespace Nexus;
 
@@ -17,39 +20,75 @@ public sealed partial class MainWindow : Window
     public new static MainWindow? Current { get; private set; }
 
     public ShellState State => ShellState.Current;
+    public IRelayCommand TrayOpenCommand { get; }
+    public IAsyncRelayCommand TrayPauseCommand { get; }
+    public IRelayCommand TrayTeleportCommand { get; }
+    public IRelayCommand TrayQuitCommand { get; }
 
     public MainWindow()
     {
+        TrayOpenCommand = new RelayCommand(RestoreWindow);
+        TrayPauseCommand = new AsyncRelayCommand(PauseCaptureAsync);
+        TrayTeleportCommand = new RelayCommand(() => OpenTeleport());
+        TrayQuitCommand = new RelayCommand(Quit);
         InitializeComponent();
+        Tray.ForceCreate();
         Current = this;
+        AppWindow.Resize(new SizeInt32(1240, 820));
         ExtendsContentIntoTitleBar = true;
         SystemBackdrop = new MicaBackdrop();
         AppWindow.Closing += OnClosing;
         TeleportBadge.Visibility = Visibility.Collapsed;
         Nav.SelectedItem = TimelineItem;
-        ContentFrame.Navigate(typeof(TimelinePage));
+        ContentFrame.Loaded += OnContentFrameLoaded;
         App.Core.Subscribe(DispatcherQueue, OnCoreEvent);
         _ = App.Core.CallAsync(NxMethods.EventsSubscribe);
         TryEnableLoginStart();
-        ApplyPendingLink();
         _ = RefreshBannerAsync();
+    }
+
+    private void OnContentFrameLoaded(object sender, RoutedEventArgs e)
+    {
+        ContentFrame.Loaded -= OnContentFrameLoaded;
+        if (ContentFrame.Content is null) ShowPage(new TimelinePage());
+        ApplyPendingLink();
+    }
+
+    private void ShowPage(NexusPage page, object? parameter = null)
+    {
+        page.Enter(parameter);
+        ContentFrame.Content = page;
     }
 
     public void OpenSession(string sessionId)
     {
-        Activate();
-        AppWindow.Show();
-        ContentFrame.Navigate(typeof(SessionPage), sessionId);
+        RestoreWindow();
+        ShowPage(new SessionPage(), sessionId);
+    }
+
+    public void ShowTimeline(string? query = null)
+    {
+        _navLock = true;
+        Nav.SelectedItem = TimelineItem;
+        _navLock = false;
+        ShowPage(new TimelinePage(), query ?? "");
+    }
+
+    public void ShowSettings()
+    {
+        _navLock = true;
+        Nav.SelectedItem = SettingsItem;
+        _navLock = false;
+        ShowPage(new SettingsPage());
     }
 
     public void OpenTeleport(string? teleportId = null)
     {
-        Activate();
-        AppWindow.Show();
+        RestoreWindow();
         _navLock = true;
         Nav.SelectedItem = TeleportItem;
         _navLock = false;
-        ContentFrame.Navigate(typeof(TeleportPage), teleportId ?? "");
+        ShowPage(new TeleportPage(), teleportId ?? "");
     }
 
     public void HandleRemote(string payload)
@@ -57,8 +96,7 @@ public sealed partial class MainWindow : Window
         var lines = payload.Split('\n', StringSplitOptions.RemoveEmptyEntries);
         App.ReadDeepLink(lines);
         ApplyPendingLink();
-        Activate();
-        AppWindow.Show();
+        RestoreWindow();
     }
 
     private void ApplyPendingLink()
@@ -85,7 +123,7 @@ public sealed partial class MainWindow : Window
             return;
         }
         args.Cancel = true;
-        sender.Hide();
+        WindowExtensions.Hide(this);
     }
 
     private void Nav_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
@@ -94,23 +132,24 @@ public sealed partial class MainWindow : Window
         {
             return;
         }
-        ContentFrame.Navigate(tag switch
+        ShowPage(tag switch
         {
-            "memory" => typeof(MemoryPage),
-            "teleport" => typeof(TeleportPage),
-            "agents" => typeof(AgentsPage),
-            "settings" => typeof(SettingsPage),
-            _ => typeof(TimelinePage)
+            "memory" => new MemoryPage(),
+            "teleport" => new TeleportPage(),
+            "agents" => new AgentsPage(),
+            "settings" => new SettingsPage(),
+            _ => new TimelinePage()
         });
     }
 
-    private void Tray_Open(object sender, RoutedEventArgs e)
+    private void RestoreWindow()
     {
+        if (_quitting) return;
+        WindowExtensions.Show(this);
         Activate();
-        AppWindow.Show();
     }
 
-    private async void Tray_Pause(object sender, RoutedEventArgs e)
+    private async Task PauseCaptureAsync()
     {
         var method = State.CapturePaused ? NxMethods.CaptureResume : NxMethods.CapturePause;
         var response = await App.Core.CallAsync(method);
@@ -124,12 +163,14 @@ public sealed partial class MainWindow : Window
         PauseItem.Text = State.CapturePaused ? "Resume capture" : "Pause capture";
     }
 
-    private void Tray_Teleport(object sender, RoutedEventArgs e) => OpenTeleport();
-
-    private void Tray_Quit(object sender, RoutedEventArgs e)
+    private void Quit()
     {
+        if (_quitting) return;
         _quitting = true;
         App.Core.Shutdown();
+        Tray.Dispose();
+        AppWindow.Closing -= OnClosing;
+        AppWindow.Destroy();
         Application.Current.Exit();
     }
 
@@ -150,7 +191,7 @@ public sealed partial class MainWindow : Window
         {
             return;
         }
-        ContentFrame.Navigate(typeof(SearchPage), box.Text);
+        ShowPage(new SearchPage(), box.Text);
     }
 
     private void OnCoreEvent(string json)

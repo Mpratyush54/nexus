@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"central-memory/internal/hiddenproc"
 )
 
 // openCodeSQLite extracts dialogue from OpenCode's opencode.db (session +
@@ -53,12 +55,14 @@ LIMIT 1200;
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin, "-separator", "\t", uri, sql)
+	hiddenproc.Configure(cmd)
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
 		// Retry without URI if the build lacks URI support.
 		cmd2 := exec.CommandContext(ctx, bin, "-separator", "\t", dbPath, sql)
+		hiddenproc.Configure(cmd2)
 		out.Reset()
 		errBuf.Reset()
 		cmd2.Stdout = &out

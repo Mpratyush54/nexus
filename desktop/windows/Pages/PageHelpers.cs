@@ -26,6 +26,29 @@ public static class UiThread
 public class NexusPage : Page
 {
     protected NxClient Core => App.Core;
+    private bool _entered;
+
+    public NexusPage()
+    {
+        Loaded += (_, _) =>
+        {
+            if (!_entered) Enter(null);
+        };
+    }
+
+    public void Enter(object? parameter)
+    {
+        _entered = true;
+        OnEnter(parameter);
+    }
+
+    protected virtual void OnEnter(object? parameter) { }
+
+    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    {
+        base.OnNavigatedTo(e);
+        Enter(e.Parameter);
+    }
 
     protected async Task<NxResponse> Call(string method, object? args = null)
     {

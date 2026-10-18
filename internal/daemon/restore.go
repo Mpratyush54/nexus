@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"central-memory/internal/hiddenproc"
 )
 
 // RestoreOptions controls session hydration onto a local workspace.
@@ -163,9 +165,11 @@ func RestoreSession(ctx context.Context, opt RestoreOptions) (string, error) {
 
 func gitApplyDiff(root string, diff []byte) error {
 	cmd := exec.Command("git", "-C", root, "apply", "--whitespace=fix", "-")
+	hiddenproc.Configure(cmd)
 	cmd.Stdin = bytes.NewReader(diff)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		cmd2 := exec.Command("git", "-C", root, "apply", "--3way", "-")
+		hiddenproc.Configure(cmd2)
 		cmd2.Stdin = bytes.NewReader(diff)
 		if out2, err2 := cmd2.CombinedOutput(); err2 != nil {
 			return fmt.Errorf("git apply failed: %s / 3way: %s", bytes.TrimSpace(out), bytes.TrimSpace(out2))

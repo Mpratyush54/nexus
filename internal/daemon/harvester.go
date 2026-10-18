@@ -913,7 +913,7 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 			role = "assistant"
 		}
 	}
-	if r := strings.ToLower(role); r == "tool" || r == "function" {
+	if r := strings.ToLower(strings.TrimSpace(role)); r == "tool" || r == "function" || r == "system" || r == "developer" {
 		// tool_result rows — keep dialogue clean; structured calls live on
 		// the assistant turn that issued them.
 		return Turn{}, false

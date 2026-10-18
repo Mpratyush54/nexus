@@ -62,9 +62,9 @@ public sealed class TeleportPage : NexusPage
         Content = root;
     }
 
-    protected override void OnNavigatedTo(Microsoft.UI.Xaml.Navigation.NavigationEventArgs e)
+    protected override void OnEnter(object? parameter)
     {
-        if (e.Parameter is string id)
+        if (parameter is string id)
         {
             _selected = id;
         }
