@@ -30,6 +30,16 @@ if (Test-Path (Join-Path $appxTools "Microsoft.Build.Packaging.Pri.Tasks.dll")) 
 }
 dotnet publish "$win\Nexus.csproj" -c Release -r win-x64 --self-contained false -o $app @props
 
+# WinUI's unpackaged publish omits generated XAML and PRI resources on some
+# SDK installations. The compiled output has them; without these files the
+# published EXE starts and exits before it can create a window.
+$compiled = Join-Path $win "bin\Release\net8.0-windows10.0.19041.0\win-x64"
+foreach ($resource in @("App.xbf", "MainWindow.xbf", "Microsoft.UI.pri", "Microsoft.UI.Xaml.Controls.pri", "resources.pri")) {
+  $source = Join-Path $compiled $resource
+  if (-not (Test-Path $source)) { throw "Missing compiled WinUI resource: $source" }
+  Copy-Item $source (Join-Path $app $resource) -Force
+}
+
 # Publish first, then place the Go library beside Nexus.exe. This makes a
 # stale core impossible even if dotnet cleans its destination.
 $env:CGO_ENABLED = "1"

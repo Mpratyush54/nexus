@@ -49,8 +49,7 @@ public sealed class AgentsPage : NexusPage
         {
             var id = NxJson.Text(project, "id", "project_id");
             if (id.Length == 0) continue;
-            var name = NxJson.Text(project, "name", "slug", "title");
-            _project.Items.Add(new ComboBoxItem { Content = name.Length > 0 ? name : id, Tag = id });
+            _project.Items.Add(new ComboBoxItem { Content = ProjectLabels.Name(project), Tag = id });
         }
         _projectsLoaded = true;
         for (var i = 0; i < _project.Items.Count; i++)
@@ -75,7 +74,7 @@ public sealed class AgentsPage : NexusPage
         {
             var name = NxJson.Text(agent, "name", "agent", "harness");
             var harness = NxJson.Text(agent, "harness");
-            var project = NxJson.Text(agent, "project_id", "project");
+            var project = (_project.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "";
             var status = NxJson.Text(agent, "status");
             var resume = NxJson.Text(agent, "resume_mode");
             var count = NxJson.Text(agent, "captured_count", "count");

@@ -97,10 +97,9 @@ public sealed class MemoryPage : NexusPage
         foreach (var project in NxJson.Items(response.Result))
         {
             var id = NxJson.Text(project, "id", "project_id");
-            var name = NxJson.Text(project, "name", "slug", "title");
             if (id.Length > 0)
             {
-                _project.Items.Add(new ComboBoxItem { Content = name.Length > 0 ? name : id, Tag = id });
+                _project.Items.Add(new ComboBoxItem { Content = ProjectLabels.Name(project), Tag = id });
             }
         }
         _projectsLoaded = true;

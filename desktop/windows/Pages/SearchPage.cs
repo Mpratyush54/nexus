@@ -59,8 +59,7 @@ public sealed class SearchPage : NexusPage
         {
             var id = NxJson.Text(project, "id", "project_id");
             if (id.Length == 0) continue;
-            var name = NxJson.Text(project, "name", "slug", "title");
-            _project.Items.Add(new ComboBoxItem { Content = name.Length > 0 ? name : id, Tag = id });
+            _project.Items.Add(new ComboBoxItem { Content = ProjectLabels.Name(project), Tag = id });
         }
         for (var i = 0; i < _project.Items.Count; i++)
             if ((_project.Items[i] as ComboBoxItem)?.Tag as string == preferred) { _project.SelectedIndex = i; return; }

@@ -83,8 +83,7 @@ public sealed class TimelinePage : NexusPage
         {
             var id = NxJson.Text(project, "id", "project_id");
             if (id.Length == 0) continue;
-            var name = NxJson.Text(project, "name", "slug", "title");
-            _project.Items.Add(new ComboBoxItem { Content = name.Length > 0 ? name : id, Tag = id });
+            _project.Items.Add(new ComboBoxItem { Content = ProjectLabels.Name(project), Tag = id });
         }
         if (_project.Items.Count == 0)
         {

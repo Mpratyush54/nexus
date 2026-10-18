@@ -1,5 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Documents;
+using Microsoft.UI.Xaml.Media;
 using Nexus.Core;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -11,7 +13,7 @@ public sealed class SessionPage : NexusPage
 {
     private string _id = "";
     private readonly TextBlock _header = new() { TextWrapping = TextWrapping.Wrap, FontSize = 16 };
-    private readonly StackPanel _chat = new();
+    private readonly StackPanel _chat = new() { Spacing = 18, HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly Button _chatMore = new() { Content = "Load more turns" };
     private string _nextTurnCursor = "";
     private readonly StackPanel _files = new();
@@ -113,7 +115,8 @@ public sealed class SessionPage : NexusPage
         var memoriesTask = Call(NxMethods.SessionsMemories, new { session_id = _id });
         var summaryTask = Call(NxMethods.SessionsSummary, new { session_id = _id });
         var versionsTask = Call(NxMethods.SessionsVersions, new { session_id = _id });
-        await Task.WhenAll(sessionTask, turnsTask, filesTask, opsTask, memoriesTask, summaryTask, versionsTask);
+        var projectsTask = Call(NxMethods.ProjectsList);
+        await Task.WhenAll(sessionTask, turnsTask, filesTask, opsTask, memoriesTask, summaryTask, versionsTask, projectsTask);
         var session = await sessionTask;
         var turns = await turnsTask;
         var files = await filesTask;
@@ -121,9 +124,8 @@ public sealed class SessionPage : NexusPage
         var memories = await memoriesTask;
         var summary = await summaryTask;
         var versions = await versionsTask;
-        FillLines(_chat, turns, "text_preview", "text", "content", "message");
+        var projects = await projectsTask;
         _nextTurnCursor = turns.Result is { } turnResult ? NxJson.Text(turnResult, "next_cursor") : "";
-        if (_nextTurnCursor.Length > 0) _chat.Children.Add(_chatMore);
         FillLines(_files, files, "path", "file_path", "name");
         FillLines(_commands, ops, "command", "command_line", "cmd", "text");
         FillLines(_memory, memories, "content", "text", "title", "key");
@@ -140,10 +142,10 @@ public sealed class SessionPage : NexusPage
             _nativeID = NxJson.Text(body, "native_id");
             _header.Text = Nonempty(title, "Captured " + Nonempty(_agent, "agent") + " session");
             AddDetail("Agent", _agent);
-            AddDetail("Project", NxJson.Text(body, "project_id", "project"));
+            AddDetail("Project", ProjectLabels.ForSession(NxJson.Text(body, "project_id", "project"), NxJson.Text(body, "workspace_root_hint"), projects.Result));
             AddDetail("Workspace", NxJson.Text(body, "workspace_root_hint"));
             AddDetail("Last activity", NxJson.Text(body, "last_active_at"));
-            AddDetail("Session ID", _id);
+            ToolTipService.SetToolTip(_header, "Session ID: " + _id);
             _legacy = NxJson.Text(body, "lineage_kind") == "legacy_snapshot";
             _hasCompleteVersion = NxJson.Items(versions.Result).Any(v => NxJson.Text(v, "state").Equals("complete", StringComparison.OrdinalIgnoreCase));
             _sessionLoaded = true;
@@ -159,6 +161,8 @@ public sealed class SessionPage : NexusPage
             _notice.Text = session.Error ?? "Could not load this session.";
             UpdateActions();
         }
+        FillChat(turns, false);
+        if (_nextTurnCursor.Length > 0) _chat.Children.Add(_chatMore);
     }
 
     private async Task LoadMoreTurnsAsync()
@@ -173,11 +177,144 @@ public sealed class SessionPage : NexusPage
         }
         else
         {
-            FillLines(_chat, response, true, "text_preview", "text", "content", "message");
+            FillChat(response, true);
             _nextTurnCursor = response.Result is { } result ? NxJson.Text(result, "next_cursor") : "";
         }
         _chatMore.IsEnabled = true;
         if (_nextTurnCursor.Length > 0) _chat.Children.Add(_chatMore);
+    }
+
+    private void FillChat(NxResponse response, bool append)
+    {
+        if (!append) _chat.Children.Clear();
+        if (!response.Ok)
+        {
+            _chat.Children.Add(Card(Line(response.Error ?? "Could not load this conversation.")));
+            return;
+        }
+        var shown = 0;
+        foreach (var item in NxJson.Items(response.Result))
+        {
+            var role = NxJson.Text(item, "role");
+            if (role.Equals("system", StringComparison.OrdinalIgnoreCase) ||
+                role.Equals("developer", StringComparison.OrdinalIgnoreCase)) continue;
+            var text = ReadableTurn(NxJson.Text(item, "text_preview", "text", "content", "message"));
+            if (text.Length == 0) continue;
+            _chat.Children.Add(ChatMessage(role, text));
+            shown++;
+        }
+        if (shown == 0 && !append) _chat.Children.Add(Card(Line("No readable chat turns have been captured yet.")));
+    }
+
+    private UIElement ChatMessage(string role, string content)
+    {
+        var fromUser = role.Equals("user", StringComparison.OrdinalIgnoreCase);
+        var label = fromUser ? "YOU" : Nonempty(_agent, "AGENT").ToUpperInvariant();
+        var message = new StackPanel { Spacing = 10 };
+        message.Children.Add(new TextBlock
+        {
+            Text = label,
+            FontSize = 11,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Opacity = 0.72
+        });
+        message.Children.Add(FormattedMessage(content));
+        var bubble = new Border
+        {
+            Child = message,
+            Padding = new Thickness(18, 14, 18, 16),
+            CornerRadius = new CornerRadius(14),
+            MaxWidth = 820,
+            HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Left,
+            Background = new SolidColorBrush(fromUser
+                ? Windows.UI.Color.FromArgb(255, 29, 69, 92)
+                : Windows.UI.Color.FromArgb(255, 48, 48, 48)),
+            BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(45, 255, 255, 255)),
+            BorderThickness = new Thickness(1)
+        };
+        return bubble;
+    }
+
+    private static StackPanel FormattedMessage(string content)
+    {
+        var blocks = new StackPanel { Spacing = 7 };
+        var lines = content.Replace("\r\n", "\n").Split('\n');
+        var code = new List<string>();
+        var inCode = false;
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.TrimEnd();
+            if (line.TrimStart().StartsWith("```", StringComparison.Ordinal))
+            {
+                if (inCode) AddCode();
+                inCode = !inCode;
+                continue;
+            }
+            if (inCode) { code.Add(line); continue; }
+            if (line.Length == 0)
+            {
+                blocks.Children.Add(new Border { Height = 5 });
+                continue;
+            }
+            var trimmed = line.TrimStart();
+            var heading = Regex.Match(trimmed, "^#{1,6}\\s+(.+)$");
+            var bullet = Regex.Match(trimmed, "^(?:[-*+]\\s+|\\d+[.)]\\s+)(.+)$");
+            var quote = trimmed.StartsWith("> ", StringComparison.Ordinal);
+            var display = heading.Success ? heading.Groups[1].Value : bullet.Success ? "•  " + bullet.Groups[1].Value : quote ? trimmed[2..] : line;
+            var text = new TextBlock
+            {
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = heading.Success ? 17 : 14,
+                FontWeight = heading.Success ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal,
+                Opacity = quote ? 0.8 : 1,
+                Margin = bullet.Success || quote ? new Thickness(12, 0, 0, 0) : new Thickness(0)
+            };
+            AddInlineFormatting(text, display);
+            blocks.Children.Add(text);
+        }
+        if (inCode) AddCode();
+        return blocks;
+
+        void AddCode()
+        {
+            blocks.Children.Add(new Border
+            {
+                Background = new SolidColorBrush(Windows.UI.Color.FromArgb(100, 0, 0, 0)),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12),
+                Child = new ScrollViewer
+                {
+                    HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    Content = new TextBlock
+                    {
+                        Text = string.Join("\n", code),
+                        FontFamily = new FontFamily("Consolas"),
+                        FontSize = 12.5,
+                        TextWrapping = TextWrapping.NoWrap
+                    }
+                }
+            });
+            code.Clear();
+        }
+    }
+
+    private static void AddInlineFormatting(TextBlock block, string value)
+    {
+        var pattern = new Regex(@"(\*\*(.+?)\*\*|`(.+?)`|\[([^\]]+)\]\([^)]+\))");
+        var start = 0;
+        foreach (Match match in pattern.Matches(value))
+        {
+            if (match.Index > start) block.Inlines.Add(new Run { Text = value[start..match.Index] });
+            if (match.Groups[2].Success)
+            {
+                var bold = new Bold();
+                bold.Inlines.Add(new Run { Text = match.Groups[2].Value });
+                block.Inlines.Add(bold);
+            }
+            else block.Inlines.Add(new Run { Text = match.Groups[3].Success ? match.Groups[3].Value : match.Groups[4].Value });
+            start = match.Index + match.Length;
+        }
+        if (start < value.Length) block.Inlines.Add(new Run { Text = value[start..] });
     }
 
     private static void FillLines(StackPanel panel, NxResponse response, params string[] keys) => FillLines(panel, response, false, keys);
