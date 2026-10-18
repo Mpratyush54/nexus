@@ -16,7 +16,7 @@ import (
 // writes provenance under the agent-session ID.
 func sessionContentIDs(row *store.AgentSession) []string {
 	ids := []string{row.ID}
-	if row.NativeID != "" && row.NativeID != row.ID && uuidLikeSessionID(row.NativeID) {
+	if row.NativeID != "" && row.NativeID != row.ID {
 		ids = append(ids, row.NativeID)
 	}
 	return ids
@@ -161,6 +161,17 @@ func (s *Server) sessionToolCalls(r *http.Request, row *store.AgentSession) []ma
 		if json.Unmarshal(turn.ToolCalls, &calls) == nil {
 			out = append(out, calls...)
 		}
+		// Some historical imports serialized the turn envelope into the chat
+		// preview instead of populating session_turns.tool_calls. Recover only
+		// structured calls from a valid JSON envelope; never infer from prose.
+		if len(calls) == 0 && strings.HasPrefix(strings.TrimSpace(turn.TextPreview), "{") {
+			var envelope struct {
+				ToolCalls []map[string]any `json:"tool_calls"`
+			}
+			if json.Unmarshal([]byte(turn.TextPreview), &envelope) == nil {
+				out = append(out, envelope.ToolCalls...)
+			}
+		}
 	}
 	return out
 }
@@ -212,10 +223,30 @@ func (s *Server) handleAgentSessionMemories(w http.ResponseWriter, r *http.Reque
 	}
 	items := []knowledgeItem{}
 	for _, item := range found {
-		if item == nil || !idSet[item.SessionID] {
+		if item == nil || !storeMemoryBelongsToSession(item, idSet) {
 			continue
 		}
 		items = append(items, knowledgeItem{ID: item.ID, Key: item.Key, Content: item.Content, Level: item.Level, Scope: item.Scope, Status: publicMemoryStatus(item.Status), Confidence: item.Confidence, Tags: item.Tags, Source: item.Source})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func storeMemoryBelongsToSession(item *store.MemoryItem, ids map[string]bool) bool {
+	if item == nil {
+		return false
+	}
+	if ids[item.SessionID] {
+		return true
+	}
+	for id := range ids {
+		if item.Key == "session/"+id {
+			return true
+		}
+	}
+	for _, tag := range item.Tags {
+		if strings.HasPrefix(tag, "session:") && ids[strings.TrimPrefix(tag, "session:")] {
+			return true
+		}
+	}
+	return false
 }

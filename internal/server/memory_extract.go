@@ -45,7 +45,7 @@ func (s *Server) extractExistingHints(r *http.Request, projectID string) []extra
 	return out
 }
 
-func (s *Server) persistExtractProposal(r *http.Request, projectID string, p extract.Proposal, srcHint, provider string) (*store.MemoryItem, error) {
+func (s *Server) persistExtractProposal(r *http.Request, projectID string, p extract.Proposal, srcHint, provider, sessionID string) (*store.MemoryItem, error) {
 	content := strings.TrimSpace(p.Content)
 	if err := store.ValidateMemoryContent(content); err != nil {
 		return nil, err
@@ -109,6 +109,9 @@ func (s *Server) persistExtractProposal(r *http.Request, projectID string, p ext
 		SupersedesKey: p.SupersedesKey,
 		Outcome:       outcome,
 		WeekBucket:    week,
+	}
+	if uuidLikeSessionID(sessionID) {
+		item.SessionID = sessionID
 	}
 	if level == "personal" {
 		item.UserID = authSubject(r)

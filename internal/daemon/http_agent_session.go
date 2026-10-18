@@ -86,7 +86,7 @@ func mirrorJSON(ctx context.Context, client *http.Client, method, endpoint, toke
 
 // upsertMirroredSession creates or touches the cloud session with a stable
 // (project, harness, native id, machine) identity.
-func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, nativeID, machineID, workspaceRoot string) (string, error) {
+func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, nativeID, machineID, workspaceRoot, title string) (string, error) {
 	base, token, projectID, client, err := s.mirrorConnection()
 	if err != nil {
 		return "", err
@@ -105,7 +105,7 @@ func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, na
 		"native_id":           nativeID,
 		"origin_machine_id":   strings.TrimSpace(machineID),
 		"workspace_root_hint": strings.TrimSpace(workspaceRoot),
-		"title":               "Captured " + harness + " session",
+		"title":               strings.TrimSpace(title),
 		"visibility":          "private",
 	}, &out)
 	if err != nil {
@@ -120,8 +120,12 @@ func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, na
 // MirrorAgentSessionTurns makes a captured conversation visible in Timeline
 // immediately.  Indexes are deterministic source positions: a retry that
 // reaches an already-written turn receives 409 and is therefore idempotent.
-func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, nativeID, machineID, workspaceRoot string, turns []MirroredTurn) (string, error) {
-	sessionID, err := s.upsertMirroredSession(ctx, harness, nativeID, machineID, workspaceRoot)
+func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, nativeID, machineID, workspaceRoot string, turns []MirroredTurn, title ...string) (string, error) {
+	name := "Captured " + normalizeHarness(harness) + " session"
+	if len(title) > 0 && strings.TrimSpace(title[0]) != "" {
+		name = strings.TrimSpace(title[0])
+	}
+	sessionID, err := s.upsertMirroredSession(ctx, harness, nativeID, machineID, workspaceRoot, name)
 	if err != nil || len(turns) == 0 {
 		return sessionID, err
 	}
@@ -160,7 +164,7 @@ func (s *HTTPMemoryStore) PublishAgentSessionVersion(ctx context.Context, snap *
 	if snap == nil {
 		return fmt.Errorf("daemon: cloud session mirror: nil snapshot")
 	}
-	sessionID, err := s.upsertMirroredSession(ctx, snap.Harness, snap.ConversationID, snap.SourceMachineID, workspaceRoot)
+	sessionID, err := s.upsertMirroredSession(ctx, snap.Harness, snap.ConversationID, snap.SourceMachineID, workspaceRoot, "")
 	if err != nil {
 		return err
 	}

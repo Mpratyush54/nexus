@@ -109,7 +109,49 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"summary": row.Summary})
+	summary := strings.TrimSpace(row.Summary)
+	if summary == "" {
+		if cs, ok := s.agentCloud(); ok {
+			if turns, err := cs.ListSessionTurns(r.Context(), row.ID); err == nil {
+				summary = capturedTurnOverview(turns)
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"summary": summary})
+}
+
+// An extractive fallback is more honest and useful than an empty Summary tab.
+// It is explicitly labelled so it is never confused with a processed memory.
+func capturedTurnOverview(turns []store.SessionTurn) string {
+	var request, response string
+	for _, turn := range turns {
+		text := strings.Join(strings.Fields(turn.TextPreview), " ")
+		if text == "" {
+			continue
+		}
+		if chars := []rune(text); len(chars) > 480 {
+			text = string(chars[:480]) + "…"
+		}
+		switch strings.ToLower(turn.Role) {
+		case "user":
+			if request == "" {
+				request = text
+			}
+		case "assistant":
+			response = text
+		}
+	}
+	if request == "" && response == "" {
+		return ""
+	}
+	parts := []string{"Conversation overview · from captured chat"}
+	if request != "" {
+		parts = append(parts, "Request: "+request)
+	}
+	if response != "" {
+		parts = append(parts, "Latest agent response: "+response)
+	}
+	return strings.Join(parts, "\n\n")
 }
 
 // knowledgeItem is the project-knowledge row agents see. Status is the

@@ -397,7 +397,16 @@ func (r *Runtime) Start(ctx context.Context) {
 					cloudSessionID = sid
 				}
 				r.pushParsedToolOps(ctx, cloudSessionID, harness, batch, inter)
-				if props, err := r.Processor.ProcessEvents(ctx, r.ProjectID, batch); err != nil {
+				memoryBatch := batch
+				if looksLikeUUID(cloudSessionID) && cloudSessionID != sid {
+					memoryBatch = make([]Event, len(batch))
+					for i, ev := range batch {
+						memoryBatch[i] = ev
+						memoryBatch[i].Payload = copyMap(ev.Payload)
+						memoryBatch[i].Payload["session_id"] = cloudSessionID
+					}
+				}
+				if props, err := r.Processor.ProcessEvents(ctx, r.ProjectID, memoryBatch); err != nil {
 					log.Printf("daemon: conversation process (session=%s): %v", sid, err)
 					r.noteProposals(len(props), err)
 				} else if len(props) > 0 {
@@ -592,9 +601,13 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 	}
 	byMillisecond := map[int64]int64{}
 	turns := make([]MirroredTurn, 0, len(batch))
+	title := ""
 	for _, ev := range batch {
 		if ev.Type != EventConversationTurn || ev.Payload == nil {
 			continue
+		}
+		if title == "" {
+			title, _ = ev.Payload["session_title"].(string)
 		}
 		at := ev.CreatedAt
 		if raw, ok := ev.Payload["timestamp"].(string); ok {
@@ -614,6 +627,11 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 		}
 		role, _ := ev.Payload["speaker"].(string)
 		content, _ := ev.Payload["content"].(string)
+		// Keep tool-only events for provenance, but do not fill Chat with
+		// hundreds of blank OpenCode tool steps or make one HTTP turn call each.
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
 		turns = append(turns, MirroredTurn{
 			Idx:         idx,
 			Role:        role,
@@ -621,10 +639,7 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 			ToolCalls:   mirroredToolCalls(ev.Payload["tool_calls"]),
 		})
 	}
-	if len(turns) == 0 {
-		return ""
-	}
-	id, err := hs.MirrorAgentSessionTurns(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, turns)
+	id, err := hs.MirrorAgentSessionTurns(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, turns, title)
 	if err != nil {
 		log.Printf("daemon: mirror cloud session turns session=%s: %v", nativeID, err)
 		return ""

@@ -68,9 +68,52 @@ func TestAgentSessionContentReadsHistoricalNativeID(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if err := mem.CreateMemoryItem(t.Context(), &store.MemoryItem{
+		ProjectID: project.ID, Key: "session/" + session.ID,
+		Content: "Historical session summary recovered from its key", Level: store.LevelProject,
+		Tags: []string{"session:" + session.ID}, Status: store.StatusConfirmed,
+		Visibility: store.VisibilityProject,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	memories := doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+session.ID+"/memories", owner, nil)
 	if memories.Code != http.StatusOK || !strings.Contains(memories.Body.String(), "Use the new capture bridge") ||
+		!strings.Contains(memories.Body.String(), "Historical session summary recovered") ||
 		strings.Contains(memories.Body.String(), "Do not show in this session") {
 		t.Fatalf("memories: %d %s", memories.Code, memories.Body.String())
+	}
+}
+
+func TestAgentSessionMemoriesFindNativeOpenCodeTag(t *testing.T) {
+	s := newTestServer()
+	mem := s.Store.(*store.MemStore)
+	project, err := mem.ResolveProject(t.Context(), "", "", "opencode-content-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.ClaimProject(t.Context(), project.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	token := loginAs(t, s, "owner")
+	const nativeID = "ses_opencode_123"
+	created := doJSON(t, s, http.MethodPost, "/v1/agent-sessions", token, map[string]any{
+		"project_id": project.ID, "harness": "opencode", "native_id": nativeID,
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	var session store.AgentSession
+	decodeBody(t, created, &session)
+	if err := mem.CreateMemoryItem(t.Context(), &store.MemoryItem{
+		ProjectID: project.ID, Key: "session/" + nativeID,
+		Content: "Historical OpenCode summary", Level: store.LevelProject,
+		Tags: []string{"session:" + nativeID}, Status: store.StatusConfirmed,
+		Visibility: store.VisibilityProject,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	response := doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+session.ID+"/memories", token, nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Historical OpenCode summary") {
+		t.Fatalf("native-tagged memory: %d %s", response.Code, response.Body.String())
 	}
 }

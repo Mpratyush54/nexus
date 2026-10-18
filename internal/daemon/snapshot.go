@@ -109,7 +109,7 @@ func readSnapshotTranscript(layout SnapshotLayout, workspaceRoot string) ([]byte
 	// SQLite-only harnesses (Windsurf/Copilot/OpenCode/…): extract dialogue
 	// into JSONL at collect time — no permanent sidecar required.
 	if layout.SQLiteSource != "" {
-		return extractSnapshotTranscriptJSONL(layout.Harness, layout.SQLiteSource, workspaceRoot)
+		return extractSnapshotTranscriptJSONL(layout.Harness, layout.SQLiteSource, workspaceRoot, layout.ConversationID)
 	}
 	if path != "" {
 		return nil, fmt.Errorf("no transcript at %s", path)
@@ -260,6 +260,10 @@ func artifactSkipPrefixes(layout SnapshotLayout) []string {
 	case "cursor":
 		// Transcripts packed separately; terminals are ephemeral local state.
 		return []string{"agent-transcripts", "terminals"}
+	case "opencode":
+		// The global DB is read separately. Its snapshots and tool outputs can
+		// contain gigabytes of unrelated projects and must never enter a chat.
+		return []string{"snapshot", "tool-output", "log", "storage", "repos"}
 	default:
 		return nil
 	}
