@@ -54,8 +54,42 @@ func TestMirrorAgentSessionTurnsUsesCloudContract(t *testing.T) {
 	if gotTurn["idx"] != float64(170000000000000001) || gotTurn["role"] != "user" || gotTurn["text_preview"] != "ship the bridge" {
 		t.Fatalf("turn = %#v", gotTurn)
 	}
-	if got := strings.Join(seen, ","); got != "POST /v1/agent-sessions,POST /v1/agent-sessions/cloud-session/turns" {
+	if got := strings.Join(seen, ","); got != "POST /v1/agent-sessions,POST /v1/agent-sessions/cloud-session/turns/batch,POST /v1/agent-sessions/cloud-session/turns" {
 		t.Fatalf("calls = %s", got)
+	}
+}
+
+func TestMirrorAgentSessionTurnsBatchesBackfill(t *testing.T) {
+	var sizes []int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/agent-sessions":
+			_ = json.NewEncoder(w).Encode(map[string]any{"id": "cloud-session"})
+		case "/v1/agent-sessions/cloud-session/turns/batch":
+			var body struct {
+				Turns []json.RawMessage `json:"turns"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode batch: %v", err)
+			}
+			sizes = append(sizes, len(body.Turns))
+			w.WriteHeader(http.StatusCreated)
+		default:
+			t.Errorf("unexpected route %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	turns := make([]MirroredTurn, 55)
+	for i := range turns {
+		turns[i] = MirroredTurn{Idx: int64(178970000000000000 + i), Role: "assistant", TextPreview: "captured"}
+	}
+	hs := NewHTTPMemoryStore(srv.URL, "test-token", "project-1")
+	if _, err := hs.MirrorAgentSessionTurns(t.Context(), "opencode", "ses-batch", "machine-1", "C:/work", turns); err != nil {
+		t.Fatal(err)
+	}
+	if len(sizes) != 2 || sizes[0] != 50 || sizes[1] != 5 {
+		t.Fatalf("batch sizes = %+v", sizes)
 	}
 }
 

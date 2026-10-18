@@ -133,6 +133,43 @@ func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, 
 	if err != nil {
 		return sessionID, err
 	}
+	// The live database may contain thousands of historical turns. Upload in
+	// bounded chunks; old API builds return 404 and use the single-turn route.
+	fallback := false
+	for start := 0; start < len(turns); start += 50 {
+		end := start + 50
+		if end > len(turns) {
+			end = len(turns)
+		}
+		batch := make([]map[string]any, 0, end-start)
+		for _, turn := range turns[start:end] {
+			role := strings.TrimSpace(turn.Role)
+			if role == "" || role == "unknown" {
+				role = "assistant"
+			}
+			calls := turn.ToolCalls
+			if calls == nil {
+				calls = []map[string]any{}
+			}
+			batch = append(batch, map[string]any{
+				"idx": turn.Idx, "role": role,
+				"text_preview": turn.TextPreview, "tool_calls": calls,
+			})
+		}
+		status, err := mirrorJSON(ctx, client, http.MethodPost,
+			base+"/v1/agent-sessions/"+url.PathEscape(sessionID)+"/turns/batch",
+			token, map[string]any{"turns": batch}, nil)
+		if status == http.StatusNotFound || status == http.StatusMethodNotAllowed {
+			fallback = true
+			break
+		}
+		if err != nil {
+			return sessionID, err
+		}
+	}
+	if !fallback {
+		return sessionID, nil
+	}
 	for _, turn := range turns {
 		role := strings.TrimSpace(turn.Role)
 		if role == "" || role == "unknown" {

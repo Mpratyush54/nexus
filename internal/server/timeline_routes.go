@@ -22,6 +22,7 @@ func (s *Server) registerTimelineRoutes() {
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}", s.requireAuth(s.handleAgentSessionGet))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/grants", s.requireAuth(s.handleAgentSessionGrant))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/turns", s.requireAuth(s.handleAgentTurnPost))
+	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/turns/batch", s.requireAuth(s.handleAgentTurnBatchPost))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/turns", s.requireAuth(s.handleAgentTurnList))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/versions", s.requireAuth(s.handleAgentVersionList))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/versions", s.requireAuth(s.handleAgentVersionCreate))
@@ -319,6 +320,57 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"ok": true})
+}
+
+// Batch ingest avoids one WAN round-trip per captured turn when importing an
+// existing agent database. Duplicate indexes are safe to retry after a
+// partial upload; other failures stop the batch and remain visible to the
+// caller instead of silently discarding chat history.
+func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request) {
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return
+	}
+	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if s.rejectIfCaptureOff(w, r, row.ProjectID) {
+		return
+	}
+	var body struct {
+		Turns []struct {
+			Idx         int             `json:"idx"`
+			Role        string          `json:"role"`
+			TextPreview string          `json:"text_preview"`
+			ToolCalls   json.RawMessage `json:"tool_calls"`
+		} `json:"turns"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if len(body.Turns) == 0 || len(body.Turns) > 50 {
+		writeError(w, http.StatusBadRequest, "turns must contain 1 to 50 items")
+		return
+	}
+	created, duplicates := 0, 0
+	for _, turn := range body.Turns {
+		err := cs.AppendSessionTurn(r.Context(), store.SessionTurn{
+			SessionID: row.ID, Idx: turn.Idx, Role: turn.Role,
+			TextPreview: turn.TextPreview, ToolCalls: turn.ToolCalls,
+		})
+		if errors.Is(err, store.ErrConflict) {
+			duplicates++
+			continue
+		}
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		created++
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"created": created, "duplicates": duplicates})
 }
 
 func (s *Server) handleAgentTurnList(w http.ResponseWriter, r *http.Request) {

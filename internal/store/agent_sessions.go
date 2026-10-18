@@ -13,6 +13,7 @@ import (
 	"central-memory/internal/capture"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // ErrStorageFull means file blobs cannot be accepted until the plan has room.
@@ -1161,6 +1162,10 @@ func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn)
 		VALUES ($1::uuid, $2, $3, $4, NULLIF($5,''), $6::jsonb, NULLIF($7,''))`,
 		turn.SessionID, turn.Idx, turn.Role, turn.At, turn.TextPreview, string(turn.ToolCalls), turn.BlobRef)
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return ErrConflict
+		}
 		return err
 	}
 	if tag.RowsAffected() == 0 {
