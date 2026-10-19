@@ -39,7 +39,8 @@ func (s *Server) registerAgentSessionToolRoutes() {
 // are omitted. next_cursor is that idx when another page remains.
 func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.PathValue("id"))
-	if _, ok := s.requireAgentRead(w, r, sessionID); !ok {
+	row, ok := s.requireAgentRead(w, r, sessionID)
+	if !ok {
 		return
 	}
 	limit := clampSearchLimit(r.URL.Query().Get("limit"), w)
@@ -56,15 +57,23 @@ func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request)
 		}
 		after = &n
 	}
-	cs, ok := s.agentCloud()
-	if !ok {
-		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
-		return
-	}
-	turns, err := cs.ListSessionTurns(r.Context(), sessionID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
+	var turns []store.SessionTurn
+	if row.LineageKind == "legacy_snapshot" {
+		// Archived sessions have no session_turns rows; serve the redacted
+		// transcript stored in their snapshot so Chat is never empty.
+		turns = s.legacySnapshotTurns(r, row)
+	} else {
+		cs, ok := s.agentCloud()
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+			return
+		}
+		var err error
+		turns, err = cs.ListSessionTurns(r.Context(), sessionID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	items, next := pageSessionTurns(turns, after, limit)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -110,6 +119,11 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	summary := strings.TrimSpace(row.Summary)
+	if row.LineageKind == "legacy_snapshot" && summary == "Archived snapshot" {
+		// Placeholder text, not a real summary: fall through to the memory
+		// lookup and transcript overview below.
+		summary = ""
+	}
 	if summary == "" {
 		// The harvest worker stores its processed summary as a project memory
 		// keyed session/<id> (the session_id column stays NULL: those rows are
@@ -127,11 +141,15 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if summary == "" {
-		if cs, ok := s.agentCloud(); ok {
-			if turns, err := cs.ListSessionTurns(r.Context(), row.ID); err == nil {
-				summary = capturedTurnOverview(turns)
+		var turns []store.SessionTurn
+		if row.LineageKind == "legacy_snapshot" {
+			turns = s.legacySnapshotTurns(r, row)
+		} else if cs, ok := s.agentCloud(); ok {
+			if found, err := cs.ListSessionTurns(r.Context(), row.ID); err == nil {
+				turns = found
 			}
 		}
+		summary = capturedTurnOverview(turns)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"summary": summary})
 }
