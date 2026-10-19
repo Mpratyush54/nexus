@@ -78,7 +78,7 @@ public sealed class AgentsPage : NexusPage
             var status = NxJson.Text(agent, "status");
             var resume = NxJson.Text(agent, "resume_mode");
             var count = NxJson.Text(agent, "captured_count", "count");
-            var view = Action("View sessions", () => MainWindow.Current?.ShowAgentSessions(harness.Length > 0 ? harness : name));
+            var view = Action("View sessions", () => MainWindow.Current?.ShowAgentSessions(harness.Length > 0 ? harness : name, projectId));
             var detail = string.Join(" · ", new[] { status, count.Length > 0 ? count + " sessions" : "", project }.Where(x => x.Length > 0));
             _cards.Children.Add(Card(
                 Line(name.Length > 0 ? name : "Unknown harness", title: true),

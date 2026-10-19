@@ -32,6 +32,7 @@ func (s *Server) registerTimelineRoutes() {
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/merge-code", s.requireAuth(s.handleAgentSessionMergeCode))
 	s.Mux.HandleFunc("POST /v1/blobs/missing", s.requireAuth(s.handleBlobsMissing))
 	s.Mux.HandleFunc("PUT /v1/blobs/{sha256}", s.requireAuth(s.handleBlobPut))
+	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/versions/{version}/blobs/{sha256}", s.requireAuth(s.handleSessionVersionBlob))
 	s.Mux.HandleFunc("GET /v1/timeline", s.requireAuth(s.handleTimeline))
 }
 

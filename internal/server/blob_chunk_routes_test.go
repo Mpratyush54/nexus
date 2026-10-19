@@ -101,6 +101,10 @@ func TestBlobChunkUploadAssembleAuthAndCapture(t *testing.T) {
 	if assembled.Size != len(whole) || assembled.ChunkCount != 2 {
 		t.Fatalf("assembled %+v", assembled)
 	}
+	stored, err := s.Store.(*store.MemStore).ReadBlob(t.Context(), projectID, parent)
+	if err != nil || string(stored) != string(whole) {
+		t.Fatalf("assembled blob was not persisted: %v", err)
+	}
 
 	only := []byte("only-chunk")
 	onlySum := shaHex(only)

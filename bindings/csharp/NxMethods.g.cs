@@ -19,6 +19,7 @@ namespace Nexus.Core
         public const string FilesRead = "files.read";
         public const string FilesDiff = "files.diff";
         public const string ContinueStart = "continue.start";
+        public const string ContinueHere = "continue.here";
         public const string RunsMessage = "runs.message";
         public const string RunsApprove = "runs.approve";
         public const string RunsCancel = "runs.cancel";
@@ -38,6 +39,7 @@ namespace Nexus.Core
         public const string NetStatus = "net.status";
         public const string TeleportRedactionPreview = "teleport.redaction_preview";
         public const string TeleportSend = "teleport.send";
+        public const string TeleportRestoreCode = "teleport.restore_code";
         public const string TeleportInbox = "teleport.inbox";
         public const string TeleportSent = "teleport.sent";
         public const string TeleportPrepare = "teleport.prepare";

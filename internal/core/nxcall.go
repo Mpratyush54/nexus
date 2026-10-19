@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -34,6 +35,14 @@ var ErrOffline = errors.New("Nexus is offline; memory unavailable")
 // ErrUnknownMethod is an nx_call name this build does not implement.
 var ErrUnknownMethod = errors.New("unknown nx_call method")
 
+func sameWorkspacePath(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
 // Cloud is the thin /v1 client data methods wrap.
 type Cloud interface {
 	Do(ctx context.Context, method, path string, body []byte) ([]byte, error)
@@ -50,13 +59,14 @@ type CaptureController interface {
 
 // Deps are the local subsystems nx_call can touch.
 type Deps struct {
-	Cloud          Cloud
-	Cache          *cache.Cache
-	Outbox         *outbox.Spool
-	Root           string
-	Online         bool
-	Capture        CaptureController
-	ContinueRunner continuex.Runner // optional; when set, continue.start records/starts via Runner
+	Cloud            Cloud
+	Cache            *cache.Cache
+	Outbox           *outbox.Spool
+	Root             string
+	Online           bool
+	Capture          CaptureController
+	ContinueRunner   continuex.Runner       // optional; when set, continue.start records/starts via Runner
+	ContinueExecutor continuex.TurnExecutor // optional in-app native turn executor
 }
 
 // capturedAgentSummary deliberately describes only harnesses that actually
@@ -82,6 +92,7 @@ func Methods() []string {
 		"files.read",
 		"files.diff",
 		"continue.start",
+		"continue.here",
 		"memory.search",
 		"memory.forget",
 		"memory.pin",
@@ -93,6 +104,7 @@ func Methods() []string {
 		"net.status",
 		"teleport.redaction_preview",
 		"teleport.send",
+		"teleport.restore_code",
 		"teleport.inbox",
 		"teleport.sent",
 		"teleport.prepare",
@@ -201,6 +213,41 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		}
 		trackRun(opID, argv)
 		return map[string]any{"op_id": opID, "command": argv}, nil
+	case "continue.here":
+		var req struct {
+			continuex.Request
+			WorkspaceRoot string `json:"workspace_root"`
+		}
+		if err := decode(args, &req); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(req.WorkspaceRoot) == "" || strings.TrimSpace(deps.Root) == "" {
+			return nil, errors.New("select this session's workspace in Settings before continuing here")
+		}
+		configured, err := filepath.Abs(deps.Root)
+		if err != nil {
+			return nil, err
+		}
+		source, err := filepath.Abs(req.WorkspaceRoot)
+		if err != nil || !sameWorkspacePath(configured, source) {
+			return nil, errors.New("switch to this session's workspace in Settings before continuing here")
+		}
+		prompt := strings.TrimSpace(req.Prompt)
+		if prompt == "" || len(prompt) > 16000 {
+			return nil, errors.New("enter a message of up to 16,000 characters")
+		}
+		if deps.ContinueExecutor == nil {
+			return nil, errors.New("in-app continuation is unavailable in this build")
+		}
+		plan, err := continuex.Plan(req.Agent, "here", req.NativeID, prompt)
+		if err != nil {
+			return nil, err
+		}
+		answer, err := deps.ContinueExecutor.Turn(ctx, plan, deps.Root)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"text": answer, "agent": plan.Agent}, nil
 	case "runs.message":
 		var body struct {
 			OpID    string `json:"op_id"`
@@ -258,6 +305,28 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		}
 		plan := teleport.BuildPreparePlan(body)
 		return plan, nil
+	case "teleport.send":
+		var sendOptions struct {
+			SessionID   string `json:"session_id"`
+			ToUserID    string `json:"to_user_id"`
+			IncludeCode bool   `json:"include_code"`
+		}
+		if err := json.Unmarshal(args, &sendOptions); err != nil {
+			return nil, err
+		}
+		if sendOptions.IncludeCode {
+			return teleportSendWithCode(ctx, deps, args)
+		}
+		if deps.Cloud == nil {
+			return nil, ErrOffline
+		}
+		var out any
+		if err := cloudDecode(ctx, deps.Cloud, http.MethodPost, "/v1/teleports", map[string]string{"session_id": sendOptions.SessionID, "to_user_id": sendOptions.ToUserID}, &out); err != nil {
+			return nil, err
+		}
+		return out, nil
+	case "teleport.restore_code":
+		return teleportRestoreCode(ctx, deps, args)
 	case "teleport.apply":
 		// The desktop's inbox action carries only a teleport id: acknowledge it
 		// on the cloud before opening a local restore plan.  Keep the existing
