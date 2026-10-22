@@ -1,11 +1,25 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func TestCodexEnvelopeRetainsOriginalTimestamp(t *testing.T) {
+	at := time.Date(2026, 9, 18, 20, 10, 0, 0, time.UTC)
+	for _, line := range []string{
+		fmt.Sprintf(`{"timestamp":%q,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}}`, at.Format(time.RFC3339)),
+		fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"agent_message","message":"reply"}}`, at.Format(time.RFC3339)),
+	} {
+		turn, ok := parseTurnLine([]byte(line))
+		if !ok || !turn.Timestamp.Equal(at) {
+			t.Fatalf("lost envelope timestamp: %+v", turn)
+		}
+	}
+}
 
 func TestUnknownAgentDateIsNotReplacedByCaptureTime(t *testing.T) {
 	root := t.TempDir()

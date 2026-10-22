@@ -856,6 +856,9 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 	if noiseTypes[typ] {
 		return Turn{}, false
 	}
+	// Codex keeps its original timestamp on the envelope, not the payload.
+	// Save it before unwrapping dialogue fields.
+	envelopeTime := extractTime(m)
 	// Codex / OpenAI Responses-style: unwrap payload for dialogue fields.
 	if p, ok := m["payload"].(map[string]any); ok {
 		pt := strings.ToLower(strField(p, "type"))
@@ -934,10 +937,14 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 	if strings.TrimSpace(content) == "" && len(toolCalls) == 0 {
 		return Turn{}, false
 	}
+	sourceTime := extractTime(m)
+	if sourceTime.IsZero() {
+		sourceTime = envelopeTime
+	}
 	t = Turn{
 		Speaker:   normalizeSpeaker(role),
 		Content:   strings.TrimSpace(content),
-		Timestamp: extractTime(m),
+		Timestamp: sourceTime,
 		ToolCalls: toolCalls,
 	}
 	if t.Speaker == "unknown" && len(toolCalls) > 0 {
