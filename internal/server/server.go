@@ -75,6 +75,12 @@ type Server struct {
 	// Accounts is the full user store for signup/profile/usage (issue #161).
 	Accounts *store.UserStore
 
+	// Bounded, aggregate-only cache for archived source dates. The key includes
+	// owner/project and snapshot version; no conversation text is retained.
+	activityMu           sync.Mutex
+	activityCache        map[string]cachedLegacyActivity
+	activityCacheEntries int
+
 	// Tokens is the API token store for mint/list/revoke (issue #161).
 	Tokens *store.APITokenStore
 

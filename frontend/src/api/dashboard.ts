@@ -20,12 +20,13 @@ export type ProjectDashboard = {
   project_id: string
   metrics: DashboardMetrics
   heatmap: HeatDay[]
+  agent_activity?: { timestamp_basis: string; undated_messages: number; partial: boolean }
   by_type: TypeCount[]
   recent: ProjectEvent[]
 }
 
 export const dashboardApi = {
   get(projectId: string, signal?: AbortSignal) {
-    return apiRequest<ProjectDashboard>(`/projects/${projectId}/dashboard`, { signal })
+    return apiRequest<ProjectDashboard>(`/projects/${projectId}/dashboard?utc_offset_minutes=${-new Date().getTimezoneOffset()}`, { signal })
   },
 }

@@ -30,6 +30,7 @@ type MirroredTurn struct {
 	Role        string
 	TextPreview string
 	ToolCalls   []map[string]any
+	SourceAt    *time.Time
 }
 
 // mirrorConnection returns a coherent connection snapshot.  The project id
@@ -151,10 +152,14 @@ func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, 
 			if calls == nil {
 				calls = []map[string]any{}
 			}
-			batch = append(batch, map[string]any{
+			body := map[string]any{
 				"idx": turn.Idx, "role": role,
 				"text_preview": turn.TextPreview, "tool_calls": calls,
-			})
+			}
+			if turn.SourceAt != nil {
+				body["source_ts"] = turn.SourceAt
+			}
+			batch = append(batch, body)
 		}
 		status, err := mirrorJSON(ctx, client, http.MethodPost,
 			base+"/v1/agent-sessions/"+url.PathEscape(sessionID)+"/turns/batch",
@@ -179,13 +184,17 @@ func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, 
 		if calls == nil {
 			calls = []map[string]any{}
 		}
+		body := map[string]any{
+			"idx":          turn.Idx,
+			"role":         role,
+			"text_preview": turn.TextPreview,
+			"tool_calls":   calls,
+		}
+		if turn.SourceAt != nil {
+			body["source_ts"] = turn.SourceAt
+		}
 		status, err := mirrorJSON(ctx, client, http.MethodPost,
-			base+"/v1/agent-sessions/"+url.PathEscape(sessionID)+"/turns", token, map[string]any{
-				"idx":          turn.Idx,
-				"role":         role,
-				"text_preview": turn.TextPreview,
-				"tool_calls":   calls,
-			}, nil)
+			base+"/v1/agent-sessions/"+url.PathEscape(sessionID)+"/turns", token, body, nil)
 		if err != nil && status != http.StatusConflict {
 			return sessionID, err
 		}

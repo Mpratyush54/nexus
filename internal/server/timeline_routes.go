@@ -306,6 +306,7 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 		TextPreview string          `json:"text_preview"`
 		ToolCalls   json.RawMessage `json:"tool_calls"`
 		BlobRef     string          `json:"blob_ref"`
+		SourceAt    *time.Time      `json:"source_ts"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -313,6 +314,7 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 	err := cs.AppendSessionTurn(r.Context(), store.SessionTurn{
 		SessionID: r.PathValue("id"), Idx: body.Idx, Role: body.Role,
 		TextPreview: body.TextPreview, ToolCalls: body.ToolCalls, BlobRef: body.BlobRef,
+		SourceAt: validAgentSourceTime(body.SourceAt),
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -348,6 +350,7 @@ func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request
 			Role        string          `json:"role"`
 			TextPreview string          `json:"text_preview"`
 			ToolCalls   json.RawMessage `json:"tool_calls"`
+			SourceAt    *time.Time      `json:"source_ts"`
 		} `json:"turns"`
 	}
 	if !decodeJSON(w, r, &body) {
@@ -362,6 +365,7 @@ func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request
 		err := cs.AppendSessionTurn(r.Context(), store.SessionTurn{
 			SessionID: row.ID, Idx: turn.Idx, Role: turn.Role,
 			TextPreview: turn.TextPreview, ToolCalls: turn.ToolCalls,
+			SourceAt: validAgentSourceTime(turn.SourceAt),
 		})
 		if errors.Is(err, store.ErrConflict) {
 			duplicates++
