@@ -1400,9 +1400,6 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	if len(turns) > 0 {
 		last := now
 		for i := range turns {
-			if turns[i].Timestamp.IsZero() {
-				turns[i].Timestamp = now
-			}
 			if turns[i].Timestamp.After(last) {
 				last = turns[i].Timestamp
 			}
@@ -1473,21 +1470,24 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 		}
 		h.mu.Lock()
 		for i := range turns {
-			if turns[i].Timestamp.IsZero() {
-				turns[i].Timestamp = now
+			// Receipt time drives idle detection only. Missing source timestamps
+			// stay missing in the emitted turn and archived transcript.
+			activityAt := turns[i].Timestamp
+			if activityAt.IsZero() {
+				activityAt = now
 			}
 			turnPath := path
 			if turns[i].SessionID != "" {
 				turnPath = filepath.Join(filepath.Dir(path), ".nexus-opencode-sessions", turns[i].SessionID+".jsonl")
 				h.agents[turnPath] = agent
 			}
-			if turns[i].Timestamp.After(h.lastActive[turnPath]) {
-				h.lastActive[turnPath] = turns[i].Timestamp
+			if activityAt.After(h.lastActive[turnPath]) {
+				h.lastActive[turnPath] = activityAt
 			}
 			delete(h.completed, turnPath)
 			h.batch[turnPath] = append(h.batch[turnPath], turns[i])
-			if turns[i].Timestamp.After(h.lastActive[path]) {
-				h.lastActive[path] = turns[i].Timestamp
+			if activityAt.After(h.lastActive[path]) {
+				h.lastActive[path] = activityAt
 			}
 		}
 		h.mu.Unlock()
