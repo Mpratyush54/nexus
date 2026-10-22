@@ -232,6 +232,9 @@ export function DashboardPage() {
           </Link>
         </div>
         <ActivityHeatmap days={dash.data?.heatmap} loading={dash.isLoading} />
+        <p className="text-xs text-muted">Based on original agent timestamps, not upload dates.</p>
+        {!!dash.data?.agent_activity?.undated_messages && <p className="text-xs text-amber">{dash.data.agent_activity.undated_messages} historical messages have no original date and are excluded.</p>}
+        {dash.data?.agent_activity?.partial && <p className="text-xs text-amber">Some archived history could not be read; activity may be incomplete.</p>}
       </GlassPanel>
 
       <div className="grid gap-6 lg:grid-cols-5">

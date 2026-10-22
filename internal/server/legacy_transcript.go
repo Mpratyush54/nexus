@@ -79,6 +79,10 @@ func ParseTranscriptJSONL(raw []byte) []store.SessionTurn {
 			continue
 		}
 		if turn, ok := transcriptTurn(entry); ok {
+			turn.SourceAt = transcriptSourceTime(entry)
+			if turn.SourceAt != nil {
+				turn.At = *turn.SourceAt
+			}
 			turns = append(turns, turn)
 		}
 		if len(turns) >= legacyTurnLimit {

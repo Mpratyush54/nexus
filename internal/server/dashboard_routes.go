@@ -72,6 +72,11 @@ func (s *Server) handleProjectDashboard(w http.ResponseWriter, r *http.Request) 
 	if len(typeRows) > 8 {
 		typeRows = typeRows[:8]
 	}
+	agentActivity, err := s.activityCalendar(r, id, now)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load agent activity")
+		return
+	}
 
 	memories := 0
 	proposed := 0
@@ -136,8 +141,10 @@ func (s *Server) handleProjectDashboard(w http.ResponseWriter, r *http.Request) 
 			"github_connected": githubConnected,
 			"github_repo":      githubRepo,
 		},
-		"heatmap": heatmap,
-		"by_type": typeRows,
-		"recent":  recent,
+		"heatmap":        agentActivity["days"],
+		"agent_activity": agentActivity,
+		"event_heatmap":  heatmap,
+		"by_type":        typeRows,
+		"recent":         recent,
 	})
 }

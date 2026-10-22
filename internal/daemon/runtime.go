@@ -610,9 +610,11 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 			title, _ = ev.Payload["session_title"].(string)
 		}
 		at := ev.CreatedAt
+		var sourceAt *time.Time
 		if raw, ok := ev.Payload["timestamp"].(string); ok {
 			if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
 				at = parsed
+				sourceAt = &parsed
 			}
 		}
 		if at.IsZero() {
@@ -637,6 +639,7 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 			Role:        role,
 			TextPreview: boundedTurnPreview(content),
 			ToolCalls:   mirroredToolCalls(ev.Payload["tool_calls"]),
+			SourceAt:    sourceAt,
 		})
 	}
 	id, err := hs.MirrorAgentSessionTurns(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, turns, title)

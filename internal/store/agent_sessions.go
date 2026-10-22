@@ -71,6 +71,7 @@ type SessionTurn struct {
 	Idx         int             `json:"idx"`
 	Role        string          `json:"role"`
 	At          time.Time       `json:"ts"`
+	SourceAt    *time.Time      `json:"source_ts,omitempty"`
 	TextPreview string          `json:"text_preview,omitempty"`
 	ToolCalls   json.RawMessage `json:"tool_calls"`
 	BlobRef     string          `json:"blob_ref,omitempty"`
@@ -523,8 +524,11 @@ func (m *MemStore) AppendSessionTurn(ctx context.Context, turn SessionTurn) erro
 		turn.At = time.Now().UTC()
 	}
 	turns := m.sessionTurns[turn.SessionID]
-	for _, existing := range turns {
+	for i, existing := range turns {
 		if existing.Idx == turn.Idx {
+			if turn.SourceAt != nil && existing.SourceAt == nil {
+				turns[i].SourceAt = turn.SourceAt
+			}
 			return fmt.Errorf("store: turn %d: %w", turn.Idx, ErrConflict)
 		}
 	}
@@ -1222,12 +1226,19 @@ func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn)
 		turn.At = time.Now().UTC()
 	}
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO session_turns (session_id, idx, role, ts, text_preview, tool_calls, blob_ref)
-		VALUES ($1::uuid, $2, $3, $4, NULLIF($5,''), $6::jsonb, NULLIF($7,''))`,
-		turn.SessionID, turn.Idx, turn.Role, turn.At, turn.TextPreview, string(turn.ToolCalls), turn.BlobRef)
+		INSERT INTO session_turns (session_id, idx, role, ts, text_preview, tool_calls, blob_ref, source_ts)
+		VALUES ($1::uuid, $2, $3, $4, NULLIF($5,''), $6::jsonb, NULLIF($7,''), $8)`,
+		turn.SessionID, turn.Idx, turn.Role, turn.At, turn.TextPreview, string(turn.ToolCalls), turn.BlobRef, turn.SourceAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			if turn.SourceAt != nil {
+				_, repairErr := s.pool.Exec(ctx, `UPDATE session_turns SET source_ts = $3
+					WHERE session_id = $1::uuid AND idx = $2 AND source_ts IS NULL`, turn.SessionID, turn.Idx, turn.SourceAt)
+				if repairErr != nil {
+					return repairErr
+				}
+			}
 			return ErrConflict
 		}
 		return err
@@ -1244,7 +1255,7 @@ func (s *PostgresStore) ListSessionTurns(ctx context.Context, sessionID string) 
 		return nil, ErrNotFound
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT session_id::text, idx, role, ts, COALESCE(text_preview,''), tool_calls, COALESCE(blob_ref,'')
+		SELECT session_id::text, idx, role, ts, COALESCE(text_preview,''), tool_calls, COALESCE(blob_ref,''), source_ts
 		FROM session_turns WHERE session_id = $1::uuid ORDER BY idx`, sessionID)
 	if err != nil {
 		return nil, err
@@ -1254,7 +1265,7 @@ func (s *PostgresStore) ListSessionTurns(ctx context.Context, sessionID string) 
 	for rows.Next() {
 		var t SessionTurn
 		var calls []byte
-		if err := rows.Scan(&t.SessionID, &t.Idx, &t.Role, &t.At, &t.TextPreview, &calls, &t.BlobRef); err != nil {
+		if err := rows.Scan(&t.SessionID, &t.Idx, &t.Role, &t.At, &t.TextPreview, &calls, &t.BlobRef, &t.SourceAt); err != nil {
 			return nil, err
 		}
 		t.ToolCalls = calls
