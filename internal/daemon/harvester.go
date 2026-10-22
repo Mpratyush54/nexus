@@ -856,6 +856,9 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 	if noiseTypes[typ] {
 		return Turn{}, false
 	}
+	// Codex keeps its original timestamp on the envelope, not the payload.
+	// Save it before unwrapping dialogue fields.
+	envelopeTime := extractTime(m)
 	// Codex / OpenAI Responses-style: unwrap payload for dialogue fields.
 	if p, ok := m["payload"].(map[string]any); ok {
 		pt := strings.ToLower(strField(p, "type"))
@@ -934,10 +937,14 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 	if strings.TrimSpace(content) == "" && len(toolCalls) == 0 {
 		return Turn{}, false
 	}
+	sourceTime := extractTime(m)
+	if sourceTime.IsZero() {
+		sourceTime = envelopeTime
+	}
 	t = Turn{
 		Speaker:   normalizeSpeaker(role),
 		Content:   strings.TrimSpace(content),
-		Timestamp: extractTime(m),
+		Timestamp: sourceTime,
 		ToolCalls: toolCalls,
 	}
 	if t.Speaker == "unknown" && len(toolCalls) > 0 {
@@ -1400,9 +1407,6 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	if len(turns) > 0 {
 		last := now
 		for i := range turns {
-			if turns[i].Timestamp.IsZero() {
-				turns[i].Timestamp = now
-			}
 			if turns[i].Timestamp.After(last) {
 				last = turns[i].Timestamp
 			}
@@ -1473,21 +1477,24 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 		}
 		h.mu.Lock()
 		for i := range turns {
-			if turns[i].Timestamp.IsZero() {
-				turns[i].Timestamp = now
+			// Receipt time drives idle detection only. Missing source timestamps
+			// stay missing in the emitted turn and archived transcript.
+			activityAt := turns[i].Timestamp
+			if activityAt.IsZero() {
+				activityAt = now
 			}
 			turnPath := path
 			if turns[i].SessionID != "" {
 				turnPath = filepath.Join(filepath.Dir(path), ".nexus-opencode-sessions", turns[i].SessionID+".jsonl")
 				h.agents[turnPath] = agent
 			}
-			if turns[i].Timestamp.After(h.lastActive[turnPath]) {
-				h.lastActive[turnPath] = turns[i].Timestamp
+			if activityAt.After(h.lastActive[turnPath]) {
+				h.lastActive[turnPath] = activityAt
 			}
 			delete(h.completed, turnPath)
 			h.batch[turnPath] = append(h.batch[turnPath], turns[i])
-			if turns[i].Timestamp.After(h.lastActive[path]) {
-				h.lastActive[path] = turns[i].Timestamp
+			if activityAt.After(h.lastActive[path]) {
+				h.lastActive[path] = activityAt
 			}
 		}
 		h.mu.Unlock()
