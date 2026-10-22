@@ -21,6 +21,7 @@ import (
 	"unsafe"
 
 	"central-memory/internal/config"
+	"central-memory/internal/continuex"
 	"central-memory/internal/core"
 	"central-memory/internal/daemon"
 )
@@ -100,7 +101,7 @@ func nx_init(configJSON *C.char) (rc C.int) {
 			log.Printf("nexuscore: save capture workspace: %v", err)
 		}
 	}
-	deps := core.Deps{Root: root, Online: cfg.Online && serverToken != "", Capture: embeddedCaptureController{}}
+	deps := core.Deps{Root: root, Online: cfg.Online && serverToken != "", Capture: embeddedCaptureController{}, ContinueExecutor: continuex.HeadlessExecutor{}}
 	if deps.Online {
 		deps.Cloud = &core.HTTPCloud{BaseURL: serverURL, Token: serverToken}
 	}

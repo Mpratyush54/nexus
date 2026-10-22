@@ -9,19 +9,22 @@ public sealed class TimelinePage : NexusPage
 {
     private readonly ComboBox _project = new() { PlaceholderText = "Select a project", Width = 240 };
     private readonly TextBox _agent = new() { PlaceholderText = "Agent", Width = 160 };
-    private readonly TextBox _search = new() { PlaceholderText = "Search sessions", Width = 240 };
+    private readonly TextBox _search = new() { PlaceholderText = "Search sessions" };
+    private readonly StackPanel _agentChip = new() { Spacing = 6, VerticalAlignment = VerticalAlignment.Center };
     private readonly StackPanel _cards = new() { Spacing = 10, HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly Button _more = new() { Content = "Load more sessions", Visibility = Visibility.Collapsed };
-    private readonly TextBlock _count = new() { Text = "", Opacity = 0.7 };
+    private readonly TextBlock _count = new() { Text = "", Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center };
+    private readonly string _projectID;
     private string _query = "";
     private string _nextCursor = "";
     private bool _loading;
     private int _loadedCount;
     private bool _projectsLoaded;
 
-    public TimelinePage(string agent = "")
+    public TimelinePage(string agent = "", string projectID = "")
     {
         _agent.Text = agent;
+        _projectID = projectID;
         var refresh = new Button { Content = "Refresh" };
         refresh.Click += async (_, _) => await LoadAsync(false);
         _more.Click += async (_, _) => await LoadAsync(true);
@@ -33,9 +36,22 @@ public sealed class TimelinePage : NexusPage
                 if (e.Key == Windows.System.VirtualKey.Enter) await LoadAsync(false);
             };
         }
-        var filters = Row(_project, _search, _agent, refresh);
+        var filters = new Grid { ColumnSpacing = 8 };
+        filters.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        filters.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        filters.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(140) });
+        filters.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        _search.HorizontalAlignment = HorizontalAlignment.Stretch;
+        Grid.SetColumn(_project, 0);
+        Grid.SetColumn(_search, 1);
+        Grid.SetColumn(_agent, 2);
+        Grid.SetColumn(refresh, 3);
+        filters.Children.Add(_project);
+        filters.Children.Add(_search);
+        filters.Children.Add(_agent);
+        filters.Children.Add(refresh);
         var results = new StackPanel { Spacing = 14 };
-        results.Children.Add(_count);
+        results.Children.Add(Row(_count, _agentChip));
         results.Children.Add(_cards);
         results.Children.Add(_more);
         var scroller = new ScrollViewer { Content = results };
@@ -45,7 +61,7 @@ public sealed class TimelinePage : NexusPage
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         var header = new StackPanel { Spacing = 4 };
         header.Children.Add(Line("Timeline", title: true));
-        header.Children.Add(Line("Captured sessions in the selected project. Choose another project to switch workspaces."));
+        header.Children.Add(Muted("Browse chats by project. To change local capture or in-app continuation, select its folder in Settings."));
         var title = header;
         Grid.SetRow(filters, 1);
         Grid.SetRow(scroller, 2);
@@ -91,8 +107,9 @@ public sealed class TimelinePage : NexusPage
             return;
         }
         var chosen = -1;
+        var target = _projectID.Length > 0 ? _projectID : preferred;
         for (var i = 0; i < _project.Items.Count; i++)
-            if ((_project.Items[i] as ComboBoxItem)?.Tag as string == preferred) { chosen = i; break; }
+            if ((_project.Items[i] as ComboBoxItem)?.Tag as string == target) { chosen = i; break; }
         _projectsLoaded = true;
         if (chosen >= 0 || _project.Items.Count == 1) _project.SelectedIndex = chosen >= 0 ? chosen : 0;
         else _count.Text = "Choose a project to see its sessions.";
@@ -105,6 +122,7 @@ public sealed class TimelinePage : NexusPage
         if (projectId.Length == 0) { _count.Text = "Choose a project to see its sessions."; return; }
         _loading = true;
         _more.IsEnabled = false;
+        UpdateAgentChip();
         if (!append)
         {
             _nextCursor = "";
@@ -134,10 +152,13 @@ public sealed class TimelinePage : NexusPage
         _more.IsEnabled = true;
         var items = NxJson.Items(response.Result).ToList();
         _loadedCount += items.Count;
-        _count.Text = $"{_loadedCount} sessions loaded" + (_nextCursor.Length > 0 ? " · more available" : "");
+        var agentScope = _agent.Text.Trim().Length > 0 ? " · agent: " + _agent.Text.Trim() : "";
+        _count.Text = $"{_loadedCount} sessions loaded" + agentScope + (_nextCursor.Length > 0 ? " · more available" : "");
         if (items.Count == 0 && !append)
         {
-            _cards.Children.Add(Card(Line("No sessions found", title: true), Line("Check that capture is active in Settings, then refresh. Historical and new sessions appear here together.")));
+            _cards.Children.Add(Card(Line("No sessions found", title: true), Line(agentScope.Length > 0
+                ? "No sessions for this agent filter in the selected project. Clear the filter or pick another project."
+                : "Check that capture is active in Settings, then refresh. Historical and new sessions appear here together.")));
             return;
         }
         foreach (var item in items)
@@ -155,5 +176,16 @@ public sealed class TimelinePage : NexusPage
             open.IsEnabled = id.Length > 0;
             _cards.Children.Add(Card(Line(headline.Length > 0 ? headline : id, title: true), Line(meta), open));
         }
+    }
+
+    private void UpdateAgentChip()
+    {
+        _agentChip.Children.Clear();
+        var filter = _agent.Text.Trim();
+        if (filter.Length == 0) return;
+        var clear = new Button { Content = "✕", MinHeight = 26, Padding = new Thickness(8, 2, 8, 2) };
+        ToolTipService.SetToolTip(clear, "Clear the agent filter");
+        clear.Click += async (_, _) => { _agent.Text = ""; await LoadAsync(false); };
+        _agentChip.Children.Add(Row(Chip("agent: " + filter), clear));
     }
 }

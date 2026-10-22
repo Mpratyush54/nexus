@@ -165,7 +165,11 @@ func harnessArgv(agent, mode, id, prompt string) ([]string, bool, error) {
 		return []string{"copilot", "--resume=" + id}, true, nil
 	case "opencode":
 		if headless {
-			return []string{"opencode", "run", "-s", id, "--format", "json"}, true, nil
+			argv := []string{"opencode", "run", "-s", id, "--format", "json"}
+			if prompt != "" {
+				argv = append(argv, prompt)
+			}
+			return argv, true, nil
 		}
 		return []string{"opencode", "-s", id}, true, nil
 	case "kimi":

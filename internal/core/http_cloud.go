@@ -34,16 +34,27 @@ func (c *HTTPCloud) Do(ctx context.Context, method, path string, body []byte) ([
 	}
 	client := c.Client
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		timeout := 30 * time.Second
+		if strings.Contains(path, "/blobs/") {
+			timeout = 2 * time.Minute
+		}
+		client = &http.Client{Timeout: timeout}
 	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	limit := int64(2 << 20)
+	if method == http.MethodGet && strings.Contains(path, "/blobs/") {
+		limit = 32 << 20
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(raw)) > limit {
+		return nil, fmt.Errorf("cloud: response too large for %s", path)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		return nil, fmt.Errorf("cloud: %s %s", resp.Status, strings.TrimSpace(string(raw)))

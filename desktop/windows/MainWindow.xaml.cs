@@ -76,12 +76,12 @@ public sealed partial class MainWindow : Window
         ShowPage(new TimelinePage(), query ?? "");
     }
 
-    public void ShowAgentSessions(string agent)
+    public void ShowAgentSessions(string agent, string projectId = "")
     {
         _navLock = true;
         Nav.SelectedItem = TimelineItem;
         _navLock = false;
-        ShowPage(new TimelinePage(agent));
+        ShowPage(new TimelinePage(agent, projectId));
     }
 
     public void ShowSettings()

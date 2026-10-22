@@ -92,8 +92,80 @@ public class NexusPage : Page
         {
             Text = NxJson.Scrub(text),
             TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true,
             FontSize = title ? 18 : 14,
             FontWeight = title ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal
+        };
+    }
+
+    protected static TextBlock Muted(string text)
+    {
+        return new TextBlock
+        {
+            Text = NxJson.Scrub(text),
+            TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true,
+            FontSize = 12,
+            Opacity = 0.65
+        };
+    }
+
+    protected static TextBlock Monospace(string text)
+    {
+        return new TextBlock
+        {
+            Text = NxJson.Scrub(text),
+            FontFamily = new FontFamily("Consolas"),
+            TextWrapping = TextWrapping.Wrap,
+            IsTextSelectionEnabled = true,
+            FontSize = 13
+        };
+    }
+
+    protected static TextBlock SectionHeader(string text)
+    {
+        return new TextBlock
+        {
+            Text = NxJson.Scrub(text),
+            TextWrapping = TextWrapping.Wrap,
+            FontSize = 13,
+            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
+            Opacity = 0.7,
+            Margin = new Thickness(0, 10, 0, 2)
+        };
+    }
+
+    protected static Border Chip(string text)
+    {
+        return new Border
+        {
+            Padding = new Thickness(8, 2, 8, 3),
+            CornerRadius = new CornerRadius(6),
+            VerticalAlignment = VerticalAlignment.Center,
+            Background = ResourceBrush("ControlFillColorSecondaryBrush", Windows.UI.Color.FromArgb(36, 255, 255, 255)),
+            BorderBrush = ResourceBrush("ControlStrokeColorDefaultBrush", Windows.UI.Color.FromArgb(46, 255, 255, 255)),
+            BorderThickness = new Thickness(1),
+            Child = new TextBlock { Text = NxJson.Scrub(text), FontSize = 11, Opacity = 0.85 }
+        };
+    }
+
+    protected static Border ListItem(params UIElement[] children)
+    {
+        var stack = new StackPanel { Spacing = 6 };
+        foreach (var child in children)
+        {
+            stack.Children.Add(child);
+        }
+        return new Border
+        {
+            Padding = new Thickness(14, 10, 14, 10),
+            Margin = new Thickness(0, 0, 0, 6),
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            CornerRadius = new CornerRadius(9),
+            BorderThickness = new Thickness(1),
+            Background = ResourceBrush("CardBackgroundFillColorDefaultBrush", Windows.UI.Color.FromArgb(26, 255, 255, 255)),
+            BorderBrush = ResourceBrush("CardStrokeColorDefaultBrush", Windows.UI.Color.FromArgb(60, 255, 255, 255)),
+            Child = stack
         };
     }
 
