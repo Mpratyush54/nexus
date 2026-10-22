@@ -84,17 +84,15 @@ func (s *Server) handleAgentSessionFiles(w http.ResponseWriter, r *http.Request)
 		}
 		byPath[path][op.OpType] = true
 	}
-	if len(byPath) == 0 {
-		for _, call := range s.sessionToolCalls(r, row) {
-			path := toolCallValue(call, "file_path", "target_file", "path")
-			if path == "" {
-				continue
-			}
-			if byPath[path] == nil {
-				byPath[path] = map[string]bool{}
-			}
-			byPath[path][toolCallValue(call, "name")] = true
+	for _, call := range s.sessionToolCalls(r, row) {
+		path := toolCallValue(call, "file_path", "target_file", "path")
+		if path == "" {
+			continue
 		}
+		if byPath[path] == nil {
+			byPath[path] = map[string]bool{}
+		}
+		byPath[path][toolCallValue(call, "name")] = true
 	}
 	type fileRow struct {
 		Path       string   `json:"path"`
@@ -129,11 +127,17 @@ func (s *Server) handleAgentSessionOperations(w http.ResponseWriter, r *http.Req
 		Tool      string `json:"tool"`
 		Command   string `json:"command"`
 		Directory string `json:"directory,omitempty"`
+		ExitCode  *int   `json:"exit_code,omitempty"`
+		Output    string `json:"output,omitempty"`
+		Truncated bool   `json:"truncated,omitempty"`
 	}
 	items := make([]commandRow, 0, len(tools))
 	for _, item := range tools {
 		if item.CommandLine != "" {
-			items = append(items, commandRow{Tool: item.ToolName, Command: item.CommandLine, Directory: item.WorkingDirectory})
+			items = append(items, commandRow{
+				Tool: item.ToolName, Command: item.CommandLine, Directory: item.WorkingDirectory,
+				ExitCode: item.ExitCode, Output: item.OutputSnippet, Truncated: item.Truncated,
+			})
 		}
 	}
 	if len(items) == 0 {
