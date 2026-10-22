@@ -111,6 +111,9 @@ func TestForkAgentSessionTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := m.AppendSessionTurn(ctx, SessionTurn{SessionID: parent.ID, Idx: 1, Role: "user", TextPreview: "Find the missing data"}); err != nil {
+		t.Fatal(err)
+	}
 	child, err := m.ForkAgentSession(ctx, parent.ID, "bob")
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +123,14 @@ func TestForkAgentSessionTree(t *testing.T) {
 	}
 	if child.OwnerUserID != "bob" || child.ProjectID != parent.ProjectID {
 		t.Fatalf("child ownership: %+v", child)
+	}
+	cloned, err := m.ListSessionTurns(ctx, child.ID)
+	if err != nil || len(cloned) != 1 || cloned[0].TextPreview != "Find the missing data" {
+		t.Fatalf("fork transcript=%+v err=%v", cloned, err)
+	}
+	timeline, _, err := m.ListTimeline(ctx, TimelineQuery{UserID: "bob", Query: "missing data"})
+	if err != nil || len(timeline) != 1 || timeline[0].Summary != "Find the missing data" {
+		t.Fatalf("fork timeline=%+v err=%v", timeline, err)
 	}
 	forks, err := m.ListAgentSessionForks(ctx, parent.ID)
 	if err != nil || len(forks) != 1 || forks[0].ID != child.ID {

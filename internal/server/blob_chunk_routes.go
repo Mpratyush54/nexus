@@ -157,6 +157,15 @@ func (s *Server) handleBlobAssemble(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "missing chunk")
 		return
 	}
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "blob storage unavailable")
+		return
+	}
+	if err := cs.PutBlob(r.Context(), projectID, parent, "plain", "file", plain); err != nil {
+		writeError(w, http.StatusBadRequest, "could not store assembled file: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sha256":      parent,
 		"size":        len(plain),

@@ -18,6 +18,8 @@ import (
 )
 
 func (s *Server) registerTimelineRoutes() {
+	s.Mux.HandleFunc("GET /v1/sharing/recipients", s.requireAuth(s.handleSharingRecipients))
+	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/grants/organization", s.requireAuth(s.handleShareWithOrganization))
 	s.Mux.HandleFunc("POST /v1/agent-sessions", s.requireAuth(s.handleAgentSessionUpsert))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}", s.requireAuth(s.handleAgentSessionGet))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/grants", s.requireAuth(s.handleAgentSessionGrant))
@@ -32,6 +34,7 @@ func (s *Server) registerTimelineRoutes() {
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/merge-code", s.requireAuth(s.handleAgentSessionMergeCode))
 	s.Mux.HandleFunc("POST /v1/blobs/missing", s.requireAuth(s.handleBlobsMissing))
 	s.Mux.HandleFunc("PUT /v1/blobs/{sha256}", s.requireAuth(s.handleBlobPut))
+	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/versions/{version}/blobs/{sha256}", s.requireAuth(s.handleSessionVersionBlob))
 	s.Mux.HandleFunc("GET /v1/timeline", s.requireAuth(s.handleTimeline))
 }
 
@@ -750,9 +753,6 @@ func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness,
 			if harness != "" && !strings.EqualFold(harness, snap.Harness) {
 				continue
 			}
-			if query != "" && !strings.Contains(strings.ToLower(snap.Harness+" "+snap.ConversationID), strings.ToLower(query)) {
-				continue
-			}
 			if !s.canReadSnapshot(ctx, userID, snap) {
 				continue
 			}
@@ -761,11 +761,38 @@ func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness,
 				(legacy.LastActiveAt.Equal(cursorAt) && legacy.ID >= cursorID)) {
 				continue
 			}
+			var matchPreview, matchRole string
+			var matchIdx *int
+			if query != "" && !strings.Contains(strings.ToLower(legacy.Title+" "+snap.Harness+" "+snap.ConversationID), strings.ToLower(query)) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				full, err := ps.GetLatestSnapshot(ctx, snap.SessionID)
+				if err != nil {
+					return nil, err
+				}
+				raw, err := gunzipSnapshot(full.TranscriptPayload)
+				if err != nil {
+					continue
+				}
+				for _, turn := range ParseTranscriptJSONL(raw) {
+					if (turn.Role == "user" || turn.Role == "assistant") && strings.Contains(strings.ToLower(turn.TextPreview), strings.ToLower(query)) {
+						idx := turn.Idx
+						matchIdx, matchRole = &idx, turn.Role
+						matchPreview = store.TimelineMatchPreview(turn.TextPreview, query)
+						break
+					}
+				}
+				if matchIdx == nil {
+					continue
+				}
+			}
 			items = append(items, store.TimelineItem{
 				SessionID: legacy.ID, ProjectID: legacy.ProjectID, Harness: legacy.Harness,
 				NativeID: legacy.NativeID, Title: legacy.Title, Summary: legacy.Summary,
 				Visibility: legacy.Visibility, OwnerUserID: legacy.OwnerUserID,
 				LastActiveAt: legacy.LastActiveAt, TurnCount: snap.TurnCount, VersionState: "legacy_snapshot",
+				MatchPreview: matchPreview, MatchTurnIdx: matchIdx, MatchRole: matchRole,
 			})
 		}
 	}

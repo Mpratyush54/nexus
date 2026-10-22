@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"central-memory/internal/capture"
 
@@ -88,6 +89,9 @@ type TimelineItem struct {
 	LastActiveAt time.Time `json:"last_active_at"`
 	TurnCount    int       `json:"turn_count"`
 	VersionState string    `json:"version_state,omitempty"`
+	MatchPreview string    `json:"match_preview,omitempty"`
+	MatchTurnIdx *int      `json:"match_turn_idx,omitempty"`
+	MatchRole    string    `json:"match_role,omitempty"`
 }
 
 // TimelineQuery filters GET /v1/timeline.
@@ -461,6 +465,12 @@ func (m *MemStore) ForkAgentSession(ctx context.Context, parentSessionID, ownerU
 	key := nativeKey(row.ProjectID, row.Harness, row.NativeID, row.OriginMachineID)
 	m.agentSessions[id] = row
 	m.agentByNative[key] = id
+	for _, original := range m.sessionTurns[parent.ID] {
+		copyTurn := original
+		copyTurn.SessionID = id
+		copyTurn.ToolCalls = append(json.RawMessage(nil), original.ToolCalls...)
+		m.sessionTurns[id] = append(m.sessionTurns[id], copyTurn)
+	}
 	cp := *row
 	return &cp, nil
 }
@@ -722,6 +732,15 @@ func (m *MemStore) SetStorageUsage(ctx context.Context, scope string, used, cap 
 	return nil
 }
 
+func timelineTurnPreview(raw string) string {
+	text := strings.Join(strings.Fields(raw), " ")
+	chars := []rune(text)
+	if len(chars) > 260 {
+		return string(chars[:260]) + "…"
+	}
+	return text
+}
+
 func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]TimelineItem, string, error) {
 	_ = ctx
 	if q.Limit <= 0 || q.Limit > 100 {
@@ -754,8 +773,21 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 		if q.Harness != "" && row.Harness != q.Harness {
 			continue
 		}
-		if q.Query != "" && !strings.Contains(strings.ToLower(row.Title+" "+row.Summary+" "+row.NativeID), strings.ToLower(q.Query)) {
-			continue
+		var matchTurn *SessionTurn
+		if q.Query != "" {
+			needle := strings.ToLower(q.Query)
+			matched := strings.Contains(strings.ToLower(row.Title+" "+row.Summary+" "+row.NativeID), needle)
+			for _, turn := range m.sessionTurns[row.ID] {
+				if (turn.Role == "user" || turn.Role == "assistant") && strings.Contains(strings.ToLower(turn.TextPreview), needle) {
+					matched = true
+					copy := turn
+					matchTurn = &copy
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
 		}
 		if !cursorAt.IsZero() {
 			if row.LastActiveAt.After(cursorAt) {
@@ -769,6 +801,19 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 			SessionID: row.ID, ProjectID: row.ProjectID, Harness: row.Harness,
 			NativeID: row.NativeID, Title: row.Title, Summary: row.Summary,
 			Visibility: row.Visibility, OwnerUserID: row.OwnerUserID, LastActiveAt: row.LastActiveAt,
+		}
+		if matchTurn != nil {
+			idx := matchTurn.Idx
+			item.MatchTurnIdx, item.MatchRole = &idx, matchTurn.Role
+			item.MatchPreview = TimelineMatchPreview(matchTurn.TextPreview, q.Query)
+		}
+		if strings.TrimSpace(item.Summary) == "" {
+			for _, turn := range m.sessionTurns[row.ID] {
+				if turn.Role == "user" && strings.TrimSpace(turn.TextPreview) != "" {
+					item.Summary = timelineTurnPreview(turn.TextPreview)
+					break
+				}
+			}
 		}
 		var best *SessionVersion
 		for i := range m.sessionVersions[row.ID] {
@@ -1096,7 +1141,12 @@ func (s *PostgresStore) ForkAgentSession(ctx context.Context, parentSessionID, o
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%1_000_000)
 	native := parent.NativeID + "-fork-" + suffix
-	row := s.pool.QueryRow(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	row := tx.QueryRow(ctx, `
 		INSERT INTO agent_sessions (
 			project_id, owner_user_id, harness, native_id, origin_machine_id,
 			workspace_root_hint, title, visibility, summary, parent_session_id, lineage_kind
@@ -1110,7 +1160,21 @@ func (s *PostgresStore) ForkAgentSession(ctx context.Context, parentSessionID, o
 		          COALESCE(parent_session_id::text,''), COALESCE(lineage_kind,''), COALESCE(summary,'')`,
 		parent.ProjectID, ownerUserID, parent.Harness, native, parent.OriginMachineID,
 		parent.WorkspaceRootHint, parent.Title, parent.Summary, parent.ID)
-	return scanAgentSession(row)
+	child, err := scanAgentSession(row)
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO session_turns (session_id, idx, role, ts, text_preview, tool_calls, blob_ref)
+		SELECT $1::uuid, idx, role, ts, text_preview, tool_calls, blob_ref
+		FROM session_turns WHERE session_id = $2::uuid`, child.ID, parent.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return child, nil
 }
 
 // MarkAgentSessionCodeMerged records a code-only merge on the source session.
@@ -1372,7 +1436,12 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT s.id::text, s.project_id::text, s.harness, s.native_id, COALESCE(s.title,''),
-		       COALESCE(s.summary,''), s.visibility, COALESCE(s.owner_user_id::text,''), s.last_active_at,
+		       COALESCE(NULLIF(s.summary,''), (
+		         SELECT LEFT(REGEXP_REPLACE(t.text_preview, '\s+', ' ', 'g'), 260)
+		         FROM session_turns t WHERE t.session_id = s.id AND t.role = 'user'
+		           AND NULLIF(BTRIM(t.text_preview), '') IS NOT NULL
+		         ORDER BY t.idx LIMIT 1
+		       ), ''), s.visibility, COALESCE(s.owner_user_id::text,''), s.last_active_at,
 		       COALESCE((
 		         SELECT v.turn_count FROM session_versions v
 		         WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only')
@@ -1382,8 +1451,17 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		         SELECT v.state FROM session_versions v
 		         WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only')
 		         ORDER BY v.version DESC LIMIT 1
-		       ), '')
+		       ), ''), COALESCE(hit.preview, ''), hit.idx, COALESCE(hit.role, '')
 		FROM agent_sessions s
+		LEFT JOIN LATERAL (
+		  SELECT t.idx, t.role,
+		    SUBSTRING(REGEXP_REPLACE(t.text_preview, '\s+', ' ', 'g') FROM
+		      GREATEST(1, STRPOS(LOWER(REGEXP_REPLACE(t.text_preview, '\s+', ' ', 'g')), LOWER($7)) - 70) FOR 260) AS preview
+		  FROM session_turns t
+		  WHERE t.session_id = s.id AND $7 <> '' AND t.role IN ('user', 'assistant')
+		    AND STRPOS(LOWER(t.text_preview), LOWER($7)) > 0
+		  ORDER BY t.idx LIMIT 1
+		) hit ON TRUE
 		WHERE (
 		  s.owner_user_id = $1::uuid
 		  OR EXISTS (
@@ -1399,7 +1477,7 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		)
 		AND ($2 = '' OR s.project_id::text = $2)
 		AND ($3 = '' OR s.harness = $3)
-		AND ($7 = '' OR s.title ILIKE '%' || $7 || '%' OR s.summary ILIKE '%' || $7 || '%' OR s.native_id ILIKE '%' || $7 || '%')
+		AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0 OR STRPOS(LOWER(s.summary), LOWER($7)) > 0 OR STRPOS(LOWER(s.native_id), LOWER($7)) > 0 OR hit.idx IS NOT NULL)
 		AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
 		ORDER BY s.last_active_at DESC, s.id DESC
 		LIMIT $6`,
@@ -1412,7 +1490,7 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	for rows.Next() {
 		var it TimelineItem
 		if err := rows.Scan(&it.SessionID, &it.ProjectID, &it.Harness, &it.NativeID, &it.Title, &it.Summary,
-			&it.Visibility, &it.OwnerUserID, &it.LastActiveAt, &it.TurnCount, &it.VersionState); err != nil {
+			&it.Visibility, &it.OwnerUserID, &it.LastActiveAt, &it.TurnCount, &it.VersionState, &it.MatchPreview, &it.MatchTurnIdx, &it.MatchRole); err != nil {
 			return nil, "", err
 		}
 		items = append(items, it)
@@ -1430,6 +1508,37 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		items = []TimelineItem{}
 	}
 	return items, next, nil
+}
+
+// TimelineMatchPreview centers the excerpt on the match instead of returning
+// the start of a long message where the searched phrase may not be visible.
+func TimelineMatchPreview(text, query string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	lower := strings.ToLower(text)
+	at := strings.Index(lower, strings.ToLower(query))
+	start := 0
+	if at > 0 {
+		start = utf8.RuneCountInString(lower[:at]) - 70
+	}
+	if start < 0 {
+		start = 0
+	}
+	runes := []rune(text)
+	if start > len(runes) {
+		start = 0
+	}
+	end := start + 260
+	if end > len(runes) {
+		end = len(runes)
+	}
+	preview := string(runes[start:end])
+	if start > 0 {
+		preview = "…" + preview
+	}
+	if end < len(runes) {
+		preview += "…"
+	}
+	return preview
 }
 
 var _ AgentCloudStore = (*MemStore)(nil)

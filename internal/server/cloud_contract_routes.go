@@ -704,6 +704,22 @@ func (s *Server) mutateTeleport(w http.ResponseWriter, r *http.Request, revoke b
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Accepting a transfer must actually open the door: grant the recipient
+	// read access so "View session" works and the session appears on their
+	// timeline. Granting is idempotent, so a retry after a partial failure
+	// converges.
+	if tp.SessionID != "" {
+		if cs, ok := s.agentCloud(); ok {
+			if err := cs.GrantAgentSession(r.Context(), tp.SessionID, caller, tp.FromUserID); err != nil && !errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusInternalServerError, "could not grant session access: "+err.Error())
+				return
+			}
+			s.recordAudit(r, store.AuditEvent{
+				Action: "session.grant_added", ResourceKind: "session", ResourceID: tp.SessionID,
+				Metadata: map[string]any{"grantee_user_id": caller, "via": "teleport", "teleport_id": id},
+			})
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "accepted"})
 }
 
