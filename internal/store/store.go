@@ -143,6 +143,9 @@ type MemStore struct {
 	projectCapture map[string]bool
 	orgInvites     map[string]*OrgInvite
 	inviteByToken  map[string]string
+	// Code links (migration 044), lazily created under mu.
+	codeEntities map[string]*CodeEntity
+	codeLinks    map[string]*memCodeLink
 }
 
 // memSubscription is one in-process event subscriber.

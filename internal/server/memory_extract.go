@@ -118,6 +118,7 @@ func (s *Server) persistExtractProposal(r *http.Request, projectID string, p ext
 	if err := s.Store.CreateMemoryItem(r.Context(), item); err != nil {
 		return nil, err
 	}
+	s.linkMemoryToCode(r.Context(), item, sessionID)
 	s.notifyProjectActivity(projectID, "MEMORY_PROPOSED", "/app/memory")
 	s.publishMemoryLifecycle(item, "MEMORY_PROPOSED", "proposed")
 	return item, nil

@@ -140,7 +140,7 @@ func ListTools() []Tool {
 				"query": str, "tags": strArr, "level": str, "limit": num, "project_id": str,
 				"file": map[string]any{
 					"type":        "string",
-					"description": "Optional file path: memories about this file (files_affected, suffix match) come first.",
+					"description": "Optional file path: memories about this file (linked to it by edits in their chat or by the harvest, else files_affected; suffix match) come first.",
 				},
 			}),
 		},
@@ -216,6 +216,22 @@ func ListTools() []Tool {
 			}),
 		},
 		{
+			Name:        "related_to",
+			Description: "Decisions, memories, and chats linked to a file (suffix match, e.g. \"internal/mcp/tools.go\" or \"tools.go\"), newest first. Each item has relation (touched = edited in that chat, decided_about = a decision about the file), source chat, date, and stale=true when the file changed since. Call before changing a file.",
+			InputSchema: schema([]string{"file"}, map[string]any{
+				"file":  map[string]any{"type": "string", "description": "File path, repo-relative or a path suffix."},
+				"limit": num, "project_id": str,
+			}),
+		},
+		{
+			Name:        "file_history",
+			Description: "The chats (sessions) that edited a file, newest first, with titles and dates. Fetch one with session_summary_get or session_fetch.",
+			InputSchema: schema([]string{"file"}, map[string]any{
+				"file":  map[string]any{"type": "string", "description": "File path, repo-relative or a path suffix."},
+				"limit": num, "project_id": str,
+			}),
+		},
+		{
 			Name:        "project_knowledge",
 			Description: "Project brief plus the top project and organization memories for bootstrap. Personal and session rows are omitted. The brief comes first, then pinned items.",
 			InputSchema: schema(nil, map[string]any{
@@ -265,6 +281,10 @@ func (s *Server) CallTool(ctx context.Context, name string, rawArgs json.RawMess
 		result, rpcErr = s.handleSessionFetch(ctx, rawArgs)
 	case "project_knowledge":
 		result, rpcErr = s.handleProjectKnowledgeTool(ctx, rawArgs)
+	case "related_to":
+		result, rpcErr = s.handleRelatedTo(ctx, rawArgs)
+	case "file_history":
+		result, rpcErr = s.handleFileHistory(ctx, rawArgs)
 	default:
 		return nil, &RPCError{Code: ErrMethodNotFound, Message: "unknown tool: " + name}
 	}
