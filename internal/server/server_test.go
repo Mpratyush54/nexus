@@ -398,7 +398,15 @@ func TestAuthStubRoundTripAndTamper(t *testing.T) {
 	}
 
 	// Tampered signature must fail.
-	tampered := token[:len(token)-2] + "xx"
+	// Flip a character in the middle of the signature (not the last one,
+	// whose low bits may be base64 padding), always to a different value.
+	dot := strings.LastIndex(token, ".")
+	i := dot + 1 + (len(token)-dot-1)/2
+	repl := byte('A')
+	if token[i] == 'A' {
+		repl = 'B'
+	}
+	tampered := token[:i] + string(repl) + token[i+1:]
 	if _, err := a.Validate(tampered); err == nil {
 		t.Fatal("expected tampered token to fail validation")
 	}

@@ -227,7 +227,7 @@ func (s *Server) handleAgentMemoryWrite(w http.ResponseWriter, r *http.Request) 
 	if level == "personal" {
 		item.UserID = authSubject(r)
 	}
-	item.Embedding = s.embedText(r.Context(), memctx.EmbedTextForItem(item.Key, item.Content))
+	s.embedItem(r.Context(), item)
 	if err := s.Store.CreateMemoryItem(r.Context(), item); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create memory: "+err.Error())
 		return
@@ -365,10 +365,12 @@ func (s *Server) handleAgentMCP(w http.ResponseWriter, r *http.Request) {
 		ProjectName: name,
 		AgentName:   agentName,
 		Embedder:    s.resolveEmbedder(),
-		Access:      access,
-		RateLimiter: s.agentMCPLimiter(),
+		// Queries get the model's query prefix (nil = Embedder).
+		QueryEmbedder: s.queryEmbedder(),
+		Access:        access,
+		RateLimiter:   s.agentMCPLimiter(),
 	}
-	srv := mcp.NewServer(agentMCPStore{Store: s.Store, UserID: authSubject(r)}, cfg)
+	srv := mcp.NewServer(agentMCPStore{Store: s.Store, UserID: authSubject(r), Embeds: s}, cfg)
 	resp := srv.Handle(r.Context(), raw)
 	if resp == nil {
 		w.WriteHeader(http.StatusNoContent)
@@ -392,6 +394,10 @@ func firstNonEmpty(vals ...string) string {
 type agentMCPStore struct {
 	Store  store.Store
 	UserID string
+	// Embeds (optional) tags written vectors with their model and vetoes
+	// vector search while the embedding model is down (the MCP query
+	// embedder then returns HashEmbed, which cannot rank model vectors).
+	Embeds *Server
 }
 
 func (a agentMCPStore) viewerCtx(ctx context.Context) context.Context {
@@ -409,15 +415,21 @@ func (a agentMCPStore) SearchMemory(ctx context.Context, projectID, query string
 // SearchMemoryVector gives cloud agents the semantic path mcp.handleMemorySearch
 // prefers. Stores without vector search report no rows, so the handler falls
 // back to keyword search; so does a search where no row reaches
-// store.MinVectorSimilarity.
+// the model's similarity floor. With Embeds set, only rows embedded by the
+// server's model are compared (the MCP query vector came from that model).
 func (a agentMCPStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*mcp.MemoryItem, error) {
-	vs, ok := a.Store.(interface {
-		SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
-	})
-	if !ok {
+	if a.Embeds != nil && !a.Embeds.vectorSearchUsable() {
+		return nil, nil // keyword fallback
+	}
+	var p *memctx.Provider
+	if a.Embeds != nil {
+		p = a.Embeds.EmbedProvider
+	}
+	search := modelVectorSearchFor(a.Store, p)
+	if search == nil {
 		return nil, nil
 	}
-	items, err := vs.SearchMemoryVector(a.viewerCtx(ctx), projectID, queryVec, limit)
+	items, err := search(a.viewerCtx(ctx), projectID, queryVec, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -457,6 +469,9 @@ func (a agentMCPStore) CreateMemoryItem(ctx context.Context, item *mcp.MemoryIte
 		if strings.EqualFold(strings.TrimSpace(row.Level), store.LevelPersonal) {
 			row.UserID = a.UserID
 		}
+	}
+	if a.Embeds != nil {
+		a.Embeds.tagEmbeddingModel(row)
 	}
 	if err := a.Store.CreateMemoryItem(ctx, row); err != nil {
 		return err

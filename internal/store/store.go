@@ -665,6 +665,13 @@ func memoryPinned(item *MemoryItem) bool {
 }
 
 func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
+	return s.SearchMemoryVectorModel(ctx, projectID, VectorQuery{Vec: queryVec}, limit)
+}
+
+// SearchMemoryVectorModel mirrors PostgresStore.SearchMemoryVectorModel.
+func (s *MemStore) SearchMemoryVectorModel(ctx context.Context, projectID string, q VectorQuery, limit int) ([]*MemoryItem, error) {
+	queryVec := q.Vec
+	floor := q.floor()
 	if len(queryVec) == 0 {
 		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
 	}
@@ -704,6 +711,9 @@ func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, que
 		if len(item.Embedding) == 0 {
 			continue
 		}
+		if !q.modelMatches(item.EmbeddingModel) {
+			continue
+		}
 		// Same visibility rule as SearchMemory (issue #164).
 		if viewerID == "" {
 			vis := NormalizeVisibility(item.Visibility)
@@ -713,7 +723,7 @@ func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, que
 		} else if !s.memoryVisibleLocked(item, viewerID, isMember) {
 			continue
 		}
-		if sim := CosineSimilarity(item.Embedding, queryVec); sim > 0 && sim >= MinVectorSimilarity {
+		if sim := CosineSimilarity(item.Embedding, queryVec); sim > 0 && sim >= floor {
 			ranked = append(ranked, scored{item, sim})
 		}
 	}

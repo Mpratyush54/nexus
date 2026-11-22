@@ -98,7 +98,24 @@ func (c *Client) CompleteCompress(ctx context.Context, prompt string) (summary s
 	return parseCompressResult([]byte(content))
 }
 
+// StatusError is a non-2xx OpenRouter answer.
+type StatusError struct {
+	Status int
+	Body   string // first 300 bytes of the response body
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("extract: openrouter %d: %s", e.Status, e.Body)
+}
+
 func (c *Client) chat(ctx context.Context, model string, fallbacks []string, system, prompt string) (string, error) {
+	return c.chatMode(ctx, model, fallbacks, system, prompt, true)
+}
+
+// chatMode is chat with JSON mode optional: jsonMode false lets the model
+// answer in plain text (the brief is markdown, which free models escape
+// badly inside a JSON string).
+func (c *Client) chatMode(ctx context.Context, model string, fallbacks []string, system, prompt string, jsonMode bool) (string, error) {
 	if c == nil || strings.TrimSpace(c.Cfg.APIKey) == "" {
 		return "", fmt.Errorf("extract: openrouter api key missing")
 	}
@@ -108,16 +125,19 @@ func (c *Client) chat(ctx context.Context, model string, fallbacks []string, sys
 	if len(fallbacks) > 3 {
 		fallbacks = fallbacks[:3]
 	}
-	body, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"model":  model,
 		"models": fallbacks,
 		"messages": []map[string]string{
 			{"role": "system", "content": system},
 			{"role": "user", "content": prompt},
 		},
-		"temperature":     0.1,
-		"response_format": map[string]string{"type": "json_object"},
-	})
+		"temperature": 0.1,
+	}
+	if jsonMode {
+		payload["response_format"] = map[string]string{"type": "json_object"}
+	}
+	body, _ := json.Marshal(payload)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL()+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -146,7 +166,7 @@ func (c *Client) chat(ctx context.Context, model string, fallbacks []string, sys
 		if len(msg) > 300 {
 			msg = msg[:300]
 		}
-		return "", fmt.Errorf("extract: openrouter %d: %s", resp.StatusCode, msg)
+		return "", &StatusError{Status: resp.StatusCode, Body: msg}
 	}
 	return openAIMessageContent(raw)
 }
