@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -177,16 +178,21 @@ func TestPostgresCodeChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	at := time.Now().Add(-time.Hour).UTC()
+	anchors := struct{ added, before, after []string }{
+		added: hashes("b", "c", "d"), before: hashes("x", "y"), after: hashes("}"),
+	}
 	in := []*CodeChange{
 		{EntityID: e.ID, SessionID: sess.ID, ToolCallID: "call_1", HunkIndex: 0, StartLine: 10, EndLine: 12, RemovedLines: 1, AddedLines: 3,
-			BeforeSnippet: "a", AfterSnippet: "b\nc\nd", AfterHash: "h1", ChangedAt: at},
+			BeforeSnippet: "a", AfterSnippet: "b\nc\nd", AfterHash: "h1", ChangedAt: at,
+			AddedHashes: anchors.added, ContextBefore: anchors.before, ContextAfter: anchors.after},
 		{EntityID: e.ID, SessionID: foreign.ID, ToolCallID: "call_x", StartLine: 1, EndLine: 1, AddedLines: 1, ChangedAt: at}, // other project's session
 	}
 	if n, err := s.AddCodeChanges(ctx, project.ID, in); err != nil || n != 1 || in[0].ID == "" {
 		t.Fatalf("add: %d %v %+v", n, err, in[0])
 	}
 	first := in[0].ObservedAt
-	same := []*CodeChange{{EntityID: e.ID, SessionID: sess.ID, ToolCallID: "call_1", StartLine: 10, EndLine: 12, RemovedLines: 1, AddedLines: 3, AfterHash: "h1", ChangedAt: at}}
+	same := []*CodeChange{{EntityID: e.ID, SessionID: sess.ID, ToolCallID: "call_1", StartLine: 10, EndLine: 12, RemovedLines: 1, AddedLines: 3, AfterHash: "h1", ChangedAt: at,
+		AddedHashes: anchors.added, ContextBefore: anchors.before, ContextAfter: anchors.after}}
 	if n, err := s.AddCodeChanges(ctx, project.ID, same); err != nil || n != 1 || same[0].ID != in[0].ID || !same[0].ObservedAt.Equal(first) {
 		t.Fatalf("idempotent resend: %d %v %+v", n, err, same[0])
 	}
@@ -205,5 +211,16 @@ func TestPostgresCodeChanges(t *testing.T) {
 	got := placedByID(PlaceCodeChanges(hits))
 	if x := got[in[0].ID]; x.CurStart != 12 || x.CurEnd != 14 || x.Approximate {
 		t.Fatalf("placed: %+v", x)
+	}
+	// The text[] anchors round-trip; a hunk without them reads back empty.
+	if !reflect.DeepEqual(hits[0].AddedHashes, anchors.added) || !reflect.DeepEqual(hits[0].ContextBefore, anchors.before) ||
+		!reflect.DeepEqual(hits[0].ContextAfter, anchors.after) {
+		t.Fatalf("anchors: %+v", hits[0].CodeChange)
+	}
+	if len(hits[1].AddedHashes) != 0 || hits[1].ContextBefore == nil {
+		t.Fatalf("empty anchors: %+v", hits[1].CodeChange)
+	}
+	if r, ok := hits[0].MatchProbes(ProbesForLines([]string{"c"}, strp("b"), strp("d"))); !ok || r != MatchExact {
+		t.Fatalf("match from Postgres row: %d %v", r, ok)
 	}
 }

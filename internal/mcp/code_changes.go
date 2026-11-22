@@ -2,9 +2,13 @@ package mcp
 
 // code_changes.go — why and line_history: line-level change history. The
 // desktop reports each hunk of an agent's file edit (Edit/MultiEdit/Write/
-// apply_patch ...) with its line range and short before/after snippets;
-// the cloud adapter shifts older ranges by newer hunks and joins the chat
-// that made the change and the memories (decisions) harvested from it.
+// apply_patch ...) with content anchors (hashes of the added lines and of
+// the lines around them), its line range as a hint and short before/after
+// snippets. Questions are asked by CONTENT: the text of the line (and its
+// neighbours) as it is now, so inserted lines above it or edits made
+// outside captured tool calls do not break the answer; the line number is
+// only a fallback. The cloud adapter joins the chat that made the change
+// and the memories (decisions) harvested from it.
 
 import (
 	"context"
@@ -33,17 +37,32 @@ type CodeChange struct {
 	ChangedAt                  time.Time
 	Approximate                bool
 	Overwritten                bool
-	Session                    *SessionRef
+	// Match says how the change was found: exact (the line and its
+	// neighbours), context (the line, with a neighbour near the change),
+	// hash (the line alone), line (line-number placement, approximate);
+	// "" for a whole-file listing.
+	Match   string
+	Session *SessionRef
 	// Memories are the decisions/memories harvested from that chat, the
 	// ones naming the file first.
 	Memories []*MemoryItem
 }
 
-// CodeChangeReader returns the hunks of a file (suffix match) that
-// overlap startLine..endLine (0 = open), newest first, filtered to what
-// the caller may read.
+// LineQuery selects lines of a file. Texts are the current text of the
+// lines (preferred); Prev/Next the lines just outside them (nil when
+// unknown); StartLine..EndLine the line numbers (0 = open), a hint when
+// Texts are given and the selection otherwise.
+type LineQuery struct {
+	Texts              []string
+	Prev, Next         *string
+	StartLine, EndLine int
+}
+
+// CodeChangeReader returns the hunks of a file (suffix match) behind the
+// queried lines, best match first and newest first within a match,
+// filtered to what the caller may read.
 type CodeChangeReader interface {
-	CodeChangesForFile(ctx context.Context, projectID, path string, startLine, endLine, limit int) ([]CodeChange, error)
+	CodeChangesForFile(ctx context.Context, projectID, path string, q LineQuery, limit int) ([]CodeChange, error)
 }
 
 func lineRange(a, b int) string {
@@ -62,6 +81,9 @@ func CodeChangeRow(c CodeChange) map[string]any {
 		"session_id":  c.SessionID,
 		"source":      "session:" + c.SessionID,
 		"approximate": c.Approximate,
+	}
+	if c.Match != "" {
+		row["match"] = c.Match
 	}
 	if c.RecordedStart != c.StartLine || c.RecordedEnd != c.EndLine {
 		row["recorded_lines"] = lineRange(c.RecordedStart, c.RecordedEnd)
@@ -128,12 +150,12 @@ func CodeChangeRows(changes []CodeChange) []map[string]any {
 	return out
 }
 
-func (s *Server) codeChanges(ctx context.Context, projectID, path string, start, end, limit int) ([]CodeChange, *RPCError) {
+func (s *Server) codeChanges(ctx context.Context, projectID, path string, q LineQuery, limit int) ([]CodeChange, *RPCError) {
 	r, ok := s.store.(CodeChangeReader)
 	if !ok {
 		return nil, &RPCError{Code: ErrInternal, Message: "line history needs Nexus cloud; code changes unavailable"}
 	}
-	changes, err := r.CodeChangesForFile(ctx, projectID, path, start, end, limit)
+	changes, err := r.CodeChangesForFile(ctx, projectID, path, q, limit)
 	if errors.Is(err, ErrCodeLinksUnavailable) {
 		return nil, &RPCError{Code: ErrInternal, Message: "line history needs Nexus cloud; code changes unavailable"}
 	}
@@ -144,12 +166,15 @@ func (s *Server) codeChanges(ctx context.Context, projectID, path string, start,
 }
 
 type lineToolArgs struct {
-	File      string `json:"file"`
-	Line      int    `json:"line"`
-	StartLine int    `json:"start_line"`
-	EndLine   int    `json:"end_line"`
-	Limit     int    `json:"limit"`
-	ProjectID string `json:"project_id"`
+	File      string   `json:"file"`
+	Line      int      `json:"line"`
+	LineText  *string  `json:"line_text"`
+	Context   []string `json:"context"`
+	Lines     []string `json:"lines"`
+	StartLine int      `json:"start_line"`
+	EndLine   int      `json:"end_line"`
+	Limit     int      `json:"limit"`
+	ProjectID string   `json:"project_id"`
 }
 
 func (s *Server) lineToolArgs(raw json.RawMessage, defLimit, maxLimit int) (lineToolArgs, *RPCError) {
@@ -173,9 +198,30 @@ func (s *Server) lineToolArgs(raw json.RawMessage, defLimit, maxLimit int) (line
 	return a, nil
 }
 
+// WhyQuery builds the query for one line: its text (nil when not given),
+// its neighbours ([prev, next]; one entry is prev) and its line number.
+func WhyQuery(text *string, context []string, line int) LineQuery {
+	q := LineQuery{StartLine: line, EndLine: line}
+	if text != nil {
+		q.Texts = []string{*text}
+		if len(context) > 0 {
+			p := context[0]
+			q.Prev = &p
+		}
+		if len(context) > 1 {
+			n := context[1]
+			q.Next = &n
+		}
+	}
+	return q
+}
+
 // WhyResult is the why answer for one line (shared with the REST route).
 func WhyResult(file string, line int, changes []CodeChange) map[string]any {
-	out := map[string]any{"file": file, "line": line, "changes": CodeChangeRows(changes), "count": len(changes)}
+	out := map[string]any{"file": file, "changes": CodeChangeRows(changes), "count": len(changes)}
+	if line > 0 {
+		out["line"] = line
+	}
 	if len(changes) == 0 {
 		out["note"] = "no captured agent edit covers this line; try related_to for decisions about the file"
 	}
@@ -189,10 +235,13 @@ func (s *Server) handleWhy(ctx context.Context, raw json.RawMessage) (any, *RPCE
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
-	if a.Line < 1 {
-		return nil, invalidParams("missing required field: line (1-based)")
+	if a.Line < 0 || (a.Line == 0 && a.LineText == nil) {
+		return nil, invalidParams("missing required field: line_text (the line's current text) or line (1-based)")
 	}
-	changes, rpcErr := s.codeChanges(ctx, a.ProjectID, a.File, a.Line, a.Line, a.Limit)
+	if len(a.Context) > 2 {
+		return nil, invalidParams("context takes at most 2 lines: [previous, next]")
+	}
+	changes, rpcErr := s.codeChanges(ctx, a.ProjectID, a.File, WhyQuery(a.LineText, a.Context, a.Line), a.Limit)
 	if rpcErr != nil {
 		return nil, rpcErr
 	}
@@ -209,7 +258,14 @@ func (s *Server) handleLineHistory(ctx context.Context, raw json.RawMessage) (an
 	if a.StartLine < 0 || a.EndLine < 0 || (a.EndLine > 0 && a.StartLine > a.EndLine) {
 		return nil, invalidParams("invalid line range")
 	}
-	changes, rpcErr := s.codeChanges(ctx, a.ProjectID, a.File, a.StartLine, a.EndLine, a.Limit)
+	if len(a.Lines) > 500 {
+		return nil, invalidParams("lines takes at most 500 lines")
+	}
+	q := LineQuery{Texts: a.Lines, StartLine: a.StartLine, EndLine: a.EndLine}
+	if len(a.Lines) > 0 && a.StartLine > 0 && a.EndLine == 0 {
+		q.EndLine = a.StartLine + len(a.Lines) - 1
+	}
+	changes, rpcErr := s.codeChanges(ctx, a.ProjectID, a.File, q, a.Limit)
 	if rpcErr != nil {
 		return nil, rpcErr
 	}

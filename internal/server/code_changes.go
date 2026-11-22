@@ -5,12 +5,16 @@ package server
 //   - POST /v1/projects/{id}/code-links accepts optional changes: the hunks
 //     of the session's edits ({path, tool_call_id, hunk_index, start_line,
 //     end_line, removed_lines, added_lines, before_snippet, after_snippet,
-//     after_hash, at}). Snippets are at most 3 lines; whole files are never
-//     sent.
-//   - GET /v1/projects/{id}/why?path=&line= (or start_line/end_line for a
-//     range) answers for the app what the MCP tools why / line_history
-//     answer for agents, with the same visibility rules as related_to:
-//     chats need read access, memories are filtered as the caller.
+//     after_hash, added_hashes, context_before, context_after, at}).
+//     Snippets are at most 3 lines; whole files are never sent.
+//   - Questions are matched by content (store.MatchProbes: the hashes of
+//     the asked line and its neighbours against each hunk's added and
+//     context hashes); line numbers are the fallback (store.PlaceCodeChanges).
+//   - GET /v1/projects/{id}/why?path=&text=&context=&context=&line= (or
+//     repeated text= with start_line for a range) answers for the app what
+//     the MCP tools why / line_history answer for agents, with the same
+//     visibility rules as related_to: chats need read access, memories are
+//     filtered as the caller.
 
 import (
 	"context"
@@ -42,6 +46,9 @@ type codeChangeInput struct {
 	BeforeSnippet string    `json:"before_snippet,omitempty"`
 	AfterSnippet  string    `json:"after_snippet,omitempty"`
 	AfterHash     string    `json:"after_hash,omitempty"`
+	AddedHashes   []string  `json:"added_hashes,omitempty"`
+	ContextBefore []string  `json:"context_before,omitempty"`
+	ContextAfter  []string  `json:"context_after,omitempty"`
 	At            time.Time `json:"at,omitempty"`
 }
 
@@ -89,6 +96,7 @@ func (s *Server) recordCodeChanges(ctx context.Context, cl store.CodeLinkStore, 
 			RemovedLines: c.RemovedLines, AddedLines: c.AddedLines,
 			BeforeSnippet: c.BeforeSnippet, AfterSnippet: c.AfterSnippet,
 			AfterHash: c.AfterHash, ChangedAt: c.At,
+			AddedHashes: c.AddedHashes, ContextBefore: c.ContextBefore, ContextAfter: c.ContextAfter,
 		})
 	}
 	n, err := ccs.AddCodeChanges(ctx, projectID, batch)
@@ -99,7 +107,10 @@ func (s *Server) recordCodeChanges(ctx context.Context, cl store.CodeLinkStore, 
 }
 
 // CodeChangesForFile serves why / line_history (mcp.CodeChangeReader).
-func (a agentMCPStore) CodeChangesForFile(ctx context.Context, projectID, path string, startLine, endLine, limit int) ([]mcp.CodeChange, error) {
+// With line texts it matches by content (exact, context, hash) and falls
+// back to line-number placement (match "line", approximate) only when no
+// change matches; without texts it selects by line range.
+func (a agentMCPStore) CodeChangesForFile(ctx context.Context, projectID, path string, q mcp.LineQuery, limit int) ([]mcp.CodeChange, error) {
 	ccs, ok := a.Store.(store.CodeChangeStore)
 	if !ok {
 		return nil, mcp.ErrCodeLinksUnavailable
@@ -112,16 +123,6 @@ func (a agentMCPStore) CodeChangesForFile(ctx context.Context, projectID, path s
 		return nil, err
 	}
 	placed := store.PlaceCodeChanges(hits)
-	sort.SliceStable(placed, func(i, j int) bool {
-		x, y := placed[i], placed[j]
-		if !x.ChangedAt.Equal(y.ChangedAt) {
-			return x.ChangedAt.After(y.ChangedAt)
-		}
-		if !x.ObservedAt.Equal(y.ObservedAt) {
-			return x.ObservedAt.After(y.ObservedAt)
-		}
-		return x.HunkIndex > y.HunkIndex
-	})
 	cs, hasCloud := a.Store.(store.AgentCloudStore)
 	readable := map[string]bool{}
 	canRead := func(id string) bool {
@@ -135,17 +136,56 @@ func (a agentMCPStore) CodeChangesForFile(ctx context.Context, projectID, path s
 		readable[id] = ok
 		return ok
 	}
+	type cand struct {
+		p      *store.PlacedCodeChange
+		rank   int
+		approx bool
+	}
+	var cands []cand
+	if len(q.Texts) > 0 {
+		probes := store.ProbesForLines(q.Texts, q.Prev, q.Next)
+		for i := range placed {
+			if rank, ok := placed[i].MatchProbes(probes); ok {
+				cands = append(cands, cand{p: &placed[i], rank: rank})
+			}
+		}
+	}
+	if len(cands) == 0 && (len(q.Texts) == 0 || q.StartLine > 0) {
+		listing := len(q.Texts) == 0 && q.StartLine == 0 && q.EndLine == 0
+		for i := range placed {
+			p := &placed[i]
+			if q.StartLine > 0 && p.CurEnd < q.StartLine {
+				continue
+			}
+			if q.EndLine > 0 && p.CurStart > q.EndLine {
+				continue
+			}
+			c := cand{p: p, rank: store.MatchLine, approx: p.Approximate || len(q.Texts) > 0}
+			if listing {
+				c.rank = -1 // whole-file listing: no match kind
+			}
+			cands = append(cands, c)
+		}
+	}
+	sort.SliceStable(cands, func(i, j int) bool {
+		x, y := cands[i], cands[j]
+		if x.rank != y.rank {
+			return x.rank < y.rank
+		}
+		if !x.p.ChangedAt.Equal(y.p.ChangedAt) {
+			return x.p.ChangedAt.After(y.p.ChangedAt)
+		}
+		if !x.p.ObservedAt.Equal(y.p.ObservedAt) {
+			return x.p.ObservedAt.After(y.p.ObservedAt)
+		}
+		return x.p.HunkIndex > y.p.HunkIndex
+	})
 	out := make([]mcp.CodeChange, 0, limit)
-	for _, p := range placed {
+	for _, cd := range cands {
 		if len(out) >= limit {
 			break
 		}
-		if startLine > 0 && p.CurEnd < startLine {
-			continue
-		}
-		if endLine > 0 && p.CurStart > endLine {
-			continue
-		}
+		p := cd.p
 		if !canRead(p.SessionID) {
 			continue
 		}
@@ -154,7 +194,10 @@ func (a agentMCPStore) CodeChangesForFile(ctx context.Context, projectID, path s
 			StartLine: p.CurStart, EndLine: p.CurEnd, RecordedStart: p.StartLine, RecordedEnd: p.EndLine,
 			RemovedLines: p.RemovedLines, AddedLines: p.AddedLines,
 			Before: p.BeforeSnippet, After: p.AfterSnippet, ChangedAt: p.ChangedAt,
-			Approximate: p.Approximate, Overwritten: p.Overwritten,
+			Approximate: cd.approx, Overwritten: p.Overwritten,
+		}
+		if cd.rank >= 0 {
+			c.Match = store.MatchName(cd.rank)
 		}
 		if p.Session != nil {
 			c.Session = &mcp.SessionRef{ID: p.Session.ID, Title: p.Session.Title, Harness: p.Session.Harness,
@@ -215,8 +258,10 @@ func rankChangeMemories(mems []*store.MemoryItem, path string) []*mcp.MemoryItem
 	return out
 }
 
-// handleWhy: GET /v1/projects/{id}/why?path=&line= — the captured edits
-// covering a line (or start_line..end_line), newest first.
+// handleWhy: GET /v1/projects/{id}/why?path=&text=&context=&context=&line=
+// — the captured edits behind a line, matched by its text (text=, with
+// context= previous and next line) and/or its number (line=). Repeated
+// text= values with start_line= ask about a range (line_history).
 func (s *Server) handleWhy(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.PathValue("id"))
 	if !s.authorizePermission(w, r, projectID, store.PermMemoryRead) {
@@ -240,16 +285,28 @@ func (s *Server) handleWhy(w http.ResponseWriter, r *http.Request) {
 	start, ok2 := num("start_line")
 	end, ok3 := num("end_line")
 	limit, ok4 := num("limit")
-	if !ok1 || !ok2 || !ok3 || !ok4 || (end > 0 && start > end) {
+	texts, context := q["text"], q["context"]
+	if !ok1 || !ok2 || !ok3 || !ok4 || (end > 0 && start > end) || len(context) > 2 || len(texts) > 500 {
 		writeError(w, http.StatusBadRequest, "invalid line")
 		return
 	}
-	if line > 0 {
-		start, end = line, line
+	single := len(texts) == 1 || (len(texts) == 0 && line > 0)
+	var lq mcp.LineQuery
+	if single {
+		var text *string
+		if len(texts) == 1 {
+			text = &texts[0]
+		}
+		lq = mcp.WhyQuery(text, context, line)
+	} else {
+		lq = mcp.LineQuery{Texts: texts, StartLine: start, EndLine: end}
+		if len(texts) > 0 && start > 0 && end == 0 {
+			lq.EndLine = start + len(texts) - 1
+		}
 	}
 	if limit <= 0 {
 		limit = 20
-		if line > 0 {
+		if single {
 			limit = 5
 		}
 	}
@@ -261,13 +318,13 @@ func (s *Server) handleWhy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	adapter := agentMCPStore{Store: s.Store, UserID: authSubject(r)}
-	changes, err := adapter.CodeChangesForFile(r.Context(), projectID, path, start, end, limit)
+	changes, err := adapter.CodeChangesForFile(r.Context(), projectID, path, lq, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "why failed: "+err.Error())
 		return
 	}
 	var out map[string]any
-	if line > 0 {
+	if single {
 		out = mcp.WhyResult(path, line, changes)
 	} else {
 		out = map[string]any{"file": path, "changes": mcp.CodeChangeRows(changes), "count": len(changes)}

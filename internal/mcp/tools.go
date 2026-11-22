@@ -233,18 +233,21 @@ func ListTools() []Tool {
 		},
 		{
 			Name:        "why",
-			Description: "Why is this line the way it is: the most recent agent edits covering one line of a file, newest first. Each has the chat (title, agent, date), the before/after snippet, and the decisions/memories from that chat. approximate=true when line numbers may have shifted. Call before changing code you did not write.",
-			InputSchema: schema([]string{"file", "line"}, map[string]any{
-				"file":  map[string]any{"type": "string", "description": "File path, repo-relative or a path suffix."},
-				"line":  map[string]any{"type": "integer", "description": "1-based line number in the file as it is now."},
-				"limit": num, "project_id": str,
+			Description: "Why is this line the way it is: the agent edits that wrote one line of a file, best match first, newest first. Pass line_text (the line's current text, read from the file) and context [previous line, next line]: matching is by content, so it survives lines inserted above and edits made outside captured chats. Each change has the chat (title, agent, date), the before/after snippet, the decisions/memories from that chat, and match (exact|context|hash|line; line = only the line number matched, approximate=true). Call before changing code you did not write.",
+			InputSchema: schema([]string{"file"}, map[string]any{
+				"file":      map[string]any{"type": "string", "description": "File path, repo-relative or a path suffix."},
+				"line_text": map[string]any{"type": "string", "description": "The line's current text (preferred)."},
+				"context":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional [previous line text, next line text]; needed for common lines such as \"}\" or \"return nil\"."},
+				"line":      map[string]any{"type": "integer", "description": "1-based line number; a fallback hint when the text matches nothing, or the query when line_text is omitted."},
+				"limit":     num, "project_id": str,
 			}),
 		},
 		{
 			Name:        "line_history",
-			Description: "Every captured agent edit in a line range of a file (or the whole file), newest first, with chat, snippets and decisions like why.",
+			Description: "Every captured agent edit in a line range of a file (or the whole file), with chat, snippets, decisions and match like why. Pass lines (the current text of the range) to match by content; start_line/end_line alone match by line number (approximate).",
 			InputSchema: schema([]string{"file"}, map[string]any{
 				"file":       map[string]any{"type": "string", "description": "File path, repo-relative or a path suffix."},
+				"lines":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "Optional current text of the lines start_line.. (preferred)."},
 				"start_line": map[string]any{"type": "integer", "description": "Optional first line (1-based)."},
 				"end_line":   map[string]any{"type": "integer", "description": "Optional last line (inclusive)."},
 				"limit":      num, "project_id": str,

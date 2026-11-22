@@ -1,19 +1,23 @@
 // code_changes.go — line-level change history (migration 047).
 //
-// A CodeChange is one hunk of an agent's edit to a file: the changed line
-// range in the file right after the edit (StartLine..EndLine, 1-based,
-// inclusive), how many lines it removed and added, short before/after
-// snippets (at most 3 lines each) and the file's content hash when the
-// desktop located the hunk (AfterHash). The desktop computes the range
-// against the file as it reads it when reporting, so every hunk of one
-// report shares one coordinate snapshot (same AfterHash and ObservedAt).
+// A CodeChange is one hunk of an agent's edit to a file. It is anchored on
+// CONTENT: AddedHashes are the LineHash of each added line in order, and
+// ContextBefore/ContextAfter the hashes of up to 2 unchanged lines above
+// and below the hunk in the file right after the edit. MatchCodeChanges
+// finds the changes behind a line by its text (and its neighbours' text),
+// so inserted lines above it or edits made outside captured tool calls do
+// not lose it.
 //
-// PlaceCodeChanges replays the snapshots of a file in order and shifts the
-// ranges of older hunks by the line deltas of newer ones, so a range can be
-// asked about in today's line numbers. A range is Approximate when a newer
-// hunk rewrote part of it, when its file was never hashed, or when the
-// file's current hash (from files-changed or code-links) differs from the
-// newest snapshot (the file changed outside captured edits).
+// The changed line range (StartLine..EndLine, 1-based, inclusive) is kept
+// as a hint, with short before/after snippets (at most 3 lines each) and
+// the file's content hash when the desktop located the hunk (AfterHash).
+// Every hunk of one report shares one coordinate snapshot (same AfterHash
+// and ObservedAt). PlaceCodeChanges replays the snapshots of a file in
+// order and shifts older ranges by the line deltas of newer ones; it is
+// the fallback when no content matches. A placed range is Approximate when
+// a newer hunk rewrote part of it, when its file was never hashed, or when
+// the file's current hash differs from the newest snapshot (the file
+// changed outside captured edits).
 package store
 
 import (
@@ -55,6 +59,9 @@ type CodeChange struct {
 	BeforeSnippet string    `json:"before_snippet,omitempty"`
 	AfterSnippet  string    `json:"after_snippet,omitempty"`
 	AfterHash     string    `json:"after_hash,omitempty"`
+	AddedHashes   []string  `json:"added_hashes,omitempty"`
+	ContextBefore []string  `json:"context_before,omitempty"`
+	ContextAfter  []string  `json:"context_after,omitempty"`
 	ChangedAt     time.Time `json:"changed_at"`
 	ObservedAt    time.Time `json:"observed_at"`
 }
@@ -147,6 +154,9 @@ func normalizeCodeChange(c *CodeChange) error {
 		c.ChangedAt = time.Now()
 	}
 	c.ChangedAt = c.ChangedAt.UTC()
+	c.AddedHashes = cleanLineHashes(c.AddedHashes, MaxAddedHashes, false)
+	c.ContextBefore = cleanLineHashes(c.ContextBefore, MaxContextHashes, true)
+	c.ContextAfter = cleanLineHashes(c.ContextAfter, MaxContextHashes, false)
 	return nil
 }
 
@@ -403,9 +413,10 @@ func (s *PostgresStore) AddCodeChanges(ctx context.Context, projectID string, ch
 		batch.Queue(
 			`INSERT INTO code_changes (project_id, entity_id, session_id, tool_call_id, hunk_index,
 			        start_line, end_line, removed_lines, added_lines, before_snippet, after_snippet,
-			        after_hash, changed_at)
+			        after_hash, changed_at, added_hashes, context_before, context_after)
 			 SELECT $1::uuid, e.id, a.id, $4::text, $5::int, $6::int, $7::int, $8::int, $9::int,
-			        $10::text, $11::text, NULLIF($12::text, ''), $13::timestamptz
+			        $10::text, $11::text, NULLIF($12::text, ''), $13::timestamptz,
+			        $14::text[], $15::text[], $16::text[]
 			   FROM code_entities e JOIN agent_sessions a ON a.id = $3::uuid AND a.project_id = $1::uuid
 			  WHERE e.id = $2::uuid AND e.project_id = $1::uuid
 			 ON CONFLICT (entity_id, session_id, tool_call_id, hunk_index) DO UPDATE SET
@@ -413,13 +424,15 @@ func (s *PostgresStore) AddCodeChanges(ctx context.Context, projectID string, ch
 			    removed_lines = EXCLUDED.removed_lines, added_lines = EXCLUDED.added_lines,
 			    before_snippet = EXCLUDED.before_snippet, after_snippet = EXCLUDED.after_snippet,
 			    changed_at = EXCLUDED.changed_at,
+			    added_hashes = EXCLUDED.added_hashes, context_before = EXCLUDED.context_before,
+			    context_after = EXCLUDED.context_after,
 			    observed_at = CASE WHEN code_changes.after_hash IS DISTINCT FROM EXCLUDED.after_hash
 			                       THEN now() ELSE code_changes.observed_at END,
 			    after_hash = EXCLUDED.after_hash
 			 RETURNING id::text, observed_at`,
 			projectID, c.EntityID, c.SessionID, c.ToolCallID, c.HunkIndex,
 			c.StartLine, c.EndLine, c.RemovedLines, c.AddedLines, c.BeforeSnippet, c.AfterSnippet,
-			c.AfterHash, c.ChangedAt)
+			c.AfterHash, c.ChangedAt, nonNilStrings(c.AddedHashes), nonNilStrings(c.ContextBefore), nonNilStrings(c.ContextAfter))
 		queued = append(queued, c)
 	}
 	if len(queued) == 0 {
@@ -452,6 +465,7 @@ func (s *PostgresStore) ListCodeChangesByPath(ctx context.Context, projectID, pa
 		`SELECT c.id::text, c.entity_id::text, c.session_id::text, c.tool_call_id, c.hunk_index,
 		        c.start_line, c.end_line, c.removed_lines, c.added_lines, c.before_snippet, c.after_snippet,
 		        COALESCE(c.after_hash, ''), c.changed_at, c.observed_at,
+		        c.added_hashes, c.context_before, c.context_after,
 		        e.path, COALESCE(e.content_hash, ''),
 		        COALESCE(s.title, ''), COALESCE(s.harness, ''), COALESCE(s.native_id, ''),
 		        s.started_at, s.last_active_at, COALESCE(s.owner_user_id::text, ''), COALESCE(s.visibility, '')
@@ -474,7 +488,8 @@ func (s *PostgresStore) ListCodeChangesByPath(ctx context.Context, projectID, pa
 		var started, last *time.Time
 		if err := rows.Scan(&h.ID, &h.EntityID, &h.SessionID, &h.ToolCallID, &h.HunkIndex,
 			&h.StartLine, &h.EndLine, &h.RemovedLines, &h.AddedLines, &h.BeforeSnippet, &h.AfterSnippet,
-			&h.AfterHash, &h.ChangedAt, &h.ObservedAt, &h.Path, &h.CurrentHash,
+			&h.AfterHash, &h.ChangedAt, &h.ObservedAt, &h.AddedHashes, &h.ContextBefore, &h.ContextAfter,
+			&h.Path, &h.CurrentHash,
 			&title, &harness, &native, &started, &last, &owner, &vis); err != nil {
 			return nil, err
 		}
@@ -504,4 +519,12 @@ func (s *PostgresStore) ListCodeChangesByPath(ctx context.Context, projectID, pa
 		out[i], out[j] = out[j], out[i]
 	}
 	return out, nil
+}
+
+// nonNilStrings makes a nil slice an empty array for Postgres.
+func nonNilStrings(v []string) []string {
+	if v == nil {
+		return []string{}
+	}
+	return v
 }

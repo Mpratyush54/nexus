@@ -64,7 +64,7 @@ func TestCodeChangesWhyAndLineHistory(t *testing.T) {
 	row, _ := changes[0].(map[string]any)
 	if row["session_id"] != sess.ID || row["title"] != "Retry uploads" || row["agent"] != "claude" ||
 		row["lines"] != "45-47" || row["recorded_lines"] != "40-42" || row["approximate"] != false ||
-		row["before"] != "return put(req)" || row["tool_call_id"] != "toolu_1" {
+		row["before"] != "return put(req)" || row["tool_call_id"] != "toolu_1" || row["match"] != "line" {
 		t.Fatalf("why row: %v", row)
 	}
 	decisions, _ := row["decisions"].([]any)
