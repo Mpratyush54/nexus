@@ -629,9 +629,14 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 		}
 		role, _ := ev.Payload["speaker"].(string)
 		content, _ := ev.Payload["content"].(string)
+		used, usageKey := usageFromPayload(ev.Payload["usage"])
 		// Keep tool-only events for provenance, but do not fill Chat with
 		// hundreds of blank OpenCode tool steps or make one HTTP turn call each.
+		// Their token usage still goes to the usage ledger.
 		if strings.TrimSpace(content) == "" {
+			if used != nil {
+				turns = append(turns, MirroredTurn{Idx: idx, SourceAt: sourceAt, Usage: used, UsageKey: usageKey, UsageOnly: true})
+			}
 			continue
 		}
 		turns = append(turns, MirroredTurn{
@@ -640,6 +645,8 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 			TextPreview: boundedTurnPreview(content),
 			ToolCalls:   mirroredToolCalls(ev.Payload["tool_calls"]),
 			SourceAt:    sourceAt,
+			Usage:       used,
+			UsageKey:    usageKey,
 		})
 	}
 	id, err := hs.MirrorAgentSessionTurns(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, turns, title)

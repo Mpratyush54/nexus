@@ -37,6 +37,7 @@ func (s *Server) registerTimelineRoutes() {
 	s.Mux.HandleFunc("PUT /v1/blobs/{sha256}", s.requireAuth(s.handleBlobPut))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/versions/{version}/blobs/{sha256}", s.requireAuth(s.handleSessionVersionBlob))
 	s.Mux.HandleFunc("GET /v1/timeline", s.requireAuth(s.handleTimeline))
+	s.registerUsageRoutes()
 }
 
 func (s *Server) agentCloud() (store.AgentCloudStore, bool) {
@@ -308,10 +309,14 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 		ToolCalls   json.RawMessage `json:"tool_calls"`
 		BlobRef     string          `json:"blob_ref"`
 		SourceAt    *time.Time      `json:"source_ts"`
+		Usage       *usageBody      `json:"usage"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
 	}
+	// Usage is recorded even when the turn is a duplicate, so a re-sent
+	// history can backfill usage for turns stored before usage existed.
+	s.recordTurnUsage(r, row.ID, body.Idx, body.SourceAt, body.Usage)
 	err := cs.AppendSessionTurn(r.Context(), store.SessionTurn{
 		SessionID: r.PathValue("id"), Idx: body.Idx, Role: body.Role,
 		TextPreview: body.TextPreview, ToolCalls: body.ToolCalls, BlobRef: body.BlobRef,
@@ -352,6 +357,7 @@ func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request
 			TextPreview string          `json:"text_preview"`
 			ToolCalls   json.RawMessage `json:"tool_calls"`
 			SourceAt    *time.Time      `json:"source_ts"`
+			Usage       *usageBody      `json:"usage"`
 		} `json:"turns"`
 	}
 	if !decodeJSON(w, r, &body) {
@@ -363,6 +369,7 @@ func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request
 	}
 	created, duplicates := 0, 0
 	for _, turn := range body.Turns {
+		s.recordTurnUsage(r, row.ID, turn.Idx, turn.SourceAt, turn.Usage)
 		err := cs.AppendSessionTurn(r.Context(), store.SessionTurn{
 			SessionID: row.ID, Idx: turn.Idx, Role: turn.Role,
 			TextPreview: turn.TextPreview, ToolCalls: turn.ToolCalls,

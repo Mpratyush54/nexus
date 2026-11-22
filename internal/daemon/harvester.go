@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"central-memory/adapters"
+	"central-memory/internal/usage"
 )
 
 // EventType is the wire-visible type of a daemon-emitted event.
@@ -100,6 +101,17 @@ type Turn struct {
 	SourcePosition int64            // stable byte position within an append-only transcript
 	SessionID      string           // native session id for multi-session stores such as OpenCode
 	SessionTitle   string           // native title, when available
+	// Usage is the token usage reported on this line (Claude message.usage,
+	// Codex token_count, OpenCode message tokens/cost, Gemini tokens). A
+	// turn with Usage but no content is "usage only": it reaches the cloud
+	// usage ledger but is not dialogue.
+	Usage    *usage.Entry
+	UsageKey string // dedup key: several lines can repeat one API call's usage
+}
+
+// UsageOnly reports a turn that only carries token usage.
+func (t Turn) UsageOnly() bool {
+	return t.Usage != nil && strings.TrimSpace(t.Content) == "" && len(t.ToolCalls) == 0
 }
 
 // Harvester tails agent transcript files for one workspace.
@@ -127,6 +139,7 @@ type Harvester struct {
 	completed  map[string]bool      // path -> SESSION_TRANSCRIPT_COMPLETE sent
 	agents     map[string]string    // path -> agent name
 	batch      map[string][]Turn    // path -> turns since session start
+	models     map[string]string    // path -> last model announced (Codex turn_context)
 	// extractors holds per-agent SQLite row extractors (nil value or absent
 	// agent = built-in fallback, then liveness-only). Issue #33/#77.
 	extractors map[string]SQLiteExtractor
@@ -1310,6 +1323,12 @@ func turnPayload(action, agent, path string, t Turn) map[string]any {
 	if t.SourcePosition > 0 {
 		p["source_position"] = t.SourcePosition
 	}
+	if t.Usage != nil {
+		p["usage"] = usagePayload(*t.Usage, t.UsageKey)
+		if t.UsageOnly() {
+			p["usage_only"] = true
+		}
+	}
 	if len(t.ToolCalls) > 0 {
 		// Emit as []any so JSON encoders and ParseToolCalls([]any) agree.
 		flat := make([]any, len(t.ToolCalls))
@@ -1381,7 +1400,21 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	position := off
 	for sc.Scan() {
 		position += int64(len(sc.Bytes())) + 1
-		if t, ok := parseTurnLine(sc.Bytes()); ok {
+		t, ok := parseTurnLine(sc.Bytes())
+		u, key, model := parseLineUsage(sc.Bytes())
+		if model != "" {
+			h.setModel(path, model)
+		}
+		if u != nil {
+			if u.Model == "" {
+				u.Model = h.modelFor(path)
+			}
+			if !ok {
+				t, ok = Turn{Speaker: "assistant", Timestamp: lineTime(sc.Bytes())}, true
+			}
+			t.Usage, t.UsageKey = u, key
+		}
+		if ok {
 			t.SourcePosition = position
 			turns = append(turns, t)
 		}
@@ -1409,7 +1442,11 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 		}
 		h.lastActive[path] = last
 		delete(h.completed, path) // new activity re-arms idle detection
-		h.batch[path] = append(h.batch[path], turns...)
+		for _, t := range turns {
+			if !t.UsageOnly() {
+				h.batch[path] = append(h.batch[path], t)
+			}
+		}
 	}
 	h.mu.Unlock()
 
@@ -1485,7 +1522,9 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 				h.lastActive[turnPath] = turns[i].Timestamp
 			}
 			delete(h.completed, turnPath)
-			h.batch[turnPath] = append(h.batch[turnPath], turns[i])
+			if !turns[i].UsageOnly() {
+				h.batch[turnPath] = append(h.batch[turnPath], turns[i])
+			}
 			if turns[i].Timestamp.After(h.lastActive[path]) {
 				h.lastActive[path] = turns[i].Timestamp
 			}
