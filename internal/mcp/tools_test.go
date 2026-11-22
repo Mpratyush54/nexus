@@ -289,3 +289,48 @@ func TestEpisodeSearchOverFetchesPastLimit(t *testing.T) {
 		t.Errorf("over-fetch count = %v, want 1 (match past limit)", got)
 	}
 }
+
+// Agents ask in sentences; the cloud store only matches substrings.
+func TestMemorySearchFallsBackToTermsAndTop(t *testing.T) {
+	if got := searchTerms("What is this project about? Redis caching, please"); len(got) != 2 || got[0] != "caching" || got[1] != "redis" {
+		t.Fatalf("terms = %v", got)
+	}
+	st := &substringStore{newFakeStore()}
+	for _, it := range []*MemoryItem{
+		{ID: "a", ProjectID: "p1", Key: "arch/cache", Content: "Redis caches match scores", Status: "CONFIRMED"},
+		{ID: "b", ProjectID: "p1", Key: "conv/tests", Content: "Use pytest fixtures for scoring", Status: "CONFIRMED"},
+	} {
+		_ = st.CreateMemoryItem(context.Background(), it)
+	}
+	s := NewServer(st, Config{ProjectID: "p1", ProjectName: "demo"})
+	items, match, err := s.keywordSearch(context.Background(), "p1", "how does redis caching of scores work", nil, 20)
+	if err != nil || match != "terms" || len(items) == 0 || items[0].ID != "a" {
+		t.Fatalf("terms search = %v %q %v", ids(items), match, err)
+	}
+	items, match, err = s.keywordSearch(context.Background(), "p1", "what is this project about", nil, 20)
+	if err != nil || match != "top" || len(items) != 2 {
+		t.Fatalf("overview search = %v %q %v", ids(items), match, err)
+	}
+}
+
+// substringStore matches the whole query as one substring, like Postgres.
+type substringStore struct{ *fakeStore }
+
+func (s *substringStore) SearchMemory(ctx context.Context, projectID, query string, tags []string, limit int) ([]*MemoryItem, error) {
+	all, err := s.fakeStore.SearchMemory(ctx, projectID, "", tags, 0)
+	var out []*MemoryItem
+	for _, it := range all {
+		if query == "" || strings.Contains(strings.ToLower(it.Key+" "+it.Content), strings.ToLower(query)) {
+			out = append(out, it)
+		}
+	}
+	return out, err
+}
+
+func ids(items []*MemoryItem) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.ID)
+	}
+	return out
+}
