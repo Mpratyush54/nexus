@@ -41,12 +41,15 @@ type MemoryPatch struct {
 	ContextSnippet *string
 	Level          *string
 	Scope          *string
+	// Source rewrites the provenance column (e.g. "brief:openrouter" when a
+	// regenerated row changes how it was produced).
+	Source *string
 }
 
 // Empty reports whether the patch carries any field.
 func (p MemoryPatch) Empty() bool {
 	return p.Key == nil && p.Content == nil && p.Tags == nil &&
-		p.ContextSnippet == nil && p.Level == nil && p.Scope == nil
+		p.ContextSnippet == nil && p.Level == nil && p.Scope == nil && p.Source == nil
 }
 
 func memoryEditable(status string) bool {
@@ -121,6 +124,9 @@ func applyMemoryPatch(m *MemoryItem, patch MemoryPatch) error {
 			return err
 		}
 		m.Scope = scope
+	}
+	if patch.Source != nil {
+		m.Source = strings.TrimSpace(*patch.Source)
 	}
 	// An edit is a person (or harvest) restating the memory now, so any
 	// "files changed since" flag no longer applies.
@@ -296,10 +302,10 @@ func (s *PostgresStore) UpdateMemory(ctx context.Context, id string, patch Memor
 	tag, err := tx.Exec(ctx,
 		`UPDATE memory_items SET
 			"key" = $2, content = $3, tags = $4,
-			context_snippet = NULLIF($5,''), level = $6, scope = $7,
+			context_snippet = NULLIF($5,''), level = $6, scope = $7, source = NULLIF($8,''),
 			stale_since = NULL, updated_at = now()
 		 WHERE id = $1::uuid AND status IN ('PROPOSED','CONFIRMED')`,
-		id, m.Key, m.Content, m.Tags, m.ContextSnippet, m.Level, m.Scope)
+		id, m.Key, m.Content, m.Tags, m.ContextSnippet, m.Level, m.Scope, m.Source)
 	if err != nil {
 		return nil, err
 	}

@@ -36,6 +36,8 @@ const (
 	// briefInputMemories / briefInputSummaries bound the generator input.
 	briefInputMemories  = 30
 	briefInputSummaries = 5
+	// briefCorpusChars bounds each row's text used for stack/topic detection.
+	briefCorpusChars = 600
 )
 
 // briefClockNow is the brief clock (tests may override Server.briefNow).
@@ -232,8 +234,18 @@ func (s *Server) briefInput(ctx context.Context, projectID string, candidates []
 		return extract.BriefMemory{
 			Key: m.Key, Content: m.Content, Category: m.Category, Scope: m.Scope,
 			Confidence: float64(m.Confidence), UseCount: m.UseCount,
-			Pinned: hasTag(m, "pinned"), SessionID: memorySessionID(m),
+			Pinned: hasTag(m, "pinned"), Confirmed: m.Status == store.StatusConfirmed,
+			SessionID: memorySessionID(m), FilesAffected: m.FilesAffected,
 		}
+	}
+	// Every eligible row feeds stack and topic detection (bounded text).
+	in.Corpus = make([]extract.BriefMemory, 0, len(candidates))
+	for _, m := range candidates {
+		c := conv(m)
+		if r := []rune(c.Content); len(r) > briefCorpusChars {
+			c.Content = string(r[:briefCorpusChars])
+		}
+		in.Corpus = append(in.Corpus, c)
 	}
 	for _, m := range mems {
 		in.Memories = append(in.Memories, conv(m))
@@ -244,14 +256,57 @@ func (s *Server) briefInput(ctx context.Context, projectID string, candidates []
 	return in
 }
 
-// briefTags are the brief row's tags: pinned, the brief marker, and one
+// Brief row tags recording how the brief was produced.
+const (
+	briefProviderTag = "brief-provider:"
+	briefFallbackTag = "brief-fallback:"
+)
+
+// briefTags are the brief row's tags: pinned, the brief marker, the
+// provider, the fallback reason (deterministic briefs only), and one
 // brief-source tag per cited session.
-func briefTags(sources []string) []string {
-	tags := []string{"pinned", store.ProjectBriefTag}
-	for _, sid := range sources {
+func briefTags(res extract.BriefResult) []string {
+	tags := []string{"pinned", store.ProjectBriefTag, briefProviderTag + res.Provider}
+	if res.FallbackReason != "" {
+		tags = append(tags, briefFallbackTag+res.FallbackReason)
+	}
+	for _, sid := range res.Sources {
 		tags = append(tags, store.ProjectBriefSourceTag+sid)
 	}
 	return tags
+}
+
+// briefTagValue reads one prefixed tag value from the brief row.
+func briefTagValue(m *store.MemoryItem, prefix string) string {
+	if m == nil {
+		return ""
+	}
+	for _, t := range m.Tags {
+		if strings.HasPrefix(t, prefix) {
+			return strings.TrimPrefix(t, prefix)
+		}
+	}
+	return ""
+}
+
+// warnBriefFallback logs a WARN once per project and reason. The error
+// detail goes to the log only, never into the brief.
+func (s *Server) warnBriefFallback(projectID string, res extract.BriefResult) {
+	s.briefMu.Lock()
+	if s.briefWarned == nil {
+		s.briefWarned = map[string]string{}
+	}
+	prev := s.briefWarned[projectID]
+	s.briefWarned[projectID] = res.FallbackReason
+	s.briefMu.Unlock()
+	if res.FallbackReason == "" || res.FallbackReason == prev {
+		return
+	}
+	detail := res.LLMError
+	if detail == "" {
+		detail = "-"
+	}
+	s.logBrief("WARN brief: project=%s used the deterministic brief (reason=%s): %s", projectID, res.FallbackReason, detail)
 }
 
 // briefSources reads the cited session IDs back from the brief row's tags.
@@ -285,17 +340,18 @@ func (s *Server) rebuildProjectBrief(ctx context.Context, projectID string, cand
 	}
 	in := s.briefInput(ctx, projectID, candidates)
 	res := s.resolveExtractor().GenerateBrief(ctx, in)
-	if res.LLMError != "" {
-		s.logBrief("brief: llm project=%s fell back to heuristic: %s", projectID, res.LLMError)
-	}
+	s.warnBriefFallback(projectID, res)
 	content := extract.ClampBrief(res.Content)
 	if err := store.ValidateMemoryContent(content); err != nil {
 		return nil, errNoBriefInput
 	}
-	tags := briefTags(res.Sources)
+	tags := briefTags(res)
+	source := "brief:" + res.Provider
 	if existing != nil {
 		if es, ok := s.memoryEditStore(); ok {
-			item, err := es.UpdateMemory(ctx, existing.ID, store.MemoryPatch{Content: &content, Tags: &tags}, "")
+			// Source is patched too: a brief first written by the heuristic
+			// must not keep "brief:heuristic" after an LLM rebuild.
+			item, err := es.UpdateMemory(ctx, existing.ID, store.MemoryPatch{Content: &content, Tags: &tags, Source: &source}, "")
 			if err != nil {
 				return nil, err
 			}
@@ -311,7 +367,7 @@ func (s *Server) rebuildProjectBrief(ctx context.Context, projectID string, cand
 		Scope:         "fact",
 		Confidence:    1.0,
 		Status:        store.StatusConfirmed,
-		Source:        "brief:" + res.Provider,
+		Source:        source,
 		Tags:          tags,
 		Category:      "architecture",
 		Outcome:       "active",
@@ -339,6 +395,11 @@ type projectBriefResponse struct {
 	Content   string     `json:"content"`
 	UpdatedAt *time.Time `json:"updated_at"`
 	Sources   []string   `json:"sources"`
+	// Provider is how the brief was produced (openrouter | heuristic);
+	// FallbackReason is a short code when it is deterministic although an
+	// LLM brief was wanted (e.g. no_api_key, timeout, unparseable_reply).
+	Provider       string `json:"provider,omitempty"`
+	FallbackReason string `json:"fallback_reason,omitempty"`
 }
 
 func briefResponse(m *store.MemoryItem) projectBriefResponse {
@@ -346,7 +407,14 @@ func briefResponse(m *store.MemoryItem) projectBriefResponse {
 		return projectBriefResponse{Sources: []string{}}
 	}
 	at := m.UpdatedAt
-	return projectBriefResponse{Content: m.Content, UpdatedAt: &at, Sources: briefSources(m)}
+	provider := briefTagValue(m, briefProviderTag)
+	if provider == "" {
+		provider = strings.TrimPrefix(m.Source, "brief:")
+	}
+	return projectBriefResponse{
+		Content: m.Content, UpdatedAt: &at, Sources: briefSources(m),
+		Provider: provider, FallbackReason: briefTagValue(m, briefFallbackTag),
+	}
 }
 
 // handleProjectBriefGet returns the brief to project members. A project
