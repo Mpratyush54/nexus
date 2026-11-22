@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	memctx "central-memory/internal/context"
 	"central-memory/internal/extract"
 	"central-memory/internal/store"
 )
@@ -209,6 +208,7 @@ func (s *Server) upsertSessionSummary(ctx context.Context, job *store.HarvestJob
 			if err != nil {
 				return nil, err
 			}
+			s.reembedAfterEdit(ctx, item)
 			s.notifyProjectActivity(job.ProjectID, "MEMORY_CONFIRMED", "/app/memory")
 			s.publishMemoryLifecycle(item, "MEMORY_CONFIRMED", "confirmed")
 			return item, nil
@@ -232,7 +232,7 @@ func (s *Server) upsertSessionSummary(ctx context.Context, job *store.HarvestJob
 		FilesAffected: []string{},
 		ToolsUsed:     []string{},
 	}
-	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
+	s.embedItem(ctx, item)
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {
 		return nil, err
 	}
@@ -347,7 +347,7 @@ func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob
 		Outcome:       outcome,
 		WeekBucket:    week,
 	}
-	item.Embedding = s.embedText(ctx, memctx.EmbedTextForItem(item.Key, item.Content))
+	s.embedItem(ctx, item)
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {
 		return nil, err
 	}

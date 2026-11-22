@@ -85,6 +85,9 @@ func (s *Server) handleMemoryUpdate(w http.ResponseWriter, r *http.Request) {
 		writeMemoryEditError(w, err, "could not update memory")
 		return
 	}
+	if patch.Key != nil || patch.Content != nil {
+		s.reembedAfterEdit(r.Context(), item)
+	}
 	s.publishMemoryLifecycle(item, "MEMORY_UPDATED", "updated")
 	writeJSON(w, http.StatusOK, item)
 }
@@ -184,6 +187,7 @@ func (s *Server) handleMemoryRevert(w http.ResponseWriter, r *http.Request) {
 		writeMemoryEditError(w, err, "could not revert memory")
 		return
 	}
+	s.reembedAfterEdit(r.Context(), item)
 	s.publishMemoryLifecycle(item, "MEMORY_UPDATED", "updated")
 	writeJSON(w, http.StatusOK, item)
 }

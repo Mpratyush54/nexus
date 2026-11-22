@@ -42,6 +42,18 @@ services:
       MAIL_FROM: "${MAIL_FROM:-Nexus <noreply@pratyushes.dev>}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       PLATFORM_ADMIN_USER_IDS: "${PLATFORM_ADMIN_USER_IDS:-}"
+      # Local embeddings (sidecar below). Set CENTRAL_EMBEDDING_PROVIDER=hash
+      # in .env to turn it off without a redeploy of code. If the sidecar is
+      # down, writes fall back to HashEmbed (tagged "hash") and search to
+      # keyword; the startup backfill re-embeds those rows on the next boot.
+      CENTRAL_EMBEDDING_PROVIDER: "${CENTRAL_EMBEDDING_PROVIDER:-local}"
+      CENTRAL_EMBEDDING_MODEL: "${CENTRAL_EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}"
+      CENTRAL_EMBEDDING_ENDPOINT: "${CENTRAL_EMBEDDING_ENDPOINT:-http://embeddings:80}"
+      CENTRAL_EMBEDDING_TIMEOUT: "${CENTRAL_EMBEDDING_TIMEOUT:-5s}"
+      CENTRAL_EMBEDDING_BACKFILL_ON_START: "${CENTRAL_EMBEDDING_BACKFILL_ON_START:-1}"
+      CENTRAL_EMBEDDING_BACKFILL_RATE: "${CENTRAL_EMBEDDING_BACKFILL_RATE:-5}"
+      # Empty = per-model default (0.6 for bge-small, 0.2 for hash).
+      CENTRAL_EMBEDDING_MIN_SIMILARITY: "${CENTRAL_EMBEDDING_MIN_SIMILARITY:-}"
     ports:
       - "80:8080"
       - "8080:8080"
@@ -50,5 +62,34 @@ services:
         condition: service_healthy
     restart: always
 
+  # Local embeddings: HuggingFace text-embeddings-inference (CPU, ~240 MB
+  # compressed image) serving BAAI/bge-small-en-v1.5 (33.4M params, 384 dims,
+  # 133 MB weights) on the OpenAI-compatible /v1/embeddings route. Internal
+  # only (no published port). The server does NOT depend_on it: the API must
+  # boot and accept writes even when this container is down. Model weights
+  # are cached in the tei-models volume, so only the first boot downloads.
+  embeddings:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-1.9@sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d
+    container_name: nexus-embeddings
+    command:
+      - --model-id=BAAI/bge-small-en-v1.5
+      - --revision=5c38ec7c405ec4b44b94cc5a9bb96e735b38267a
+      - --hostname=0.0.0.0
+      - --port=80
+      - --max-concurrent-requests=32
+      - --max-client-batch-size=8
+      - --max-batch-tokens=4096
+      - --tokenization-workers=1
+    environment:
+      AUTO_TRUNCATE: "true"
+    volumes:
+      - tei-models:/data
+    # Keep Postgres and the API safe on a small box: hard RAM cap and one
+    # vCPU. bge-small fp32 needs ~133 MB of weights plus runtime overhead.
+    mem_limit: 640m
+    cpus: 1.0
+    restart: always
+
 volumes:
   pgdata:
+  tei-models:

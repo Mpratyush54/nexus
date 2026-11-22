@@ -14,14 +14,27 @@
 //	PORT (default 8080), MIGRATIONS_DIR (default /migrations)
 //	CENTRAL_MEMORY_LOCAL_DEV=1          local bypass for the /readyz sslmode=require
 //	                                    gate (compose sets this with sslmode=disable)
-//	CENTRAL_EMBEDDING_PROVIDER          openai | ollama | hash (default hash; issue #165)
+//	CENTRAL_EMBEDDING_PROVIDER          openai | ollama | local | hash (default hash; issue #165)
 //	CENTRAL_EMBEDDING_API_KEY           OpenAI / custom API key
-//	CENTRAL_EMBEDDING_MODEL             default text-embedding-3-small
-//	CENTRAL_EMBEDDING_ENDPOINT          optional OpenAI base or Ollama embeddings URL
+//	CENTRAL_EMBEDDING_MODEL             default text-embedding-3-small (local: BAAI/bge-small-en-v1.5)
+//	CENTRAL_EMBEDDING_ENDPOINT          optional OpenAI base, Ollama URL, or local sidecar
+//	                                    (local default http://embeddings:80)
+//	CENTRAL_EMBEDDING_TIMEOUT           per-call timeout (default 5s local, 30s otherwise)
+//	CENTRAL_EMBEDDING_BACKFILL_ON_START 1 = run the rate-limited reembed backfill in the
+//	                                    background after boot (default off)
+//	CENTRAL_EMBEDDING_BACKFILL_RATE     backfill embeddings/second (default 5)
+//	CENTRAL_EMBEDDING_MIN_SIMILARITY    vector-search cosine floor, 0<v<1 (default
+//	                                    per model: 0.2 hash, 0.6 bge)
 //	OPENROUTER_API_KEY                  server-side memory extraction (never sent to clients)
 //	OPENROUTER_MODEL                    default nvidia/nemotron-3.5-lightning:free
 //	OPENROUTER_BASE_URL                 optional OpenRouter API base
 //	OPENROUTER_HTTP_REFERER / OPENROUTER_APP_TITLE  optional OpenRouter headers
+//
+// One-off admin command (same env; exits when done) that re-embeds every
+// live memory whose vector is missing or came from another model (HashEmbed
+// rows, writes made while the sidecar was down):
+//
+//	central-server reembed [-rate 5] [-batch 50] [-max 0] [-dry-run]
 //
 // Boot-migration bootstrap is deploy/migrate.sh (the container ENTRYPOINT),
 // not a Go bootstrap binary: it assembles the same DSN from the same env and
@@ -321,6 +334,12 @@ func getenv(key, fallback string) string {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "reembed" {
+		if err := runReembed(os.Args[2:]); err != nil {
+			log.Fatalf("reembed: %v", err)
+		}
+		return
+	}
 	if err := run(); err != nil {
 		log.Fatalf("server: %v", err)
 	}
@@ -349,7 +368,9 @@ func run() error {
 	}
 
 	srv := newServer(cfg.jwtSecret)
-	srv.Embedder = memctx.EmbedderFromEnv()
+	srv.EmbedProvider = memctx.ProviderFromEnv()
+	srv.Embedder = srv.EmbedProvider.Embedder()
+	log.Printf("server: embeddings model %s", srv.EmbedProvider.Model())
 	srv.Extractor = extract.NewService(extract.ConfigFromEnv())
 	if srv.Extractor.HasAPIKey() {
 		log.Print("server: OpenRouter memory extraction enabled")
@@ -384,6 +405,9 @@ func run() error {
 		srv.Harvest = store.NewPostgresHarvestQueue(pg.Pool())
 		srv.HarvestSQS = server.NewSQSHarvestNotifierFromEnv()
 		srv.StartHarvestWorker(ctx)
+		if os.Getenv("CENTRAL_EMBEDDING_BACKFILL_ON_START") == "1" && !srv.EmbedProvider.IsHash() {
+			go startupReembed(ctx, srv.EmbedProvider, pg)
+		}
 		log.Print("server: postgres store + user login + api tokens + harvest queue wired")
 	}
 	// Lifecycle tick (issue #119 box 4): no-op-idle on stubStore (it

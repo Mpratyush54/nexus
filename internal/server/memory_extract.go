@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	memctx "central-memory/internal/context"
 	"central-memory/internal/extract"
 	"central-memory/internal/store"
 )
@@ -114,7 +113,7 @@ func (s *Server) persistExtractProposal(r *http.Request, projectID string, p ext
 	if level == "personal" {
 		item.UserID = authSubject(r)
 	}
-	item.Embedding = s.embedText(r.Context(), memctx.EmbedTextForItem(item.Key, item.Content))
+	s.embedItem(r.Context(), item)
 	if err := s.Store.CreateMemoryItem(r.Context(), item); err != nil {
 		return nil, err
 	}

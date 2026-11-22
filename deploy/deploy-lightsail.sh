@@ -29,6 +29,10 @@ ssh -i "$KEY" -o StrictHostKeyChecking=no "$USER@$HOST" << 'REMOTE_COMMANDS'
   "${COMPOSE[@]}" build
   if docker ps -a --format '{{.Names}}' | grep -qx nexus-postgres; then
     echo "postgres container already present — recreating server only"
+    # Embeddings sidecar first (no-op when unchanged) so the server's startup
+    # backfill finds it. Its failure must never block the API deploy.
+    "${COMPOSE[@]}" up -d --no-deps embeddings \
+      || echo "WARN: embeddings sidecar did not start; API falls back to HashEmbed + keyword search"
     "${COMPOSE[@]}" up -d --no-deps --force-recreate server
   else
     "${COMPOSE[@]}" up -d

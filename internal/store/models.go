@@ -73,6 +73,10 @@ type MemoryItem struct {
 	Level          string    `json:"level"` // organization | project | personal | session | ephemeral
 	Scope          string    `json:"scope"` // fact | preference | decision | constraint | pattern | episode_summary
 	Embedding      []float32 `json:"embedding,omitempty"`
+	// EmbeddingModel tags who produced Embedding ("hash",
+	// "local:BAAI/bge-small-en-v1.5", ...): memory_items.embedding_model.
+	// Write-only from inserts; "" stores NULL (treated as stale by reembed).
+	EmbeddingModel string    `json:"-"`
 	Tags           []string  `json:"tags,omitempty"`
 	Confidence     float32   `json:"confidence"`
 	Status         string    `json:"status"` // PROPOSED | CONFIRMED | REJECTED | SUPERSEDED

@@ -144,7 +144,7 @@ func (s *Server) handleProjectImport(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if len(item.Embedding) != store.EmbeddingDim {
-			item.Embedding = s.embedText(r.Context(), item.Key+"\n"+item.Content)
+			s.embedItem(r.Context(), &item)
 		}
 		if err := s.Store.CreateMemoryItem(r.Context(), &item); err != nil {
 			out.Skipped++
