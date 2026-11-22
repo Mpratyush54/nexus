@@ -46,6 +46,8 @@ func (s *Server) registerCloudContractRoutes() {
 	s.Mux.HandleFunc("DELETE /v1/agent-sessions/{id}/grants/team", s.requireAuth(s.handleUngrantTeam))
 	s.Mux.HandleFunc("PUT /v1/agent-sessions/{id}/grants/{user}", s.requireAuth(s.handleGrantUser))
 	s.Mux.HandleFunc("DELETE /v1/agent-sessions/{id}/grants/{user}", s.requireAuth(s.handleUngrantUser))
+	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/grants", s.requireAuth(s.handleListGrants))
+	s.Mux.HandleFunc("DELETE /v1/agent-sessions/{id}/grants", s.requireAuth(s.handleUnshareAll))
 	s.Mux.HandleFunc("GET /v1/storage/usage", s.requireAuth(s.handleStorageUsage))
 	s.Mux.HandleFunc("GET /v1/audit", s.requireAuth(s.handleAuditQuery))
 	s.Mux.HandleFunc("GET /v1/timeline/stream", s.requireAuth(s.handleTimelineStream))
@@ -693,11 +695,26 @@ func (s *Server) mutateTeleport(w http.ResponseWriter, r *http.Request, revoke b
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		// Taking back a chat the recipient already opened also ends the read
+		// access that opening it granted.
+		if strings.EqualFold(tp.Status, "accepted") && tp.SessionID != "" {
+			if err := revokeGrant(r, s, tp.SessionID, tp.ToUserID); err == nil {
+				s.recordAudit(r, store.AuditEvent{
+					Action: "session.grant_revoked", ResourceKind: "session", ResourceID: tp.SessionID,
+					Metadata: map[string]any{"grantee_user_id": tp.ToUserID, "via": "teleport_revoke", "teleport_id": id},
+				})
+			}
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "revoked"})
 		return
 	}
 	if tp.ToUserID != caller {
 		writeError(w, http.StatusForbidden, "only the recipient can accept")
+		return
+	}
+	// The sender took it back: accepting must not reopen access.
+	if tp.RevokedAt != nil || strings.EqualFold(tp.Status, "revoked") {
+		writeError(w, http.StatusGone, "the sender took this chat back")
 		return
 	}
 	if err := setTeleportStatus(r, s, id, "accepted", false); err != nil {

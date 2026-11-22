@@ -777,9 +777,20 @@ func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness,
 		if err != nil {
 			return nil, err
 		}
+		// Snapshots of conversations now captured as sessions are hidden from
+		// the list anyway; skip them before the costly transcript search.
+		var captured map[string]bool
+		if lister, ok := s.Store.(interface {
+			NativeSessionKeys(context.Context, []string) (map[string]bool, error)
+		}); ok {
+			captured, _ = lister.NativeSessionKeys(ctx, []string{project.ID})
+		}
 		for i := range snaps {
 			snap := &snaps[i]
 			if harness != "" && !strings.EqualFold(harness, snap.Harness) {
+				continue
+			}
+			if captured[snap.Harness+"\x00"+snap.ConversationID] {
 				continue
 			}
 			if !s.canReadSnapshot(ctx, userID, snap) {
