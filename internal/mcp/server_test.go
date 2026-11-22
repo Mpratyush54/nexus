@@ -480,3 +480,25 @@ func TestToolSchemasHaveRequiredArrays(t *testing.T) {
 		}
 	}
 }
+
+// MCP clients only read "content" text blocks from tools/call results.
+func TestToolsCallReturnsMCPContent(t *testing.T) {
+	out := toolCallResult(map[string]any{"context": "<project_memory/>", "token_count": 3})
+	m := out.(map[string]any)
+	blocks, ok := m["content"].([]any)
+	if !ok || len(blocks) != 1 {
+		t.Fatalf("content = %#v", m["content"])
+	}
+	block := blocks[0].(map[string]any)
+	if block["type"] != "text" || block["text"] != "<project_memory/>" {
+		t.Fatalf("block = %#v", block)
+	}
+	if m["context"] != "<project_memory/>" {
+		t.Fatal("original fields must stay for existing callers")
+	}
+	plain := toolCallResult(map[string]any{"id": "m1", "status": "active"}).(map[string]any)
+	text := plain["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, `"id": "m1"`) {
+		t.Fatalf("plain result text = %q", text)
+	}
+}
