@@ -140,6 +140,20 @@ func TestMemStoreCodeLinksLifecycle(t *testing.T) {
 		}
 	}
 
+	// The memory's own session re-edits the file: its link follows the
+	// new hash and, with no link left disagreeing, it is no longer stale.
+	_, _ = s.SetCodeEntityHash(ctx, pid, "internal/mcp/tools.go", "h3", at)
+	refreshed, unstaled, err := s.RefreshMemoryLinkHashes(ctx, pid, e.ID, "h3", []string{memID, "unrelated"})
+	if err != nil || len(refreshed) != 1 || refreshed[0] != memID || len(unstaled) != 1 {
+		t.Fatalf("refresh: %v %v %v", refreshed, unstaled, err)
+	}
+	if got, _ := s.GetMemoryItem(ctx, memID); got.StaleSince != nil {
+		t.Fatal("refresh must un-stale")
+	}
+	if marked, _, _ := s.MarkStaleByCodeHash(ctx, pid, []string{"internal/mcp/tools.go"}, at); len(marked) != 0 {
+		t.Fatalf("refreshed memory re-marked: %v", marked)
+	}
+
 	if id, err := s.FindAgentSessionByNativeID(ctx, pid, "native-1"); err != nil || id != sid {
 		t.Fatalf("native lookup: %q %v", id, err)
 	}
@@ -202,6 +216,23 @@ func TestPostgresCodeLinks(t *testing.T) {
 	if err != nil || sym.ID == e.ID || sym.Symbol != "CallTool" {
 		t.Fatalf("symbol entity: %+v %v", sym, err)
 	}
+	// The insert's ON CONFLICT on the expression index (a concurrent insert)
+	// returns the existing row, for files (NULL symbol) and symbols alike.
+	for _, want := range []*CodeEntity{e, sym} {
+		got, err := s.insertCodeEntity(ctx, project.ID, want.Kind, want.Path, want.Symbol)
+		if err != nil || got.ID != want.ID {
+			t.Fatalf("on conflict %s/%s: %+v %v", want.Path, want.Symbol, got, err)
+		}
+	}
+	var n int
+	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM code_entities WHERE project_id=$1::uuid`, project.ID).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("entities = %d %v", n, err)
+	}
+	// INSERT…SELECT refuses an entity of another project (no row -> ErrNotFound).
+	if err := s.AddEntityLink(ctx, &EntityLink{ProjectID: project.ID, EntityID: "00000000-0000-0000-0000-000000000000", SrcKind: LinkSrcSession,
+		SrcID: sess.ID, Relation: RelationTouched, Source: LinkSourceToolCall}); err != ErrNotFound {
+		t.Fatalf("foreign entity: %v", err)
+	}
 	for _, l := range []*EntityLink{
 		{ProjectID: project.ID, EntityID: e.ID, SrcKind: LinkSrcSession, SrcID: sess.ID, Relation: RelationTouched, Source: LinkSourceToolCall, ObservedHash: "h1"},
 		{ProjectID: project.ID, EntityID: e.ID, SrcKind: LinkSrcSession, SrcID: sess.ID, Relation: RelationTouched, Source: LinkSourceToolCall},
@@ -212,8 +243,13 @@ func TestPostgresCodeLinks(t *testing.T) {
 		}
 	}
 	src, err := s.ListCodeLinksForSource(ctx, project.ID, LinkSrcSession, sess.ID)
-	if err != nil || len(src) != 1 || src[0].ObservedHash != "h1" {
+	if err != nil || len(src) != 1 || src[0].ObservedHash != "h1" || src[0].Confidence != 1 {
 		t.Fatalf("for source: %+v %v", src, err)
+	}
+	// A symbol link with a fractional confidence exercises the real/text casts.
+	if err := s.AddEntityLink(ctx, &EntityLink{ProjectID: project.ID, EntityID: sym.ID, SrcKind: LinkSrcMemory, SrcID: mem.ID,
+		Relation: RelationMentions, Source: LinkSourceLLM, Confidence: 0.5}); err != nil {
+		t.Fatal(err)
 	}
 	hits, err := s.ListCodeLinksByPath(WithViewer(ctx, owner), project.ID, "mcp/tools.go", 10)
 	if err != nil {
@@ -246,6 +282,17 @@ func TestPostgresCodeLinks(t *testing.T) {
 	marked, _, err = s.MarkStaleByCodeHash(ctx, project.ID, []string{"internal/mcp/tools.go"}, at)
 	if err != nil || len(marked) != 1 || marked[0] != mem.ID {
 		t.Fatalf("new hash: %v %v", marked, err)
+	}
+	// Same-session refresh: link follows h3 and the memory is un-staled.
+	if _, err := s.SetCodeEntityHash(ctx, project.ID, "internal/mcp/tools.go", "h3", at); err != nil {
+		t.Fatal(err)
+	}
+	refreshed, unstaled, err := s.RefreshMemoryLinkHashes(ctx, project.ID, e.ID, "h3", []string{mem.ID})
+	if err != nil || len(refreshed) != 1 || len(unstaled) != 1 || unstaled[0] != mem.ID {
+		t.Fatalf("refresh: %v %v %v", refreshed, unstaled, err)
+	}
+	if got, _ := s.GetMemoryItem(ctx, mem.ID); got.StaleSince != nil {
+		t.Fatal("refresh must un-stale")
 	}
 	if id, err := s.FindAgentSessionByNativeID(ctx, project.ID, name); err != nil || id != sess.ID {
 		t.Fatalf("native: %q %v", id, err)

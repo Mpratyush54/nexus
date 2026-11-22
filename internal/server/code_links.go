@@ -129,11 +129,25 @@ func (s *Server) handleCodeLinks(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	type linked struct {
-		entityID, hash string
+	// Memories already harvested from this session: their links to the
+	// files it edits again are refreshed (the session's own re-edits never
+	// make them stale), and they gain touched links to files they name.
+	var sessionMems []*store.MemoryItem
+	if mems, err := s.Store.SearchMemory(ctx, projectID, "", []string{"session:" + sid}, 200); err == nil {
+		for _, m := range mems {
+			if m != nil && m.ProjectID == projectID {
+				sessionMems = append(sessionMems, m)
+			}
+		}
 	}
-	var touched []linked
-	added, skipped := 0, 0
+	memIDs := make([]string, 0, len(sessionMems))
+	for _, m := range sessionMems {
+		memIDs = append(memIDs, m.ID)
+	}
+
+	now := time.Now().UTC()
+	added, skipped, memLinks, refreshed := 0, 0, 0, 0
+	var hashedPaths []string
 	for _, in := range req.Links {
 		path, ok := store.CleanCodePath(in.Path)
 		if !ok {
@@ -158,9 +172,6 @@ func (s *Server) handleCodeLinks(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		hash := strings.TrimSpace(in.Hash)
-		if hash != "" && kind == store.CodeKindFile {
-			_, _ = cl.SetCodeEntityHash(ctx, projectID, e.Path, hash, time.Now().UTC())
-		}
 		link := &store.EntityLink{
 			ProjectID: projectID, EntityID: e.ID, SrcKind: store.LinkSrcSession, SrcID: sid,
 			Relation: relation, Source: source, Confidence: in.Confidence, ObservedHash: hash,
@@ -174,35 +185,105 @@ func (s *Server) handleCodeLinks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		added++
-		if relation == store.RelationTouched {
-			touched = append(touched, linked{entityID: e.ID, hash: link.ObservedHash})
+		if hash != "" && kind == store.CodeKindFile {
+			if _, err := cl.SetCodeEntityHash(ctx, projectID, e.Path, hash, now); err != nil {
+				writeError(w, http.StatusInternalServerError, "record hash failed: "+err.Error())
+				return
+			}
+			hashedPaths = append(hashedPaths, e.Path)
+			if r, _, err := cl.RefreshMemoryLinkHashes(ctx, projectID, e.ID, link.ObservedHash, memIDs); err == nil {
+				refreshed += len(r)
+			}
+		}
+		if relation != store.RelationTouched {
+			continue
+		}
+		for _, m := range sessionMems {
+			if !memoryNamesPath(m, e.Path) {
+				continue
+			}
+			if cl.AddEntityLink(ctx, &store.EntityLink{
+				ProjectID: projectID, EntityID: e.ID, SrcKind: store.LinkSrcMemory, SrcID: m.ID,
+				Relation: store.RelationTouched, Source: store.LinkSourceToolCall, Confidence: 1,
+				ObservedHash: link.ObservedHash,
+			}) == nil {
+				memLinks++
+			}
 		}
 	}
 
-	// Memories already harvested from this session get the new files.
-	memLinks := 0
-	if len(touched) > 0 {
-		mems, err := s.Store.SearchMemory(ctx, projectID, "", []string{"session:" + sid}, 200)
-		if err == nil {
-			for _, m := range mems {
-				if m == nil || m.ProjectID != projectID {
-					continue
-				}
-				for _, t := range touched {
-					if cl.AddEntityLink(ctx, &store.EntityLink{
-						ProjectID: projectID, EntityID: t.entityID, SrcKind: store.LinkSrcMemory, SrcID: m.ID,
-						Relation: store.RelationTouched, Source: store.LinkSourceToolCall, Confidence: 1,
-						ObservedHash: t.hash,
-					}) == nil {
-						memLinks++
-					}
-				}
-			}
+	// This session's edit is a change from outside for every other memory
+	// linked to those files: mark the ones that saw another version.
+	marked := []string{}
+	if len(hashedPaths) > 0 {
+		var err error
+		marked, _, err = cl.MarkStaleByCodeHash(ctx, projectID, hashedPaths, now)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "mark stale failed: "+err.Error())
+			return
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id": sid, "linked": added, "skipped": skipped, "memory_links": memLinks,
+		"refreshed": refreshed, "marked": len(marked),
 	})
+}
+
+// memoryNamesPath reports whether a memory names path: the path or its
+// base name appears in its key, content, or files_affected (case-insensitive,
+// slash-normalised, at a word boundary).
+func memoryNamesPath(m *store.MemoryItem, path string) bool {
+	if m == nil {
+		return false
+	}
+	p := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(path), `\`, "/"))
+	if p == "" {
+		return false
+	}
+	base := p
+	if i := strings.LastIndex(p, "/"); i >= 0 {
+		base = p[i+1:]
+	}
+	for _, f := range m.FilesAffected {
+		if store.FilePathMatches(f, p) {
+			return true
+		}
+		nf := strings.ToLower(strings.ReplaceAll(strings.TrimSpace(f), `\`, "/"))
+		if nf == base || strings.HasSuffix(nf, "/"+base) {
+			return true
+		}
+	}
+	text := strings.ToLower(strings.ReplaceAll(m.Key+" "+m.Content, `\`, "/"))
+	return containsAtBoundary(text, p) || containsAtBoundary(text, base)
+}
+
+// containsAtBoundary reports whether needle occurs in text with no path or
+// identifier character right before or after it ("tools.go" does not match
+// "mytools.go" or "tools.gox").
+func containsAtBoundary(text, needle string) bool {
+	if needle == "" {
+		return false
+	}
+	isWord := func(c byte) bool {
+		return c == '_' || c == '-' || c == '.' || c == '/' ||
+			(c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+	}
+	for from := 0; from <= len(text)-len(needle); {
+		i := strings.Index(text[from:], needle)
+		if i < 0 {
+			return false
+		}
+		i += from
+		end := i + len(needle)
+		beforeOK := i == 0 || !isWord(text[i-1]) || text[i-1] == '/'
+		afterOK := end == len(text) || !isWord(text[end]) ||
+			(text[end] == '.' && (end+1 == len(text) || !isWord(text[end+1])))
+		if beforeOK && afterOK {
+			return true
+		}
+		from = i + 1
+	}
+	return false
 }
 
 // codePathForMemoryFile maps one files_affected entry to an entity path:
@@ -230,7 +311,8 @@ func codePathForMemoryFile(f, root string, touched []store.CodeLinkHit) (string,
 
 // linkMemoryToCode links a memory harvested from sessionID to its
 // files_affected (decided_about/llm) and to the files that session touched
-// (touched/tool_call). Best-effort: it never fails the harvest.
+// that the memory names (touched/tool_call; see memoryNamesPath).
+// Best-effort: it never fails the harvest.
 func (s *Server) linkMemoryToCode(ctx context.Context, item *store.MemoryItem, sessionID string) {
 	cl, ok := s.codeLinkStore()
 	if !ok || item == nil || strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ProjectID) == "" {
@@ -273,10 +355,15 @@ func (s *Server) linkMemoryToCode(ctx context.Context, item *store.MemoryItem, s
 			s.Log.Printf("code links: memory=%s path=%s: %v", item.ID, path, err)
 		}
 	}
-	for i, t := range touched {
-		if i >= maxMemoryTouchLinks {
+	n := 0
+	for _, t := range touched {
+		if n >= maxMemoryTouchLinks {
 			break
 		}
+		if !memoryNamesPath(item, t.Path) {
+			continue
+		}
+		n++
 		_ = cl.AddEntityLink(ctx, &store.EntityLink{
 			ProjectID: projectID, EntityID: t.EntityID, SrcKind: store.LinkSrcMemory, SrcID: item.ID,
 			Relation: store.RelationTouched, Source: store.LinkSourceToolCall, Confidence: 1,

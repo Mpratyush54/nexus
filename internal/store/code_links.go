@@ -111,6 +111,7 @@ type CodeLinkStore interface {
 	MarkStaleByCodeHash(ctx context.Context, projectID string, paths []string, at time.Time) (marked, fresh []string, err error)
 	MarkMemoriesStaleForFilesExcept(ctx context.Context, projectID string, paths []string, at time.Time, except map[string]bool) ([]string, error)
 	FindAgentSessionByNativeID(ctx context.Context, projectID, nativeID string) (string, error)
+	RefreshMemoryLinkHashes(ctx context.Context, projectID, entityID, hash string, memoryIDs []string) (refreshed, unstaled []string, err error)
 }
 
 var (
@@ -581,6 +582,64 @@ func (s *MemStore) FindAgentSessionByNativeID(ctx context.Context, projectID, na
 	return best.ID, nil
 }
 
+// RefreshMemoryLinkHashes sets observed_hash = hash on the existing links
+// from memoryIDs to entityID: the session those memories came from edited
+// the file again, so they reflect its latest version. A refreshed memory
+// that is stale is un-staled when none of its links has a known observed
+// hash that differs from its entity's known current hash: it was marked by
+// a files-changed report of the session's own edit that arrived before the
+// code links. Links without a known hash on either side do not count.
+func (s *MemStore) RefreshMemoryLinkHashes(ctx context.Context, projectID, entityID, hash string, memoryIDs []string) ([]string, []string, error) {
+	_ = ctx
+	hash = normalizeHash(hash)
+	refreshed, unstaled := []string{}, []string{}
+	if hash == "" || entityID == "" || len(memoryIDs) == 0 {
+		return refreshed, unstaled, nil
+	}
+	want := map[string]bool{}
+	for _, id := range memoryIDs {
+		want[id] = true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[string]bool{}
+	for _, l := range s.codeLinks {
+		if l.ProjectID == projectID && l.EntityID == entityID && l.SrcKind == LinkSrcMemory && want[l.SrcID] {
+			l.ObservedHash = hash
+			if !seen[l.SrcID] {
+				seen[l.SrcID] = true
+				refreshed = append(refreshed, l.SrcID)
+			}
+		}
+	}
+	entities := map[string]*CodeEntity{}
+	for _, e := range s.codeEntities {
+		entities[e.ID] = e
+	}
+	for _, id := range refreshed {
+		m := s.memories[id]
+		if m == nil || m.StaleSince == nil {
+			continue
+		}
+		ok := true
+		for _, l := range s.codeLinks {
+			if l.SrcKind != LinkSrcMemory || l.SrcID != id {
+				continue
+			}
+			e := entities[l.EntityID]
+			if e != nil && l.ObservedHash != "" && e.ContentHash != "" && l.ObservedHash != e.ContentHash {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			m.StaleSince = nil
+			unstaled = append(unstaled, id)
+		}
+	}
+	return refreshed, unstaled, nil
+}
+
 // ---- PostgresStore ----
 
 // UpsertCodeEntity returns the entity for (kind, path, symbol), creating it
@@ -594,7 +653,7 @@ func (s *PostgresStore) UpsertCodeEntity(ctx context.Context, projectID, kind, p
 	if !looksLikeUUID(projectID) || !ok || (kind != CodeKindFile && kind != CodeKindSymbol) {
 		return nil, ErrBadCodeLink
 	}
-	const cols = `id::text, project_id::text, kind, path, COALESCE(symbol, ''), COALESCE(content_hash, ''), last_seen_at`
+	const cols = codeEntityColumns
 	scan := func(row interface{ Scan(...any) error }) (*CodeEntity, error) {
 		var e CodeEntity
 		if err := row.Scan(&e.ID, &e.ProjectID, &e.Kind, &e.Path, &e.Symbol, &e.ContentHash, &e.LastSeenAt); err != nil {
@@ -625,13 +684,26 @@ func (s *PostgresStore) UpsertCodeEntity(ctx context.Context, projectID, kind, p
 	if found != nil {
 		return found, nil
 	}
-	// The no-op update makes RETURNING yield the row on a concurrent insert.
-	return scan(s.pool.QueryRow(ctx,
+	return s.insertCodeEntity(ctx, projectID, kind, clean, symbol)
+}
+
+const codeEntityColumns = `id::text, project_id::text, kind, path, COALESCE(symbol, ''), COALESCE(content_hash, ''), last_seen_at`
+
+// insertCodeEntity inserts an entity; on a conflict with the identity index
+// (a concurrent insert) the no-op update makes RETURNING yield the row.
+func (s *PostgresStore) insertCodeEntity(ctx context.Context, projectID, kind, path, symbol string) (*CodeEntity, error) {
+	var e CodeEntity
+	err := s.pool.QueryRow(ctx,
 		`INSERT INTO code_entities (project_id, kind, path, symbol)
 		 VALUES ($1::uuid, $2, $3, NULLIF($4, ''))
 		 ON CONFLICT (project_id, kind, path, (COALESCE(symbol, ''))) DO UPDATE SET path = EXCLUDED.path
-		 RETURNING `+cols,
-		projectID, kind, clean, symbol))
+		 RETURNING `+codeEntityColumns,
+		projectID, kind, path, symbol,
+	).Scan(&e.ID, &e.ProjectID, &e.Kind, &e.Path, &e.Symbol, &e.ContentHash, &e.LastSeenAt)
+	if err != nil {
+		return nil, err
+	}
+	return &e, nil
 }
 
 // AddEntityLink inserts l, or on a repeat keeps the first created_at and
@@ -918,4 +990,67 @@ func (s *PostgresStore) FindAgentSessionByNativeID(ctx context.Context, projectI
 		return "", err
 	}
 	return id, nil
+}
+
+// RefreshMemoryLinkHashes is the Postgres form (see MemStore).
+func (s *PostgresStore) RefreshMemoryLinkHashes(ctx context.Context, projectID, entityID, hash string, memoryIDs []string) ([]string, []string, error) {
+	hash = normalizeHash(hash)
+	refreshed, unstaled := []string{}, []string{}
+	var ids []string
+	for _, id := range memoryIDs {
+		if looksLikeUUID(id) {
+			ids = append(ids, id)
+		}
+	}
+	if hash == "" || !looksLikeUUID(projectID) || !looksLikeUUID(entityID) || len(ids) == 0 {
+		return refreshed, unstaled, nil
+	}
+	rows, err := s.pool.Query(ctx,
+		`UPDATE entity_links SET observed_hash = $3::text
+		  WHERE project_id = $1::uuid AND entity_id = $2::uuid
+		    AND src_kind = 'memory' AND src_id = ANY($4::text[])
+		  RETURNING src_id`, projectID, entityID, hash, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	seen := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, nil, err
+		}
+		if !seen[id] {
+			seen[id] = true
+			refreshed = append(refreshed, id)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(refreshed) == 0 {
+		return refreshed, unstaled, nil
+	}
+	out, err := s.pool.Query(ctx,
+		`UPDATE memory_items m SET stale_since = NULL
+		  WHERE m.id = ANY($1::uuid[]) AND m.project_id = $2::uuid AND m.stale_since IS NOT NULL
+		    AND NOT EXISTS (
+		      SELECT 1 FROM entity_links l JOIN code_entities e ON e.id = l.entity_id
+		       WHERE l.src_kind = 'memory' AND l.src_id = m.id::text
+		         AND COALESCE(l.observed_hash, '') <> '' AND COALESCE(e.content_hash, '') <> ''
+		         AND l.observed_hash <> e.content_hash)
+		  RETURNING m.id::text`, refreshed, projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer out.Close()
+	for out.Next() {
+		var id string
+		if err := out.Scan(&id); err != nil {
+			return nil, nil, err
+		}
+		unstaled = append(unstaled, id)
+	}
+	return refreshed, unstaled, out.Err()
 }
