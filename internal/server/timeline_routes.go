@@ -688,7 +688,9 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		last := items[len(items)-1]
 		next = last.LastActiveAt.UTC().Format(time.RFC3339Nano) + "|" + last.SessionID
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
+	// turn_counts tells clients turn_count is real, so a 0 means an empty
+	// chat (older servers sent 0 for every mirrored chat).
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next, "turn_counts": "exact"})
 }
 
 // queryFlag reads a boolean query parameter ("1", "true", "yes").

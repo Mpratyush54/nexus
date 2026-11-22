@@ -51,9 +51,13 @@ func TestTimelineTurnCountAndHideEmpty(t *testing.T) {
 			t.Fatalf("timeline: %d %s", rec.Code, rec.Body.String())
 		}
 		var body struct {
-			Items []store.TimelineItem `json:"items"`
+			Items      []store.TimelineItem `json:"items"`
+			TurnCounts string               `json:"turn_counts"`
 		}
 		decodeBody(t, rec, &body)
+		if body.TurnCounts != "exact" {
+			t.Fatalf("turn_counts marker: %q", body.TurnCounts)
+		}
 		out := map[string]int{}
 		for _, item := range body.Items {
 			out[item.SessionID] = item.TurnCount
