@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -757,13 +758,34 @@ func (m *MemStore) SetStorageUsage(ctx context.Context, scope string, used, cap 
 	return nil
 }
 
+// timelineTurnPreview is a chat's fallback summary from one user turn: the
+// request without harness wrapper, whitespace collapsed, cut at 260 chars.
+// "" when the turn is only wrapper.
 func timelineTurnPreview(raw string) string {
-	text := strings.Join(strings.Fields(raw), " ")
+	text := strings.Join(strings.Fields(requestText(raw)), " ")
 	chars := []rune(text)
 	if len(chars) > 260 {
 		return string(chars[:260]) + "…"
 	}
 	return text
+}
+
+// timelineFallbackTurns is how many leading user turns may supply the
+// fallback summary; envelope-only turns are skipped.
+const timelineFallbackTurns = 3
+
+// timelineFirstRequestPreview is the preview of the first of the leading
+// user turns that still has text once its harness wrapper is removed.
+func timelineFirstRequestPreview(raw []string) string {
+	for i, text := range raw {
+		if i >= timelineFallbackTurns {
+			break
+		}
+		if p := timelineTurnPreview(text); p != "" {
+			return p
+		}
+	}
+	return ""
 }
 
 func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]TimelineItem, string, error) {
@@ -833,12 +855,18 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 			item.MatchPreview = TimelineMatchPreview(matchTurn.TextPreview, q.Query)
 		}
 		if strings.TrimSpace(item.Summary) == "" {
+			var users []SessionTurn
 			for _, turn := range m.sessionTurns[row.ID] {
 				if turn.Role == "user" && strings.TrimSpace(turn.TextPreview) != "" {
-					item.Summary = timelineTurnPreview(turn.TextPreview)
-					break
+					users = append(users, turn)
 				}
 			}
+			sort.SliceStable(users, func(i, j int) bool { return users[i].Idx < users[j].Idx })
+			previews := make([]string, 0, len(users))
+			for _, turn := range users {
+				previews = append(previews, turn.TextPreview)
+			}
+			item.Summary = timelineFirstRequestPreview(previews)
 		}
 		var best *SessionVersion
 		for i := range m.sessionVersions[row.ID] {
@@ -1504,12 +1532,16 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	// preview for sessions that already matched.
 	rows, err := s.pool.Query(ctx, `
 		SELECT s.id::text, s.project_id::text, s.harness, s.native_id, COALESCE(s.title,''),
-		       COALESCE(NULLIF(s.summary,''), (
-		         SELECT LEFT(REGEXP_REPLACE(t.text_preview, '\s+', ' ', 'g'), 260)
+		       COALESCE(s.summary,''),
+		       -- Fallback preview source, only when there is no summary: the raw
+		       -- first user turns. Go removes harness wrapper and skips
+		       -- envelope-only turns (timelineFirstRequestPreview).
+		       CASE WHEN NULLIF(s.summary,'') IS NULL THEN ARRAY(
+		         SELECT LEFT(t.text_preview, 4000)
 		         FROM session_turns t WHERE t.session_id = s.id AND t.role = 'user'
 		           AND NULLIF(BTRIM(t.text_preview), '') IS NOT NULL
-		         ORDER BY t.idx LIMIT 1
-		       ), ''), s.visibility, COALESCE(s.owner_user_id::text,''), s.last_active_at,
+		         ORDER BY t.idx LIMIT 3
+		       ) ELSE ARRAY[]::text[] END, s.visibility, COALESCE(s.owner_user_id::text,''), s.last_active_at,
 		       GREATEST(COALESCE((
 		         SELECT v.turn_count FROM session_versions v
 		         WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only')
@@ -1570,9 +1602,13 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	var items []TimelineItem
 	for rows.Next() {
 		var it TimelineItem
-		if err := rows.Scan(&it.SessionID, &it.ProjectID, &it.Harness, &it.NativeID, &it.Title, &it.Summary,
+		var firstTurns []string
+		if err := rows.Scan(&it.SessionID, &it.ProjectID, &it.Harness, &it.NativeID, &it.Title, &it.Summary, &firstTurns,
 			&it.Visibility, &it.OwnerUserID, &it.LastActiveAt, &it.TurnCount, &it.VersionState, &it.MatchPreview, &it.MatchTurnIdx, &it.MatchRole); err != nil {
 			return nil, "", err
+		}
+		if it.Summary == "" {
+			it.Summary = timelineFirstRequestPreview(firstTurns)
 		}
 		// Same excerpt rules as every other store: centred on the match,
 		// cut at word boundaries, marked with … where text was cut.
