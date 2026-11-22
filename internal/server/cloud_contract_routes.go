@@ -46,6 +46,8 @@ func (s *Server) registerCloudContractRoutes() {
 	s.Mux.HandleFunc("DELETE /v1/agent-sessions/{id}/grants/team", s.requireAuth(s.handleUngrantTeam))
 	s.Mux.HandleFunc("PUT /v1/agent-sessions/{id}/grants/{user}", s.requireAuth(s.handleGrantUser))
 	s.Mux.HandleFunc("DELETE /v1/agent-sessions/{id}/grants/{user}", s.requireAuth(s.handleUngrantUser))
+	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}/grants", s.requireAuth(s.handleListGrants))
+	s.Mux.HandleFunc("DELETE /v1/agent-sessions/{id}/grants", s.requireAuth(s.handleUnshareAll))
 	s.Mux.HandleFunc("GET /v1/storage/usage", s.requireAuth(s.handleStorageUsage))
 	s.Mux.HandleFunc("GET /v1/audit", s.requireAuth(s.handleAuditQuery))
 	s.Mux.HandleFunc("GET /v1/timeline/stream", s.requireAuth(s.handleTimelineStream))
@@ -690,7 +692,27 @@ func (s *Server) mutateTeleport(w http.ResponseWriter, r *http.Request, revoke b
 			return
 		}
 		if err := setTeleportStatus(r, s, id, "revoked", true); err != nil {
-			writeError(w, http.StatusBadRequest, err.Error())
+			// Already revoked (a retry, or a concurrent revoke): still make
+			// sure the grant is gone below, so a retry after a failed grant
+			// removal converges.
+			cur, gerr := getTeleport(r, s, id)
+			if gerr != nil || !teleportRevoked(cur) {
+				writeError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		// Taking back a chat also ends any read access the recipient got by
+		// accepting it. Revoke the grant whatever status was read above: an
+		// accept running concurrently may have granted after that read, so
+		// "pending" here does not mean "no grant". A missing grant is fine.
+		//
+		// Trade-off: session_grants has one row per (session, grantee) and
+		// does not record which path created it, so this also removes a
+		// direct share of the same session to the same person. Telling the
+		// two apart needs a grant-source column (schema change); until then
+		// the sender can share again after taking the teleport back.
+		if err := s.revokeTeleportGrant(r, tp, "teleport_revoke"); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not remove session access: "+err.Error())
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "revoked"})
@@ -700,7 +722,18 @@ func (s *Server) mutateTeleport(w http.ResponseWriter, r *http.Request, revoke b
 		writeError(w, http.StatusForbidden, "only the recipient can accept")
 		return
 	}
+	// The sender took it back: accepting must not reopen access.
+	if tp.RevokedAt != nil || strings.EqualFold(tp.Status, "revoked") {
+		writeError(w, http.StatusGone, "the sender took this chat back")
+		return
+	}
 	if err := setTeleportStatus(r, s, id, "accepted", false); err != nil {
+		// The status update is conditional on the teleport not being
+		// revoked; a revoke that landed since the read above lands here.
+		if cur, gerr := getTeleport(r, s, id); gerr == nil && teleportRevoked(cur) {
+			writeError(w, http.StatusGone, "the sender took this chat back")
+			return
+		}
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -719,8 +752,67 @@ func (s *Server) mutateTeleport(w http.ResponseWriter, r *http.Request, revoke b
 				Metadata: map[string]any{"grantee_user_id": caller, "via": "teleport", "teleport_id": id},
 			})
 		}
+		revoked, err := s.undoGrantIfTeleportRevoked(r, tp)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not confirm the transfer: "+err.Error())
+			return
+		}
+		if revoked {
+			writeError(w, http.StatusGone, "the sender took this chat back")
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "accepted"})
+}
+
+func teleportRevoked(tp *store.Teleport) bool {
+	return tp != nil && (tp.RevokedAt != nil || strings.EqualFold(tp.Status, "revoked"))
+}
+
+// undoGrantIfTeleportRevoked closes the accept/revoke race: it runs after
+// accept granted access and re-reads the teleport. If the sender revoked it
+// in the meantime (their revoke may have run before this grant existed, so
+// it had nothing to remove), the grant is taken away again and it reports
+// true. Revoke sets the status before removing the grant and accept grants
+// before this re-read, so one of the two always removes the grant. If the
+// re-read itself fails, it fails closed: the grant is removed and the error
+// returned, so the recipient can simply accept again.
+func (s *Server) undoGrantIfTeleportRevoked(r *http.Request, tp *store.Teleport) (bool, error) {
+	cur, err := getTeleport(r, s, tp.ID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		if rerr := s.revokeTeleportGrant(r, tp, "teleport_accept_unconfirmed"); rerr != nil {
+			return false, errors.Join(err, rerr)
+		}
+		return false, err
+	}
+	if err == nil && !teleportRevoked(cur) {
+		return false, nil
+	}
+	// Revoked, or the teleport is gone: take the access back.
+	if rerr := s.revokeTeleportGrant(r, tp, "teleport_accept_raced_revoke"); rerr != nil {
+		return true, rerr
+	}
+	return true, nil
+}
+
+// revokeTeleportGrant removes the recipient's grant on the teleported
+// session. A grant (or session) that does not exist is not an error.
+func (s *Server) revokeTeleportGrant(r *http.Request, tp *store.Teleport, via string) error {
+	if tp == nil || tp.SessionID == "" || tp.ToUserID == "" {
+		return nil
+	}
+	err := revokeGrant(r, s, tp.SessionID, tp.ToUserID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	s.recordAudit(r, store.AuditEvent{
+		Action: "session.grant_revoked", ResourceKind: "session", ResourceID: tp.SessionID,
+		Metadata: map[string]any{"grantee_user_id": tp.ToUserID, "via": via, "teleport_id": tp.ID},
+	})
+	return nil
 }
 
 func createTeleport(r *http.Request, s *Server, sessionID, fromUser, toUser, preview string) (*store.Teleport, error) {

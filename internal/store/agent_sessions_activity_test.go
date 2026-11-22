@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,5 +34,48 @@ func TestSessionActivityUsesSourceTime(t *testing.T) {
 	got, _ = m.UpsertAgentSession(ctx, &AgentSession{ProjectID: "p", OwnerUserID: "u", Harness: "claude", NativeID: "n1"})
 	if time.Since(got.LastActiveAt) > time.Minute {
 		t.Fatalf("new turn did not bump activity: %v", got.LastActiveAt)
+	}
+}
+
+func TestTimelineMatchPreviewCutsAtWords(t *testing.T) {
+	text := strings.Repeat("alpha beta gamma delta ", 10) + "the sidebar list shows old imported chats " + strings.Repeat("epsilon zeta eta theta ", 20)
+	got := TimelineMatchPreview(text, "old imported")
+	if !strings.HasPrefix(got, "…") || !strings.HasSuffix(got, "…") || !strings.Contains(got, "old imported") {
+		t.Fatalf("preview = %q", got)
+	}
+	inner := strings.TrimSuffix(strings.TrimPrefix(got, "…"), "…")
+	for _, w := range strings.Fields(inner) {
+		switch w {
+		case "alpha", "beta", "gamma", "delta", "the", "sidebar", "list", "shows", "old", "imported", "chats", "epsilon", "zeta", "eta", "theta":
+		default:
+			t.Fatalf("partial word %q in %q", w, got)
+		}
+	}
+	if got := TimelineMatchPreview("short text here", "text"); got != "short text here" {
+		t.Fatalf("short preview = %q", got)
+	}
+}
+
+// Re-sending an imported history with source times re-dates the chat.
+func TestResentHistoryRedatesChat(t *testing.T) {
+	ctx := context.Background()
+	m := NewMemStore()
+	sess, err := m.UpsertAgentSession(ctx, &AgentSession{ProjectID: "p", OwnerUserID: "u", Harness: "cursor", NativeID: "redate", OriginMachineID: "m"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 2; i++ {
+		if err := m.AppendSessionTurn(ctx, SessionTurn{SessionID: sess.ID, Idx: i, Role: "user", TextPreview: "x"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Date(2026, 9, 30, 19, 41, 0, 0, time.UTC)
+	for i, at := range []time.Time{old.Add(-time.Hour), old} {
+		src := at
+		_ = m.AppendSessionTurn(ctx, SessionTurn{SessionID: sess.ID, Idx: i + 1, Role: "user", TextPreview: "x", SourceAt: &src})
+	}
+	got, _ := m.UpsertAgentSession(ctx, &AgentSession{ProjectID: "p", OwnerUserID: "u", Harness: "cursor", NativeID: "redate", OriginMachineID: "m"})
+	if !got.LastActiveAt.Equal(old) {
+		t.Fatalf("last_active_at = %v, want %v", got.LastActiveAt, old)
 	}
 }

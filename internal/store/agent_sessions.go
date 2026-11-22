@@ -526,6 +526,21 @@ func (m *MemStore) AppendSessionTurn(ctx context.Context, turn SessionTurn) erro
 		if existing.Idx == turn.Idx {
 			if turn.SourceAt != nil && existing.SourceAt == nil {
 				turns[i].SourceAt = turn.SourceAt
+				// Same as Postgres: a fully dated history dates the chat.
+				var latest time.Time
+				complete := true
+				for _, t := range turns {
+					if t.SourceAt == nil {
+						complete = false
+						break
+					}
+					if t.SourceAt.After(latest) {
+						latest = *t.SourceAt
+					}
+				}
+				if complete && !latest.IsZero() {
+					row.LastActiveAt = latest
+				}
 			}
 			return fmt.Errorf("store: turn %d: %w", turn.Idx, ErrConflict)
 		}
@@ -1236,10 +1251,20 @@ func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			if turn.SourceAt != nil {
-				_, repairErr := s.pool.Exec(ctx, `UPDATE session_turns SET source_ts = $3
+				repaired, repairErr := s.pool.Exec(ctx, `UPDATE session_turns SET source_ts = $3
 					WHERE session_id = $1::uuid AND idx = $2 AND source_ts IS NULL`, turn.SessionID, turn.Idx, turn.SourceAt)
 				if repairErr != nil {
 					return repairErr
+				}
+				// Once a re-sent history has every turn dated, date the chat
+				// from them; an import stamped it with the upload time.
+				if repaired.RowsAffected() > 0 {
+					_, _ = s.pool.Exec(ctx, `UPDATE agent_sessions s
+						SET last_active_at = t.latest
+						FROM (SELECT MAX(source_ts) AS latest FROM session_turns WHERE session_id = $1::uuid) t
+						WHERE s.id = $1::uuid AND t.latest IS NOT NULL
+						  AND NOT EXISTS (SELECT 1 FROM session_turns WHERE session_id = $1::uuid AND source_ts IS NULL)`,
+						turn.SessionID)
 				}
 			}
 			return ErrConflict
@@ -1479,8 +1504,7 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		FROM agent_sessions s
 		LEFT JOIN LATERAL (
 		  SELECT t.idx, t.role,
-		    SUBSTRING(REGEXP_REPLACE(t.text_preview, '\s+', ' ', 'g') FROM
-		      GREATEST(1, STRPOS(LOWER(REGEXP_REPLACE(t.text_preview, '\s+', ' ', 'g')), LOWER($7)) - 70) FOR 260) AS preview
+		    t.text_preview AS preview
 		  FROM session_turns t
 		  WHERE t.session_id = s.id AND $7 <> '' AND t.role IN ('user', 'assistant')
 		    AND STRPOS(LOWER(t.text_preview), LOWER($7)) > 0
@@ -1516,6 +1540,11 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		if err := rows.Scan(&it.SessionID, &it.ProjectID, &it.Harness, &it.NativeID, &it.Title, &it.Summary,
 			&it.Visibility, &it.OwnerUserID, &it.LastActiveAt, &it.TurnCount, &it.VersionState, &it.MatchPreview, &it.MatchTurnIdx, &it.MatchRole); err != nil {
 			return nil, "", err
+		}
+		// Same excerpt rules as every other store: centred on the match,
+		// cut at word boundaries, marked with … where text was cut.
+		if it.MatchPreview != "" {
+			it.MatchPreview = TimelineMatchPreview(it.MatchPreview, q.Query)
 		}
 		items = append(items, it)
 	}
@@ -1555,7 +1584,25 @@ func TimelineMatchPreview(text, query string) string {
 	if end > len(runes) {
 		end = len(runes)
 	}
-	preview := string(runes[start:end])
+	// Snap a cut edge to a word boundary so the excerpt never starts or
+	// ends mid-word (a long unbroken token keeps the hard cut).
+	if start > 0 {
+		for i := start; i < end && i-start < 20; i++ {
+			if runes[i-1] == ' ' {
+				start = i
+				break
+			}
+		}
+	}
+	if end < len(runes) {
+		for i := end; i > start && end-i < 20; i-- {
+			if runes[i] == ' ' {
+				end = i
+				break
+			}
+		}
+	}
+	preview := strings.TrimSpace(string(runes[start:end]))
 	if start > 0 {
 		preview = "…" + preview
 	}
@@ -1569,20 +1616,26 @@ var _ AgentCloudStore = (*MemStore)(nil)
 var _ AgentCloudStore = (*PostgresStore)(nil)
 
 // NativeSessionKeys returns "harness\x00native_id" for every agent session in
-// the given projects. The timeline uses it to drop old snapshots of
-// conversations that are now captured as sessions, whatever page those
-// sessions fall on.
-func (m *MemStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (map[string]bool, error) {
+// the given projects that viewerID can read. The timeline uses it to drop old
+// snapshots of conversations that are now captured as sessions, whatever page
+// those sessions fall on. Only readable sessions count: a snapshot shared with
+// someone who cannot open the modern copy must stay on their timeline, or the
+// chat disappears for them. The readability rule matches ListTimeline.
+func (m *MemStore) NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error) {
 	_ = ctx
+	viewerID = strings.TrimSpace(viewerID)
+	out := map[string]bool{}
+	if viewerID == "" {
+		return out, nil
+	}
 	want := map[string]bool{}
 	for _, id := range projectIDs {
 		want[id] = true
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := map[string]bool{}
 	for _, sess := range m.agentSessions {
-		if want[sess.ProjectID] {
+		if sess != nil && want[sess.ProjectID] && m.agentVisibleLocked(viewerID, sess) {
 			out[sess.Harness+"\x00"+sess.NativeID] = true
 		}
 	}
@@ -1590,18 +1643,35 @@ func (m *MemStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (
 }
 
 // NativeSessionKeys: see MemStore.NativeSessionKeys.
-func (s *PostgresStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (map[string]bool, error) {
+func (s *PostgresStore) NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if !looksLikeUUID(viewerID) {
+		return out, nil
+	}
 	ids := make([]string, 0, len(projectIDs))
 	for _, id := range projectIDs {
 		if looksLikeUUID(id) {
 			ids = append(ids, id)
 		}
 	}
-	out := map[string]bool{}
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT harness, native_id FROM agent_sessions WHERE project_id = ANY($1::uuid[])`, ids)
+	rows, err := s.pool.Query(ctx, `
+		SELECT s.harness, s.native_id FROM agent_sessions s
+		WHERE s.project_id = ANY($1::uuid[]) AND (
+		  s.owner_user_id = $2::uuid
+		  OR EXISTS (
+		    SELECT 1 FROM session_grants g
+		    WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $2::uuid
+		  )
+		  OR (
+		    s.visibility = 'team' AND (
+		      EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $2::uuid)
+		      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $2::uuid)
+		    )
+		  )
+		)`, ids, viewerID)
 	if err != nil {
 		return nil, err
 	}

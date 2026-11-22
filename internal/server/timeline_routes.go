@@ -643,10 +643,10 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 			seen[item.Harness+"\x00"+item.NativeID] = true
 		}
 	}
-	// The modern copy may be on another page; ask the store directly.
-	if lister, ok := s.Store.(interface {
-		NativeSessionKeys(context.Context, []string) (map[string]bool, error)
-	}); ok && len(legacy) > 0 {
+	// The modern copy may be on another page; ask the store directly. Only
+	// copies this viewer can read hide a snapshot, so a snapshot shared with
+	// someone stays listed when the modern copy is private to its owner.
+	if lister, ok := s.Store.(nativeSessionKeyLister); ok && len(legacy) > 0 {
 		projectSet := map[string]bool{}
 		for _, item := range legacy {
 			projectSet[item.ProjectID] = true
@@ -655,7 +655,7 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		for id := range projectSet {
 			projectIDs = append(projectIDs, id)
 		}
-		if keys, kerr := lister.NativeSessionKeys(r.Context(), projectIDs); kerr == nil {
+		if keys, kerr := lister.NativeSessionKeys(r.Context(), authSubject(r), projectIDs); kerr == nil {
 			for key := range keys {
 				seen[key] = true
 			}
@@ -683,6 +683,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		next = last.LastActiveAt.UTC().Format(time.RFC3339Nano) + "|" + last.SessionID
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
+}
+
+// nativeSessionKeyLister reports the harness/native-id keys of the agent
+// sessions a viewer can read (MemStore and PostgresStore implement it).
+type nativeSessionKeyLister interface {
+	NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error)
 }
 
 // legacySnapshotSession turns an owner-visible historical snapshot into the
@@ -777,9 +783,19 @@ func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness,
 		if err != nil {
 			return nil, err
 		}
+		// Snapshots of conversations now captured as sessions this viewer can
+		// read are hidden from the list anyway; skip them before the costly
+		// transcript search.
+		var captured map[string]bool
+		if lister, ok := s.Store.(nativeSessionKeyLister); ok {
+			captured, _ = lister.NativeSessionKeys(ctx, userID, []string{project.ID})
+		}
 		for i := range snaps {
 			snap := &snaps[i]
 			if harness != "" && !strings.EqualFold(harness, snap.Harness) {
+				continue
+			}
+			if captured[snap.Harness+"\x00"+snap.ConversationID] {
 				continue
 			}
 			if !s.canReadSnapshot(ctx, userID, snap) {
@@ -796,9 +812,14 @@ func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness,
 				if err := ctx.Err(); err != nil {
 					return nil, err
 				}
+				// One unreadable snapshot only drops out of the search
+				// results; it must not fail the whole timeline.
 				full, err := ps.GetLatestSnapshot(ctx, snap.SessionID)
-				if err != nil {
-					return nil, err
+				if err != nil || full == nil {
+					if cerr := ctx.Err(); cerr != nil {
+						return nil, cerr
+					}
+					continue
 				}
 				raw, err := gunzipSnapshot(full.TranscriptPayload)
 				if err != nil {

@@ -220,6 +220,10 @@ func (m *MemStore) SetTeleportStatus(ctx context.Context, id, status string, rev
 	if row == nil {
 		return ErrNotFound
 	}
+	// Match Postgres: a revoked teleport never changes state again.
+	if row.RevokedAt != nil {
+		return ErrNotFound
+	}
 	if revoke {
 		now := time.Now().UTC()
 		row.RevokedAt = &now
