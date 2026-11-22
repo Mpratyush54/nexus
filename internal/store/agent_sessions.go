@@ -526,6 +526,21 @@ func (m *MemStore) AppendSessionTurn(ctx context.Context, turn SessionTurn) erro
 		if existing.Idx == turn.Idx {
 			if turn.SourceAt != nil && existing.SourceAt == nil {
 				turns[i].SourceAt = turn.SourceAt
+				// Same as Postgres: a fully dated history dates the chat.
+				var latest time.Time
+				complete := true
+				for _, t := range turns {
+					if t.SourceAt == nil {
+						complete = false
+						break
+					}
+					if t.SourceAt.After(latest) {
+						latest = *t.SourceAt
+					}
+				}
+				if complete && !latest.IsZero() {
+					row.LastActiveAt = latest
+				}
 			}
 			return fmt.Errorf("store: turn %d: %w", turn.Idx, ErrConflict)
 		}
@@ -1236,10 +1251,20 @@ func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			if turn.SourceAt != nil {
-				_, repairErr := s.pool.Exec(ctx, `UPDATE session_turns SET source_ts = $3
+				repaired, repairErr := s.pool.Exec(ctx, `UPDATE session_turns SET source_ts = $3
 					WHERE session_id = $1::uuid AND idx = $2 AND source_ts IS NULL`, turn.SessionID, turn.Idx, turn.SourceAt)
 				if repairErr != nil {
 					return repairErr
+				}
+				// Once a re-sent history has every turn dated, date the chat
+				// from them; an import stamped it with the upload time.
+				if repaired.RowsAffected() > 0 {
+					_, _ = s.pool.Exec(ctx, `UPDATE agent_sessions s
+						SET last_active_at = t.latest
+						FROM (SELECT MAX(source_ts) AS latest FROM session_turns WHERE session_id = $1::uuid) t
+						WHERE s.id = $1::uuid AND t.latest IS NOT NULL
+						  AND NOT EXISTS (SELECT 1 FROM session_turns WHERE session_id = $1::uuid AND source_ts IS NULL)`,
+						turn.SessionID)
 				}
 			}
 			return ErrConflict
