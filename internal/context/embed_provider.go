@@ -2,23 +2,35 @@
 //
 // Extends the HashEmbed interim in embed.go with pluggable backends:
 //
-//	CENTRAL_EMBEDDING_PROVIDER = openai | ollama | local | hash  (default: hash)
-//	CENTRAL_EMBEDDING_API_KEY  = OpenAI / custom API key (optional for local)
+//	CENTRAL_EMBEDDING_PROVIDER = openrouter | openai | ollama | local | hash
+//	                             (default: hash)
+//	CENTRAL_EMBEDDING_API_KEY  = OpenAI / custom API key (openrouter falls back
+//	                             to OPENROUTER_API_KEY; optional for local)
 //	CENTRAL_EMBEDDING_MODEL    = default text-embedding-3-small
-//	                             (local: BAAI/bge-small-en-v1.5)
+//	                             (openrouter: nvidia/nemotron-3-embed-1b:free,
+//	                             local: BAAI/bge-small-en-v1.5)
 //	CENTRAL_EMBEDDING_ENDPOINT = optional OpenAI base or Ollama embeddings URL
-//	                             (local: default http://embeddings:80, the
-//	                             compose sidecar)
+//	                             (openrouter: OPENROUTER_BASE_URL or
+//	                             https://openrouter.ai/api/v1; local: default
+//	                             http://embeddings:80)
+//	CENTRAL_EMBEDDING_DIMS     = keep only the first N dims (Matryoshka models)
+//	                             and re-normalize (default 1024 for Nemotron
+//	                             embed models, which return 2048 > vector(1536))
 //	CENTRAL_EMBEDDING_TIMEOUT  = per-call timeout, Go duration (default 5s
 //	                             for local, 30s otherwise)
 //	CENTRAL_EMBEDDING_MIN_SIMILARITY = cosine floor for vector search with
 //	                             the active model, 0<v<1 (default per model:
 //	                             see DefaultMinSimilarity)
+//	CENTRAL_EMBEDDING_DATA_COLLECTION = openrouter only: allow | deny, sent as
+//	                             provider.data_collection (unset = account
+//	                             privacy setting decides)
 //
-// "local" speaks the OpenAI /v1/embeddings wire format to a self-hosted
-// server (HuggingFace text-embeddings-inference sidecar) without sending a
-// "dimensions" field; narrower vectors (384 for bge-small) are zero-padded
-// into vector(1536), which leaves cosine similarity unchanged.
+// "openrouter" calls OpenRouter's OpenAI-compatible POST /embeddings with
+// batched input, honours 429 Retry-After (the provider cools down for that
+// long), adds the model family's query/passage prefixes, and truncates
+// Matryoshka vectors. "local" speaks the same wire format to a self-hosted
+// server without a "dimensions" field. Narrower vectors are zero-padded into
+// vector(1536), which leaves cosine similarity unchanged.
 //
 // NewEmbedder / EmbedderFromEnv always return an Embedder that falls back to
 // HashEmbed on missing keys, network/parse errors, or wrong-width vectors so
@@ -53,6 +65,8 @@ const (
 	// ProviderLocal is a self-hosted OpenAI-compatible embeddings server
 	// (text-embeddings-inference sidecar). No API key, no "dimensions".
 	ProviderLocal = "local"
+	// ProviderOpenRouter is OpenRouter's OpenAI-compatible embeddings API.
+	ProviderOpenRouter = "openrouter"
 )
 
 // ModelHash tags vectors produced by HashEmbed (memory_items.embedding_model).
@@ -82,10 +96,19 @@ const (
 
 // EmbeddingConfig is the env-driven provider selection for write/search.
 type EmbeddingConfig struct {
-	Provider string // openai | ollama | hash
+	Provider string // openrouter | openai | ollama | local | hash
 	APIKey   string
 	Model    string
 	Endpoint string
+	// Dims keeps only the first Dims components (Matryoshka truncation) and
+	// re-normalizes; 0 = the model family default (see defaultTruncateDims).
+	Dims int
+	// DataCollection is sent to OpenRouter as provider.data_collection
+	// ("allow" | "deny"); "" omits it.
+	DataCollection string
+	// Referer / AppTitle are OpenRouter's optional attribution headers.
+	Referer  string
+	AppTitle string
 	// Timeout bounds one embedding call (0 = provider default).
 	Timeout time.Duration
 	// MinSimilarity overrides the model's vector-search floor; values
@@ -112,14 +135,34 @@ func EmbeddingConfigFromEnv() EmbeddingConfig {
 			timeout = d
 		}
 	}
-	return EmbeddingConfig{
-		Provider:      provider,
-		APIKey:        strings.TrimSpace(os.Getenv("CENTRAL_EMBEDDING_API_KEY")),
-		Model:         model,
-		Endpoint:      strings.TrimSpace(os.Getenv("CENTRAL_EMBEDDING_ENDPOINT")),
-		Timeout:       timeout,
-		MinSimilarity: parseMinSimilarity(os.Getenv("CENTRAL_EMBEDDING_MIN_SIMILARITY")),
+	cfg := EmbeddingConfig{
+		Provider:       provider,
+		APIKey:         strings.TrimSpace(os.Getenv("CENTRAL_EMBEDDING_API_KEY")),
+		Model:          model,
+		Endpoint:       strings.TrimSpace(os.Getenv("CENTRAL_EMBEDDING_ENDPOINT")),
+		Timeout:        timeout,
+		MinSimilarity:  parseMinSimilarity(os.Getenv("CENTRAL_EMBEDDING_MIN_SIMILARITY")),
+		DataCollection: strings.ToLower(strings.TrimSpace(os.Getenv("CENTRAL_EMBEDDING_DATA_COLLECTION"))),
 	}
+	if raw := strings.TrimSpace(os.Getenv("CENTRAL_EMBEDDING_DIMS")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 && n <= EmbedDims {
+			cfg.Dims = n
+		} else {
+			log.Printf("embeddings: ignoring CENTRAL_EMBEDDING_DIMS=%q (want 1..%d)", raw, EmbedDims)
+		}
+	}
+	if provider == ProviderOpenRouter {
+		// Reuse the extraction secret and base URL (internal/extract).
+		if cfg.APIKey == "" {
+			cfg.APIKey = strings.TrimSpace(os.Getenv("OPENROUTER_API_KEY"))
+		}
+		if cfg.Endpoint == "" {
+			cfg.Endpoint = strings.TrimSpace(os.Getenv("OPENROUTER_BASE_URL"))
+		}
+		cfg.Referer = strings.TrimSpace(os.Getenv("OPENROUTER_HTTP_REFERER"))
+		cfg.AppTitle = strings.TrimSpace(os.Getenv("OPENROUTER_APP_TITLE"))
+	}
+	return cfg
 }
 
 // parseMinSimilarity validates CENTRAL_EMBEDDING_MIN_SIMILARITY: a float
@@ -151,11 +194,16 @@ func parseMinSimilarity(raw string) float64 {
 //     texts therefore land around 0.4-0.6, so 0.6 is the lowest floor that
 //     drops them while keeping related rows (the card suggests tuning on
 //     real data; override with CENTRAL_EMBEDDING_MIN_SIMILARITY).
+//   - NVIDIA Nemotron embed (nemotron-*-embed-*): scores are spread out.
+//     The Nemotron-3-Embed-1B model card's examples put relevant
+//     query/passage pairs at ~0.65-0.81 and unrelated pairs at ~-0.05-0.12,
+//     so 0.3 sits in the gap with margin for 1024-dim truncation.
 //   - Other models: 0.2 until tuned (override with the env var).
 const (
-	MinSimilarityHash    = 0.2
-	MinSimilarityBGE     = 0.6
-	MinSimilarityDefault = 0.2
+	MinSimilarityHash     = 0.2
+	MinSimilarityBGE      = 0.6
+	MinSimilarityNemotron = 0.3
+	MinSimilarityDefault  = 0.2
 )
 
 // DefaultMinSimilarity is the vector-search floor for a model tag such as
@@ -167,6 +215,8 @@ func DefaultMinSimilarity(model string) float64 {
 		return MinSimilarityHash
 	case strings.Contains(m, "bge-"):
 		return MinSimilarityBGE
+	case strings.Contains(m, "nemotron") && strings.Contains(m, "embed"):
+		return MinSimilarityNemotron
 	default:
 		return MinSimilarityDefault
 	}
@@ -207,11 +257,19 @@ var ErrProviderUnavailable = errors.New("context: embedding provider unavailable
 // Provider is the configured embedding backend plus its model tag, outage
 // state, and fallback policy. Safe for concurrent use.
 type Provider struct {
-	primary  Embedder // nil for hash
+	primary  batchEmbedder // nil for hash
 	model    string
 	minSim   float64
 	timeout  time.Duration
 	cooldown time.Duration
+
+	dims         int    // Matryoshka truncation (0 = none)
+	queryPrefix  string // prepended to search queries
+	docPrefix    string // prepended to stored memories
+	maxBatch     int    // inputs per request
+	maxInputRune int    // per-input character cap (0 = none)
+
+	qcache *queryCache
 
 	mu        sync.Mutex
 	downUntil time.Time
@@ -223,18 +281,35 @@ type Provider struct {
 
 // NewProvider builds a Provider for cfg. Unknown providers behave as hash.
 func NewProvider(cfg EmbeddingConfig) *Provider {
-	p := &Provider{model: ModelHash, cooldown: providerCooldown, now: time.Now, logf: log.Printf}
+	p := &Provider{model: ModelHash, cooldown: providerCooldown, now: time.Now, logf: log.Printf, maxBatch: 1}
 	name := strings.ToLower(strings.TrimSpace(cfg.Provider))
 	switch name {
 	case ProviderOpenAI:
-		p.primary = openAIEmbedder(cfg)
+		p.primary = singleBatch(openAIEmbedder(cfg))
 		p.model = ProviderOpenAI + ":" + cfg.openAIModel()
 	case ProviderOllama:
-		p.primary = ollamaEmbedder(cfg)
+		p.primary = singleBatch(ollamaEmbedder(cfg))
 		p.model = ProviderOllama + ":" + cfg.ollamaModel()
 	case ProviderLocal:
-		p.primary = localEmbedder(cfg)
+		p.primary = singleBatch(localEmbedder(cfg))
 		p.model = ProviderLocal + ":" + cfg.localModel()
+	case ProviderOpenRouter:
+		model := cfg.openRouterModel()
+		p.primary = openRouterEmbedder(cfg, model)
+		p.model = ProviderOpenRouter + ":" + modelTagName(model)
+		p.maxBatch = openRouterMaxBatch
+		p.maxInputRune = openRouterMaxInputChars
+		p.queryPrefix, p.docPrefix = modelPrefixes(model)
+		p.dims = defaultTruncateDims(model)
+		p.qcache = newQueryCache(256, 10*time.Minute)
+	}
+	if cfg.Dims > 0 && p.primary != nil {
+		p.dims = cfg.Dims
+	}
+	if p.dims > 0 && p.primary != nil {
+		// The kept width is part of the vector space: vectors truncated to
+		// different widths must never be compared.
+		p.model = fmt.Sprintf("%s@%d", p.model, p.dims)
 	}
 	p.minSim = DefaultMinSimilarity(p.model)
 	if cfg.MinSimilarity > 0 && cfg.MinSimilarity < 1 {
@@ -283,11 +358,101 @@ func (p *Provider) IsHash() bool { return p == nil || p.primary == nil }
 // The backfill uses it (it must not overwrite rows with hash vectors) and so
 // does search (a hash query vector is meaningless against model vectors).
 func (p *Provider) EmbedStrict(ctx context.Context, text string) ([]float32, error) {
-	if err := ctx.Err(); err != nil {
+	if p.IsHash() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return HashEmbed(text), nil
+	}
+	out, err := p.embedTexts(ctx, []string{text}, p.docPrefix)
+	if err != nil {
 		return nil, err
 	}
+	return out[0], nil
+}
+
+// EmbedQueryStrict is EmbedStrict for a search query: it applies the model's
+// query prefix (asymmetric retrieval models embed queries and passages
+// differently) and serves repeats from a short cache to save rate limit.
+func (p *Provider) EmbedQueryStrict(ctx context.Context, query string) ([]float32, error) {
 	if p.IsHash() {
-		return HashEmbed(text), nil
+		return p.EmbedStrict(ctx, query)
+	}
+	if vec, ok := p.qcache.get(query, p.now()); ok {
+		return vec, nil
+	}
+	out, err := p.embedTexts(ctx, []string{query}, p.queryPrefix)
+	if err != nil {
+		return nil, err
+	}
+	p.qcache.put(query, out[0], p.now())
+	return out[0], nil
+}
+
+// EmbedBatchStrict embeds many memory texts with as few requests as the
+// provider allows (OpenRouter: up to openRouterMaxBatch inputs each). Used
+// by the backfill so a free-tier request budget stretches across rows.
+func (p *Provider) EmbedBatchStrict(ctx context.Context, texts []string) ([][]float32, error) {
+	if p.IsHash() {
+		out := make([][]float32, len(texts))
+		for i, t := range texts {
+			out[i] = HashEmbed(t)
+		}
+		return out, ctx.Err()
+	}
+	out := make([][]float32, 0, len(texts))
+	for start := 0; start < len(texts); start += p.maxBatch {
+		end := start + p.maxBatch
+		if end > len(texts) {
+			end = len(texts)
+		}
+		part, err := p.embedTexts(ctx, texts[start:end], p.docPrefix)
+		if err != nil {
+			return out, err
+		}
+		out = append(out, part...)
+	}
+	return out, nil
+}
+
+// MaxBatch is the number of inputs one provider request carries.
+func (p *Provider) MaxBatch() int {
+	if p == nil || p.maxBatch < 1 {
+		return 1
+	}
+	return p.maxBatch
+}
+
+// clearCooldown lets the next call through after the backfill has waited
+// out a rate limit itself (degraded stays set until a call succeeds).
+func (p *Provider) clearCooldown() {
+	if p.IsHash() {
+		return
+	}
+	p.mu.Lock()
+	p.downUntil = time.Time{}
+	p.mu.Unlock()
+}
+
+// RetryAt is when the cooling-down provider accepts calls again (zero when
+// it is not cooling down).
+func (p *Provider) RetryAt() time.Time {
+	if p.IsHash() {
+		return time.Time{}
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.now().Before(p.downUntil) {
+		return p.downUntil
+	}
+	return time.Time{}
+}
+
+// embedTexts is the single request path: cooldown gate, timeout, prefix,
+// input cap, then truncate/fit/normalize every vector.
+func (p *Provider) embedTexts(ctx context.Context, texts []string, prefix string) ([][]float32, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	p.mu.Lock()
 	cooling := p.now().Before(p.downUntil)
@@ -295,13 +460,28 @@ func (p *Provider) EmbedStrict(ctx context.Context, text string) ([]float32, err
 	if cooling {
 		return nil, ErrProviderUnavailable
 	}
+	inputs := make([]string, len(texts))
+	for i, t := range texts {
+		inputs[i] = prefix + capRunes(t, p.maxInputRune)
+	}
 	cctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	vec, err := p.primary(cctx, text)
+	raw, err := p.primary(cctx, inputs)
+	if err == nil && len(raw) != len(inputs) {
+		err = fmt.Errorf("context: embedding provider returned %d vectors for %d inputs", len(raw), len(inputs))
+	}
+	var out [][]float32
 	if err == nil {
-		vec = FitEmbedDims(vec)
-		if len(vec) != EmbedDims {
-			err = fmt.Errorf("context: embedding provider returned an empty vector")
+		out = make([][]float32, len(raw))
+		for i, vec := range raw {
+			if p.dims > 0 && len(vec) > p.dims {
+				vec = vec[:p.dims]
+			}
+			if len(vec) == 0 || len(vec) > EmbedDims {
+				err = fmt.Errorf("context: embedding provider returned %d dims (column holds %d; set CENTRAL_EMBEDDING_DIMS for Matryoshka models)", len(vec), EmbedDims)
+				break
+			}
+			out[i] = L2Normalize(FitEmbedDims(vec))
 		}
 	}
 	if err != nil {
@@ -312,11 +492,11 @@ func (p *Provider) EmbedStrict(ctx context.Context, text string) ([]float32, err
 		return nil, err
 	}
 	p.markUp()
-	return L2Normalize(vec), nil
+	return out, nil
 }
 
 // Embed never fails: the primary vector and its model tag, or HashEmbed and
-// "hash" when the primary is unavailable. Writes use this so a down sidecar
+// "hash" when the primary is unavailable. Writes use this so a down or rate-limited provider
 // never blocks a memory write; the backfill later replaces hash rows.
 func (p *Provider) Embed(ctx context.Context, text string) ([]float32, string) {
 	if vec, err := p.EmbedStrict(ctx, text); err == nil {
@@ -337,6 +517,24 @@ func (p *Provider) Embedder() Embedder {
 		}
 		vec, _ := p.Embed(ctx, text)
 		return vec, nil
+	}
+}
+
+// QueryEmbedder adapts EmbedQueryStrict to the Embedder seam with the same
+// never-fail HashEmbed fallback as Embedder() (MCP query embedding; the
+// server vetoes vector search while Degraded()).
+func (p *Provider) QueryEmbedder() Embedder {
+	if p.IsHash() {
+		return AsEmbedder(HashEmbed)
+	}
+	return func(ctx context.Context, text string) ([]float32, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if vec, err := p.EmbedQueryStrict(ctx, text); err == nil {
+			return vec, nil
+		}
+		return HashEmbed(text), nil
 	}
 }
 
@@ -379,8 +577,16 @@ func (p *Provider) ModelOf(vec []float32, text string) string {
 }
 
 func (p *Provider) markDown(err error) {
+	wait := p.cooldown
+	var rl *RateLimitError
+	if errors.As(err, &rl) && rl.RetryAfter > wait {
+		wait = rl.RetryAfter
+		if wait > maxRateLimitCooldown {
+			wait = maxRateLimitCooldown
+		}
+	}
 	p.mu.Lock()
-	p.downUntil = p.now().Add(p.cooldown)
+	p.downUntil = p.now().Add(wait)
 	first := !p.degraded
 	p.degraded = true
 	p.mu.Unlock()

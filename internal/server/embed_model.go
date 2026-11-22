@@ -1,6 +1,6 @@
 package server
 
-// embed_model.go — model-aware embedding helpers (local embeddings sidecar).
+// embed_model.go — model-aware embedding helpers (OpenRouter / local providers).
 //
 // Writes always get a vector (HashEmbed when the provider is down) tagged
 // with the model that made it, so `central-server reembed` can later redo
@@ -48,7 +48,7 @@ func (s *Server) tagEmbeddingModel(item *store.MemoryItem) {
 // the configured model is unavailable (never a hash stand-in).
 func (s *Server) embedQuery(ctx context.Context, query string) ([]float32, bool) {
 	if s.EmbedProvider != nil && !s.EmbedProvider.IsHash() {
-		vec, err := s.EmbedProvider.EmbedStrict(ctx, query)
+		vec, err := s.EmbedProvider.EmbedQueryStrict(ctx, query)
 		if err != nil || len(vec) != memctx.EmbedDims {
 			return nil, false
 		}
@@ -96,6 +96,15 @@ func modelVectorSearchFor(st any, p *memctx.Provider) vectorSearchFunc {
 // embedding provider.
 func (s *Server) modelVectorSearch() vectorSearchFunc {
 	return modelVectorSearchFor(s.Store, s.EmbedProvider)
+}
+
+// queryEmbedder is the MCP query seam: the provider's query-prefixed,
+// fallback-safe embedder, or nil (MCP then uses Config.Embedder).
+func (s *Server) queryEmbedder() memctx.Embedder {
+	if s == nil || s.EmbedProvider == nil {
+		return nil
+	}
+	return s.EmbedProvider.QueryEmbedder()
 }
 
 // vectorSearchUsable reports whether a precomputed query vector can be

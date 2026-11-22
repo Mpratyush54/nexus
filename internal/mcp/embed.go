@@ -78,6 +78,9 @@ func (s *Server) embedForWrite(key, content string) (vec []float32) {
 // to HashEmbed so keyword-compatible vectors still rank HashEmbed rows.
 func (s *Server) embedQuery(ctx context.Context, query string) []float32 {
 	emb := s.resolveEmbedder()
+	if s != nil && s.cfg.QueryEmbedder != nil {
+		emb = s.cfg.QueryEmbedder
+	}
 	vec, err := emb(ctx, query)
 	if err != nil || len(vec) != EmbedDims {
 		return HashEmbed(query)

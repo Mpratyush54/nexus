@@ -365,8 +365,10 @@ func (s *Server) handleAgentMCP(w http.ResponseWriter, r *http.Request) {
 		ProjectName: name,
 		AgentName:   agentName,
 		Embedder:    s.resolveEmbedder(),
-		Access:      access,
-		RateLimiter: s.agentMCPLimiter(),
+		// Queries get the model's query prefix (nil = Embedder).
+		QueryEmbedder: s.queryEmbedder(),
+		Access:        access,
+		RateLimiter:   s.agentMCPLimiter(),
 	}
 	srv := mcp.NewServer(agentMCPStore{Store: s.Store, UserID: authSubject(r), Embeds: s}, cfg)
 	resp := srv.Handle(r.Context(), raw)

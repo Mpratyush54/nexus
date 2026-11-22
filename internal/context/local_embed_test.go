@@ -296,7 +296,7 @@ func TestReembedBackfillsStaleRowsIdempotently(t *testing.T) {
 	st := store.NewMemStore()
 	ids := seedMemories(t, st, 7)
 
-	stats, err := Reembed(context.Background(), p, st, ReembedOptions{BatchSize: 3, PerSecond: -1})
+	stats, err := Reembed(context.Background(), p, st, ReembedOptions{RequestsPerMinute: -1})
 	if err != nil || stats.Embedded != 7 {
 		t.Fatalf("first run stats=%+v err=%v, want 7 embedded", stats, err)
 	}
@@ -317,7 +317,7 @@ func TestReembedBackfillsStaleRowsIdempotently(t *testing.T) {
 		t.Fatalf("stale rows after run = %d", n)
 	}
 	before := f.calls.Load()
-	stats, err = Reembed(context.Background(), p, st, ReembedOptions{PerSecond: -1})
+	stats, err = Reembed(context.Background(), p, st, ReembedOptions{RequestsPerMinute: -1})
 	if err != nil || stats.Embedded != 0 || f.calls.Load() != before {
 		t.Fatalf("second run stats=%+v err=%v calls=%d, want a no-op", stats, err, f.calls.Load()-before)
 	}
@@ -331,7 +331,7 @@ func TestReembedStopsWithoutWritingHashWhenProviderDown(t *testing.T) {
 	st := store.NewMemStore()
 	ids := seedMemories(t, st, 4)
 
-	stats, err := Reembed(context.Background(), p, st, ReembedOptions{PerSecond: -1})
+	stats, err := Reembed(context.Background(), p, st, ReembedOptions{RequestsPerMinute: -1})
 	if err == nil || stats.Embedded != 0 {
 		t.Fatalf("stats=%+v err=%v, want provider error and nothing written", stats, err)
 	}
@@ -349,12 +349,12 @@ func TestReembedRateLimitAndMax(t *testing.T) {
 	st := store.NewMemStore()
 	seedMemories(t, st, 6)
 	start := time.Now()
-	stats, err := Reembed(context.Background(), p, st, ReembedOptions{PerSecond: 50, Max: 4})
+	stats, err := Reembed(context.Background(), p, st, ReembedOptions{RequestsPerMinute: 3000, Max: 4})
 	if err != nil || stats.Embedded != 4 {
 		t.Fatalf("stats=%+v err=%v, want 4 (Max)", stats, err)
 	}
-	// 4 calls at 50/s wait for 4 ticks of 20ms.
-	if el := time.Since(start); el < 70*time.Millisecond {
+	// 4 single-input requests 20ms apart: at least 3 gaps.
+	if el := time.Since(start); el < 55*time.Millisecond {
 		t.Fatalf("run took %v; rate limit not applied", el)
 	}
 	if n, _ := st.CountMemoryForReembed(context.Background(), p.Model()); n != 2 {

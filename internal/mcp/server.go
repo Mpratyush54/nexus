@@ -114,6 +114,10 @@ type Config struct {
 	// CENTRAL_EMBEDDING_*). When set it wins over Embed; failures fall
 	// back to HashEmbed inside the provider wrapper.
 	Embedder memctx.Embedder
+	// QueryEmbedder, when set, embeds memory_search queries instead of
+	// Embedder (asymmetric retrieval models prefix queries differently from
+	// stored passages). Nil uses Embedder.
+	QueryEmbedder memctx.Embedder
 	// FileAccessLog, when set, receives (op, workspace-relative path, byte
 	// count) for every successful file_read/file_write (issue #96): the
 	// audit seam mirroring the daemon interceptor events. Nil disables.

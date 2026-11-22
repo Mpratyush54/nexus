@@ -237,3 +237,58 @@ func TestVectorSearchComparesSameModelOnly(t *testing.T) {
 		t.Fatalf("MCP vector search = %d items, want only new/bge", len(mitems))
 	}
 }
+
+// OpenRouter wiring end to end: stored memories are embedded as passages,
+// REST and cloud-MCP queries as queries, all with the shared key.
+func TestOpenRouterPrefixesThroughServer(t *testing.T) {
+	var inputs []string
+	var auth atomic.Value
+	or := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth.Store(r.Header.Get("Authorization"))
+		var body struct {
+			Input []string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		inputs = append(inputs, body.Input...)
+		data := make([]map[string]any, len(body.Input))
+		for i := range body.Input {
+			v := make([]float64, 2048)
+			v[1] = 1
+			data[i] = map[string]any{"index": i, "embedding": v}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data})
+	}))
+	t.Cleanup(or.Close)
+	s := newTestServer()
+	s.EmbedProvider = memctx.NewProvider(memctx.EmbeddingConfig{
+		Provider: memctx.ProviderOpenRouter, APIKey: "k", Endpoint: or.URL,
+	})
+	token := loginAs(t, s, "editor")
+	projectID := resolveTestProject(t, s, token, "or-proj")
+	rec := doJSON(t, s, http.MethodPost, "/memory", token, map[string]any{
+		"project_id": projectID, "key": "deploy/where", "content": "API runs on Lightsail.", "level": "project",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&q=where+is+the+api", token, nil)
+	var res struct {
+		Items []*store.MemoryItem `json:"items"`
+	}
+	decodeBody(t, rec, &res)
+	if len(res.Items) != 1 {
+		t.Fatalf("vector search items = %d, want 1", len(res.Items))
+	}
+	if qe := s.queryEmbedder(); qe == nil {
+		t.Fatal("MCP query embedder not wired")
+	} else if _, err := qe(t.Context(), "mcp query"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"passage: deploy/where\nAPI runs on Lightsail.", "query: where is the api", "query: mcp query"}
+	if strings.Join(inputs, "|") != strings.Join(want, "|") {
+		t.Fatalf("inputs = %q, want %q", inputs, want)
+	}
+	if auth.Load() != "Bearer k" {
+		t.Fatalf("auth = %v", auth.Load())
+	}
+}

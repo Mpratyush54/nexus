@@ -2,9 +2,11 @@ package main
 
 // reembed.go — `central-server reembed`: the one-off, rate-limited backfill
 // that replaces HashEmbed (or older-model) vectors with the configured
-// embedding model, plus the opt-in startup variant
-// (CENTRAL_EMBEDDING_BACKFILL_ON_START=1). Both are resumable: they only
-// touch rows whose embedding_model differs from the live model.
+// embedding model, plus the opt-in background variant
+// (CENTRAL_EMBEDDING_BACKFILL_ON_START=1), which runs after boot and then
+// every CENTRAL_EMBEDDING_BACKFILL_INTERVAL to heal rows written while the
+// provider was rate limited. Both are resumable: they only touch rows whose
+// embedding_model differs from the live model, in batched requests.
 
 import (
 	"context"
@@ -25,8 +27,7 @@ import (
 
 func runReembed(args []string) error {
 	fs := flag.NewFlagSet("reembed", flag.ContinueOnError)
-	rate := fs.Float64("rate", 5, "max embedding calls per second (<0 = unlimited)")
-	batch := fs.Int("batch", 50, "rows per page")
+	rpm := fs.Float64("rpm", memctx.DefaultBackfillRPM, "max provider requests per minute (each embeds a batch of rows; <0 = unlimited)")
 	maxRows := fs.Int("max", 0, "stop after N rows (0 = all)")
 	dry := fs.Bool("dry-run", false, "only count the rows that would be re-embedded")
 	allowHash := fs.Bool("allow-hash", false, "allow running with the hash provider")
@@ -38,7 +39,7 @@ func runReembed(args []string) error {
 
 	p := memctx.ProviderFromEnv()
 	if p.IsHash() && !*allowHash {
-		return errors.New("CENTRAL_EMBEDDING_PROVIDER is hash; set the real provider (e.g. local) or pass -allow-hash")
+		return errors.New("CENTRAL_EMBEDDING_PROVIDER is hash; set the real provider (e.g. openrouter) or pass -allow-hash")
 	}
 	cfg := resolveConfig()
 	if cfg.databaseURL == "" {
@@ -58,39 +59,51 @@ func runReembed(args []string) error {
 	if *dry || pending == 0 {
 		return nil
 	}
-	// Probe once so a down sidecar fails fast with a clear message.
+	// Probe once so a missing key or down provider fails fast.
 	if _, err := p.EmbedStrict(ctx, "reembed probe"); err != nil {
 		return fmt.Errorf("embedding provider %s not reachable: %w", p.Model(), err)
 	}
 	start := time.Now()
 	stats, err := memctx.Reembed(ctx, p, pg, memctx.ReembedOptions{
-		BatchSize: *batch, PerSecond: *rate, Max: *maxRows, Logf: log.Printf,
+		RequestsPerMinute: *rpm, Max: *maxRows, Logf: log.Printf,
 	})
-	log.Printf("reembed: done in %s: %d embedded, %d skipped", time.Since(start).Round(time.Second), stats.Embedded, stats.Skipped)
+	log.Printf("reembed: done in %s: %d embedded, %d skipped, %d requests", time.Since(start).Round(time.Second), stats.Embedded, stats.Skipped, stats.Requests)
 	return err
 }
 
-// startupReembed runs the backfill in the background after boot, at the
-// configured rate. Provider failures end the run quietly (next boot retries).
+// startupReembed runs the backfill in the background after boot and then
+// every CENTRAL_EMBEDDING_BACKFILL_INTERVAL (default 15m; "0" = once) at
+// CENTRAL_EMBEDDING_BACKFILL_RPM requests/minute. A pass that hits a
+// provider error just ends; the next pass retries.
 func startupReembed(ctx context.Context, p *memctx.Provider, st memctx.ReembedStore) {
-	rate := 5.0
-	if raw := strings.TrimSpace(os.Getenv("CENTRAL_EMBEDDING_BACKFILL_RATE")); raw != "" {
+	rpm := float64(memctx.DefaultBackfillRPM)
+	if raw := strings.TrimSpace(os.Getenv("CENTRAL_EMBEDDING_BACKFILL_RPM")); raw != "" {
 		if v, err := strconv.ParseFloat(raw, 64); err == nil && v > 0 {
-			rate = v
+			rpm = v
 		}
 	}
-	// Give the sidecar time to load its model before the first call.
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(30 * time.Second):
+	interval := 15 * time.Minute
+	if raw := strings.TrimSpace(os.Getenv("CENTRAL_EMBEDDING_BACKFILL_INTERVAL")); raw != "" {
+		if d, err := time.ParseDuration(raw); err == nil && d >= 0 {
+			interval = d
+		}
 	}
-	stats, err := memctx.Reembed(ctx, p, st, memctx.ReembedOptions{PerSecond: rate})
-	if err != nil && ctx.Err() == nil {
-		log.Printf("server: startup reembed stopped after %d rows: %v", stats.Embedded, err)
-		return
-	}
-	if stats.Embedded > 0 {
-		log.Printf("server: startup reembed finished: %d rows now %s", stats.Embedded, p.Model())
+	delay := 30 * time.Second // let the API settle before the first pass
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		stats, err := memctx.Reembed(ctx, p, st, memctx.ReembedOptions{RequestsPerMinute: rpm})
+		if err != nil && ctx.Err() == nil {
+			log.Printf("server: background reembed stopped after %d rows: %v", stats.Embedded, err)
+		} else if stats.Embedded > 0 {
+			log.Printf("server: background reembed: %d rows now %s (%d requests)", stats.Embedded, p.Model(), stats.Requests)
+		}
+		if interval == 0 {
+			return
+		}
+		delay = interval
 	}
 }

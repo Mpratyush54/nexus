@@ -1,9 +1,9 @@
 package store
 
-// memory_embedding.go — embedding provenance + re-embed seams (local
-// embeddings sidecar). memory_items.embedding_model (migration 043) records
+// memory_embedding.go — embedding provenance + re-embed seams.
+// memory_items.embedding_model (migration 043) records
 // which model produced each vector; the reembed backfill lists rows whose
-// tag differs from the live model and overwrites them one at a time.
+// tag differs from the live model and overwrites them (batched).
 
 import (
 	"context"
