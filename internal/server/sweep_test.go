@@ -51,7 +51,8 @@ func TestSearchResetsDecayClock(t *testing.T) {
 	}
 	tok := loginAs(t, s, "alice")
 	ensureMembership(t, s, tok, p.ID)
-	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+p.ID+"&q=deploy+migrations", tok, nil)
+	// Agent retrieval opts in with record_use=1 (mcp.HTTPStore sends it).
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+p.ID+"&q=deploy+migrations&record_use=1", tok, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("search status = %d, body = %s", rec.Code, rec.Body.String())
 	}

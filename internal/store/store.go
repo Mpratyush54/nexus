@@ -465,7 +465,7 @@ func (s *MemStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) error
 		stored.Tags = []string{}
 	}
 	if stored.Visibility == "" {
-		stored.Visibility = VisibilityProject
+		stored.Visibility = DefaultMemoryVisibility(stored)
 	} else {
 		stored.Visibility = NormalizeVisibility(stored.Visibility)
 	}
@@ -644,7 +644,9 @@ func (s *MemStore) SearchMemoryPage(ctx context.Context, projectID string, query
 
 // SearchMemoryVector ranks memories by cosine similarity (issue #165).
 // Active rows are CONFIRMED and PROPOSED (spec 2.2). Confidence must be
-// above 0.3 and the embedding must be non-empty. Pinned items rank first.
+// above 0.3, the embedding must be non-empty, and cosine similarity must
+// reach MinVectorSimilarity. Visibility follows SearchMemory (WithViewer).
+// Pinned items rank first.
 func memoryPinned(item *MemoryItem) bool {
 	if item == nil {
 		return false
@@ -667,6 +669,16 @@ func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, que
 	if limit <= 0 {
 		limit = 20
 	}
+	viewerID := ViewerFrom(ctx)
+	// Membership checked outside the memory lock (RWMutex is not reentrant).
+	isMember := false
+	if viewerID != "" {
+		ok, err := s.IsProjectMember(ctx, viewerID, projectID)
+		if err != nil {
+			return nil, err
+		}
+		isMember = ok
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	type scored struct {
@@ -687,7 +699,16 @@ func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, que
 		if len(item.Embedding) == 0 {
 			continue
 		}
-		if sim := CosineSimilarity(item.Embedding, queryVec); sim > 0 {
+		// Same visibility rule as SearchMemory (issue #164).
+		if viewerID == "" {
+			vis := NormalizeVisibility(item.Visibility)
+			if vis != VisibilityProject && vis != VisibilityPublic {
+				continue
+			}
+		} else if !s.memoryVisibleLocked(item, viewerID, isMember) {
+			continue
+		}
+		if sim := CosineSimilarity(item.Embedding, queryVec); sim > 0 && sim >= MinVectorSimilarity {
 			ranked = append(ranked, scored{item, sim})
 		}
 	}

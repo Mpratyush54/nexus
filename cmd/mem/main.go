@@ -99,6 +99,10 @@ func (s mcpStore) CreateMemoryItem(ctx context.Context, item *mcp.MemoryItem) er
 		ContextSnippet: item.ContextSnippet, Level: item.Level, Scope: item.Scope,
 		Tags: item.Tags, Confidence: item.Confidence, Status: item.Status, Source: item.Source,
 		Embedding: item.Embedding,
+		// Local single-user store with no viewer: searches here see project
+		// and public rows only, so a personal row must not default to
+		// private (store.DefaultMemoryVisibility) or the agent loses it.
+		Visibility: store.VisibilityProject,
 	}
 	if err := s.mem.CreateMemoryItem(ctx, row); err != nil {
 		return err

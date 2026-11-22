@@ -101,6 +101,19 @@ func MemoryCreatorID(m *MemoryItem) string {
 	return strings.TrimSpace(m.UserID)
 }
 
+// DefaultMemoryVisibility is the visibility a new row gets when the writer
+// did not name one. A personal memory is one person's preference, so an
+// owned personal row defaults to private (creator-only, see CanViewMemory);
+// every other level keeps the project default. An ownerless personal row
+// (no proposed_by or user_id, e.g. a system harvest) stays project: private
+// would make it visible to no one.
+func DefaultMemoryVisibility(item *MemoryItem) string {
+	if item != nil && strings.EqualFold(strings.TrimSpace(item.Level), LevelPersonal) && MemoryCreatorID(item) != "" {
+		return VisibilityPrivate
+	}
+	return VisibilityProject
+}
+
 // CanViewMemory reports whether viewerID may see item given membership and
 // an explicit share hit. PUBLIC always passes; PRIVATE is creator-only;
 // SHARED is creator or share; PROJECT requires membership.

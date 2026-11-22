@@ -131,7 +131,7 @@ func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) 
 		item.Tags = []string{}
 	}
 	if item.Visibility == "" {
-		item.Visibility = VisibilityProject
+		item.Visibility = DefaultMemoryVisibility(item)
 	} else {
 		item.Visibility = NormalizeVisibility(item.Visibility)
 	}
@@ -143,18 +143,22 @@ func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) 
 	var supersededIDs []string
 	if item.ProjectID != "" && targetKey != "" {
 		rows, err := s.pool.Query(ctx,
-			`SELECT id FROM memory_items 
-			 WHERE project_id = $1::uuid AND key = $2 
-			   AND status IN ('CONFIRMED', 'PROPOSED') AND superseded_by IS NULL`,
+			`SELECT id, level, COALESCE(proposed_by::text, ''), COALESCE(user_id::text, '')
+			   FROM memory_items
+			  WHERE project_id = $1::uuid AND key = $2
+			    AND status IN ('CONFIRMED', 'PROPOSED') AND superseded_by IS NULL`,
 			item.ProjectID, targetKey)
 		if err == nil {
-			defer rows.Close()
 			for rows.Next() {
-				var oldID string
-				if err := rows.Scan(&oldID); err == nil && oldID != "" && oldID != item.ID {
-					supersededIDs = append(supersededIDs, oldID)
+				var old MemoryItem
+				if err := rows.Scan(&old.ID, &old.Level, &old.ProposedBy, &old.UserID); err != nil {
+					continue
+				}
+				if old.ID != "" && old.ID != item.ID && SupersedesExisting(item, &old) {
+					supersededIDs = append(supersededIDs, old.ID)
 				}
 			}
+			rows.Close()
 		}
 	}
 
@@ -215,6 +219,35 @@ func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) 
 			 WHERE id = $2::uuid`, item.ID, oldID)
 	}
 	return nil
+}
+
+// SupersedesExisting reports whether a new same-key write may supersede old.
+// Only rows at the same level are replaced, and for the per-person levels
+// (personal, session) only rows from the same owner (MemoryCreatorID): one
+// teammate's personal preference must never archive another's, and a
+// project fact must never archive someone's personal note that happens to
+// share its key.
+func SupersedesExisting(newItem, old *MemoryItem) bool {
+	if newItem == nil || old == nil {
+		return false
+	}
+	level := normalizedMemoryLevel(newItem.Level)
+	if level != normalizedMemoryLevel(old.Level) {
+		return false
+	}
+	switch level {
+	case LevelPersonal, LevelSession:
+		return MemoryCreatorID(newItem) == MemoryCreatorID(old)
+	}
+	return true
+}
+
+func normalizedMemoryLevel(level string) string {
+	level = strings.ToLower(strings.TrimSpace(level))
+	if level == "" {
+		return LevelProject
+	}
+	return level
 }
 
 func nullEventID(id int64) any {
@@ -338,11 +371,13 @@ func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, 
 	}
 
 	var visible []*MemoryItem
+	fetched := 0
 	for rows.Next() {
 		m, err := scanMemoryItem(rows)
 		if err != nil {
 			return nil, 0, err
 		}
+		fetched++
 		if viewerID == "" {
 			vis := NormalizeVisibility(m.Visibility)
 			if vis != VisibilityProject && vis != VisibilityPublic {
@@ -368,19 +403,25 @@ func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, 
 
 	// Exact total when the fetch window covered all candidates.
 	total := len(visible)
-	if len(visible) >= fetch {
-		// May be more — count without LIMIT for a true total.
+	if fetched >= fetch {
+		// May be more — count without LIMIT for a true total. The predicate
+		// must match the list query above (superseded rows excluded); rows
+		// the viewer could not see in the fetched window are subtracted so
+		// the total tracks the visible list rather than the raw table.
 		var cnt int
 		cerr := s.pool.QueryRow(ctx,
 			`SELECT COUNT(*) FROM memory_items
 			  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
 			    AND status IN ('CONFIRMED','PROPOSED')
+			    AND superseded_by IS NULL
 			    AND ($2 = '' OR content ILIKE '%'||$2||'%'
 			         OR "key" ILIKE '%'||$2||'%' OR $2 = ANY(tags))
 			    AND ($3::text[] IS NULL OR tags && $3)`,
 			nullText(projectID), query, nilTextArray(tags)).Scan(&cnt)
-		if cerr == nil && cnt > total {
-			total = cnt
+		if cerr == nil {
+			if est := cnt - (fetched - len(visible)); est > total {
+				total = est
+			}
 		}
 	}
 
@@ -401,10 +442,20 @@ func nilTextArray(tags []string) any {
 	return tags
 }
 
+// MinVectorSimilarity is the cosine-similarity floor for SearchMemoryVector
+// (both backends). Without it a vector search always returns its nearest
+// rows however unrelated they are, so callers never reach their keyword
+// fallback and junk ranks first. 0.2 keeps loosely related rows while
+// dropping noise; when nothing reaches it the search returns no rows and
+// callers fall back to keyword search. Pinned rows must also reach it.
+const MinVectorSimilarity = 0.2
+
 // SearchMemoryVector is the primary semantic path (plan §1.5): cosine
 // similarity over pgvector. Active rows are PROPOSED and CONFIRMED (spec
-// 2.2: knowledge is searchable on write). Confidence floor is 0.3.
-// Pinned rows rank ahead of similarity.
+// 2.2: knowledge is searchable on write). Confidence floor is 0.3 and the
+// similarity floor is MinVectorSimilarity. Pinned rows rank ahead of
+// similarity. Visibility follows SearchMemoryPage: WithViewer applies
+// CanViewMemory, an empty viewer sees project and public rows only.
 func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
 	if len(queryVec) == 0 {
 		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
@@ -415,6 +466,8 @@ func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string
 	if limit <= 0 {
 		limit = 20
 	}
+	// Over-fetch so rows hidden by visibility do not shrink the page.
+	fetch := limit * 4
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items
 		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
@@ -422,20 +475,59 @@ func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string
 		    AND superseded_by IS NULL
 		    AND confidence > 0.3
 		    AND embedding IS NOT NULL
+		    AND 1 - (embedding <=> $2::vector) >= $4
 		  ORDER BY (CASE WHEN 'pinned' = ANY(tags) THEN 0 ELSE 1 END), embedding <=> $2::vector
 		  LIMIT $3`,
-		nullText(projectID), encodeEmbedding(queryVec), limit)
+		nullText(projectID), encodeEmbedding(queryVec), fetch, MinVectorSimilarity)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*MemoryItem
+	var candidates []*MemoryItem
 	for rows.Next() {
 		m, err := scanMemoryItem(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
+		}
+		candidates = append(candidates, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	viewerID := ViewerFrom(ctx)
+	isMember := false
+	if viewerID != "" {
+		ok, merr := s.IsProjectMember(ctx, viewerID, projectID)
+		if merr != nil {
+			return nil, merr
+		}
+		isMember = ok
+	}
+	out := make([]*MemoryItem, 0, limit)
+	for _, m := range candidates {
+		if len(out) >= limit {
+			break
+		}
+		vis := NormalizeVisibility(m.Visibility)
+		if viewerID == "" {
+			if vis != VisibilityProject && vis != VisibilityPublic {
+				continue
+			}
+		} else {
+			hasShare := false
+			if vis == VisibilityShared {
+				hasShare, err = s.hasMemoryShare(ctx, m.ID, viewerID, m.ProjectID)
+				if err != nil {
+					return nil, err
+				}
+			}
+			if !CanViewMemory(m, viewerID, isMember, hasShare) {
+				continue
+			}
 		}
 		out = append(out, m)
 	}
-	return out, rows.Err()
+	return out, nil
 }
