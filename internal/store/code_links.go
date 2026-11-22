@@ -585,10 +585,9 @@ func (s *MemStore) FindAgentSessionByNativeID(ctx context.Context, projectID, na
 // RefreshMemoryLinkHashes sets observed_hash = hash on the existing links
 // from memoryIDs to entityID: the session those memories came from edited
 // the file again, so they reflect its latest version. A refreshed memory
-// that is stale is un-staled when none of its links has a known observed
-// hash that differs from its entity's known current hash: it was marked by
-// a files-changed report of the session's own edit that arrived before the
-// code links. Links without a known hash on either side do not count.
+// that is stale is un-staled only when it is provably current
+// (safeToUnstale): it was marked by a files-changed report of the
+// session's own edit that arrived before the code links.
 func (s *MemStore) RefreshMemoryLinkHashes(ctx context.Context, projectID, entityID, hash string, memoryIDs []string) ([]string, []string, error) {
 	_ = ctx
 	hash = normalizeHash(hash)
@@ -621,23 +620,60 @@ func (s *MemStore) RefreshMemoryLinkHashes(ctx context.Context, projectID, entit
 		if m == nil || m.StaleSince == nil {
 			continue
 		}
-		ok := true
+		var links []linkHashState
 		for _, l := range s.codeLinks {
 			if l.SrcKind != LinkSrcMemory || l.SrcID != id {
 				continue
 			}
-			e := entities[l.EntityID]
-			if e != nil && l.ObservedHash != "" && e.ContentHash != "" && l.ObservedHash != e.ContentHash {
-				ok = false
-				break
+			st := linkHashState{Observed: l.ObservedHash}
+			if e := entities[l.EntityID]; e != nil {
+				st.Path, st.Current = e.Path, e.ContentHash
 			}
+			links = append(links, st)
 		}
-		if ok {
+		if safeToUnstale(m.FilesAffected, links) {
 			m.StaleSince = nil
 			unstaled = append(unstaled, id)
 		}
 	}
 	return refreshed, unstaled, nil
+}
+
+// linkHashState is one link of a memory with its entity's path and hashes.
+type linkHashState struct {
+	Path, Observed, Current string
+}
+
+// safeToUnstale reports whether a stale memory is provably current: it has
+// links, every link has a known observed hash equal to its entity's known
+// current hash, and every files_affected path is covered by one of those
+// links. Anything unknown keeps the memory stale.
+func safeToUnstale(filesAffected []string, links []linkHashState) bool {
+	if len(links) == 0 {
+		return false
+	}
+	for _, l := range links {
+		o, c := normalizeHash(l.Observed), normalizeHash(l.Current)
+		if l.Path == "" || o == "" || c == "" || o != c {
+			return false
+		}
+	}
+	for _, f := range filesAffected {
+		if strings.TrimSpace(f) == "" {
+			continue
+		}
+		covered := false
+		for _, l := range links {
+			if FilePathMatches(l.Path, f) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
 }
 
 // ---- PostgresStore ----
@@ -1032,15 +1068,68 @@ func (s *PostgresStore) RefreshMemoryLinkHashes(ctx context.Context, projectID, 
 	if len(refreshed) == 0 {
 		return refreshed, unstaled, nil
 	}
+	// Stale candidates with their files, then all their links, judged in Go.
+	mr, err := s.pool.Query(ctx,
+		`SELECT id::text, COALESCE(files_affected, '{}') FROM memory_items
+		  WHERE id = ANY($1::uuid[]) AND project_id = $2::uuid AND stale_since IS NOT NULL`,
+		refreshed, projectID)
+	if err != nil {
+		return nil, nil, err
+	}
+	files := map[string][]string{}
+	var stale []string
+	for mr.Next() {
+		var id string
+		var fa []string
+		if err := mr.Scan(&id, &fa); err != nil {
+			mr.Close()
+			return nil, nil, err
+		}
+		files[id] = fa
+		stale = append(stale, id)
+	}
+	mr.Close()
+	if err := mr.Err(); err != nil {
+		return nil, nil, err
+	}
+	if len(stale) == 0 {
+		return refreshed, unstaled, nil
+	}
+	lr, err := s.pool.Query(ctx,
+		`SELECT l.src_id, e.path, COALESCE(l.observed_hash, ''), COALESCE(e.content_hash, '')
+		   FROM entity_links l JOIN code_entities e ON e.id = l.entity_id
+		  WHERE l.project_id = $1::uuid AND l.src_kind = 'memory' AND l.src_id = ANY($2::text[])`,
+		projectID, stale)
+	if err != nil {
+		return nil, nil, err
+	}
+	links := map[string][]linkHashState{}
+	for lr.Next() {
+		var id string
+		var st linkHashState
+		if err := lr.Scan(&id, &st.Path, &st.Observed, &st.Current); err != nil {
+			lr.Close()
+			return nil, nil, err
+		}
+		links[id] = append(links[id], st)
+	}
+	lr.Close()
+	if err := lr.Err(); err != nil {
+		return nil, nil, err
+	}
+	var clear []string
+	for _, id := range stale {
+		if safeToUnstale(files[id], links[id]) {
+			clear = append(clear, id)
+		}
+	}
+	if len(clear) == 0 {
+		return refreshed, unstaled, nil
+	}
 	out, err := s.pool.Query(ctx,
-		`UPDATE memory_items m SET stale_since = NULL
-		  WHERE m.id = ANY($1::uuid[]) AND m.project_id = $2::uuid AND m.stale_since IS NOT NULL
-		    AND NOT EXISTS (
-		      SELECT 1 FROM entity_links l JOIN code_entities e ON e.id = l.entity_id
-		       WHERE l.src_kind = 'memory' AND l.src_id = m.id::text
-		         AND COALESCE(l.observed_hash, '') <> '' AND COALESCE(e.content_hash, '') <> ''
-		         AND l.observed_hash <> e.content_hash)
-		  RETURNING m.id::text`, refreshed, projectID)
+		`UPDATE memory_items SET stale_since = NULL
+		  WHERE id = ANY($1::uuid[]) AND project_id = $2::uuid AND stale_since IS NOT NULL
+		  RETURNING id::text`, clear, projectID)
 	if err != nil {
 		return nil, nil, err
 	}

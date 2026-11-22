@@ -247,7 +247,7 @@ func TestPostgresCodeLinks(t *testing.T) {
 		t.Fatalf("for source: %+v %v", src, err)
 	}
 	// A symbol link with a fractional confidence exercises the real/text casts.
-	if err := s.AddEntityLink(ctx, &EntityLink{ProjectID: project.ID, EntityID: sym.ID, SrcKind: LinkSrcMemory, SrcID: mem.ID,
+	if err := s.AddEntityLink(ctx, &EntityLink{ProjectID: project.ID, EntityID: sym.ID, SrcKind: LinkSrcSession, SrcID: sess.ID,
 		Relation: RelationMentions, Source: LinkSourceLLM, Confidence: 0.5}); err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,44 @@ func TestPostgresCodeLinks(t *testing.T) {
 	if got, _ := s.GetMemoryItem(ctx, mem.ID); got.StaleSince != nil {
 		t.Fatal("refresh must un-stale")
 	}
+	// A link to a file without a known hash keeps a stale memory stale.
+	docs, err := s.UpsertCodeEntity(ctx, project.ID, CodeKindFile, "docs/tools.md", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddEntityLink(ctx, &EntityLink{ProjectID: project.ID, EntityID: docs.ID, SrcKind: LinkSrcMemory, SrcID: mem.ID,
+		Relation: RelationDecidedAbout, Source: LinkSourceLLM}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.pool.Exec(ctx, `UPDATE memory_items SET stale_since = now() WHERE id=$1::uuid`, mem.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, unstaled, err := s.RefreshMemoryLinkHashes(ctx, project.ID, e.ID, "h3", []string{mem.ID}); err != nil || len(unstaled) != 0 {
+		t.Fatalf("unhashed link must block un-stale: %v %v", unstaled, err)
+	}
 	if id, err := s.FindAgentSessionByNativeID(ctx, project.ID, name); err != nil || id != sess.ID {
 		t.Fatalf("native: %q %v", id, err)
+	}
+}
+
+func TestSafeToUnstale(t *testing.T) {
+	ok := linkHashState{Path: "internal/a.go", Observed: "h", Current: "h"}
+	cases := []struct {
+		name  string
+		files []string
+		links []linkHashState
+		want  bool
+	}{
+		{"all hashed and equal, files covered", []string{`D:\repo\internal\a.go`}, []linkHashState{ok}, true},
+		{"no links", nil, nil, false},
+		{"observed missing", nil, []linkHashState{ok, {Path: "b.go", Current: "x"}}, false},
+		{"current missing", nil, []linkHashState{ok, {Path: "b.go", Observed: "x"}}, false},
+		{"mismatch", nil, []linkHashState{{Path: "a.go", Observed: "x", Current: "y"}}, false},
+		{"files_affected path without a link", []string{"internal/a.go", "docs/b.md"}, []linkHashState{ok}, false},
+	}
+	for _, c := range cases {
+		if got := safeToUnstale(c.files, c.links); got != c.want {
+			t.Errorf("%s: got %v", c.name, got)
+		}
 	}
 }

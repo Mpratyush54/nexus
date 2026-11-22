@@ -53,7 +53,7 @@ func TestCodeLinksRouteHarvestStalenessAndAgentTools(t *testing.T) {
 	item, err := s.persistHarvestMemory(ctx, &store.HarvestJob{ProjectID: pid}, extract.Proposal{
 		Key: "arch/routes", Content: "Every HTTP route is registered from registerRoutes in routes.go; MCP tools dispatch via CallTool in tools.go.",
 		Level: "project", Scope: "decision", Confidence: 0.9,
-		FilesAffected: []string{`D:\repo\internal\server\routes.go`, `D:\repo\docs\routing.md`},
+		FilesAffected: []string{`D:\repo\internal\server\routes.go`},
 	}, sess.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +68,6 @@ func TestCodeLinksRouteHarvestStalenessAndAgentTools(t *testing.T) {
 	}
 	for key, hash := range map[string]string{
 		"internal/server/routes.go|decided_about": "r1",
-		"docs/routing.md|decided_about":           "",
 		"internal/server/routes.go|touched":       "r1",
 		"internal/mcp/tools.go|touched":           "t1",
 	} {
@@ -76,7 +75,7 @@ func TestCodeLinksRouteHarvestStalenessAndAgentTools(t *testing.T) {
 			t.Fatalf("memory link %s: %v (all %v)", key, h, rel)
 		}
 	}
-	if _, ok := rel["internal/store/db.go|touched"]; ok || len(rel) != 4 {
+	if _, ok := rel["internal/store/db.go|touched"]; ok || len(rel) != 3 {
 		t.Fatalf("memory linked to a file it does not name: %v", rel)
 	}
 
@@ -217,5 +216,53 @@ func TestMemoryNamesPath(t *testing.T) {
 		if got := memoryNamesPath(m, path); got != want {
 			t.Errorf("memoryNamesPath(%q) = %v, want %v", path, got, want)
 		}
+	}
+}
+
+// A memory marked stale by the path/time rule for a file with no known hash
+// stays stale when its session's code links arrive: un-staling needs every
+// linked file's hash to be known and current.
+func TestCodeLinksKeepPathRuleStaleForUnhashedFile(t *testing.T) {
+	s, mem, pid := briefFixture(t)
+	ctx := t.Context()
+	owner := loginAs(t, s, "owner")
+	sess, err := mem.UpsertAgentSession(ctx, &store.AgentSession{ProjectID: pid, OwnerUserID: "owner", Harness: "claude", NativeID: "native-9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	url := "/v1/projects/" + pid + "/code-links"
+	if rec := doJSON(t, s, http.MethodPost, url, owner, map[string]any{"session_id": sess.ID,
+		"links": []map[string]any{{"path": "internal/server/routes.go", "hash": "r1"}}}); rec.Code != http.StatusOK {
+		t.Fatalf("code-links: %d", rec.Code)
+	}
+	item, err := s.persistHarvestMemory(ctx, &store.HarvestJob{ProjectID: pid}, extract.Proposal{
+		Key: "docs/routing", Content: "Routing is documented in routing.md and implemented in routes.go.",
+		Level: "project", Scope: "decision", Confidence: 0.9,
+		FilesAffected: []string{"docs/routing.md", "internal/server/routes.go"},
+	}, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	// docs/routing.md changes with no hash (e.g. deleted): the path rule.
+	rec := doJSON(t, s, http.MethodPost, "/v1/projects/"+pid+"/files-changed", owner, map[string]any{"paths": []string{"docs/routing.md"}})
+	var fc struct {
+		Marked int `json:"marked"`
+	}
+	decodeBody(t, rec, &fc)
+	if rec.Code != http.StatusOK || fc.Marked != 1 {
+		t.Fatalf("path rule: %d %+v", rec.Code, fc)
+	}
+	rec = doJSON(t, s, http.MethodPost, url, owner, map[string]any{"session_id": sess.ID,
+		"links": []map[string]any{{"path": "internal/server/routes.go", "hash": "r2"}}})
+	var cl struct {
+		Refreshed int `json:"refreshed"`
+	}
+	decodeBody(t, rec, &cl)
+	if rec.Code != http.StatusOK || cl.Refreshed != 1 {
+		t.Fatalf("code-links refresh: %d %+v", rec.Code, cl)
+	}
+	if m, _ := mem.GetMemoryItem(ctx, item.ID); m.StaleSince == nil {
+		t.Fatal("memory stale for an unhashed file must stay stale")
 	}
 }
