@@ -125,7 +125,10 @@ type Server struct {
 	// briefNow overrides the clock in tests.
 	briefMu      sync.Mutex
 	briefChecked map[string]time.Time
-	briefNow     func() time.Time
+	// briefWarned is the last fallback reason logged per project, so a
+	// failing LLM warns once per project and reason, not on every rebuild.
+	briefWarned map[string]string
+	briefNow    func() time.Time
 }
 
 // NewServer wires routes onto a fresh stdlib ServeMux.

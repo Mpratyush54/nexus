@@ -86,7 +86,7 @@ func TestProjectBriefDeterministicExcludesPrivate(t *testing.T) {
 	}
 	var got projectBriefResponse
 	decodeBody(t, rec, &got)
-	if got.Content != brief.Content || got.UpdatedAt == nil || strings.Join(got.Sources, ",") != "s2,s1" {
+	if got.Content != brief.Content || got.UpdatedAt == nil || strings.Join(got.Sources, ",") != "s1,s2" {
 		t.Fatalf("brief response: %+v", got)
 	}
 	rec = doJSON(t, s, http.MethodGet, "/v1/projects/"+pid+"/brief", loginAs(t, s, "stranger"), nil)

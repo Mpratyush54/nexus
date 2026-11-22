@@ -36,8 +36,10 @@ func TestDeterministicBriefShapeAndSources(t *testing.T) {
 	}
 	for _, want := range []string{
 		"# Project brief: nexus",
-		"Recent work: Added the project brief to MCP initialize. (session:s-new)",
-		"Stack: Postgres with pgvector stores memories. (session:s-db)",
+		"What it is: nexus is a Go software project.",
+		"Stack: Go, Postgres, pgvector\n",
+		"## Recent work\n- Added the project brief to MCP initialize. (session:s-new)",
+		"- Dependencies: Postgres with pgvector stores memories. (session:s-db)",
 		"- Architecture: The server is a Go stdlib HTTP API behind a thin store interface. (session:s-arch)",
 		"- Conventions: Use LF line endings and gofmt on every change.", // no source: none known
 		"- Auth: Never put personal memories into project-visible output. (session:s-pin)",
@@ -55,7 +57,7 @@ func TestDeterministicBriefShapeAndSources(t *testing.T) {
 		t.Fatalf("category order wrong:\n%s", a.Content)
 	}
 	got := strings.Join(a.Sources, ",")
-	if got != "s-new,s-db,s-arch,s-pin" {
+	if got != "s-arch,s-pin,s-db,s-new" {
 		t.Fatalf("sources = %s", got)
 	}
 }
