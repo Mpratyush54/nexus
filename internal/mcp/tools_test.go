@@ -203,7 +203,8 @@ func TestResolvePathSandbox(t *testing.T) {
 	resultMap(t, r)
 	r = callTool(t, s, "file_read", map[string]any{"path": "sub/note.md"})
 	m := resultMap(t, r)
-	if m["content"] != "hello sandbox" {
+	// MCP shape: the file text is the first text block.
+	if blocks, ok := m["content"].([]any); !ok || len(blocks) == 0 || blocks[0].(map[string]any)["text"] != "hello sandbox" {
 		t.Errorf("content = %v", m["content"])
 	}
 
