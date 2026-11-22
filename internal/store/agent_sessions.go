@@ -1567,3 +1567,51 @@ func TimelineMatchPreview(text, query string) string {
 
 var _ AgentCloudStore = (*MemStore)(nil)
 var _ AgentCloudStore = (*PostgresStore)(nil)
+
+// NativeSessionKeys returns "harness\x00native_id" for every agent session in
+// the given projects. The timeline uses it to drop old snapshots of
+// conversations that are now captured as sessions, whatever page those
+// sessions fall on.
+func (m *MemStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (map[string]bool, error) {
+	_ = ctx
+	want := map[string]bool{}
+	for _, id := range projectIDs {
+		want[id] = true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := map[string]bool{}
+	for _, sess := range m.agentSessions {
+		if want[sess.ProjectID] {
+			out[sess.Harness+"\x00"+sess.NativeID] = true
+		}
+	}
+	return out, nil
+}
+
+// NativeSessionKeys: see MemStore.NativeSessionKeys.
+func (s *PostgresStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (map[string]bool, error) {
+	ids := make([]string, 0, len(projectIDs))
+	for _, id := range projectIDs {
+		if looksLikeUUID(id) {
+			ids = append(ids, id)
+		}
+	}
+	out := map[string]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT harness, native_id FROM agent_sessions WHERE project_id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var harness, native string
+		if err := rows.Scan(&harness, &native); err != nil {
+			return nil, err
+		}
+		out[harness+"\x00"+native] = true
+	}
+	return out, rows.Err()
+}
