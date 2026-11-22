@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 	"sort"
 	"strconv"
@@ -57,11 +58,12 @@ func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request)
 		}
 		after = &n
 	}
-	var turns []store.SessionTurn
+	var items []store.SessionTurn
+	var next string
 	if row.LineageKind == "legacy_snapshot" {
 		// Archived sessions have no session_turns rows; serve the redacted
 		// transcript stored in their snapshot so Chat is never empty.
-		turns = s.legacySnapshotTurns(r, row)
+		items, next = pageSessionTurns(s.legacySnapshotTurns(r, row), after, limit)
 	} else {
 		cs, ok := s.agentCloud()
 		if !ok {
@@ -69,17 +71,38 @@ func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		var err error
-		turns, err = cs.ListSessionTurns(r.Context(), sessionID)
+		items, next, err = pageAgentSessionTurns(r.Context(), cs, sessionID, after, limit)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 	}
-	items, next := pageSessionTurns(turns, after, limit)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":       items,
 		"next_cursor": next,
 	})
+}
+
+// pageAgentSessionTurns reads one page of a session's turns. Stores with a
+// keyset reader return just the page; others load the session and page it.
+func pageAgentSessionTurns(ctx context.Context, cs store.AgentCloudStore, sessionID string, after *int, limit int) ([]store.SessionTurn, string, error) {
+	if reader, ok := cs.(store.SessionTurnReader); ok {
+		page, more, err := reader.ListSessionTurnsPage(ctx, sessionID, after, limit)
+		if err != nil {
+			return nil, "", err
+		}
+		next := ""
+		if more && len(page) > 0 {
+			next = strconv.Itoa(page[len(page)-1].Idx)
+		}
+		return page, next, nil
+	}
+	turns, err := cs.ListSessionTurns(ctx, sessionID)
+	if err != nil {
+		return nil, "", err
+	}
+	page, next := pageSessionTurns(turns, after, limit)
+	return page, next, nil
 }
 
 // pageSessionTurns keeps turns in idx order, drops idx <= cursor, and
@@ -144,6 +167,11 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 		var turns []store.SessionTurn
 		if row.LineageKind == "legacy_snapshot" {
 			turns = s.legacySnapshotTurns(r, row)
+		} else if reader, ok := s.Store.(store.SessionTurnReader); ok {
+			// The overview needs two turns, not the whole session.
+			if first, last, err := reader.SessionTurnOverview(r.Context(), row.ID); err == nil {
+				turns = []store.SessionTurn{first, last}
+			}
 		} else if cs, ok := s.agentCloud(); ok {
 			if found, err := cs.ListSessionTurns(r.Context(), row.ID); err == nil {
 				turns = found

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -626,16 +627,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// Historical snapshots and agent sessions coexist. Query both on every
-	// page; otherwise the first new capture hides the entire old timeline.
-	legacy, err := s.legacyTimeline(r.Context(), authSubject(r), projectID, harness, query, cursor)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not list captured snapshots")
-		return
-	}
 	// A conversation captured both ways (an old snapshot and a modern
 	// session) is one chat: the snapshot's id is the native id, so match on
-	// harness + native id too, and keep the modern session.
+	// harness + native id too, and keep the modern session. Copies on other
+	// pages are excluded by ListLegacyTimeline itself; only copies this
+	// viewer can read hide a snapshot, so a snapshot shared with someone
+	// stays listed when the modern copy is private to its owner.
 	seen := make(map[string]bool, len(items)*2)
 	for _, item := range items {
 		seen[item.SessionID] = true
@@ -643,52 +640,49 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 			seen[item.Harness+"\x00"+item.NativeID] = true
 		}
 	}
-	// The modern copy may be on another page; ask the store directly. Only
-	// copies this viewer can read hide a snapshot, so a snapshot shared with
-	// someone stays listed when the modern copy is private to its owner.
-	if lister, ok := s.Store.(nativeSessionKeyLister); ok && len(legacy) > 0 {
-		projectSet := map[string]bool{}
-		for _, item := range legacy {
-			projectSet[item.ProjectID] = true
-		}
-		projectIDs := make([]string, 0, len(projectSet))
-		for id := range projectSet {
-			projectIDs = append(projectIDs, id)
-		}
-		if keys, kerr := lister.NativeSessionKeys(r.Context(), authSubject(r), projectIDs); kerr == nil {
-			for key := range keys {
-				seen[key] = true
+	hidden := func(item store.TimelineItem) bool {
+		return seen[item.SessionID] || (item.NativeID != "" && seen[item.Harness+"\x00"+item.NativeID])
+	}
+	// Historical snapshots and agent sessions coexist. Query both on every
+	// page; otherwise the first new capture hides the entire old timeline.
+	// limit+1 legacy rows are enough to fill the page and tell whether more
+	// remain.
+	legacy, floor, err := s.legacyTimeline(r.Context(), authSubject(r), projectID, harness, query, cursor, limit+1, hidden)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not list captured snapshots")
+		return
+	}
+	items = append(items, legacy...)
+	sort.Slice(items, func(i, j int) bool {
+		return timelineNewer(items[i].LastActiveAt, items[i].SessionID, items[j].LastActiveAt, items[j].SessionID)
+	})
+	hasMore := len(items) > limit || modernNext != ""
+	if floor != nil {
+		// The archived-transcript search stopped at floor: nothing at or
+		// below it is known yet, so the page ends above it and the next page
+		// resumes there.
+		kept := items[:0]
+		for _, item := range items {
+			if timelineNewer(item.LastActiveAt, item.SessionID, floor.UpdatedAt, floor.SessionID) {
+				kept = append(kept, item)
 			}
 		}
+		items, hasMore = kept, true
 	}
-	for _, item := range legacy {
-		if seen[item.SessionID] || (item.NativeID != "" && seen[item.Harness+"\x00"+item.NativeID]) {
-			continue
-		}
-		items = append(items, item)
-	}
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].LastActiveAt.Equal(items[j].LastActiveAt) {
-			return items[i].SessionID > items[j].SessionID
-		}
-		return items[i].LastActiveAt.After(items[j].LastActiveAt)
-	})
 	next := ""
-	hasMore := len(items) > limit || modernNext != ""
 	if len(items) > limit {
 		items = items[:limit]
 	}
 	if hasMore && len(items) > 0 {
 		last := items[len(items)-1]
 		next = last.LastActiveAt.UTC().Format(time.RFC3339Nano) + "|" + last.SessionID
+	} else if hasMore && floor != nil {
+		// Nothing above floor matched. Resume at floor itself: a cursor one
+		// microsecond (the store's time resolution) above it with an empty id
+		// sorts after every row at floor's time.
+		next = floor.UpdatedAt.Add(time.Microsecond).UTC().Format(time.RFC3339Nano) + "|"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
-}
-
-// nativeSessionKeyLister reports the harness/native-id keys of the agent
-// sessions a viewer can read (MemStore and PostgresStore implement it).
-type nativeSessionKeyLister interface {
-	NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error)
 }
 
 // legacySnapshotSession turns an owner-visible historical snapshot into the
@@ -698,7 +692,14 @@ func (s *Server) legacySnapshotSession(ctx context.Context, userID, sessionID st
 	if ps == nil {
 		return nil, false
 	}
-	snap, err := ps.GetLatestSnapshot(ctx, sessionID)
+	var snap *store.SessionSnapshot
+	var err error
+	if lts, ok := s.Store.(store.LegacyTimelineStore); ok {
+		// Metadata only: the read check never needs the payloads.
+		snap, err = lts.GetLatestSnapshotMeta(ctx, sessionID)
+	} else {
+		snap, err = ps.GetLatestSnapshot(ctx, sessionID)
+	}
 	if err != nil || !s.canReadSnapshot(ctx, userID, snap) {
 		return nil, false
 	}
@@ -739,112 +740,249 @@ func legacyAgentSession(snap *store.SessionSnapshot) *store.AgentSession {
 	}
 }
 
-func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness, query, cursor string) ([]store.TimelineItem, error) {
-	ps := provenanceStore(s.Store)
-	if ps == nil {
-		return []store.TimelineItem{}, nil
+// timelineNewer orders timeline rows newest first, then by id descending.
+func timelineNewer(at time.Time, id string, otherAt time.Time, otherID string) bool {
+	if at.Equal(otherAt) {
+		return id > otherID
 	}
-	projects := []*store.Project{}
-	if projectID != "" {
-		project, err := s.Store.GetProject(ctx, projectID)
-		if err != nil {
-			return nil, err
-		}
-		projects = append(projects, project)
-	} else {
-		var err error
-		projects, err = s.Store.ListProjectsForUser(ctx, userID)
-		if err != nil {
-			return nil, err
-		}
+	return at.After(otherAt)
+}
+
+func parseTimelineCursor(cursor string) (time.Time, string, error) {
+	if cursor == "" {
+		return time.Time{}, "", nil
 	}
-	items := make([]store.TimelineItem, 0)
-	var cursorAt time.Time
-	cursorID := ""
-	if cursor != "" {
-		idx := strings.LastIndex(cursor, "|")
-		if idx <= 0 {
-			return nil, errors.New("bad timeline cursor")
-		}
-		var err error
-		cursorAt, err = time.Parse(time.RFC3339Nano, cursor[:idx])
-		if err != nil {
-			return nil, err
-		}
-		cursorID = cursor[idx+1:]
+	idx := strings.LastIndex(cursor, "|")
+	if idx <= 0 {
+		return time.Time{}, "", errors.New("bad timeline cursor")
 	}
-	for _, project := range projects {
-		if project == nil || project.ID == "" {
-			continue
+	at, err := time.Parse(time.RFC3339Nano, cursor[:idx])
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	return at, cursor[idx+1:], nil
+}
+
+// A text search over archived transcripts stops after this many
+// transcripts or this long, whichever comes first. The page then ends early
+// and its cursor resumes the search, so no match is lost; a slow search
+// just takes several pages instead of one very slow request. Variables so
+// tests can shrink them.
+var (
+	legacySearchTranscriptBudget = 500
+	legacySearchTimeBudget       = 1500 * time.Millisecond
+)
+
+// legacyTranscriptBatch is how many transcripts one query loads.
+const legacyTranscriptBatch = 16
+
+func legacyTimelineItem(snap *store.SessionSnapshot) store.TimelineItem {
+	legacy := legacyAgentSession(snap)
+	return store.TimelineItem{
+		SessionID: legacy.ID, ProjectID: legacy.ProjectID, Harness: legacy.Harness,
+		NativeID: legacy.NativeID, Title: legacy.Title, Summary: legacy.Summary,
+		Visibility: legacy.Visibility, OwnerUserID: legacy.OwnerUserID,
+		LastActiveAt: legacy.LastActiveAt, TurnCount: snap.TurnCount, VersionState: "legacy_snapshot",
+	}
+}
+
+// legacyTimeline returns up to need archived sessions after cursor, newest
+// first, skipping those hidden reports. Rows come from one paged query with
+// the read rule in SQL; a text search decompresses only the transcripts of
+// rows whose title does not already match, at most
+// legacySearchTranscriptBudget of them within legacySearchTimeBudget. When
+// the budget runs out it returns the first unchecked row as floor: rows at or
+// below it are not known yet.
+func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness, query, cursor string, need int, hidden func(store.TimelineItem) bool) ([]store.TimelineItem, *store.SessionSnapshot, error) {
+	items := []store.TimelineItem{}
+	lts, ok := s.Store.(store.LegacyTimelineStore)
+	if !ok || provenanceStore(s.Store) == nil {
+		return items, nil, nil
+	}
+	cursorAt, cursorID, err := parseTimelineCursor(cursor)
+	if err != nil {
+		return nil, nil, err
+	}
+	lowerQuery := strings.ToLower(query)
+	needsTranscript := func(item store.TimelineItem) bool {
+		if query == "" || (hidden != nil && hidden(item)) {
+			return false
 		}
-		// The provenance API returns metadata only. Allow a substantial
-		// historical backfill instead of the previous hard 100-session cutoff.
-		snaps, err := ps.ListSnapshotsForProject(ctx, project.ID, 10000)
+		return !strings.Contains(strings.ToLower(item.Title+" "+item.Harness+" "+item.NativeID), lowerQuery)
+	}
+	budget := legacySearchTranscriptBudget
+	deadline := time.Now().Add(legacySearchTimeBudget)
+	batch := need
+	if batch < 50 {
+		batch = 50
+	}
+	if query != "" {
+		// A search skips most rows; fetch more per round trip.
+		batch = 200
+	}
+	for len(items) < need {
+		rows, err := lts.ListLegacyTimeline(ctx, store.LegacyTimelineQuery{
+			UserID: userID, ProjectID: projectID, Harness: harness,
+			CursorAt: cursorAt, CursorID: cursorID, Limit: batch,
+		})
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		// Snapshots of conversations now captured as sessions this viewer can
-		// read are hidden from the list anyway; skip them before the costly
-		// transcript search.
-		var captured map[string]bool
-		if lister, ok := s.Store.(nativeSessionKeyLister); ok {
-			captured, _ = lister.NativeSessionKeys(ctx, userID, []string{project.ID})
-		}
-		for i := range snaps {
-			snap := &snaps[i]
-			if harness != "" && !strings.EqualFold(harness, snap.Harness) {
+		transcripts := map[string][]byte{}
+		for i := range rows {
+			snap := &rows[i]
+			item := legacyTimelineItem(snap)
+			if hidden != nil && hidden(item) {
 				continue
 			}
-			if captured[snap.Harness+"\x00"+snap.ConversationID] {
-				continue
-			}
-			if !s.canReadSnapshot(ctx, userID, snap) {
-				continue
-			}
-			legacy := legacyAgentSession(snap)
-			if !cursorAt.IsZero() && (legacy.LastActiveAt.After(cursorAt) ||
-				(legacy.LastActiveAt.Equal(cursorAt) && legacy.ID >= cursorID)) {
-				continue
-			}
-			var matchPreview, matchRole string
-			var matchIdx *int
-			if query != "" && !strings.Contains(strings.ToLower(legacy.Title+" "+snap.Harness+" "+snap.ConversationID), strings.ToLower(query)) {
+			if needsTranscript(item) {
 				if err := ctx.Err(); err != nil {
-					return nil, err
+					return nil, nil, err
+				}
+				payload, loaded := transcripts[snap.SessionID]
+				if !loaded {
+					if budget <= 0 || time.Now().After(deadline) {
+						return items, snap, nil
+					}
+					// Load this row's transcript with the next few that need
+					// one, in a single query.
+					ids := []string{}
+					for j := i; j < len(rows) && len(ids) < legacyTranscriptBatch && len(ids) < budget; j++ {
+						if needsTranscript(legacyTimelineItem(&rows[j])) {
+							ids = append(ids, rows[j].SessionID)
+						}
+					}
+					budget -= len(ids)
+					got, err := s.loadLegacyTranscripts(ctx, lts, ids)
+					if err != nil {
+						return nil, nil, err
+					}
+					for _, id := range ids {
+						transcripts[id] = got[id]
+					}
+					payload = transcripts[snap.SessionID]
 				}
 				// One unreadable snapshot only drops out of the search
 				// results; it must not fail the whole timeline.
-				full, err := ps.GetLatestSnapshot(ctx, snap.SessionID)
-				if err != nil || full == nil {
-					if cerr := ctx.Err(); cerr != nil {
-						return nil, cerr
-					}
+				idx, role, preview, found := searchLegacyTranscript(payload, query)
+				if !found {
 					continue
 				}
-				raw, err := gunzipSnapshot(full.TranscriptPayload)
-				if err != nil {
-					continue
-				}
-				for _, turn := range ParseTranscriptJSONL(raw) {
-					if (turn.Role == "user" || turn.Role == "assistant") && strings.Contains(strings.ToLower(turn.TextPreview), strings.ToLower(query)) {
-						idx := turn.Idx
-						matchIdx, matchRole = &idx, turn.Role
-						matchPreview = store.TimelineMatchPreview(turn.TextPreview, query)
-						break
-					}
-				}
-				if matchIdx == nil {
-					continue
-				}
+				item.MatchTurnIdx, item.MatchRole, item.MatchPreview = &idx, role, preview
 			}
-			items = append(items, store.TimelineItem{
-				SessionID: legacy.ID, ProjectID: legacy.ProjectID, Harness: legacy.Harness,
-				NativeID: legacy.NativeID, Title: legacy.Title, Summary: legacy.Summary,
-				Visibility: legacy.Visibility, OwnerUserID: legacy.OwnerUserID,
-				LastActiveAt: legacy.LastActiveAt, TurnCount: snap.TurnCount, VersionState: "legacy_snapshot",
-				MatchPreview: matchPreview, MatchTurnIdx: matchIdx, MatchRole: matchRole,
-			})
+			items = append(items, item)
+			if len(items) == need {
+				return items, nil, nil
+			}
+		}
+		if len(rows) < batch {
+			break
+		}
+		last := rows[len(rows)-1]
+		cursorAt, cursorID = last.UpdatedAt, last.SessionID
+	}
+	return items, nil, nil
+}
+
+// loadLegacyTranscripts loads several latest transcripts in one query. If
+// that fails it falls back to one read per snapshot, skipping any that fail,
+// so one bad row cannot hide the rest.
+func (s *Server) loadLegacyTranscripts(ctx context.Context, lts store.LegacyTimelineStore, ids []string) (map[string][]byte, error) {
+	got, err := lts.LatestSnapshotTranscripts(ctx, ids)
+	if err == nil {
+		return got, nil
+	}
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, cerr
+	}
+	got = map[string][]byte{}
+	ps := provenanceStore(s.Store)
+	for _, id := range ids {
+		snap, err := ps.GetLatestSnapshot(ctx, id)
+		if err != nil || snap == nil {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, cerr
+			}
+			continue
+		}
+		got[id] = snap.TranscriptPayload
+	}
+	return got, nil
+}
+
+// searchLegacyTranscript finds the first user or assistant turn containing
+// query (case-insensitive) in a gzipped transcript.
+func searchLegacyTranscript(payload []byte, query string) (int, string, string, bool) {
+	if len(payload) == 0 {
+		return 0, "", "", false
+	}
+	raw, err := gunzipSnapshot(payload)
+	if err != nil {
+		return 0, "", "", false
+	}
+	lowerQuery := strings.ToLower(query)
+	if transcriptPrefilterSafe(query) && !containsFoldASCII(raw, lowerQuery) && !hasASCIILoweringRune(raw) {
+		return 0, "", "", false
+	}
+	for _, turn := range ParseTranscriptJSONL(raw) {
+		if (turn.Role == "user" || turn.Role == "assistant") && strings.Contains(strings.ToLower(turn.TextPreview), lowerQuery) {
+			return turn.Idx, turn.Role, store.TimelineMatchPreview(turn.TextPreview, query), true
 		}
 	}
-	return items, nil
+	return 0, "", "", false
+}
+
+// hasASCIILoweringRune reports whether raw holds, literally or as a JSON
+// escape, one of the two non-ASCII runes that lower-case to an ASCII letter:
+// the Kelvin sign (k) and capital I with dot (i). The ASCII-only prefilter
+// cannot see those, so such transcripts are always parsed.
+func hasASCIILoweringRune(raw []byte) bool {
+	return bytes.Contains(raw, []byte("\u212a")) || bytes.Contains(raw, []byte("\u0130")) ||
+		containsFoldASCII(raw, `\u212a`) || containsFoldASCII(raw, `\u0130`)
+}
+
+// containsFoldASCII reports whether s contains lowerQuery (lower-case ASCII)
+// ignoring ASCII case, without copying s.
+func containsFoldASCII(s []byte, lowerQuery string) bool {
+	n := len(lowerQuery)
+	if n == 0 {
+		return true
+	}
+	for i := 0; i+n <= len(s); i++ {
+		j := 0
+		for ; j < n; j++ {
+			c := s[i+j]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != lowerQuery[j] {
+				break
+			}
+		}
+		if j == n {
+			return true
+		}
+	}
+	return false
+}
+
+// transcriptPrefilterSafe reports whether a query found in a parsed turn's
+// text must also appear, byte for byte up to case, in the raw JSONL, so the
+// JSON parse can be skipped when it does not. That holds for one ASCII word
+// with a letter and no character a JSON encoder may escape: turn text is a
+// JSON string (or integer) value, or several joined with newlines.
+func transcriptPrefilterSafe(query string) bool {
+	letter := false
+	for i := 0; i < len(query); i++ {
+		c := query[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z':
+			letter = true
+		case c >= '0' && c <= '9':
+		case strings.IndexByte("-_.:@#$%^*()+=[]{}|;,?!~'", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return letter
 }
