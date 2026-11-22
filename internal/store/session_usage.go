@@ -68,6 +68,9 @@ type usageAgg struct {
 	Reported            float64
 	HasReported         bool
 	Turns               int64
+	// Long marks records whose prompt is over usage.LongPromptTokens, so
+	// tiered models (Haiku 5.5) are priced per request tier.
+	Long bool
 }
 
 // foldUsage turns per-model partial sums into totals keyed by group,
@@ -99,7 +102,7 @@ func foldUsage(rows []usageAgg, groupIsModel bool) []usage.Total {
 		if unreported.Empty() {
 			continue
 		}
-		if est, ok := usage.Estimate(unreported); ok {
+		if est, ok := usage.EstimateTier(unreported, r.Long); ok {
 			t.EstimatedUSD += est
 			t.CostUSD += est
 			t.Estimated = true
@@ -179,7 +182,8 @@ func mergeUsage(prev *SessionUsage, r SessionUsage) {
 }
 
 func memAgg(group string, r *SessionUsage) usageAgg {
-	a := usageAgg{Group: group, Model: r.Model, In: r.Input, Out: r.Output, CR: r.CacheRead, CW: r.CacheWrite, Turns: 1}
+	a := usageAgg{Group: group, Model: r.Model, In: r.Input, Out: r.Output, CR: r.CacheRead, CW: r.CacheWrite, Turns: 1,
+		Long: usage.LongPrompt(r.Entry)}
 	if r.CostUSD != nil {
 		a.Reported, a.HasReported = *r.CostUSD, true
 	} else {
@@ -284,7 +288,11 @@ const usageAggColumns = `u.model,
 	COALESCE(SUM(u.output_tokens) FILTER (WHERE u.cost_usd IS NULL), 0)::bigint,
 	COALESCE(SUM(u.cache_read_tokens) FILTER (WHERE u.cost_usd IS NULL), 0)::bigint,
 	COALESCE(SUM(u.cache_write_tokens) FILTER (WHERE u.cost_usd IS NULL), 0)::bigint,
-	COALESCE(SUM(u.cost_usd), 0)::double precision, COUNT(u.cost_usd) > 0, COUNT(*)`
+	COALESCE(SUM(u.cost_usd), 0)::double precision, COUNT(u.cost_usd) > 0, COUNT(*),
+	(u.input_tokens + u.cache_read_tokens + u.cache_write_tokens) > 100000`
+
+// The literal above is usage.LongPromptTokens (checked by a test); the tier
+// is column 14, which every usage query groups by.
 
 func scanUsageAggs(rows interface {
 	Next() bool
@@ -297,7 +305,7 @@ func scanUsageAggs(rows interface {
 	for rows.Next() {
 		var a usageAgg
 		if err := rows.Scan(&a.Group, &a.Model, &a.In, &a.Out, &a.CR, &a.CW, &a.UIn, &a.UOut, &a.UCR, &a.UCW,
-			&a.Reported, &a.HasReported, &a.Turns); err != nil {
+			&a.Reported, &a.HasReported, &a.Turns, &a.Long); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -310,7 +318,7 @@ func (s *PostgresStore) SessionUsageByModel(ctx context.Context, sessionID strin
 		return nil, ErrNotFound
 	}
 	rows, err := s.pool.Query(ctx, `SELECT u.model, `+usageAggColumns+`
-		FROM session_usage u WHERE u.session_id = $1::uuid GROUP BY u.model`, sessionID)
+		FROM session_usage u WHERE u.session_id = $1::uuid GROUP BY 1, 2, 14`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +373,7 @@ func (s *PostgresStore) UsageSummary(ctx context.Context, q UsageQuery) ([]usage
 		                 WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER'))
 		    ))
 		  )))
-		GROUP BY 1, 2`, q.UserID, from, to, project, q.TZOffset, q.OwnerOnly)
+		GROUP BY 1, 2, 14`, q.UserID, from, to, project, q.TZOffset, q.OwnerOnly)
 	if err != nil {
 		return nil, err
 	}

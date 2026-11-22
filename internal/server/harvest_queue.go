@@ -89,8 +89,14 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 	if job == nil {
 		return
 	}
+	// Keep the project brief current after every job, failed or not
+	// (debounced; never fails the job). When the job's LLM call failed the
+	// brief is built without the LLM.
+	briefReason := ""
+	defer func() { s.maybeRefreshProjectBriefWith(ctx, job.ProjectID, briefReason) }()
 	svc := s.resolveExtractor()
 	if !svc.HasAPIKey() {
+		briefReason = extract.BriefFallbackNoKey
 		_ = s.Harvest.FinishHarvestJob(ctx, job.ID, store.HarvestFailed, "", "OPENROUTER_API_KEY unset — refusing heuristic scrap", 0)
 		return
 	}
@@ -115,10 +121,12 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 	if sessionID != "" {
 		result, err := svc.ExtractSessionCompress(jobCtx, job.ProjectID, sessionID, turns, existing)
 		if err != nil {
+			briefReason = harvestBriefFallback(err.Error())
 			s.finishOrRetryHarvest(ctx, job, extract.ProviderOpenRouter, err.Error())
 			return
 		}
 		if result.LLMError != "" {
+			briefReason = harvestBriefFallback(result.LLMError)
 			s.finishOrRetryHarvest(ctx, job, result.Provider, result.LLMError)
 			return
 		}
@@ -144,10 +152,12 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 	} else {
 		result, err := svc.ExtractLLMOnly(jobCtx, job.ProjectID, turns, existing)
 		if err != nil {
+			briefReason = harvestBriefFallback(err.Error())
 			s.finishOrRetryHarvest(ctx, job, extract.ProviderOpenRouter, err.Error())
 			return
 		}
 		if result.LLMError != "" {
+			briefReason = harvestBriefFallback(result.LLMError)
 			s.finishOrRetryHarvest(ctx, job, result.Provider, result.LLMError)
 			return
 		}
@@ -167,13 +177,34 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 	if s.Log != nil {
 		s.Log.Printf("harvest worker: done job=%s provider=%s memories=%d session=%s", job.ID, provider, saved, sessionID)
 	}
-	// Keep the project brief current (debounced; never fails the job).
-	s.maybeRefreshProjectBrief(ctx, job.ProjectID)
 }
 
+// harvestBriefFallback maps a failed job's LLM error to the brief fallback
+// reason recorded on a brief built without the LLM.
+func harvestBriefFallback(errMsg string) string {
+	m := strings.ToLower(errMsg)
+	switch {
+	case strings.Contains(m, " 429") || strings.Contains(m, "rate limit") || strings.Contains(m, "rate-limit"):
+		return extract.BriefFallbackRateLimited
+	case strings.Contains(m, "deadline exceeded") || strings.Contains(m, "timeout"):
+		return extract.BriefFallbackTimeout
+	}
+	return extract.BriefFallbackUpstream
+}
+
+// findMemoryByKey returns the active row with this exact key (without its
+// embedding: callers read or patch content, and edits re-embed).
 func (s *Server) findMemoryByKey(ctx context.Context, projectID, key string) *store.MemoryItem {
 	if s.Store == nil || key == "" {
 		return nil
+	}
+	ctx = store.WithoutEmbeddings(ctx)
+	if f, ok := s.Store.(memoryKeyFinder); ok {
+		it, err := f.FindMemoryByKey(ctx, projectID, key)
+		if err != nil {
+			return nil
+		}
+		return it
 	}
 	items, err := s.Store.SearchMemory(ctx, projectID, key, nil, 80)
 	if err != nil {

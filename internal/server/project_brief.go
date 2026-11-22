@@ -3,7 +3,12 @@ package server
 // project_brief.go — the per-project brief every agent gets (key
 // project/brief) and file-change staleness for memories.
 //
-// The harvest worker calls maybeRefreshProjectBrief after each finished job.
+// The harvest worker calls the brief hook after every job, failed or not:
+// under an OpenRouter rate limit no job finishes, and a hook that ran on
+// success only left busy projects without a brief. When the job's LLM call
+// failed the brief is built by the deterministic generator, and a later job
+// with a working LLM upgrades it (briefUpgradeAge). GET on a project without
+// a brief also schedules one in the background.
 // The brief is rebuilt when it is missing, when at least briefMinNew
 // memories were added since it was written, or when it is older than
 // briefMaxAge and something changed. briefDebounce stops a busy project from
@@ -38,6 +43,11 @@ const (
 	briefInputSummaries = 5
 	// briefCorpusChars bounds each row's text used for stack/topic detection.
 	briefCorpusChars = 600
+	// briefUpgradeAge: a deterministic brief written because the LLM failed
+	// is rebuilt by the next job whose LLM works, once it is this old.
+	briefUpgradeAge = time.Hour
+	// briefBackgroundTimeout bounds a brief build scheduled by GET.
+	briefBackgroundTimeout = 2 * time.Minute
 )
 
 // briefClockNow is the brief clock (tests may override Server.briefNow).
@@ -62,10 +72,25 @@ func (s *Server) briefCheckAllowed(projectID string, now time.Time) bool {
 	return true
 }
 
+// memoryKeyFinder is the exact-key lookup (MemStore and Postgres).
+type memoryKeyFinder interface {
+	FindMemoryByKey(ctx context.Context, projectID, key string) (*store.MemoryItem, error)
+}
+
 // loadProjectBrief finds the CONFIRMED brief row of projectID visible in ctx.
+// It runs on every MCP initialize and project_knowledge call, so it reads
+// by exact key without the embedding column.
 func loadProjectBrief(ctx context.Context, st store.Store, projectID string) *store.MemoryItem {
 	if st == nil || strings.TrimSpace(projectID) == "" {
 		return nil
+	}
+	ctx = store.WithoutEmbeddings(ctx)
+	if f, ok := st.(memoryKeyFinder); ok {
+		it, err := f.FindMemoryByKey(ctx, projectID, store.ProjectBriefKey)
+		if err != nil || it == nil || it.Status != store.StatusConfirmed {
+			return nil
+		}
+		return it
 	}
 	items, err := st.SearchMemory(ctx, projectID, store.ProjectBriefKey, nil, 50)
 	if err != nil {
@@ -130,7 +155,7 @@ func hasTag(m *store.MemoryItem, tag string) bool {
 // and shared rows are already left out; briefEligible re-checks level and
 // visibility so a viewer-scoped ctx could never leak them either.
 func (s *Server) briefCandidates(ctx context.Context, projectID string) ([]*store.MemoryItem, error) {
-	all, err := s.Store.SearchMemory(ctx, projectID, "", nil, briefScan)
+	all, err := s.Store.SearchMemory(store.WithoutEmbeddings(ctx), projectID, "", nil, briefScan)
 	if err != nil {
 		return nil, err
 	}
@@ -164,9 +189,26 @@ func briefDue(brief *store.MemoryItem, candidates []*store.MemoryItem, now time.
 	return changed && now.Sub(since) >= briefMaxAge
 }
 
-// maybeRefreshProjectBrief is the harvest worker hook. It never fails the
-// job: errors are logged and the next check retries.
+// briefUpgradeDue reports a deterministic brief written because the LLM
+// failed (not because no key is configured) that is old enough to retry.
+func briefUpgradeDue(brief *store.MemoryItem, now time.Time) bool {
+	if brief == nil {
+		return false
+	}
+	reason := briefTagValue(brief, briefFallbackTag)
+	return reason != "" && reason != extract.BriefFallbackNoKey && now.Sub(brief.UpdatedAt) >= briefUpgradeAge
+}
+
+// maybeRefreshProjectBrief is the brief hook with the LLM path enabled.
 func (s *Server) maybeRefreshProjectBrief(ctx context.Context, projectID string) {
+	s.maybeRefreshProjectBriefWith(ctx, projectID, "")
+}
+
+// maybeRefreshProjectBriefWith is the harvest worker hook. It never fails
+// the job: errors are logged and the next check retries. A non-empty
+// heuristicReason (the job's LLM call just failed) skips the LLM and builds
+// the deterministic brief tagged with that reason.
+func (s *Server) maybeRefreshProjectBriefWith(ctx context.Context, projectID, heuristicReason string) {
 	if s == nil || s.Store == nil || strings.TrimSpace(projectID) == "" {
 		return
 	}
@@ -179,12 +221,13 @@ func (s *Server) maybeRefreshProjectBrief(ctx context.Context, projectID string)
 		return
 	}
 	brief := loadProjectBrief(ctx, s.Store, projectID)
-	if !briefDue(brief, candidates, s.briefClockNow()) {
+	now := s.briefClockNow()
+	if !briefDue(brief, candidates, now) && (heuristicReason != "" || !briefUpgradeDue(brief, now)) {
 		return
 	}
 	bctx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	if _, err := s.rebuildProjectBrief(bctx, projectID, candidates, brief); err != nil {
+	if _, err := s.rebuildProjectBriefWith(bctx, projectID, candidates, brief, heuristicReason); err != nil {
 		s.logBrief("brief: rebuild project=%s: %v", projectID, err)
 	}
 }
@@ -327,6 +370,12 @@ func briefSources(m *store.MemoryItem) []string {
 // of the existing row (keeps one row and its history) or a new CONFIRMED
 // row. candidates nil means "list them now".
 func (s *Server) rebuildProjectBrief(ctx context.Context, projectID string, candidates []*store.MemoryItem, existing *store.MemoryItem) (*store.MemoryItem, error) {
+	return s.rebuildProjectBriefWith(ctx, projectID, candidates, existing, "")
+}
+
+// rebuildProjectBriefWith is rebuildProjectBrief; a non-empty
+// heuristicReason skips the LLM (see maybeRefreshProjectBriefWith).
+func (s *Server) rebuildProjectBriefWith(ctx context.Context, projectID string, candidates []*store.MemoryItem, existing *store.MemoryItem, heuristicReason string) (*store.MemoryItem, error) {
 	if candidates == nil {
 		var err error
 		candidates, err = s.briefCandidates(ctx, projectID)
@@ -339,7 +388,13 @@ func (s *Server) rebuildProjectBrief(ctx context.Context, projectID string, cand
 		return nil, errNoBriefInput
 	}
 	in := s.briefInput(ctx, projectID, candidates)
-	res := s.resolveExtractor().GenerateBrief(ctx, in)
+	var res extract.BriefResult
+	if heuristicReason != "" {
+		res = extract.DeterministicBrief(in)
+		res.FallbackReason = heuristicReason
+	} else {
+		res = s.resolveExtractor().GenerateBrief(ctx, in)
+	}
 	s.warnBriefFallback(projectID, res)
 	content := extract.ClampBrief(res.Content)
 	if err := store.ValidateMemoryContent(content); err != nil {
@@ -400,6 +455,9 @@ type projectBriefResponse struct {
 	// LLM brief was wanted (e.g. no_api_key, timeout, unparseable_reply).
 	Provider       string `json:"provider,omitempty"`
 	FallbackReason string `json:"fallback_reason,omitempty"`
+	// Building is true when the project has no brief yet and this request
+	// scheduled one in the background (poll again shortly).
+	Building bool `json:"building,omitempty"`
 }
 
 func briefResponse(m *store.MemoryItem) projectBriefResponse {
@@ -418,13 +476,41 @@ func briefResponse(m *store.MemoryItem) projectBriefResponse {
 }
 
 // handleProjectBriefGet returns the brief to project members. A project
-// without one yet answers 200 with empty content and null updated_at.
+// without one yet answers 200 with empty content and null updated_at, and
+// schedules a build in the background (debounced per project) so projects
+// whose harvest jobs never succeed still get a brief.
 func (s *Server) handleProjectBriefGet(w http.ResponseWriter, r *http.Request) {
 	projectID := strings.TrimSpace(r.PathValue("id"))
 	if !s.authorizeProject(w, r, projectID) {
 		return
 	}
-	writeJSON(w, http.StatusOK, briefResponse(loadProjectBrief(r.Context(), s.Store, projectID)))
+	brief := loadProjectBrief(r.Context(), s.Store, projectID)
+	resp := briefResponse(brief)
+	if brief == nil {
+		resp.Building = s.scheduleProjectBrief(projectID)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// scheduleProjectBrief starts a background brief check for a project
+// without one. It reads without a viewer (project-visible rows only), like
+// the harvest worker, and reports whether a check was started (false while
+// the per-project debounce holds).
+func (s *Server) scheduleProjectBrief(projectID string) bool {
+	s.briefMu.Lock()
+	last, seen := s.briefChecked[projectID]
+	s.briefMu.Unlock()
+	if seen && s.briefClockNow().Sub(last) < briefDebounce {
+		return false
+	}
+	s.briefWG.Add(1)
+	go func() {
+		defer s.briefWG.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), briefBackgroundTimeout)
+		defer cancel()
+		s.maybeRefreshProjectBrief(ctx, projectID)
+	}()
+	return true
 }
 
 // authorizeProjectAdmin admits project OWNER/ADMIN and org owners/admins.

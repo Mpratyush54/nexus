@@ -3,9 +3,9 @@ package server
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"io"
-	"net/http"
 	"strconv"
 	"strings"
 
@@ -25,7 +25,7 @@ const (
 
 // legacySnapshotTurns loads and parses the latest snapshot transcript for a
 // legacy session. It returns nil when no snapshot or transcript exists.
-func (s *Server) legacySnapshotTurns(r *http.Request, row *store.AgentSession) []store.SessionTurn {
+func (s *Server) legacySnapshotTurns(ctx context.Context, row *store.AgentSession) []store.SessionTurn {
 	ps := provenanceStore(s.Store)
 	if ps == nil || row == nil {
 		return nil
@@ -38,13 +38,13 @@ func (s *Server) legacySnapshotTurns(r *http.Request, row *store.AgentSession) [
 		var payload []byte
 		if lts != nil {
 			// The transcript column only, not the diff and artifact bundle.
-			got, err := lts.LatestSnapshotTranscripts(r.Context(), []string{id})
+			got, err := lts.LatestSnapshotTranscripts(ctx, []string{id})
 			if err != nil {
 				continue
 			}
 			payload = got[id]
 		} else {
-			snap, err := ps.GetLatestSnapshot(r.Context(), id)
+			snap, err := ps.GetLatestSnapshot(ctx, id)
 			if err != nil || snap == nil {
 				continue
 			}

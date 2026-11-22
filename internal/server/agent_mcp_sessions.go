@@ -34,6 +34,11 @@ func (a agentMCPStore) GetSessionSummary(ctx context.Context, sessionID string) 
 	if err != nil {
 		return "", err
 	}
+	if a.Embeds != nil {
+		// Same fallbacks as GET /v1/agent-sessions/{id}/summary: the
+		// harvest summary memory, else first request + latest reply.
+		return a.Embeds.sessionSummaryText(ctx, row), nil
+	}
 	return row.Summary, nil
 }
 
@@ -89,7 +94,9 @@ func (a agentMCPStore) ProjectKnowledge(ctx context.Context, projectID string, l
 	if limit <= 0 {
 		limit = 20
 	}
-	found, err := a.Store.SearchMemory(store.WithViewer(ctx, a.UserID), projectID, "", nil, 200)
+	// Content only: skipping the vector column keeps this 200-row read
+	// small (it was the 3.7 s cold project_knowledge call).
+	found, err := a.Store.SearchMemory(store.WithoutEmbeddings(store.WithViewer(ctx, a.UserID)), projectID, "", nil, 200)
 	if err != nil {
 		return nil, err
 	}

@@ -349,7 +349,7 @@ func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, 
 		fetch = 100000
 	}
 	rows, err := s.pool.Query(ctx,
-		`SELECT `+memoryColumns+` FROM memory_items
+		`SELECT `+memorySelectColumns(ctx)+` FROM memory_items
 		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
 		    AND status IN ('CONFIRMED','PROPOSED')
 		    AND superseded_by IS NULL
