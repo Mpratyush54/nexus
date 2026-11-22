@@ -13,6 +13,7 @@ package server
 import (
 	"context"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,6 +41,16 @@ func recordMemoryUse(ctx context.Context, st store.Store, items []*store.MemoryI
 		}
 		_ = ru.RecordMemoryUse(ctx, it.ID)
 	}
+}
+
+// searchRecordsUse parses GET /memory/search's record_use flag. Only agent
+// retrieval opts in; a human browsing the Memory page does not count as use.
+func searchRecordsUse(raw string) bool {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes":
+		return true
+	}
+	return false
 }
 
 // StartLifecycleSweeper runs store.SweepLifecycle on a ticker until ctx ends

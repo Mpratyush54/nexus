@@ -37,6 +37,7 @@ func (s *Server) extractExistingHints(r *http.Request, projectID string) []extra
 			continue
 		}
 		out = append(out, extract.Existing{
+			Key:     it.Key,
 			Level:   it.Level,
 			Scope:   it.Scope,
 			Content: it.Content,

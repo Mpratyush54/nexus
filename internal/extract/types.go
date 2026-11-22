@@ -1,6 +1,8 @@
 package extract
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"strings"
 	"sync"
@@ -16,8 +18,10 @@ type Turn struct {
 	SessionID string `json:"session_id,omitempty"`
 }
 
-// Existing is a known memory used for prompt dedup hints.
+// Existing is a known memory used for prompt dedup hints. Key is shown in
+// the prompt so the LLM can name it in supersedes_key.
 type Existing struct {
+	Key     string `json:"key,omitempty"`
 	Level   string `json:"level,omitempty"`
 	Scope   string `json:"scope,omitempty"`
 	Content string `json:"content"`
@@ -189,22 +193,34 @@ func SessionIDFromTurns(turns []Turn) string {
 	return ""
 }
 
-// KeyFromContent derives a short key from content (mirrors daemon heuristic).
+// KeyFromContent derives a key for a memory whose writer (caller or LLM)
+// supplied none. The readable slug is the first four words of 3+ letters
+// ("deploy/with-migrations-applied"); a short content hash is appended
+// ("…-3fa9c1") because same-key writes supersede each other, and two
+// unrelated memories that merely start with the same words must not. The
+// hash is over normalised content (lower-case words), so re-extracting the
+// same sentence yields the same key and still dedupes. Only call this for
+// auto-generated keys: a key the caller or LLM chose is kept as given.
 func KeyFromContent(text string) string {
+	toks := tokenize(text)
 	var words []string
-	for _, t := range tokenize(text) {
+	for _, t := range toks {
 		if len(t) < 3 || len(words) >= 4 {
 			continue
 		}
 		words = append(words, t)
 	}
-	if len(words) == 0 {
-		return "misc/note"
+	var slug string
+	switch len(words) {
+	case 0:
+		slug = "misc/note"
+	case 1:
+		slug = "misc/" + words[0]
+	default:
+		slug = words[0] + "/" + strings.Join(words[1:], "-")
 	}
-	if len(words) == 1 {
-		return "misc/" + words[0]
-	}
-	return words[0] + "/" + strings.Join(words[1:], "-")
+	sum := sha256.Sum256([]byte(strings.Join(toks, " ")))
+	return slug + "-" + hex.EncodeToString(sum[:])[:6]
 }
 
 func tokenize(text string) []string {

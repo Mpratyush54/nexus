@@ -276,7 +276,7 @@ func (s *Server) harvestExisting(ctx context.Context, projectID string) []extrac
 		if it == nil {
 			continue
 		}
-		out = append(out, extract.Existing{Level: it.Level, Scope: it.Scope, Content: it.Content})
+		out = append(out, extract.Existing{Key: it.Key, Level: it.Level, Scope: it.Scope, Content: it.Content})
 	}
 	return out
 }

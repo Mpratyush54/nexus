@@ -93,6 +93,9 @@ func (h *HTTPStore) SearchMemory(ctx context.Context, projectID, query string, t
 	if len(tags) > 0 {
 		q.Set("tags", strings.Join(tags, ","))
 	}
+	// Agent retrieval counts as use (decay clock, plan §1.7); the server only
+	// records it when asked, so human browsing of the same route does not.
+	q.Set("record_use", "1")
 	data, _, err := h.do(ctx, http.MethodGet, "/memory/search", q, nil)
 	if err != nil {
 		return nil, err

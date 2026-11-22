@@ -45,19 +45,11 @@ func BuildPrompt(project string, existing []Existing, turns []Turn) string {
 	sb.WriteString("If unsure between session and project, choose project.\n")
 	sb.WriteString("If unsure between fact and decision, choose decision when the chat records an agreement.\n\n")
 	sb.WriteString("Respond with JSON only: {\"memories\":[{\"key\":\"category/slug\",\"content\":\"standalone sentence\",\"level\":\"project\",\"scope\":\"decision\",\"category\":\"architecture\",\"files_affected\":[\"path/to/file\"],\"tools_used\":[\"git\"],\"supersedes_key\":\"\",\"outcome\":\"active\",\"confidence\":0.0-1.0,\"explicit\":true|false}]}\n\n")
-	sb.WriteString("Existing confirmed memories (do not duplicate; use supersedes_key if updating):\n")
+	sb.WriteString("Existing confirmed memories (do not duplicate; to update one, set supersedes_key to its key):\n")
 	if len(existing) == 0 {
 		sb.WriteString("(none)\n")
 	}
-	for _, m := range existing {
-		sb.WriteString("- [")
-		sb.WriteString(m.Level)
-		sb.WriteString("/")
-		sb.WriteString(m.Scope)
-		sb.WriteString("] ")
-		sb.WriteString(m.Content)
-		sb.WriteString("\n")
-	}
+	writeExisting(&sb, existing)
 	sb.WriteString("\nNew turns:\n")
 	for _, t := range CapTurns(turns) {
 		sb.WriteString("- ")
@@ -71,6 +63,25 @@ func BuildPrompt(project string, existing []Existing, turns []Turn) string {
 		sb.WriteString("\n")
 	}
 	return sb.String()
+}
+
+// writeExisting renders the known-memory list. Each line carries the row's
+// key so the model can name it in supersedes_key (it cannot guess keys).
+func writeExisting(sb *strings.Builder, existing []Existing) {
+	for _, m := range existing {
+		sb.WriteString("- [")
+		sb.WriteString(m.Level)
+		sb.WriteString("/")
+		sb.WriteString(m.Scope)
+		sb.WriteString("] ")
+		if key := strings.TrimSpace(m.Key); key != "" {
+			sb.WriteString("key=")
+			sb.WriteString(key)
+			sb.WriteString(": ")
+		}
+		sb.WriteString(m.Content)
+		sb.WriteString("\n")
+	}
 }
 
 // BuildCompressPrompt asks for one rich session episode_summary plus sharp decisions.
@@ -100,19 +111,11 @@ func BuildCompressPrompt(project, sessionID string, existing []Existing, turns [
 	sb.WriteString("Never invent work that is not in the turns. Never drop concrete nouns.\n\n")
 	sb.WriteString("Respond with JSON only:\n")
 	sb.WriteString(`{"session_summary":"structured prose under 1800 chars","decisions":[{"key":"category/slug","content":"standalone sentence","level":"project","scope":"decision","category":"architecture","files_affected":["file.go"],"tools_used":["git"],"supersedes_key":"","outcome":"active","confidence":0.0-1.0,"explicit":true}]}`)
-	sb.WriteString("\n\nExisting memories (do not duplicate decisions):\n")
+	sb.WriteString("\n\nExisting memories (do not duplicate decisions; to update one, set supersedes_key to its key):\n")
 	if len(existing) == 0 {
 		sb.WriteString("(none)\n")
 	}
-	for _, m := range existing {
-		sb.WriteString("- [")
-		sb.WriteString(m.Level)
-		sb.WriteString("/")
-		sb.WriteString(m.Scope)
-		sb.WriteString("] ")
-		sb.WriteString(m.Content)
-		sb.WriteString("\n")
-	}
+	writeExisting(&sb, existing)
 	sb.WriteString("\nSession turns:\n")
 	for _, t := range CapCompressTurns(turns) {
 		sb.WriteString("- ")

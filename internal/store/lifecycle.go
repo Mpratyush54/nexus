@@ -205,7 +205,8 @@ func (s *MemStore) CountEventsByRetentionTier(_ context.Context, now time.Time) 
 // ---- memory use tracking (issue #119: the missing writer) ----
 
 // RecordMemoryUse bumps use_count and stamps last_used_at for one memory so
-// the decay clock resets on serve/search hits. Unknown id -> ErrNotFound.
+// the decay clock resets on agent retrieval. UpdatedAt is left alone (it
+// tracks content changes). Unknown id -> ErrNotFound.
 func (s *MemStore) RecordMemoryUse(ctx context.Context, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -218,11 +219,13 @@ func (s *MemStore) RecordMemoryUse(ctx context.Context, id string) error {
 	return nil
 }
 
-// RecordMemoryUse is the Postgres writer for serve/search hits.
+// RecordMemoryUse is the Postgres writer for agent retrieval hits. It
+// touches use_count and last_used_at only: updated_at means "content last
+// changed" (the Memory page shows it), so being read must not move it.
 func (s *PostgresStore) RecordMemoryUse(ctx context.Context, id string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE memory_items SET use_count = use_count + 1,
-			last_used_at = now(), updated_at = now()
+			last_used_at = now()
 		  WHERE id = $1::uuid`, id)
 	if err != nil {
 		return err

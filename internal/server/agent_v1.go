@@ -117,6 +117,8 @@ func (s *Server) handleAgentMemorySearch(w http.ResponseWriter, r *http.Request)
 		}
 		items = filtered
 	}
+	// Agent retrieval counts as use (decay clock, plan §1.7).
+	recordMemoryUse(r.Context(), s.Store, items)
 	out := make([]map[string]any, 0, len(items))
 	for _, it := range items {
 		if it == nil {
@@ -385,25 +387,77 @@ func firstNonEmpty(vals ...string) string {
 }
 
 // agentMCPStore adapts store.Store to mcp.Store for cloud MCP JSON-RPC.
+// Reads run as UserID (store.WithViewer), so an agent sees exactly what its
+// user may see: project rows plus that user's own private (personal) rows.
 type agentMCPStore struct {
 	Store  store.Store
 	UserID string
 }
 
+func (a agentMCPStore) viewerCtx(ctx context.Context) context.Context {
+	return store.WithViewer(ctx, a.UserID)
+}
+
 func (a agentMCPStore) SearchMemory(ctx context.Context, projectID, query string, tags []string, limit int) ([]*mcp.MemoryItem, error) {
-	items, err := a.Store.SearchMemory(ctx, projectID, query, tags, limit)
+	items, err := a.Store.SearchMemory(a.viewerCtx(ctx), projectID, query, tags, limit)
 	if err != nil {
 		return nil, err
 	}
+	return storeToMCPMemories(items), nil
+}
+
+// SearchMemoryVector gives cloud agents the semantic path mcp.handleMemorySearch
+// prefers. Stores without vector search report no rows, so the handler falls
+// back to keyword search; so does a search where no row reaches
+// store.MinVectorSimilarity.
+func (a agentMCPStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*mcp.MemoryItem, error) {
+	vs, ok := a.Store.(interface {
+		SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
+	})
+	if !ok {
+		return nil, nil
+	}
+	items, err := vs.SearchMemoryVector(a.viewerCtx(ctx), projectID, queryVec, limit)
+	if err != nil {
+		return nil, err
+	}
+	return storeToMCPMemories(items), nil
+}
+
+// RecordMemoryUse lets mcp.handleMemorySearch reset the decay clock on rows
+// it serves to a cloud agent. Stores without use tracking skip it.
+func (a agentMCPStore) RecordMemoryUse(ctx context.Context, id string) error {
+	ru, ok := a.Store.(interface {
+		RecordMemoryUse(context.Context, string) error
+	})
+	if !ok {
+		return nil
+	}
+	return ru.RecordMemoryUse(ctx, id)
+}
+
+func storeToMCPMemories(items []*store.MemoryItem) []*mcp.MemoryItem {
 	out := make([]*mcp.MemoryItem, 0, len(items))
 	for _, item := range items {
+		if item == nil {
+			continue
+		}
 		out = append(out, storeToMCPMemory(item))
 	}
-	return out, nil
+	return out
 }
 
 func (a agentMCPStore) CreateMemoryItem(ctx context.Context, item *mcp.MemoryItem) error {
 	row := mcpToStoreMemory(item)
+	// Attribution is server-derived, as on POST /memory: the authenticated
+	// user wrote it, and a personal row belongs to that user (so it is
+	// private to them, not to whatever user_id the agent passed).
+	if a.UserID != "" {
+		row.ProposedBy = a.UserID
+		if strings.EqualFold(strings.TrimSpace(row.Level), store.LevelPersonal) {
+			row.UserID = a.UserID
+		}
+	}
 	if err := a.Store.CreateMemoryItem(ctx, row); err != nil {
 		return err
 	}
