@@ -103,6 +103,8 @@ type TimelineQuery struct {
 	Query     string
 	Cursor    string
 	Limit     int
+	// HideEmpty drops sessions with no turns (turn_count 0).
+	HideEmpty bool
 }
 
 // SessionGrantOpts is a live or point-in-time share (D15).
@@ -852,6 +854,13 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 			item.TurnCount = best.TurnCount
 			item.VersionState = best.State
 		}
+		// Mirrored chats have turns but often no version: count the turns.
+		if n := len(m.sessionTurns[row.ID]); n > item.TurnCount {
+			item.TurnCount = n
+		}
+		if q.HideEmpty && item.TurnCount == 0 {
+			continue
+		}
 		items = append(items, item)
 	}
 	// Newest first, then id descending so the cursor is stable.
@@ -1491,11 +1500,15 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		           AND NULLIF(BTRIM(t.text_preview), '') IS NOT NULL
 		         ORDER BY t.idx LIMIT 1
 		       ), ''), s.visibility, COALESCE(s.owner_user_id::text,''), s.last_active_at,
-		       COALESCE((
+		       GREATEST(COALESCE((
 		         SELECT v.turn_count FROM session_versions v
 		         WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only')
 		         ORDER BY v.version DESC LIMIT 1
-		       ), 0),
+		       ), 0), (
+		         -- Mirrored chats have turns but often no version. Index-only
+		         -- count on the (session_id, idx) primary key, output rows only.
+		         SELECT COUNT(*) FROM session_turns t WHERE t.session_id = s.id
+		       )::int),
 		       COALESCE((
 		         SELECT v.state FROM session_versions v
 		         WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only')
@@ -1527,9 +1540,13 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		AND ($3 = '' OR s.harness = $3)
 		AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0 OR STRPOS(LOWER(s.summary), LOWER($7)) > 0 OR STRPOS(LOWER(s.native_id), LOWER($7)) > 0 OR hit.idx IS NOT NULL)
 		AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
+		AND (NOT $8::bool
+		  OR EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = s.id)
+		  OR EXISTS (SELECT 1 FROM session_versions v
+		             WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only') AND v.turn_count > 0))
 		ORDER BY s.last_active_at DESC, s.id DESC
 		LIMIT $6`,
-		q.UserID, q.ProjectID, q.Harness, cursorAt, cursorID, q.Limit+1, q.Query)
+		q.UserID, q.ProjectID, q.Harness, cursorAt, cursorID, q.Limit+1, q.Query, q.HideEmpty)
 	if err != nil {
 		return nil, "", err
 	}

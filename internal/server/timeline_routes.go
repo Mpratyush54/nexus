@@ -618,9 +618,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	cursor := r.URL.Query().Get("cursor")
 	harness := strings.TrimSpace(r.URL.Query().Get("harness"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	// hide_empty=1 drops chats with no turns (captured but never written to).
+	hideEmpty := queryFlag(r.URL.Query().Get("hide_empty"))
 	items, modernNext, err := cs.ListTimeline(r.Context(), store.TimelineQuery{
 		UserID: authSubject(r), ProjectID: projectID,
 		Harness: harness, Query: query, Cursor: cursor, Limit: limit,
+		HideEmpty: hideEmpty,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -665,6 +668,9 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		if seen[item.SessionID] || (item.NativeID != "" && seen[item.Harness+"\x00"+item.NativeID]) {
 			continue
 		}
+		if hideEmpty && item.TurnCount == 0 {
+			continue
+		}
 		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -683,6 +689,15 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		next = last.LastActiveAt.UTC().Format(time.RFC3339Nano) + "|" + last.SessionID
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
+}
+
+// queryFlag reads a boolean query parameter ("1", "true", "yes").
+func queryFlag(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // nativeSessionKeyLister reports the harness/native-id keys of the agent
