@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -401,8 +403,9 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 			}
 		}
 	}
+	match := "vector"
 	if !usedVector {
-		items, err = s.store.SearchMemory(ctx, projectID, a.Query, a.Tags, limit)
+		items, match, err = s.keywordSearch(ctx, projectID, a.Query, a.Tags, limit)
 		if err != nil {
 			return nil, &RPCError{Code: ErrInternal, Message: "search failed: " + err.Error()}
 		}
@@ -432,8 +435,95 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 		"token_count":      tokens,
 		"budget_remaining": remaining,
 		"items_included":   countXMLItems(contextXML),
+		"match":            match,
 		"reflection_hint":  ReflectionHint,
 	}, nil
+}
+
+// keywordSearch makes store substring search work for how agents actually
+// ask: in sentences ("what is this project about"). The whole query is tried
+// first; then its distinctive words, ranked by how many each memory matches;
+// and when nothing matches, the project's most trusted memories, so an agent
+// asking for an overview never gets an empty block from a non-empty project.
+func (s *Server) keywordSearch(ctx context.Context, projectID, query string, tags []string, limit int) ([]*MemoryItem, string, error) {
+	items, err := s.store.SearchMemory(ctx, projectID, query, tags, limit)
+	if err != nil || len(items) > 0 {
+		return items, "phrase", err
+	}
+	terms := searchTerms(query)
+	if len(terms) > 1 || (len(terms) == 1 && !strings.EqualFold(terms[0], strings.TrimSpace(query))) {
+		hits := map[string]int{}
+		byID := map[string]*MemoryItem{}
+		var order []string
+		for _, term := range terms {
+			found, terr := s.store.SearchMemory(ctx, projectID, term, tags, limit)
+			if terr != nil {
+				return nil, "", terr
+			}
+			for _, it := range found {
+				key := it.ID
+				if key == "" {
+					key = it.Key + "\x00" + it.Content
+				}
+				if _, seen := byID[key]; !seen {
+					byID[key] = it
+					order = append(order, key)
+				}
+				hits[key]++
+			}
+		}
+		if len(order) > 0 {
+			sort.SliceStable(order, func(i, j int) bool { return hits[order[i]] > hits[order[j]] })
+			if len(order) > limit {
+				order = order[:limit]
+			}
+			out := make([]*MemoryItem, 0, len(order))
+			for _, key := range order {
+				out = append(out, byID[key])
+			}
+			return out, "terms", nil
+		}
+	}
+	top := limit
+	if top > 10 {
+		top = 10
+	}
+	items, err = s.store.SearchMemory(ctx, projectID, "", tags, top)
+	return items, "top", err
+}
+
+// searchStopWords are words that say nothing about which memory is wanted.
+var searchStopWords = map[string]bool{
+	"the": true, "and": true, "for": true, "are": true, "was": true, "were": true, "with": true,
+	"this": true, "that": true, "these": true, "those": true, "what": true, "which": true, "who": true,
+	"how": true, "why": true, "when": true, "where": true, "about": true, "from": true, "into": true,
+	"does": true, "did": true, "have": true, "has": true, "had": true, "can": true, "could": true,
+	"should": true, "would": true, "will": true, "you": true, "your": true, "our": true, "its": true,
+	"there": true, "their": true, "them": true, "they": true, "any": true, "all": true, "some": true,
+	"project": true, "use": true, "used": true, "using": true, "tell": true, "know": true, "look": true,
+	"find": true, "get": true, "please": true, "info": true, "information": true, "details": true,
+	"memory": true, "memories": true, "stored": true, "saved": true, "not": true, "but": true,
+}
+
+// searchTerms returns up to eight distinctive words of a query, longest first.
+func searchTerms(query string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, w := range strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.')
+	}) {
+		w = strings.Trim(w, "-_.")
+		if len([]rune(w)) < 3 || searchStopWords[w] || seen[w] {
+			continue
+		}
+		seen[w] = true
+		out = append(out, w)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
+	if len(out) > 8 {
+		out = out[:8]
+	}
+	return out
 }
 
 // recordUse bumps use_count/last_used_at on served rows so the confidence
