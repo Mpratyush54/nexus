@@ -1569,20 +1569,26 @@ var _ AgentCloudStore = (*MemStore)(nil)
 var _ AgentCloudStore = (*PostgresStore)(nil)
 
 // NativeSessionKeys returns "harness\x00native_id" for every agent session in
-// the given projects. The timeline uses it to drop old snapshots of
-// conversations that are now captured as sessions, whatever page those
-// sessions fall on.
-func (m *MemStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (map[string]bool, error) {
+// the given projects that viewerID can read. The timeline uses it to drop old
+// snapshots of conversations that are now captured as sessions, whatever page
+// those sessions fall on. Only readable sessions count: a snapshot shared with
+// someone who cannot open the modern copy must stay on their timeline, or the
+// chat disappears for them. The readability rule matches ListTimeline.
+func (m *MemStore) NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error) {
 	_ = ctx
+	viewerID = strings.TrimSpace(viewerID)
+	out := map[string]bool{}
+	if viewerID == "" {
+		return out, nil
+	}
 	want := map[string]bool{}
 	for _, id := range projectIDs {
 		want[id] = true
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	out := map[string]bool{}
 	for _, sess := range m.agentSessions {
-		if want[sess.ProjectID] {
+		if sess != nil && want[sess.ProjectID] && m.agentVisibleLocked(viewerID, sess) {
 			out[sess.Harness+"\x00"+sess.NativeID] = true
 		}
 	}
@@ -1590,18 +1596,35 @@ func (m *MemStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (
 }
 
 // NativeSessionKeys: see MemStore.NativeSessionKeys.
-func (s *PostgresStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (map[string]bool, error) {
+func (s *PostgresStore) NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if !looksLikeUUID(viewerID) {
+		return out, nil
+	}
 	ids := make([]string, 0, len(projectIDs))
 	for _, id := range projectIDs {
 		if looksLikeUUID(id) {
 			ids = append(ids, id)
 		}
 	}
-	out := map[string]bool{}
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := s.pool.Query(ctx, `SELECT harness, native_id FROM agent_sessions WHERE project_id = ANY($1::uuid[])`, ids)
+	rows, err := s.pool.Query(ctx, `
+		SELECT s.harness, s.native_id FROM agent_sessions s
+		WHERE s.project_id = ANY($1::uuid[]) AND (
+		  s.owner_user_id = $2::uuid
+		  OR EXISTS (
+		    SELECT 1 FROM session_grants g
+		    WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $2::uuid
+		  )
+		  OR (
+		    s.visibility = 'team' AND (
+		      EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $2::uuid)
+		      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $2::uuid)
+		    )
+		  )
+		)`, ids, viewerID)
 	if err != nil {
 		return nil, err
 	}
