@@ -222,8 +222,6 @@ func (m *MemStore) UpsertAgentSession(ctx context.Context, in *AgentSession) (*A
 		if cur.OwnerUserID != in.OwnerUserID {
 			return nil, fmt.Errorf("store: session owned by someone else: %w", ErrConflict)
 		}
-		now := time.Now().UTC()
-		cur.LastActiveAt = now
 		if strings.TrimSpace(in.Title) != "" {
 			cur.Title = strings.TrimSpace(in.Title)
 		}
@@ -533,7 +531,13 @@ func (m *MemStore) AppendSessionTurn(ctx context.Context, turn SessionTurn) erro
 		}
 	}
 	m.sessionTurns[turn.SessionID] = append(turns, turn)
-	row.LastActiveAt = turn.At
+	activity := turn.At
+	if turn.SourceAt != nil && !turn.SourceAt.IsZero() {
+		activity = *turn.SourceAt
+	}
+	if len(turns) == 0 || activity.After(row.LastActiveAt) {
+		row.LastActiveAt = activity
+	}
 	return nil
 }
 
@@ -927,8 +931,7 @@ func (s *PostgresStore) UpsertAgentSession(ctx context.Context, in *AgentSession
 			$1::uuid, $2::uuid, $3, $4, $5, NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,'')
 		)
 		ON CONFLICT (project_id, harness, native_id, origin_machine_id) DO UPDATE
-		SET last_active_at = now(),
-		    title = COALESCE(NULLIF(EXCLUDED.title, ''), agent_sessions.title),
+		SET title = COALESCE(NULLIF(EXCLUDED.title, ''), agent_sessions.title),
 		    summary = COALESCE(NULLIF(EXCLUDED.summary, ''), agent_sessions.summary)
 		WHERE agent_sessions.owner_user_id = EXCLUDED.owner_user_id
 		RETURNING id::text, project_id::text, COALESCE(owner_user_id::text,''), harness, native_id,
@@ -1246,7 +1249,17 @@ func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn)
 	if tag.RowsAffected() == 0 {
 		return ErrConflict
 	}
-	_, _ = s.pool.Exec(ctx, `UPDATE agent_sessions SET last_active_at = $2 WHERE id = $1::uuid`, turn.SessionID, turn.At)
+	// Activity is when the message was written (source time), not when it
+	// was uploaded. The first turn replaces the insert-time default; later
+	// turns only move it forward, so out-of-order imports cannot rewind it.
+	activity := turn.At
+	if turn.SourceAt != nil && !turn.SourceAt.IsZero() {
+		activity = *turn.SourceAt
+	}
+	_, _ = s.pool.Exec(ctx, `UPDATE agent_sessions
+		SET last_active_at = CASE WHEN last_active_at = started_at THEN $2
+		                          ELSE GREATEST(last_active_at, $2) END
+		WHERE id = $1::uuid`, turn.SessionID, activity)
 	return nil
 }
 
@@ -1554,3 +1567,51 @@ func TimelineMatchPreview(text, query string) string {
 
 var _ AgentCloudStore = (*MemStore)(nil)
 var _ AgentCloudStore = (*PostgresStore)(nil)
+
+// NativeSessionKeys returns "harness\x00native_id" for every agent session in
+// the given projects. The timeline uses it to drop old snapshots of
+// conversations that are now captured as sessions, whatever page those
+// sessions fall on.
+func (m *MemStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (map[string]bool, error) {
+	_ = ctx
+	want := map[string]bool{}
+	for _, id := range projectIDs {
+		want[id] = true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := map[string]bool{}
+	for _, sess := range m.agentSessions {
+		if want[sess.ProjectID] {
+			out[sess.Harness+"\x00"+sess.NativeID] = true
+		}
+	}
+	return out, nil
+}
+
+// NativeSessionKeys: see MemStore.NativeSessionKeys.
+func (s *PostgresStore) NativeSessionKeys(ctx context.Context, projectIDs []string) (map[string]bool, error) {
+	ids := make([]string, 0, len(projectIDs))
+	for _, id := range projectIDs {
+		if looksLikeUUID(id) {
+			ids = append(ids, id)
+		}
+	}
+	out := map[string]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `SELECT harness, native_id FROM agent_sessions WHERE project_id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var harness, native string
+		if err := rows.Scan(&harness, &native); err != nil {
+			return nil, err
+		}
+		out[harness+"\x00"+native] = true
+	}
+	return out, rows.Err()
+}

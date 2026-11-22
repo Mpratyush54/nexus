@@ -633,14 +633,39 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not list captured snapshots")
 		return
 	}
-	seen := make(map[string]bool, len(items))
+	// A conversation captured both ways (an old snapshot and a modern
+	// session) is one chat: the snapshot's id is the native id, so match on
+	// harness + native id too, and keep the modern session.
+	seen := make(map[string]bool, len(items)*2)
 	for _, item := range items {
 		seen[item.SessionID] = true
+		if item.NativeID != "" {
+			seen[item.Harness+"\x00"+item.NativeID] = true
+		}
+	}
+	// The modern copy may be on another page; ask the store directly.
+	if lister, ok := s.Store.(interface {
+		NativeSessionKeys(context.Context, []string) (map[string]bool, error)
+	}); ok && len(legacy) > 0 {
+		projectSet := map[string]bool{}
+		for _, item := range legacy {
+			projectSet[item.ProjectID] = true
+		}
+		projectIDs := make([]string, 0, len(projectSet))
+		for id := range projectSet {
+			projectIDs = append(projectIDs, id)
+		}
+		if keys, kerr := lister.NativeSessionKeys(r.Context(), projectIDs); kerr == nil {
+			for key := range keys {
+				seen[key] = true
+			}
+		}
 	}
 	for _, item := range legacy {
-		if !seen[item.SessionID] {
-			items = append(items, item)
+		if seen[item.SessionID] || (item.NativeID != "" && seen[item.Harness+"\x00"+item.NativeID]) {
+			continue
 		}
+		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].LastActiveAt.Equal(items[j].LastActiveAt) {
