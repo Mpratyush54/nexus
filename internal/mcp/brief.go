@@ -25,7 +25,8 @@ type FileMemorySearcher interface {
 // InstructionsIntro opens the MCP initialize instructions.
 const InstructionsIntro = "Nexus shared memory is available for this project. " +
 	"Call memory_search before changing unfamiliar code (pass file=<path> for memories about a file; " +
-	"related_to and file_history list the decisions and chats linked to a file), " +
+	"related_to and file_history list the decisions and chats linked to a file; " +
+	"why {file, line} tells which chat changed a line and the decision behind it), " +
 	"project_knowledge for an overview, and memory_write to record decisions. " +
 	"Items carry date and source (session:<id>, fetch it with session_summary_get); " +
 	"items marked stale=\"true\" refer to files changed since: verify before relying on them."

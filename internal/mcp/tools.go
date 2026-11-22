@@ -232,6 +232,25 @@ func ListTools() []Tool {
 			}),
 		},
 		{
+			Name:        "why",
+			Description: "Why is this line the way it is: the most recent agent edits covering one line of a file, newest first. Each has the chat (title, agent, date), the before/after snippet, and the decisions/memories from that chat. approximate=true when line numbers may have shifted. Call before changing code you did not write.",
+			InputSchema: schema([]string{"file", "line"}, map[string]any{
+				"file":  map[string]any{"type": "string", "description": "File path, repo-relative or a path suffix."},
+				"line":  map[string]any{"type": "integer", "description": "1-based line number in the file as it is now."},
+				"limit": num, "project_id": str,
+			}),
+		},
+		{
+			Name:        "line_history",
+			Description: "Every captured agent edit in a line range of a file (or the whole file), newest first, with chat, snippets and decisions like why.",
+			InputSchema: schema([]string{"file"}, map[string]any{
+				"file":       map[string]any{"type": "string", "description": "File path, repo-relative or a path suffix."},
+				"start_line": map[string]any{"type": "integer", "description": "Optional first line (1-based)."},
+				"end_line":   map[string]any{"type": "integer", "description": "Optional last line (inclusive)."},
+				"limit":      num, "project_id": str,
+			}),
+		},
+		{
 			Name:        "project_knowledge",
 			Description: "Project brief plus the top project and organization memories for bootstrap. Personal and session rows are omitted. The brief comes first, then pinned items.",
 			InputSchema: schema(nil, map[string]any{
@@ -285,6 +304,10 @@ func (s *Server) CallTool(ctx context.Context, name string, rawArgs json.RawMess
 		result, rpcErr = s.handleRelatedTo(ctx, rawArgs)
 	case "file_history":
 		result, rpcErr = s.handleFileHistory(ctx, rawArgs)
+	case "why":
+		result, rpcErr = s.handleWhy(ctx, rawArgs)
+	case "line_history":
+		result, rpcErr = s.handleLineHistory(ctx, rawArgs)
 	default:
 		return nil, &RPCError{Code: ErrMethodNotFound, Message: "unknown tool: " + name}
 	}
