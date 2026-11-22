@@ -277,8 +277,8 @@ func TestHandleToolsList(t *testing.T) {
 	r := callRaw(t, s, "tools/list", nil)
 	m := resultMap(t, r)
 	tools, _ := m["tools"].([]Tool)
-	if len(tools) != 11 {
-		t.Fatalf("got %d tools, want 11", len(tools))
+	if len(tools) != 13 {
+		t.Fatalf("got %d tools, want 13", len(tools))
 	}
 	names := map[string]bool{}
 	for _, tl := range tools {
@@ -292,6 +292,7 @@ func TestHandleToolsList(t *testing.T) {
 		"episode_search", "episode_report", "workspace_info",
 		"file_read", "file_write",
 		"session_summary_get", "session_fetch", "project_knowledge",
+		"related_to", "file_history",
 	} {
 		if !names[want] {
 			t.Errorf("missing tool %q", want)

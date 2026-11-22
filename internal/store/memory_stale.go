@@ -105,6 +105,12 @@ func fileBaseName(p string) string {
 // files_affected match any of paths and that were created before at. Rows
 // already stale keep their first stamp. Returns the IDs it flagged.
 func (s *MemStore) MarkMemoriesStaleForFiles(ctx context.Context, projectID string, paths []string, at time.Time) ([]string, error) {
+	return s.MarkMemoriesStaleForFilesExcept(ctx, projectID, paths, at, nil)
+}
+
+// MarkMemoriesStaleForFilesExcept is MarkMemoriesStaleForFiles that leaves
+// the memories in except alone (known fresh by content hash).
+func (s *MemStore) MarkMemoriesStaleForFilesExcept(ctx context.Context, projectID string, paths []string, at time.Time, except map[string]bool) ([]string, error) {
 	_ = ctx
 	paths = cleanStalePaths(paths)
 	if strings.TrimSpace(projectID) == "" || len(paths) == 0 {
@@ -118,7 +124,7 @@ func (s *MemStore) MarkMemoriesStaleForFiles(ctx context.Context, projectID stri
 	defer s.mu.Unlock()
 	marked := []string{}
 	for _, m := range s.memories {
-		if m.ProjectID != projectID || m.Status != StatusConfirmed || m.StaleSince != nil {
+		if m.ProjectID != projectID || m.Status != StatusConfirmed || m.StaleSince != nil || except[m.ID] {
 			continue
 		}
 		if !m.CreatedAt.Before(at) || !memoryTouchesAny(m, paths) {
@@ -161,6 +167,12 @@ func (s *MemStore) SearchMemoryByFile(ctx context.Context, projectID, path strin
 // MarkMemoriesStaleForFiles is the Postgres form: a basename LIKE prefilter
 // in SQL, the exact segment-suffix rule in Go, then one UPDATE.
 func (s *PostgresStore) MarkMemoriesStaleForFiles(ctx context.Context, projectID string, paths []string, at time.Time) ([]string, error) {
+	return s.MarkMemoriesStaleForFilesExcept(ctx, projectID, paths, at, nil)
+}
+
+// MarkMemoriesStaleForFilesExcept is MarkMemoriesStaleForFiles that leaves
+// the memories in except alone (known fresh by content hash).
+func (s *PostgresStore) MarkMemoriesStaleForFilesExcept(ctx context.Context, projectID string, paths []string, at time.Time, except map[string]bool) ([]string, error) {
 	paths = cleanStalePaths(paths)
 	if strings.TrimSpace(projectID) == "" || len(paths) == 0 {
 		return []string{}, nil
@@ -193,7 +205,7 @@ func (s *PostgresStore) MarkMemoriesStaleForFiles(ctx context.Context, projectID
 			rows.Close()
 			return nil, err
 		}
-		if memoryTouchesAny(&m, paths) {
+		if !except[m.ID] && memoryTouchesAny(&m, paths) {
 			ids = append(ids, m.ID)
 		}
 	}
@@ -262,6 +274,12 @@ func (s *PostgresStore) SearchMemoryByFile(ctx context.Context, projectID, path 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	return s.viewerVisibleMemories(ctx, projectID, candidates, limit)
+}
+
+// viewerVisibleMemories keeps the items the viewer in ctx may see (see
+// WithViewer; no viewer sees project and public rows), at most limit.
+func (s *PostgresStore) viewerVisibleMemories(ctx context.Context, projectID string, candidates []*MemoryItem, limit int) ([]*MemoryItem, error) {
 	viewerID := ViewerFrom(ctx)
 	isMember := false
 	if viewerID != "" {
@@ -284,6 +302,7 @@ func (s *PostgresStore) SearchMemoryByFile(ctx context.Context, projectID, path 
 		} else {
 			hasShare := false
 			if vis == VisibilityShared {
+				var err error
 				hasShare, err = s.hasMemoryShare(ctx, m.ID, viewerID, m.ProjectID)
 				if err != nil {
 					return nil, err

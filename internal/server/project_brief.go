@@ -483,6 +483,11 @@ type staleMarker interface {
 
 type filesChangedRequest struct {
 	Paths []string `json:"paths"`
+	// Hashes (optional) maps paths to their current sha256 content hash.
+	// Memories linked to a file with a different observed hash are marked
+	// stale; those linked with the same hash are known fresh and skip the
+	// path-and-time rule.
+	Hashes map[string]string `json:"hashes,omitempty"`
 	// At is when the files changed (RFC 3339); empty means now. Only
 	// memories created before it are marked.
 	At string `json:"at,omitempty"`
@@ -504,11 +509,17 @@ func (s *Server) handleProjectFilesChanged(w http.ResponseWriter, r *http.Reques
 	if !decodeJSON(w, r, &req) {
 		return
 	}
+	if len(req.Paths) == 0 && len(req.Hashes) > 0 {
+		for p := range req.Hashes {
+			req.Paths = append(req.Paths, p)
+		}
+		sort.Strings(req.Paths)
+	}
 	if len(req.Paths) == 0 {
 		writeError(w, http.StatusBadRequest, "paths required")
 		return
 	}
-	if len(req.Paths) > store.MaxStalePaths {
+	if len(req.Paths) > store.MaxStalePaths || len(req.Hashes) > store.MaxStalePaths {
 		writeError(w, http.StatusBadRequest, "too many paths")
 		return
 	}
@@ -525,15 +536,58 @@ func (s *Server) handleProjectFilesChanged(w http.ResponseWriter, r *http.Reques
 			at = now
 		}
 	}
-	ids, err := sm.MarkMemoriesStaleForFiles(r.Context(), projectID, req.Paths, at)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "mark stale failed: "+err.Error())
-		return
+	ctx := r.Context()
+	var ids []string
+	fresh := []string{}
+	if cl, ok := s.codeLinkStore(); ok {
+		// Hash rule first: record current hashes, mark memories whose link
+		// saw another hash, and spare those whose link saw this one.
+		except := map[string]bool{}
+		if len(req.Hashes) > 0 {
+			hashed := make([]string, 0, len(req.Hashes))
+			for p, h := range req.Hashes {
+				if strings.TrimSpace(h) == "" {
+					continue
+				}
+				if _, err := cl.SetCodeEntityHash(ctx, projectID, p, h, at); err != nil {
+					writeError(w, http.StatusInternalServerError, "record hashes failed: "+err.Error())
+					return
+				}
+				hashed = append(hashed, p)
+			}
+			sort.Strings(hashed)
+			marked, ok, err := cl.MarkStaleByCodeHash(ctx, projectID, hashed, at)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "mark stale failed: "+err.Error())
+				return
+			}
+			ids = append(ids, marked...)
+			fresh = ok
+			for _, id := range marked {
+				except[id] = true
+			}
+			for _, id := range ok {
+				except[id] = true
+			}
+		}
+		more, err := cl.MarkMemoriesStaleForFilesExcept(ctx, projectID, req.Paths, at, except)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "mark stale failed: "+err.Error())
+			return
+		}
+		ids = append(ids, more...)
+	} else {
+		marked, err := sm.MarkMemoriesStaleForFiles(ctx, projectID, req.Paths, at)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "mark stale failed: "+err.Error())
+			return
+		}
+		ids = marked
 	}
 	if ids == nil {
 		ids = []string{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"marked": len(ids), "ids": ids, "at": at})
+	writeJSON(w, http.StatusOK, map[string]any{"marked": len(ids), "ids": ids, "fresh": len(fresh), "at": at})
 }
 
 // ---- cloud MCP adapter ----
