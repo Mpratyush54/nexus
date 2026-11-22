@@ -92,6 +92,9 @@ type MemoryItem struct {
 	LastUsedAt     time.Time `json:"last_used_at,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+	// StaleSince is set when one of FilesAffected changed after the memory
+	// was written (migration 042). Nil means fresh. Confirm/edit clears it.
+	StaleSince *time.Time `json:"stale_since,omitempty"`
 }
 
 // Episode captures the narrative arc of a bug investigation, feature, or refactor.

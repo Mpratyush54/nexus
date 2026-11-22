@@ -201,6 +201,9 @@ func (s *Server) dispatch(ctx context.Context, req *Request) *Response {
 			"protocolVersion": ProtocolVersion,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": ServerName, "version": ServerVersion},
+			// instructions (MCP 2025-03-26+, ignored by older hosts): tells
+			// the agent memory is here and hands it the project brief.
+			"instructions": s.instructions(ctx),
 		})
 	case "notifications/initialized":
 		return okResult(req.ID, map[string]any{})

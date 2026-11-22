@@ -122,6 +122,9 @@ func applyMemoryPatch(m *MemoryItem, patch MemoryPatch) error {
 		}
 		m.Scope = scope
 	}
+	// An edit is a person (or harvest) restating the memory now, so any
+	// "files changed since" flag no longer applies.
+	m.StaleSince = nil
 	m.UpdatedAt = time.Now().UTC()
 	return nil
 }
@@ -228,6 +231,7 @@ func (s *MemStore) RevertMemory(ctx context.Context, id string, version int, edi
 	if target.Scope != "" {
 		m.Scope = target.Scope
 	}
+	m.StaleSince = nil
 	m.UpdatedAt = time.Now().UTC()
 	return cloneMemoryItem(m), nil
 }
@@ -293,7 +297,7 @@ func (s *PostgresStore) UpdateMemory(ctx context.Context, id string, patch Memor
 		`UPDATE memory_items SET
 			"key" = $2, content = $3, tags = $4,
 			context_snippet = NULLIF($5,''), level = $6, scope = $7,
-			updated_at = now()
+			stale_since = NULL, updated_at = now()
 		 WHERE id = $1::uuid AND status IN ('PROPOSED','CONFIRMED')`,
 		id, m.Key, m.Content, m.Tags, m.ContextSnippet, m.Level, m.Scope)
 	if err != nil {
@@ -430,7 +434,7 @@ func (s *PostgresStore) RevertMemory(ctx context.Context, id string, version int
 	tag, err := tx.Exec(ctx,
 		`UPDATE memory_items SET
 			"key" = $2, content = $3, tags = $4, level = $5, scope = $6,
-			updated_at = now()
+			stale_since = NULL, updated_at = now()
 		 WHERE id = $1::uuid AND status IN ('PROPOSED','CONFIRMED')`,
 		id, target.Key, target.Content, tags, level, scope)
 	if err != nil {

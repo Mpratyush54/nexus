@@ -168,6 +168,8 @@ func (s *Server) processHarvestJob(ctx context.Context, job *store.HarvestJob) {
 	if s.Log != nil {
 		s.Log.Printf("harvest worker: done job=%s provider=%s memories=%d session=%s", job.ID, provider, saved, sessionID)
 	}
+	// Keep the project brief current (debounced; never fails the job).
+	s.maybeRefreshProjectBrief(ctx, job.ProjectID)
 }
 
 func (s *Server) findMemoryByKey(ctx context.Context, projectID, key string) *store.MemoryItem {

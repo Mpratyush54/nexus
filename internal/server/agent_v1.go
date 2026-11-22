@@ -532,7 +532,10 @@ func storeToMCPMemory(item *store.MemoryItem) *mcp.MemoryItem {
 		Key: item.Key, Content: item.Content, ContextSnippet: item.ContextSnippet,
 		Level: item.Level, Scope: item.Scope, Tags: item.Tags,
 		Confidence: item.Confidence, Status: item.Status, Source: item.Source,
-		Embedding: item.Embedding,
+		Embedding: item.Embedding, Category: item.Category,
+		FilesAffected: append([]string(nil), item.FilesAffected...),
+		CreatedAt:     item.CreatedAt, UpdatedAt: item.UpdatedAt,
+		StaleSince: item.StaleSince,
 	}
 }
 

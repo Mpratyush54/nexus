@@ -43,6 +43,15 @@ type MemoryItem struct {
 	// Embedding carries the write-time vector (issue #76, 1536-dim,
 	// L2-normalized) for the store adapter to persist to pgvector.
 	Embedding []float32
+	// Category, FilesAffected, CreatedAt, UpdatedAt, and StaleSince are
+	// read-side provenance: agents see when a memory was written, which chat
+	// it came from, which files it is about, and whether those files changed
+	// since (StaleSince non-nil).
+	Category      string
+	FilesAffected []string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
+	StaleSince    *time.Time
 }
 
 // Episode is the MCP layer's view of an episode row (subset, see above).
@@ -126,9 +135,13 @@ func ListTools() []Tool {
 	return []Tool{
 		{
 			Name:        "memory_search",
-			Description: "Search active project memories. Fresh writes are included. Returns an inference-ready XML context block plus a voluntary reflection hint.",
+			Description: "Search active project memories. Fresh writes are included. Pass file to get memories about a file first. Returns an inference-ready XML context block (items carry date, source chat, files, and stale=\"true\" when their files changed since) plus a voluntary reflection hint.",
 			InputSchema: schema([]string{"query"}, map[string]any{
 				"query": str, "tags": strArr, "level": str, "limit": num, "project_id": str,
+				"file": map[string]any{
+					"type":        "string",
+					"description": "Optional file path: memories about this file (files_affected, suffix match) come first.",
+				},
 			}),
 		},
 		{
@@ -204,7 +217,7 @@ func ListTools() []Tool {
 		},
 		{
 			Name:        "project_knowledge",
-			Description: "Top project and organization memories for bootstrap. Personal and session rows are omitted. Pinned items rank first.",
+			Description: "Project brief plus the top project and organization memories for bootstrap. Personal and session rows are omitted. The brief comes first, then pinned items.",
 			InputSchema: schema(nil, map[string]any{
 				"project_id": str, "limit": num,
 			}),
@@ -359,6 +372,7 @@ func decodeArgs(raw json.RawMessage, v any) *RPCError {
 
 type memorySearchArgs struct {
 	Query     string   `json:"query"`
+	File      string   `json:"file"`
 	Tags      []string `json:"tags"`
 	Level     string   `json:"level"`
 	Limit     int      `json:"limit"`
@@ -370,7 +384,7 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 	if rpcErr := decodeArgs(raw, &a); rpcErr != nil {
 		return nil, rpcErr
 	}
-	if strings.TrimSpace(a.Query) == "" {
+	if strings.TrimSpace(a.Query) == "" && strings.TrimSpace(a.File) == "" {
 		return nil, invalidParams("missing required field: query")
 	}
 	projectID := a.ProjectID
@@ -387,6 +401,18 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 
 	var items []*MemoryItem
 	var err error
+	// file= first: memories whose files_affected name the path lead the
+	// result; the query search fills the rest.
+	var fileHits []*MemoryItem
+	if strings.TrimSpace(a.File) != "" {
+		fileHits, err = s.searchByFile(ctx, projectID, a.File, a.Tags, limit)
+		if err != nil {
+			return nil, &RPCError{Code: ErrInternal, Message: "search failed: " + err.Error()}
+		}
+	}
+	if strings.TrimSpace(a.Query) == "" {
+		a.Query = a.File
+	}
 	// Prefer vector search when the store exposes it (issue #165): embed the
 	// query via the configured provider (HashEmbed fallback) and rank by
 	// cosine similarity. Keyword SearchMemory is the fallback when the store
@@ -410,6 +436,26 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 			return nil, &RPCError{Code: ErrInternal, Message: "search failed: " + err.Error()}
 		}
 	}
+	if len(fileHits) > 0 {
+		if match == "top" {
+			// The query found nothing; the file's memories are the answer,
+			// not padded with unrelated top memories.
+			items = fileHits
+			match = "file"
+		} else {
+			items = mergeAhead(fileHits, items, limit)
+			match = "file+" + match
+		}
+	}
+	// Nothing relevant matched: lead with the project brief so the agent
+	// still gets an overview of the project.
+	brief := ""
+	if match == "top" {
+		brief = s.projectBrief(ctx, projectID)
+		if brief != "" {
+			items = withoutKey(items, ProjectBriefKey)
+		}
+	}
 	// Filter before dedupe (issue #135): dedupe keeps the most-specific
 	// level per key, so deduping first would drop a key entirely when the
 	// winner's level doesn't match the filter but a loser does.
@@ -423,7 +469,7 @@ func (s *Server) handleMemorySearch(ctx context.Context, raw json.RawMessage) (a
 	recordUse(ctx, s.store, items)
 
 	budget := s.tokenBudget()
-	contextXML := buildContextXMLBudgeted(s.cfg.ProjectName, s.cfg.Branch, items, budget)
+	contextXML := buildContextXMLWithBrief(s.cfg.ProjectName, s.cfg.Branch, brief, items, budget)
 	tokens := estimateTokens(contextXML)
 	remaining := budget - len([]rune(contextXML))
 	if remaining < 0 {
@@ -638,6 +684,86 @@ func buildContextXML(project, branch string, items []*MemoryItem) string {
 // goes before project, project before personal, and so on — issue #135);
 // output always stays a well-formed project_memory block.
 func buildContextXMLBudgeted(project, branch string, items []*MemoryItem, budget int) string {
+	return buildContextXMLWithBrief(project, branch, "", items, budget)
+}
+
+// StaleNote is shown on items whose files changed after they were written.
+const StaleNote = "files changed since; verify before relying"
+
+// maxItemFiles caps the files attribute of one rendered item.
+const maxItemFiles = 5
+
+// itemSource returns "session:<id>" for a memory that came from a chat: the
+// harvest tags rows "session:<id>"; session-level rows carry SessionID.
+func itemSource(it *MemoryItem) string {
+	for _, tag := range it.Tags {
+		tag = strings.TrimSpace(tag)
+		if strings.HasPrefix(tag, "session:") && len(tag) > len("session:") {
+			return tag
+		}
+	}
+	if sid := strings.TrimSpace(it.SessionID); sid != "" {
+		return "session:" + sid
+	}
+	return ""
+}
+
+// itemDate is the day a memory last changed (updated, else created).
+func itemDate(it *MemoryItem) string {
+	at := it.UpdatedAt
+	if at.IsZero() {
+		at = it.CreatedAt
+	}
+	if at.IsZero() {
+		return ""
+	}
+	return at.UTC().Format("2006-01-02")
+}
+
+func itemFiles(it *MemoryItem) string {
+	files := make([]string, 0, maxItemFiles)
+	for _, f := range it.FilesAffected {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		files = append(files, f)
+		if len(files) >= maxItemFiles {
+			break
+		}
+	}
+	return strings.Join(files, ",")
+}
+
+// renderItem renders one <item>: key, confidence, scope, then provenance
+// (date, source, files) and the stale flag when present.
+func renderItem(it *MemoryItem) string {
+	scope := it.Scope
+	if scope == "" {
+		scope = "fact"
+	}
+	var b strings.Builder
+	b.WriteString("<item key=\"" + xmlEscape(it.Key) + "\" confidence=\"" + fmt.Sprintf("%.2f", it.Confidence) + "\" scope=\"" + xmlEscape(scope) + "\"")
+	if d := itemDate(it); d != "" {
+		b.WriteString(" date=\"" + d + "\"")
+	}
+	if src := itemSource(it); src != "" {
+		b.WriteString(" source=\"" + xmlEscape(src) + "\"")
+	}
+	if files := itemFiles(it); files != "" {
+		b.WriteString(" files=\"" + xmlEscape(files) + "\"")
+	}
+	if it.StaleSince != nil {
+		b.WriteString(" stale=\"true\" note=\"" + StaleNote + "\"")
+	}
+	b.WriteString(">\n    " + xmlEscape(it.Content) + "\n  </item>\n")
+	return b.String()
+}
+
+// buildContextXMLWithBrief renders the context block with an optional
+// <project_brief> ahead of the memory sections. The brief is dropped when
+// it alone would overflow the budget.
+func buildContextXMLWithBrief(project, branch, brief string, items []*MemoryItem, budget int) string {
 	groups := map[string][]*MemoryItem{}
 	for _, it := range items {
 		lvl := strings.ToLower(it.Level)
@@ -661,11 +787,7 @@ func buildContextXMLBudgeted(project, branch string, items []*MemoryItem, budget
 		}
 		units := make([]string, 0, len(mems))
 		for _, it := range mems {
-			scope := it.Scope
-			if scope == "" {
-				scope = "fact"
-			}
-			units = append(units, "<item key=\""+xmlEscape(it.Key)+"\" confidence=\""+fmt.Sprintf("%.2f", it.Confidence)+"\" scope=\""+xmlEscape(scope)+"\">\n    "+xmlEscape(it.Content)+"\n  </item>\n")
+			units = append(units, renderItem(it))
 		}
 		sections = append(sections, section{
 			open: "<" + lvl + ">\n", close: "</" + lvl + ">\n", units: units,
@@ -678,6 +800,12 @@ func buildContextXMLBudgeted(project, branch string, items []*MemoryItem, budget
 		return len(header)+bodyLen+add+len(footer) <= budget
 	}
 	var body strings.Builder
+	if b := strings.TrimSpace(brief); b != "" {
+		unit := "<project_brief>\n" + xmlEscape(b) + "\n</project_brief>\n"
+		if fits(0, len(unit)) {
+			body.WriteString(unit)
+		}
+	}
 	for _, s := range sections {
 		var sb strings.Builder
 		kept := 0

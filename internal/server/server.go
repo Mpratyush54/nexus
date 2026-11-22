@@ -120,6 +120,12 @@ type Server struct {
 
 	// Mail delivers signup OTP emails. Nil selects mail.FromEnv at first use.
 	Mail mail.Sender
+
+	// Project brief debounce (project_brief.go): last check per project.
+	// briefNow overrides the clock in tests.
+	briefMu      sync.Mutex
+	briefChecked map[string]time.Time
+	briefNow     func() time.Time
 }
 
 // NewServer wires routes onto a fresh stdlib ServeMux.

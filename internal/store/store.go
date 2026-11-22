@@ -522,6 +522,8 @@ func (s *MemStore) ConfirmMemory(ctx context.Context, id string, confirmedBy str
 		return errMemoryConflict(item.Status, StatusConfirmed)
 	}
 	item.ConfirmedBy = confirmedBy
+	// Re-confirming vouches for the memory again: it is no longer stale.
+	item.StaleSince = nil
 	item.UpdatedAt = time.Now().UTC()
 	return nil
 }
