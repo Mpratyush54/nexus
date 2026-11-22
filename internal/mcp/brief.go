@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"strings"
 )
 
@@ -23,7 +24,8 @@ type FileMemorySearcher interface {
 
 // InstructionsIntro opens the MCP initialize instructions.
 const InstructionsIntro = "Nexus shared memory is available for this project. " +
-	"Call memory_search before changing unfamiliar code (pass file=<path> for memories about a file), " +
+	"Call memory_search before changing unfamiliar code (pass file=<path> for memories about a file; " +
+	"related_to and file_history list the decisions and chats linked to a file), " +
 	"project_knowledge for an overview, and memory_write to record decisions. " +
 	"Items carry date and source (session:<id>, fetch it with session_summary_get); " +
 	"items marked stale=\"true\" refer to files changed since: verify before relying on them."
@@ -109,8 +111,27 @@ func memoryHasAnyTag(it *MemoryItem, tags []string) bool {
 	return false
 }
 
-// searchByFile returns memories whose files_affected match path.
+// searchByFile returns memories about path: memories linked to the file
+// (code links: edited in their chat, or named by the harvest) first, then
+// memories whose files_affected match (the fallback for stores without
+// links and for memories written before them).
 func (s *Server) searchByFile(ctx context.Context, projectID, path string, tags []string, limit int) ([]*MemoryItem, error) {
+	linked, err := s.linkedMemories(ctx, projectID, path, tags, limit)
+	if err != nil && !errors.Is(err, ErrCodeLinksUnavailable) {
+		return nil, err
+	}
+	if len(linked) >= limit {
+		return linked, nil
+	}
+	byFiles, err := s.searchByFilesAffected(ctx, projectID, path, tags, limit)
+	if err != nil {
+		return nil, err
+	}
+	return mergeAhead(linked, byFiles, limit), nil
+}
+
+// searchByFilesAffected returns memories whose files_affected match path.
+func (s *Server) searchByFilesAffected(ctx context.Context, projectID, path string, tags []string, limit int) ([]*MemoryItem, error) {
 	var found []*MemoryItem
 	var err error
 	if fs, ok := s.store.(FileMemorySearcher); ok {

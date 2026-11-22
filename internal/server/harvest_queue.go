@@ -211,6 +211,7 @@ func (s *Server) upsertSessionSummary(ctx context.Context, job *store.HarvestJob
 				return nil, err
 			}
 			s.reembedAfterEdit(ctx, item)
+			s.linkMemoryToCode(ctx, item, sessionID)
 			s.notifyProjectActivity(job.ProjectID, "MEMORY_CONFIRMED", "/app/memory")
 			s.publishMemoryLifecycle(item, "MEMORY_CONFIRMED", "confirmed")
 			return item, nil
@@ -238,6 +239,7 @@ func (s *Server) upsertSessionSummary(ctx context.Context, job *store.HarvestJob
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {
 		return nil, err
 	}
+	s.linkMemoryToCode(ctx, item, sessionID)
 	s.notifyProjectActivity(job.ProjectID, "MEMORY_CONFIRMED", "/app/memory")
 	s.publishMemoryLifecycle(item, "MEMORY_CONFIRMED", "confirmed")
 	return item, nil
@@ -353,6 +355,7 @@ func (s *Server) persistHarvestMemory(ctx context.Context, job *store.HarvestJob
 	if err := s.Store.CreateMemoryItem(ctx, item); err != nil {
 		return nil, err
 	}
+	s.linkMemoryToCode(ctx, item, sessionID)
 	s.notifyProjectActivity(job.ProjectID, "MEMORY_CONFIRMED", "/app/memory")
 	s.publishMemoryLifecycle(item, "MEMORY_CONFIRMED", "confirmed")
 	return item, nil

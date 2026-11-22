@@ -1475,6 +1475,9 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	if !looksLikeUUID(q.UserID) {
 		return []TimelineItem{}, "", nil
 	}
+	if q.ProjectID != "" && !looksLikeUUID(q.ProjectID) {
+		return []TimelineItem{}, "", nil
+	}
 	if q.Limit <= 0 || q.Limit > 100 {
 		q.Limit = 30
 	}
@@ -1492,6 +1495,13 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		cursorAt = t
 		cursorID = q.Cursor[i+1:]
 	}
+	// The project filter compares uuids so the (project_id, last_active_at)
+	// index applies. A text search tests sessions with EXISTS: the planner
+	// can probe each candidate session's turns by primary key or, for a rare
+	// word, collect matching sessions from the trigram index on
+	// LOWER(text_preview) (migration 045). The LIKE is that index's handle;
+	// STRPOS keeps the exact substring rule. The LATERAL only builds the
+	// preview for sessions that already matched.
 	rows, err := s.pool.Query(ctx, `
 		SELECT s.id::text, s.project_id::text, s.harness, s.native_id, COALESCE(s.title,''),
 		       COALESCE(NULLIF(s.summary,''), (
@@ -1536,9 +1546,15 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		    )
 		  )
 		)
-		AND ($2 = '' OR s.project_id::text = $2)
+		AND ($2 = '' OR s.project_id = NULLIF($2, '')::uuid)
 		AND ($3 = '' OR s.harness = $3)
-		AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0 OR STRPOS(LOWER(s.summary), LOWER($7)) > 0 OR STRPOS(LOWER(s.native_id), LOWER($7)) > 0 OR hit.idx IS NOT NULL)
+		AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0 OR STRPOS(LOWER(s.summary), LOWER($7)) > 0 OR STRPOS(LOWER(s.native_id), LOWER($7)) > 0
+		     OR EXISTS (
+		       SELECT 1 FROM session_turns m
+		       WHERE m.session_id = s.id AND m.role IN ('user', 'assistant')
+		         AND LOWER(m.text_preview) LIKE '%' || REPLACE(REPLACE(REPLACE(LOWER($7), '\', '\\'), '%', '\%'), '_', '\_') || '%'
+		         AND STRPOS(LOWER(m.text_preview), LOWER($7)) > 0
+		     ))
 		AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
 		AND (NOT $8::bool
 		  OR EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = s.id)
@@ -1631,74 +1647,3 @@ func TimelineMatchPreview(text, query string) string {
 
 var _ AgentCloudStore = (*MemStore)(nil)
 var _ AgentCloudStore = (*PostgresStore)(nil)
-
-// NativeSessionKeys returns "harness\x00native_id" for every agent session in
-// the given projects that viewerID can read. The timeline uses it to drop old
-// snapshots of conversations that are now captured as sessions, whatever page
-// those sessions fall on. Only readable sessions count: a snapshot shared with
-// someone who cannot open the modern copy must stay on their timeline, or the
-// chat disappears for them. The readability rule matches ListTimeline.
-func (m *MemStore) NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error) {
-	_ = ctx
-	viewerID = strings.TrimSpace(viewerID)
-	out := map[string]bool{}
-	if viewerID == "" {
-		return out, nil
-	}
-	want := map[string]bool{}
-	for _, id := range projectIDs {
-		want[id] = true
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	for _, sess := range m.agentSessions {
-		if sess != nil && want[sess.ProjectID] && m.agentVisibleLocked(viewerID, sess) {
-			out[sess.Harness+"\x00"+sess.NativeID] = true
-		}
-	}
-	return out, nil
-}
-
-// NativeSessionKeys: see MemStore.NativeSessionKeys.
-func (s *PostgresStore) NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error) {
-	out := map[string]bool{}
-	if !looksLikeUUID(viewerID) {
-		return out, nil
-	}
-	ids := make([]string, 0, len(projectIDs))
-	for _, id := range projectIDs {
-		if looksLikeUUID(id) {
-			ids = append(ids, id)
-		}
-	}
-	if len(ids) == 0 {
-		return out, nil
-	}
-	rows, err := s.pool.Query(ctx, `
-		SELECT s.harness, s.native_id FROM agent_sessions s
-		WHERE s.project_id = ANY($1::uuid[]) AND (
-		  s.owner_user_id = $2::uuid
-		  OR EXISTS (
-		    SELECT 1 FROM session_grants g
-		    WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $2::uuid
-		  )
-		  OR (
-		    s.visibility = 'team' AND (
-		      EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $2::uuid)
-		      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $2::uuid)
-		    )
-		  )
-		)`, ids, viewerID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var harness, native string
-		if err := rows.Scan(&harness, &native); err != nil {
-			return nil, err
-		}
-		out[harness+"\x00"+native] = true
-	}
-	return out, rows.Err()
-}
