@@ -1479,8 +1479,7 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		FROM agent_sessions s
 		LEFT JOIN LATERAL (
 		  SELECT t.idx, t.role,
-		    SUBSTRING(REGEXP_REPLACE(t.text_preview, '\s+', ' ', 'g') FROM
-		      GREATEST(1, STRPOS(LOWER(REGEXP_REPLACE(t.text_preview, '\s+', ' ', 'g')), LOWER($7)) - 70) FOR 260) AS preview
+		    t.text_preview AS preview
 		  FROM session_turns t
 		  WHERE t.session_id = s.id AND $7 <> '' AND t.role IN ('user', 'assistant')
 		    AND STRPOS(LOWER(t.text_preview), LOWER($7)) > 0
@@ -1516,6 +1515,11 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		if err := rows.Scan(&it.SessionID, &it.ProjectID, &it.Harness, &it.NativeID, &it.Title, &it.Summary,
 			&it.Visibility, &it.OwnerUserID, &it.LastActiveAt, &it.TurnCount, &it.VersionState, &it.MatchPreview, &it.MatchTurnIdx, &it.MatchRole); err != nil {
 			return nil, "", err
+		}
+		// Same excerpt rules as every other store: centred on the match,
+		// cut at word boundaries, marked with … where text was cut.
+		if it.MatchPreview != "" {
+			it.MatchPreview = TimelineMatchPreview(it.MatchPreview, q.Query)
 		}
 		items = append(items, it)
 	}
@@ -1555,7 +1559,25 @@ func TimelineMatchPreview(text, query string) string {
 	if end > len(runes) {
 		end = len(runes)
 	}
-	preview := string(runes[start:end])
+	// Snap a cut edge to a word boundary so the excerpt never starts or
+	// ends mid-word (a long unbroken token keeps the hard cut).
+	if start > 0 {
+		for i := start; i < end && i-start < 20; i++ {
+			if runes[i-1] == ' ' {
+				start = i
+				break
+			}
+		}
+	}
+	if end < len(runes) {
+		for i := end; i > start && end-i < 20; i-- {
+			if runes[i] == ' ' {
+				end = i
+				break
+			}
+		}
+	}
+	preview := strings.TrimSpace(string(runes[start:end]))
 	if start > 0 {
 		preview = "…" + preview
 	}
