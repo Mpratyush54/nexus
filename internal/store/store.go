@@ -135,6 +135,7 @@ type MemStore struct {
 	sessionVersions map[string][]SessionVersion
 	blobs           map[string]blobRec
 	sessionTurns    map[string][]SessionTurn
+	sessionUsage    map[string]map[string]*SessionUsage // session -> usage key (migration 048)
 	agentGrants     map[string][]agentGrant
 	storageUsage    map[string]storageRec
 	teleports       map[string]*Teleport

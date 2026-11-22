@@ -207,6 +207,9 @@ func (r *Runtime) noteHarvestEvent(ev Event) {
 	detail := ""
 	switch ev.Type {
 	case EventConversationTurn:
+		if only, _ := ev.Payload["usage_only"].(bool); only {
+			return // token usage, not dialogue
+		}
 		r.turnsEmitted++
 		if s, ok := ev.Payload["content"].(string); ok {
 			detail = trimDetail(s, 80)
