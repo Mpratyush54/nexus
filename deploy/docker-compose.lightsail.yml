@@ -16,13 +16,11 @@ services:
     restart: always
 
   server:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.server
-      args:
-        VERSION: "${VERSION:-v0.2.0}"
-        COMMIT: "${COMMIT:-unknown}"
-        BUILT_AT: "${BUILT_AT:-}"
+    # Prebuilt by GitHub Actions and pulled from ECR by deploy/lightsail-remote.sh;
+    # the 1 GB box never builds. NEXUS_SERVER_IMAGE is passed per command
+    # (current value: /opt/central-memory/deploy/current-image on the box).
+    image: ${NEXUS_SERVER_IMAGE:?set NEXUS_SERVER_IMAGE (see deploy/README.md)}
+    pull_policy: never
     container_name: nexus-server
     environment:
       DATABASE_URL: postgres://central:${DB_PASSWORD}@postgres:5432/central_memory?sslmode=disable
@@ -42,6 +40,23 @@ services:
       MAIL_FROM: "${MAIL_FROM:-Nexus <noreply@pratyushes.dev>}"
       OPENROUTER_API_KEY: "${OPENROUTER_API_KEY:-}"
       PLATFORM_ADMIN_USER_IDS: "${PLATFORM_ADMIN_USER_IDS:-}"
+      # Embeddings via OpenRouter's free NVIDIA Nemotron embed model, using
+      # OPENROUTER_API_KEY above (no extra secret, no sidecar: the 1 GB box
+      # has no room for a local model). Kill switch: set
+      # CENTRAL_EMBEDDING_PROVIDER=hash in .env (sync-secrets.py keeps it).
+      # On 429/outage writes fall back to HashEmbed (tagged "hash") and
+      # search to keyword; the background backfill re-embeds those rows.
+      CENTRAL_EMBEDDING_PROVIDER: "${CENTRAL_EMBEDDING_PROVIDER:-openrouter}"
+      CENTRAL_EMBEDDING_MODEL: "${CENTRAL_EMBEDDING_MODEL:-nvidia/nemotron-3-embed-1b:free}"
+      CENTRAL_EMBEDDING_ENDPOINT: "${CENTRAL_EMBEDDING_ENDPOINT:-}"
+      CENTRAL_EMBEDDING_DIMS: "${CENTRAL_EMBEDDING_DIMS:-}"
+      CENTRAL_EMBEDDING_TIMEOUT: "${CENTRAL_EMBEDDING_TIMEOUT:-15s}"
+      CENTRAL_EMBEDDING_DATA_COLLECTION: "${CENTRAL_EMBEDDING_DATA_COLLECTION:-}"
+      CENTRAL_EMBEDDING_BACKFILL_ON_START: "${CENTRAL_EMBEDDING_BACKFILL_ON_START:-1}"
+      CENTRAL_EMBEDDING_BACKFILL_RPM: "${CENTRAL_EMBEDDING_BACKFILL_RPM:-10}"
+      CENTRAL_EMBEDDING_BACKFILL_INTERVAL: "${CENTRAL_EMBEDDING_BACKFILL_INTERVAL:-15m}"
+      # Empty = per-model default (0.3 for Nemotron, 0.2 for hash).
+      CENTRAL_EMBEDDING_MIN_SIMILARITY: "${CENTRAL_EMBEDDING_MIN_SIMILARITY:-}"
     ports:
       - "80:8080"
       - "8080:8080"

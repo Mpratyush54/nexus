@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -286,20 +287,27 @@ func TestRateLimiterRefill(t *testing.T) {
 
 // TestRateLimiterConcurrent exercises the mutex under -race.
 func TestRateLimiterConcurrent(t *testing.T) {
-	l := security.NewLimiter(1000, 1000)
+	// Refill slowly (1 token/s) so a slow, race-instrumented run cannot
+	// refill the bucket mid-test; then count what was actually admitted.
+	l := security.NewLimiter(1, 1000)
+	start := time.Now()
+	var admitted atomic.Int64
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 200; i++ {
-				l.Allow()
+				if l.Allow() {
+					admitted.Add(1)
+				}
 			}
 		}()
 	}
 	wg.Wait()
-	if l.Allow() {
-		t.Error("limiter still admits after 1600 draws on 1000-bucket, want exhausted")
+	refill := int64(time.Since(start).Seconds()) + 1
+	if got := admitted.Load(); got < 1000 || got > 1000+refill {
+		t.Errorf("admitted %d of 1600 concurrent draws on a 1000-burst bucket, want 1000 (+%d refill at most)", got, refill)
 	}
 }
 

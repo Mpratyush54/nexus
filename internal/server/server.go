@@ -104,6 +104,11 @@ type Server struct {
 	// selects EmbedderFromEnv at first use (hash fallback by default).
 	Embedder memctx.Embedder
 
+	// EmbedProvider, when set, wins over Embedder: it tags each vector with
+	// its model (memory_items.embedding_model), lets search skip the vector
+	// path while the provider is down, and drives the reembed backfill.
+	EmbedProvider *memctx.Provider
+
 	// Extractor runs server-side OpenRouter / heuristic memory extraction
 	// for POST /memory/extract. Nil selects extract.NewService(ConfigFromEnv).
 	Extractor *extract.Service
@@ -125,7 +130,10 @@ type Server struct {
 	// briefNow overrides the clock in tests.
 	briefMu      sync.Mutex
 	briefChecked map[string]time.Time
-	briefNow     func() time.Time
+	// briefWarned is the last fallback reason logged per project, so a
+	// failing LLM warns once per project and reason, not on every rebuild.
+	briefWarned map[string]string
+	briefNow    func() time.Time
 }
 
 // NewServer wires routes onto a fresh stdlib ServeMux.
@@ -168,6 +176,9 @@ func (s *Server) quotaAllowed(chars int) (bool, string) {
 // resolveEmbedder returns the server's embedding backend (issue #165).
 // Nil Embedder lazily binds EmbedderFromEnv (hash by default).
 func (s *Server) resolveEmbedder() memctx.Embedder {
+	if s != nil && s.EmbedProvider != nil {
+		return s.EmbedProvider.Embedder()
+	}
 	if s != nil && s.Embedder != nil {
 		return s.Embedder
 	}

@@ -743,17 +743,20 @@ func (s *PostgresStore) WriteToBranch(ctx context.Context, branchID string, item
 		`INSERT INTO memory_items
 			(project_id, user_id, session_id, org_id, "key", content,
 			 context_snippet, level, scope, embedding, tags, confidence,
-			 status, source, source_event_id, proposed_by, branch_id)
+			 status, source, source_event_id, proposed_by, branch_id,
+			 embedding_model)
 		 VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6,
 		         NULLIF($7,''), $8, $9, $10::vector, $11, $12,
-		         $13, NULLIF($14,''), $15, $16::uuid, $17::uuid)
+		         $13, NULLIF($14,''), $15, $16::uuid, $17::uuid,
+		         NULLIF($18,''))
 		 RETURNING id, created_at, updated_at`,
 		chain[0].ProjectID, nullText(item.UserID),
 		nullText(item.SessionID), nullText(item.OrgID),
 		item.Key, item.Content, item.ContextSnippet,
 		item.Level, item.Scope, encodeEmbedding(item.Embedding),
 		item.Tags, item.Confidence, item.Status, item.Source,
-		nullEventID(item.SourceEventID), nullText(item.ProposedBy), branchID)
+		nullEventID(item.SourceEventID), nullText(item.ProposedBy), branchID,
+		embeddingModelFor(item))
 	return row.Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt)
 }
 

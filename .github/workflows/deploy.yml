@@ -18,6 +18,10 @@ jobs:
   build-and-push:
     name: Build & Push Image
     runs-on: ubuntu-latest
+    outputs:
+      # sha256:... of the pushed linux/amd64 image; the Lightsail job pulls
+      # exactly this digest.
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -36,6 +40,7 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: Build and Push Server Image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -101,11 +106,17 @@ jobs:
         run: bash deploy/deploy-frontend.sh
 
   # Production API host (Lightsail). Skipped until LIGHTSAIL_SSH_KEY is set —
-  # see deploy/README.md "GitHub Actions secrets".
+  # see deploy/README.md "GitHub Actions secrets". The box pulls the image
+  # build-and-push just pushed; it never builds (1 GB RAM, shared with Postgres).
   deploy-lightsail:
     name: Deploy Lightsail API
     runs-on: ubuntu-latest
+    needs: build-and-push
     if: ${{ vars.DEPLOY_LIGHTSAIL == 'true' }}
+    timeout-minutes: 20
+    concurrency:
+      group: deploy-lightsail
+      cancel-in-progress: false
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -128,13 +139,32 @@ jobs:
           mkdir -p ~/.ssh
           printf '%s\n' "$LIGHTSAIL_SSH_KEY" > ~/.ssh/central-memory-key.pem
           chmod 600 ~/.ssh/central-memory-key.pem
+          # Keepalives/connect timeout for every ssh call, including the ones
+          # sync-secrets.py makes, so a dead link fails fast.
+          printf 'Host *\n  ConnectTimeout 20\n  ServerAliveInterval 15\n  ServerAliveCountMax 4\n' > ~/.ssh/config
+          chmod 600 ~/.ssh/config
 
-      - name: Deploy to Lightsail
+      - name: Deploy to Lightsail (pull prebuilt image)
+        timeout-minutes: 18
         env:
           LIGHTSAIL_HOST: ${{ secrets.LIGHTSAIL_HOST }}
           LIGHTSAIL_USER: ${{ secrets.LIGHTSAIL_USER }}
+          IMAGE_DIGEST: ${{ needs.build-and-push.outputs.digest }}
         run: |
           set -euo pipefail
+          if ! [[ "${IMAGE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::build-and-push did not output an image digest"
+            exit 1
+          fi
+          account="$(aws sts get-caller-identity --query Account --output text)"
+          registry="${account}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+          # Same assumed role as the build job. The token is masked and only
+          # ever travels to the box over SSH stdin.
+          ECR_TOKEN="$(aws ecr get-login-password --region "${AWS_REGION}")"
+          echo "::add-mask::${ECR_TOKEN}"
+          export ECR_TOKEN
+          export NEXUS_SERVER_IMAGE="${registry}/${ECR_REPOSITORY}@${IMAGE_DIGEST}"
+          export EXPECT_COMMIT="${GITHUB_SHA}"
           export LIGHTSAIL_KEY="$HOME/.ssh/central-memory-key.pem"
           export LIGHTSAIL_HOST="${LIGHTSAIL_HOST:-13.205.221.207}"
           export LIGHTSAIL_USER="${LIGHTSAIL_USER:-ubuntu}"

@@ -189,11 +189,13 @@ func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) 
 			(project_id, user_id, session_id, org_id, "key", content,
 			 context_snippet, level, scope, embedding, tags, confidence,
 			 status, source, source_event_id, proposed_by, visibility,
-			 category, files_affected, tools_used, supersedes_key, outcome, week_bucket)
+			 category, files_affected, tools_used, supersedes_key, outcome, week_bucket,
+			 embedding_model)
 		 VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5, $6,
 		         NULLIF($7,''), $8, $9, $10::vector, $11, $12,
 		         $13, NULLIF($14,''), $15, $16::uuid, $17,
-		         $18, $19, $20, NULLIF($21,''), $22, $23)
+		         $18, $19, $20, NULLIF($21,''), $22, $23,
+		         NULLIF($24,''))
 		 RETURNING id, created_at, updated_at`,
 		nullText(item.ProjectID), nullText(item.UserID),
 		nullText(item.SessionID), nullText(item.OrgID),
@@ -202,7 +204,8 @@ func (s *PostgresStore) CreateMemoryItem(ctx context.Context, item *MemoryItem) 
 		item.Tags, item.Confidence, item.Status, item.Source,
 		nullEventID(item.SourceEventID), nullText(item.ProposedBy),
 		item.Visibility,
-		cat, files, tools, item.SupersedesKey, outc, week)
+		cat, files, tools, item.SupersedesKey, outc, week,
+		embeddingModelFor(item))
 	if err := row.Scan(&item.ID, &item.CreatedAt, &item.UpdatedAt); err != nil {
 		return err
 	}
@@ -457,6 +460,15 @@ const MinVectorSimilarity = 0.2
 // similarity. Visibility follows SearchMemoryPage: WithViewer applies
 // CanViewMemory, an empty viewer sees project and public rows only.
 func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
+	return s.SearchMemoryVectorModel(ctx, projectID, VectorQuery{Vec: queryVec}, limit)
+}
+
+// SearchMemoryVectorModel is SearchMemoryVector restricted to rows embedded
+// by q.Model (NULL embedding_model counts as "hash"), with q.MinSimilarity
+// as the floor (0 = MinVectorSimilarity). Vectors from different models
+// share the vector(1536) column but not a space, so they are never compared.
+func (s *PostgresStore) SearchMemoryVectorModel(ctx context.Context, projectID string, q VectorQuery, limit int) ([]*MemoryItem, error) {
+	queryVec := q.Vec
 	if len(queryVec) == 0 {
 		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
 	}
@@ -476,9 +488,10 @@ func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string
 		    AND confidence > 0.3
 		    AND embedding IS NOT NULL
 		    AND 1 - (embedding <=> $2::vector) >= $4
+		    AND ($5 = '' OR COALESCE(embedding_model, 'hash') = $5)
 		  ORDER BY (CASE WHEN 'pinned' = ANY(tags) THEN 0 ELSE 1 END), embedding <=> $2::vector
 		  LIMIT $3`,
-		nullText(projectID), encodeEmbedding(queryVec), fetch, MinVectorSimilarity)
+		nullText(projectID), encodeEmbedding(queryVec), fetch, q.floor(), strings.TrimSpace(q.Model))
 	if err != nil {
 		return nil, err
 	}
