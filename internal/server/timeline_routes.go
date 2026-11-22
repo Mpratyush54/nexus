@@ -619,9 +619,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	cursor := r.URL.Query().Get("cursor")
 	harness := strings.TrimSpace(r.URL.Query().Get("harness"))
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	// hide_empty=1 drops chats with no turns (captured but never written to).
+	hideEmpty := queryFlag(r.URL.Query().Get("hide_empty"))
 	items, modernNext, err := cs.ListTimeline(r.Context(), store.TimelineQuery{
 		UserID: authSubject(r), ProjectID: projectID,
 		Harness: harness, Query: query, Cursor: cursor, Limit: limit,
+		HideEmpty: hideEmpty,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -641,6 +644,9 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	hidden := func(item store.TimelineItem) bool {
+		if hideEmpty && item.TurnCount == 0 {
+			return true // hide_empty also drops archived snapshots with no turns
+		}
 		return seen[item.SessionID] || (item.NativeID != "" && seen[item.Harness+"\x00"+item.NativeID])
 	}
 	// Historical snapshots and agent sessions coexist. Query both on every
@@ -682,7 +688,18 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		// sorts after every row at floor's time.
 		next = floor.UpdatedAt.Add(time.Microsecond).UTC().Format(time.RFC3339Nano) + "|"
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
+	// turn_counts tells clients turn_count is real, so a 0 means an empty
+	// chat (older servers sent 0 for every mirrored chat).
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next, "turn_counts": "exact"})
+}
+
+// queryFlag reads a boolean query parameter ("1", "true", "yes").
+func queryFlag(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 // legacySnapshotSession turns an owner-visible historical snapshot into the
