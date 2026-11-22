@@ -30,15 +30,30 @@ func (s *Server) legacySnapshotTurns(r *http.Request, row *store.AgentSession) [
 	if ps == nil || row == nil {
 		return nil
 	}
+	lts, _ := s.Store.(store.LegacyTimelineStore)
 	for _, id := range sessionContentIDs(row) {
 		if !uuidLikeSessionID(id) {
 			continue
 		}
-		snap, err := ps.GetLatestSnapshot(r.Context(), id)
-		if err != nil || snap == nil || len(snap.TranscriptPayload) == 0 {
+		var payload []byte
+		if lts != nil {
+			// The transcript column only, not the diff and artifact bundle.
+			got, err := lts.LatestSnapshotTranscripts(r.Context(), []string{id})
+			if err != nil {
+				continue
+			}
+			payload = got[id]
+		} else {
+			snap, err := ps.GetLatestSnapshot(r.Context(), id)
+			if err != nil || snap == nil {
+				continue
+			}
+			payload = snap.TranscriptPayload
+		}
+		if len(payload) == 0 {
 			continue
 		}
-		raw, err := gunzipSnapshot(snap.TranscriptPayload)
+		raw, err := gunzipSnapshot(payload)
 		if err != nil || len(raw) == 0 {
 			continue
 		}

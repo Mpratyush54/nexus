@@ -49,10 +49,6 @@ func (a agentMCPStore) FetchSessionTurns(ctx context.Context, sessionID, cursor 
 	if !ok {
 		return nil, "", errors.New("session is private")
 	}
-	turns, err := cs.ListSessionTurns(ctx, sessionID)
-	if err != nil {
-		return nil, "", err
-	}
 	if limit <= 0 {
 		limit = 20
 	}
@@ -64,7 +60,10 @@ func (a agentMCPStore) FetchSessionTurns(ctx context.Context, sessionID, cursor 
 		}
 		after = &n
 	}
-	page, next := pageSessionTurns(turns, after, limit)
+	page, next, err := pageAgentSessionTurns(ctx, cs, sessionID, after, limit)
+	if err != nil {
+		return nil, "", err
+	}
 	out := make([]mcp.TurnPage, 0, len(page))
 	for _, turn := range page {
 		out = append(out, mcp.TurnPage{Idx: turn.Idx, Role: turn.Role, Text: turn.TextPreview})

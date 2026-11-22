@@ -34,6 +34,64 @@ gh secret set LIGHTSAIL_SSH_KEY < ~/.ssh/central-memory-key.pem
 gh variable set DEPLOY_LIGHTSAIL --body true
 ```
 
+### Lightsail API deploy (pull, never build on the box)
+
+The box (Lightsail `micro_3_1`, 1 GB RAM, x86_64, also runs Postgres) does
+not build the Go image: building there swapped for 30+ minutes and the job
+died. The flow is now:
+
+1. `build-and-push` builds `deploy/Dockerfile.server` for linux/amd64 on
+   GitHub's runner and pushes `central-memory-server:<sha>` and `:latest` to
+   ECR. Its `digest` output is the exact image.
+2. `deploy-lightsail` (`needs: build-and-push`, 20 min job timeout) assumes
+   the same OIDC role, gets an ECR token (`aws ecr get-login-password`,
+   masked) and runs `deploy/deploy-lightsail.sh`, which:
+   - runs `sync-secrets.py` (unchanged: rewrites `/opt/central-memory/repo/.env`,
+     keeps existing values when a Secrets Manager fetch fails, keeps
+     `CENTRAL_EMBEDDING_*` overrides);
+   - uploads `docker-compose.lightsail.yml` to
+     `/opt/central-memory/deploy/docker-compose.lightsail.yml`;
+   - pipes the token over SSH stdin to `docker login --password-stdin`;
+   - streams `deploy/lightsail-remote.sh` to the box, which pulls
+     `<registry>/central-memory-server@sha256:<digest>`, logs out of ECR,
+     tags the running image `nexus-server:rollback`, recreates **only** the
+     `server` container (`up -d --no-build --no-deps`; Postgres is never
+     touched), and waits up to ~4 min for `/healthz` to report the new commit.
+     If it never gets healthy it recreates the server on
+     `nexus-server:rollback` and exits non-zero (the job fails). On success it
+     writes `/opt/central-memory/deploy/current-image`, removes older server
+     images (keeping the running one and the rollback one) and prunes
+     dangling images and build cache.
+
+The box needs no git pull, Go toolchain or build. `/opt/central-memory/repo`
+is kept only because `.env` lives there. Migrations are baked into the image
+(`/migrations`) and run on container boot (`migrate.sh`).
+
+Manual deploy of a specific image from a trusted machine:
+
+```bash
+export ECR_TOKEN=$(aws ecr get-login-password --region ap-south-1)
+export NEXUS_SERVER_IMAGE=833291393451.dkr.ecr.ap-south-1.amazonaws.com/central-memory-server:<git-sha>
+export EXPECT_COMMIT=<git-sha>   # optional
+bash deploy/deploy-lightsail.sh
+```
+
+Manual rollback on the box (previous image is kept as `nexus-server:rollback`):
+
+```bash
+ssh -i ~/.ssh/central-memory-key.pem ubuntu@13.205.221.207
+cd /opt/central-memory
+NEXUS_SERVER_IMAGE=nexus-server:rollback docker compose -p repo \
+  --env-file repo/.env -f deploy/docker-compose.lightsail.yml \
+  up -d --no-build --no-deps --force-recreate server
+curl -fsS http://127.0.0.1:8080/healthz
+```
+
+Other compose commands on the box need the image too, e.g.
+`NEXUS_SERVER_IMAGE=$(cat deploy/current-image) docker compose -p repo --env-file repo/.env -f deploy/docker-compose.lightsail.yml ps`.
+Rolling back the binary does not roll back migrations (forward-only); a
+release whose migration the old binary cannot run against needs a fix-forward.
+
 Desktop clients discover updates via in-app **Check for updates** / silent notify, reading
 `https://central-memory-releases.s3.ap-south-1.amazonaws.com/desktop/latest.json`
 (S3 is source of truth; `/platform/releases/latest?app=desktop` often 404 until registered).

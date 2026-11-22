@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"central-memory/internal/buildinfo"
-	memctx "central-memory/internal/context"
 	"central-memory/internal/store"
 )
 
@@ -484,7 +483,7 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	// Embed at write time when the client omitted a vector (issue #165).
 	if len(item.Embedding) != store.EmbeddingDim {
-		item.Embedding = s.embedText(r.Context(), memctx.EmbedTextForItem(item.Key, item.Content))
+		s.embedItem(r.Context(), &item)
 	}
 	if err := s.Store.CreateMemoryItem(r.Context(), &item); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not create memory item: "+err.Error())
@@ -567,12 +566,12 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	// no vector path or vector ranking returns nothing.
 	query := q.Get("q")
 	if strings.TrimSpace(query) != "" && offset == 0 {
-		if vs, ok := s.Store.(interface {
-			SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
-		}); ok {
-			vec := s.embedText(r.Context(), query)
-			if len(vec) == memctx.EmbedDims {
-				if items, err := vs.SearchMemoryVector(viewerCtx, projectID, vec, limit); err == nil && len(items) > 0 {
+		if search := s.modelVectorSearch(); search != nil {
+			// A failing embedding model skips straight to keyword search
+			// (embedQuery never substitutes a hash vector for a model), and
+			// only rows embedded by the query's model are compared.
+			if vec, ok := s.embedQuery(r.Context(), query); ok {
+				if items, err := search(viewerCtx, projectID, vec, limit); err == nil && len(items) > 0 {
 					items = s.filterMemoriesByVisibility(r, items, authSubject(r))
 					if len(items) > 0 {
 						if recordUse {
