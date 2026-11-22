@@ -220,6 +220,10 @@ func cloneMemoryItem(m *MemoryItem) *MemoryItem {
 	cp.Embedding = append([]float32{}, m.Embedding...)
 	cp.FilesAffected = append([]string{}, m.FilesAffected...)
 	cp.ToolsUsed = append([]string{}, m.ToolsUsed...)
+	if m.StaleSince != nil {
+		at := *m.StaleSince
+		cp.StaleSince = &at
+	}
 	return &cp
 }
 

@@ -55,6 +55,7 @@ func (s *Server) registerRoutes() {
 	s.registerBlobChunkRoutes()
 	s.registerGuestOffboardRoutes()
 	s.registerAgentSessionToolRoutes()
+	s.registerProjectBriefRoutes()
 	s.registerCloudContractRoutes()
 	s.registerOpsRoutes()
 }

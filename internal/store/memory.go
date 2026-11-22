@@ -24,7 +24,7 @@ const memoryColumns = `id, project_id, user_id, session_id, org_id,
 	use_count, last_used_at, created_at, updated_at,
 	COALESCE(category, 'general'), COALESCE(files_affected, '{}'),
 	COALESCE(tools_used, '{}'), COALESCE(supersedes_key, ''),
-	COALESCE(outcome, 'active'), COALESCE(week_bucket, '')`
+	COALESCE(outcome, 'active'), COALESCE(week_bucket, ''), stale_since`
 
 func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
 	var m MemoryItem
@@ -43,7 +43,7 @@ func scanMemoryItem(row pgx.Row) (*MemoryItem, error) {
 		&proposedBy, &confirmedBy, &supersededBy, &visibility,
 		&m.UseCount, &lastUsedAt, &m.CreatedAt, &m.UpdatedAt,
 		&category, &filesAffected, &toolsUsed, &supersedesKey,
-		&outcome, &weekBucket); err != nil {
+		&outcome, &weekBucket, &m.StaleSince); err != nil {
 		return nil, err
 	}
 	if projectID != nil {
@@ -301,7 +301,7 @@ func (s *PostgresStore) GetMemoryItem(ctx context.Context, id string) (*MemoryIt
 func (s *PostgresStore) ConfirmMemory(ctx context.Context, id string, confirmedBy string) error {
 	tag, err := s.pool.Exec(ctx,
 		`UPDATE memory_items SET status = 'CONFIRMED',
-			confirmed_by = $2::uuid, updated_at = now()
+			confirmed_by = $2::uuid, stale_since = NULL, updated_at = now()
 		 WHERE id = $1::uuid AND status IN ('PROPOSED','CONFIRMED')`, id, nullText(confirmedBy))
 	if err != nil {
 		return err

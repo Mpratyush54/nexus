@@ -116,16 +116,44 @@ func (s *Server) handleProjectKnowledgeTool(ctx context.Context, raw json.RawMes
 	if err != nil {
 		return nil, &RPCError{Code: ErrInternal, Message: err.Error()}
 	}
-	out := make([]map[string]any, 0, len(items))
+	// The project brief leads: it is the one-screen overview, then the top
+	// memories follow (without a second copy of the brief row).
+	brief := s.projectBrief(ctx, projectID)
+	out := make([]map[string]any, 0, len(items)+1)
+	if brief != "" {
+		out = append(out, map[string]any{
+			"key": ProjectBriefKey, "content": brief, "level": "project",
+			"status": "active", "confidence": 1.0,
+		})
+		items = withoutKey(items, ProjectBriefKey)
+	}
 	for _, item := range items {
 		if item == nil {
 			continue
 		}
-		out = append(out, map[string]any{
+		row := map[string]any{
 			"id": item.ID, "key": item.Key, "content": item.Content,
 			"level": item.Level, "status": publicMemoryWord(item.Status),
 			"confidence": item.Confidence,
-		})
+		}
+		if d := itemDate(item); d != "" {
+			row["date"] = d
+		}
+		if src := itemSource(item); src != "" {
+			row["source"] = src
+		}
+		if files := itemFiles(item); files != "" {
+			row["files"] = files
+		}
+		if item.StaleSince != nil {
+			row["stale"] = true
+			row["note"] = StaleNote
+		}
+		out = append(out, row)
 	}
-	return map[string]any{"items": out, "count": len(out)}, nil
+	result := map[string]any{"items": out, "count": len(out)}
+	if brief != "" {
+		result["brief"] = brief
+	}
+	return result, nil
 }
