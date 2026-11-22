@@ -28,6 +28,7 @@ const maxMemoryTouchLinks = 100
 
 func (s *Server) registerCodeLinkRoutes() {
 	s.Mux.HandleFunc("POST /v1/projects/{id}/code-links", s.requireAuth(s.handleCodeLinks))
+	s.Mux.HandleFunc("GET /v1/projects/{id}/why", s.requireAuth(s.handleWhy))
 }
 
 func (s *Server) codeLinkStore() (store.CodeLinkStore, bool) {
@@ -52,6 +53,8 @@ type codeLinksRequest struct {
 	SessionNativeID string          `json:"session_native_id,omitempty"`
 	Harness         string          `json:"harness,omitempty"`
 	Links           []codeLinkInput `json:"links"`
+	// Changes are line-level hunks (code_changes.go); optional.
+	Changes []codeChangeInput `json:"changes,omitempty"`
 }
 
 // resolveCodeLinkSession maps a cloud session id or a harness-native id to
@@ -101,8 +104,12 @@ func (s *Server) handleCodeLinks(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if len(req.Links) == 0 {
+	if len(req.Links) == 0 && len(req.Changes) == 0 {
 		writeError(w, http.StatusBadRequest, "links required")
+		return
+	}
+	if len(req.Changes) > store.MaxCodeChanges {
+		writeError(w, http.StatusBadRequest, "too many changes")
 		return
 	}
 	if len(req.Links) > store.MaxCodeLinks {
@@ -223,9 +230,15 @@ func (s *Server) handleCodeLinks(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	changes, changesSkipped, err := s.recordCodeChanges(ctx, cl, projectID, sid, req.Changes)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "record changes failed: "+err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"session_id": sid, "linked": added, "skipped": skipped, "memory_links": memLinks,
 		"refreshed": refreshed, "marked": len(marked),
+		"changes": changes, "changes_skipped": changesSkipped,
 	})
 }
 

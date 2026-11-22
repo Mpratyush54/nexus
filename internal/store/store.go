@@ -146,6 +146,8 @@ type MemStore struct {
 	// Code links (migration 044), lazily created under mu.
 	codeEntities map[string]*CodeEntity
 	codeLinks    map[string]*memCodeLink
+	// Line-level code changes (migration 047), under mu.
+	codeChanges []*CodeChange
 }
 
 // memSubscription is one in-process event subscriber.
