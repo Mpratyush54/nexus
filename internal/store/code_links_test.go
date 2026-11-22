@@ -186,6 +186,15 @@ func TestPostgresCodeLinks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The viewer must be a project member to see project-visible memories.
+	if _, err := s.ClaimProject(ctx, project.ID, owner); err != nil {
+		t.Fatal(err)
+	}
+	var outsider string
+	if err := s.pool.QueryRow(ctx, `INSERT INTO users(username) VALUES ($1) RETURNING id::text`, name+"-out").Scan(&outsider); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _, _ = s.pool.Exec(context.Background(), `DELETE FROM users WHERE id=$1::uuid`, outsider) }()
 	defer func() {
 		_, _ = s.pool.Exec(context.Background(), `DELETE FROM memory_versions WHERE memory_id IN (SELECT id FROM memory_items WHERE project_id=$1::uuid)`, project.ID)
 		_, _ = s.pool.Exec(context.Background(), `DELETE FROM memory_items WHERE project_id=$1::uuid`, project.ID)
@@ -262,6 +271,16 @@ func TestPostgresCodeLinks(t *testing.T) {
 	}
 	if !sawMem || !sawSess {
 		t.Fatalf("by path: %+v", hits)
+	}
+	// A non-member viewer gets the links but never the project memory.
+	outHits, err := s.ListCodeLinksByPath(WithViewer(ctx, outsider), project.ID, "tools.go", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range outHits {
+		if h.SrcKind == LinkSrcMemory || h.Memory != nil {
+			t.Fatalf("non-member saw memory link: %+v", h)
+		}
 	}
 
 	at := time.Now().UTC()
