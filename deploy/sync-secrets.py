@@ -154,6 +154,15 @@ def main():
     ]
     if existing_admin_ids:
         env_lines.append(f"PLATFORM_ADMIN_USER_IDS={existing_admin_ids}")
+    # Preserve operator overrides of the embeddings wiring
+    # (e.g. CENTRAL_EMBEDDING_PROVIDER=hash as a kill switch). Defaults live
+    # in deploy/docker-compose.lightsail.yml.
+    res = run_ssh("grep '^CENTRAL_EMBEDDING_[A-Z_]*=' /opt/central-memory/repo/.env 2>/dev/null || true")
+    if res.returncode == 0:
+        for line in res.stdout.splitlines():
+            line = line.strip()
+            if re.match(r"^CENTRAL_EMBEDDING_[A-Z_]+=", line):
+                env_lines.append(line)
     env_content = "\n".join(env_lines) + "\n"
 
     print("[*] Securely writing .env to Lightsail instance...")

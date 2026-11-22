@@ -104,6 +104,11 @@ type Server struct {
 	// selects EmbedderFromEnv at first use (hash fallback by default).
 	Embedder memctx.Embedder
 
+	// EmbedProvider, when set, wins over Embedder: it tags each vector with
+	// its model (memory_items.embedding_model), lets search skip the vector
+	// path while the provider is down, and drives the reembed backfill.
+	EmbedProvider *memctx.Provider
+
 	// Extractor runs server-side OpenRouter / heuristic memory extraction
 	// for POST /memory/extract. Nil selects extract.NewService(ConfigFromEnv).
 	Extractor *extract.Service
@@ -171,6 +176,9 @@ func (s *Server) quotaAllowed(chars int) (bool, string) {
 // resolveEmbedder returns the server's embedding backend (issue #165).
 // Nil Embedder lazily binds EmbedderFromEnv (hash by default).
 func (s *Server) resolveEmbedder() memctx.Embedder {
+	if s != nil && s.EmbedProvider != nil {
+		return s.EmbedProvider.Embedder()
+	}
 	if s != nil && s.Embedder != nil {
 		return s.Embedder
 	}
