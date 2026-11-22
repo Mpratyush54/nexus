@@ -457,3 +457,26 @@ func TestServeStdioRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// Strict MCP clients reject the whole tool list if any schema is invalid.
+func TestToolSchemasHaveRequiredArrays(t *testing.T) {
+	b, err := json.Marshal(ListTools())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tools []struct {
+		Name        string         `json:"name"`
+		InputSchema map[string]any `json:"inputSchema"`
+	}
+	if err := json.Unmarshal(b, &tools); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools {
+		if _, ok := tool.InputSchema["required"].([]any); !ok {
+			t.Errorf("%s: required is %v, want an array", tool.Name, tool.InputSchema["required"])
+		}
+		if tool.InputSchema["type"] != "object" {
+			t.Errorf("%s: type is %v, want object", tool.Name, tool.InputSchema["type"])
+		}
+	}
+}
