@@ -155,7 +155,14 @@ func (s *Server) sessionToolCalls(r *http.Request, row *store.AgentSession) []ma
 	if !ok {
 		return nil
 	}
-	turns, err := cs.ListSessionTurns(r.Context(), row.ID)
+	var turns []store.SessionTurn
+	var err error
+	if reader, ok := cs.(store.SessionTurnReader); ok {
+		// Only turns that can carry calls; plain chat turns stay in the DB.
+		turns, err = reader.ListSessionToolCallTurns(r.Context(), row.ID)
+	} else {
+		turns, err = cs.ListSessionTurns(r.Context(), row.ID)
+	}
 	if err != nil {
 		return nil
 	}
