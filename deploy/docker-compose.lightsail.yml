@@ -16,13 +16,11 @@ services:
     restart: always
 
   server:
-    build:
-      context: ..
-      dockerfile: deploy/Dockerfile.server
-      args:
-        VERSION: "${VERSION:-v0.2.0}"
-        COMMIT: "${COMMIT:-unknown}"
-        BUILT_AT: "${BUILT_AT:-}"
+    # Prebuilt by GitHub Actions and pulled from ECR by deploy/lightsail-remote.sh;
+    # the 1 GB box never builds. NEXUS_SERVER_IMAGE is passed per command
+    # (current value: /opt/central-memory/deploy/current-image on the box).
+    image: ${NEXUS_SERVER_IMAGE:?set NEXUS_SERVER_IMAGE (see deploy/README.md)}
+    pull_policy: never
     container_name: nexus-server
     environment:
       DATABASE_URL: postgres://central:${DB_PASSWORD}@postgres:5432/central_memory?sslmode=disable
