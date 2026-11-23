@@ -32,6 +32,7 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       built_at: ${{ steps.meta.outputs.built_at }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
     steps:
       - id: meta
         run: |
@@ -46,12 +47,20 @@ jobs:
           fi
           VER="${VER#v}"
           echo "version=$VER" >> "$GITHUB_OUTPUT"
+          # The legacy all-OS publisher is stable-only. Native Windows beta
+          # artifacts use scripts/build-windows-beta.ps1 and a prerelease.
+          # In particular a beta tag must NEVER advance desktop/latest.json.
+          case "$VER" in
+            *-beta*|*-alpha*|*-rc*) echo "prerelease=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
           echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
   # Pure-Go CLI is safe to cross-compile. Windows deliberately does not ship
   # nexus-daemon: capture is hosted by Nexus.exe/nexuscore.dll.
   build-tools:
     needs: meta
+    if: needs.meta.outputs.prerelease != 'true'
     name: tools-${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ubuntu-latest
     strategy:
@@ -112,6 +121,7 @@ jobs:
   # for the non-Windows migration path until the SwiftUI replacement ships.
   build-desktop:
     needs: meta
+    if: needs.meta.outputs.prerelease != 'true'
     name: desktop-${{ matrix.goos }}-${{ matrix.goarch }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -178,6 +188,11 @@ jobs:
           dotnet publish desktop/windows/Nexus.csproj -c Release -r win-x64 --self-contained false -o dist/Nexus -p:AppxGeneratePriEnabled=false -p:WindowsAppSDKSelfContained=false
           $env:CGO_ENABLED = '1'
           go build -tags nexuscorelib -trimpath -ldflags $ld -buildmode=c-shared -o dist/Nexus/nexuscore.dll ./cmd/nexuscore
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Bundled stdio MCP proxy (Antigravity) so the app never needs the nexus CLI.
+          $env:CGO_ENABLED = '0'
+          go build -trimpath -ldflags "-s -w" -o dist/Nexus/nexus-mcp-proxy.exe ./cmd/nexus-mcp-proxy
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Compress-Archive -Path dist/Nexus/* -DestinationPath dist/nexus-desktop-windows-amd64.zip -Force
           Get-ChildItem dist -Recurse | Select-Object FullName, Length
       - uses: actions/upload-artifact@v4
@@ -188,6 +203,7 @@ jobs:
 
   publish:
     needs: [meta, build-tools, build-desktop]
+    if: needs.meta.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -201,7 +217,9 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          find artifacts -type f -exec cp -f {} dist/ \;
+          # nexus-mcp-proxy.exe ships inside the desktop zip only; flattening it
+          # here would read as a bogus "mcp-proxy" CLI platform below.
+          find artifacts -type f ! -name 'nexus-mcp-proxy.exe' -exec cp -f {} dist/ \;
           ls -la dist
           BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
           if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi

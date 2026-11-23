@@ -47,10 +47,10 @@ jobs:
             exit 1
           fi
 
-  # Job 2: race detector over the whole suite (DB-free unit tests; live-DB
-  # tests SKIP without TEST_POSTGRES_DSN — see postgres job below).
+  # Job 2: race detector over the DB-free suite (-short skips embedded/live
+  # Postgres; the postgres jobs below run the database paths).
   test-race:
-    name: go test -race ./...
+    name: go test -race -short ./...
     runs-on: ubuntu-latest
     needs: build
     steps:
@@ -66,7 +66,7 @@ jobs:
           sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
 
       - name: Test with race detector
-        run: go test -race -count=1 ./...
+        run: go test -race -short -count=1 ./...
 
   # Job 3: full suite against a real Postgres 16 + pgvector service. The
   # TEST_POSTGRES_DSN-gated tests in internal/store apply migrations/
