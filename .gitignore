@@ -11,3 +11,17 @@ hackathon-demo/*
 brag-output/*
 dist-desktop/
 skills-lock.json
+# Local build output and media renders
+/bin/
+desktop/**/bin/
+desktop/**/bin-*/
+desktop/**/obj/
+desktop/windows/.runtime-pri/
+videos/**/renders/
+videos/**/.hyperframes/
+videos/**/node_modules/
+*.pprof
+videos/**/.media/
+videos/**/*.mp3
+videos/**/*.mp4
+videos/**/*.wav
