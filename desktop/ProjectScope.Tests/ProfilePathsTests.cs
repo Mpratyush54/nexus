@@ -72,7 +72,7 @@ public class ProfilePathsTests
         {
             Assert.True(ProfilePaths.IsInside(root, env[key]!), key);
         }
-        foreach (var key in new[] { "NEXUS_CONFIG_DIR", "NEXUS_CACHE_DIR", "CENTRAL_MEMORY_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME" })
+        foreach (var key in new[] { "NEXUS_CONFIG_DIR", "NEXUS_CACHE_DIR", "CENTRAL_MEMORY_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "NEXUS_SERVER", "CENTRAL_SERVER_URL", "NEXUS_TOKEN", "CENTRAL_MEMORY_TOKEN" })
         {
             Assert.Null(env[key]);
         }

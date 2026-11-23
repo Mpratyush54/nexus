@@ -99,6 +99,13 @@ internal static partial class ProfilePaths
             ["XDG_CONFIG_HOME"] = null,
             ["XDG_DATA_HOME"] = null,
             ["XDG_CACHE_HOME"] = null,
+            // Server and credential overrides beat config.json in the core.
+            // Inherited ones belong to the normal account; a profile signs
+            // in only through its own config.json.
+            ["NEXUS_SERVER"] = null,
+            ["CENTRAL_SERVER_URL"] = null,
+            ["NEXUS_TOKEN"] = null,
+            ["CENTRAL_MEMORY_TOKEN"] = null,
         };
     }
 
