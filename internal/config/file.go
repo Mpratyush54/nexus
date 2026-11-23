@@ -7,18 +7,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
+
+var fileMu sync.Mutex
 
 // File holds the on-disk shape of ~/.config/central-memory/config.json
 // (or %APPDATA%\central-memory\config.json on Windows).
 type File struct {
-	ServerURL        string   `json:"server_url,omitempty"`
-	AppURL           string   `json:"app_url,omitempty"`
-	Token            string   `json:"token,omitempty"`
-	UserID           string   `json:"user_id,omitempty"`
-	Username         string   `json:"username,omitempty"`
-	WorkspaceRoot    string   `json:"workspace_root,omitempty"`
-	RecentWorkspaces []string `json:"recent_workspaces,omitempty"`
+	DesktopExecutionEnabled   bool     `json:"desktop_execution_enabled,omitempty"`
+	DesktopDeviceID           string   `json:"desktop_device_id,omitempty"`
+	DesktopDeviceKey          string   `json:"desktop_device_key,omitempty"`
+	DesktopDeviceKeyProtected string   `json:"desktop_device_key_protected,omitempty"`
+	ServerURL                 string   `json:"server_url,omitempty"`
+	AppURL                    string   `json:"app_url,omitempty"`
+	Token                     string   `json:"token,omitempty"`
+	TokenProtected            string   `json:"token_protected,omitempty"`
+	UserID                    string   `json:"user_id,omitempty"`
+	Username                  string   `json:"username,omitempty"`
+	WorkspaceRoot             string   `json:"workspace_root,omitempty"`
+	RecentWorkspaces          []string `json:"recent_workspaces,omitempty"`
+	CaptureConsentVersion     int      `json:"capture_consent_version,omitempty"`
+	CaptureWorkspaces         []string `json:"capture_workspaces,omitempty"`
 }
 
 // maxRecentWorkspaces caps the MRU workspace list persisted in config.json.
@@ -47,12 +57,16 @@ func PushRecentWorkspace(path string) error {
 	if path == "" {
 		return nil
 	}
-	cfg, err := LoadFile()
-	if err != nil {
-		return err
-	}
-	cfg.RecentWorkspaces = pushRecent(cfg.RecentWorkspaces, path)
-	return writeFile(cfg)
+	fileMu.Lock()
+	defer fileMu.Unlock()
+	return withConfigLock(func() error {
+		cfg, err := LoadFile()
+		if err != nil {
+			return err
+		}
+		cfg.RecentWorkspaces = pushRecent(cfg.RecentWorkspaces, path)
+		return writeFile(cfg)
+	})
 }
 
 func pushRecent(list []string, path string) []string {
@@ -91,48 +105,87 @@ func LoadFile() (File, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		return File{}, fmt.Errorf("config: parse %s: %w", path, err)
 	}
+	if cfg.TokenProtected != "" {
+		token, err := unprotectToken(cfg.TokenProtected)
+		if err != nil {
+			return File{}, fmt.Errorf("config: load %s: %w", path, err)
+		}
+		cfg.Token = token
+	}
+	if err := decodeDesktopKey(&cfg); err != nil {
+		return File{}, err
+	}
 	return cfg, nil
 }
 
 // SaveFile merges non-empty fields from patch into the existing config and
 // writes config.json with 0600 permissions.
 func SaveFile(patch File) error {
-	cur, err := LoadFile()
-	if err != nil {
-		return err
-	}
-	if v := strings.TrimSpace(patch.ServerURL); v != "" {
-		cur.ServerURL = v
-	}
-	if v := strings.TrimSpace(patch.AppURL); v != "" {
-		cur.AppURL = v
-	}
-	if v := strings.TrimSpace(patch.Token); v != "" {
-		cur.Token = v
-	}
-	if v := strings.TrimSpace(patch.UserID); v != "" {
-		cur.UserID = v
-	}
-	if v := strings.TrimSpace(patch.Username); v != "" {
-		cur.Username = v
-	}
-	if v := strings.TrimSpace(patch.WorkspaceRoot); v != "" {
-		cur.WorkspaceRoot = v
-		cur.RecentWorkspaces = pushRecent(cur.RecentWorkspaces, NormalizeWorkspacePath(v))
-	}
-	return writeFile(cur)
+	fileMu.Lock()
+	defer fileMu.Unlock()
+	return withConfigLock(func() error {
+		cur, err := LoadFile()
+		if err != nil {
+			return err
+		}
+		if v := strings.TrimSpace(patch.ServerURL); v != "" {
+			cur.ServerURL = v
+		}
+		if v := strings.TrimSpace(patch.AppURL); v != "" {
+			cur.AppURL = v
+		}
+		if v := strings.TrimSpace(patch.Token); v != "" {
+			cur.Token = v
+		}
+		if v := strings.TrimSpace(patch.UserID); v != "" {
+			cur.UserID = v
+		}
+		if v := strings.TrimSpace(patch.Username); v != "" {
+			cur.Username = v
+		}
+		if v := strings.TrimSpace(patch.WorkspaceRoot); v != "" {
+			cur.WorkspaceRoot = v
+			cur.RecentWorkspaces = pushRecent(cur.RecentWorkspaces, NormalizeWorkspacePath(v))
+		}
+		return writeFile(cur)
+	})
+}
+
+// SetCaptureWorkspaces records explicit local monitoring consent. An empty
+// list revokes capture without deleting credentials or historical uploads.
+func SetCaptureWorkspaces(roots []string) error {
+	fileMu.Lock()
+	defer fileMu.Unlock()
+	return withConfigLock(func() error {
+		cur, err := LoadFile()
+		if err != nil {
+			return err
+		}
+		cur.CaptureConsentVersion = 1
+		cur.CaptureWorkspaces = append([]string{}, roots...)
+		if len(roots) > 0 {
+			cur.WorkspaceRoot = roots[0]
+			cur.RecentWorkspaces = pushRecent(cur.RecentWorkspaces, NormalizeWorkspacePath(roots[0]))
+		}
+		return writeFile(cur)
+	})
 }
 
 // ClearCredentials removes token/user fields while keeping server URLs.
 func ClearCredentials() error {
-	cur, err := LoadFile()
-	if err != nil {
-		return err
-	}
-	cur.Token = ""
-	cur.UserID = ""
-	cur.Username = ""
-	return writeFile(cur)
+	fileMu.Lock()
+	defer fileMu.Unlock()
+	return withConfigLock(func() error {
+		cur, err := LoadFile()
+		if err != nil {
+			return err
+		}
+		cur.Token = ""
+		cur.TokenProtected = ""
+		cur.UserID = ""
+		cur.Username = ""
+		return writeFile(cur)
+	})
 }
 
 func writeFile(cfg File) error {
@@ -144,6 +197,20 @@ func writeFile(cfg File) error {
 		return fmt.Errorf("config: mkdir: %w", err)
 	}
 	path := filepath.Join(dir, ConfigFileName)
+	if err := encodeDesktopKey(&cfg); err != nil {
+		return err
+	}
+	cfg.TokenProtected = ""
+	if token := strings.TrimSpace(cfg.Token); token != "" {
+		protected, err := protectToken(token)
+		if err != nil {
+			return err
+		}
+		cfg.TokenProtected = protected
+		if protected != "" {
+			cfg.Token = ""
+		}
+	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err

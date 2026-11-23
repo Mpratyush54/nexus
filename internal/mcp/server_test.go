@@ -457,3 +457,48 @@ func TestServeStdioRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// Strict MCP clients reject the whole tool list if any schema is invalid.
+func TestToolSchemasHaveRequiredArrays(t *testing.T) {
+	b, err := json.Marshal(ListTools())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tools []struct {
+		Name        string         `json:"name"`
+		InputSchema map[string]any `json:"inputSchema"`
+	}
+	if err := json.Unmarshal(b, &tools); err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools {
+		if _, ok := tool.InputSchema["required"].([]any); !ok {
+			t.Errorf("%s: required is %v, want an array", tool.Name, tool.InputSchema["required"])
+		}
+		if tool.InputSchema["type"] != "object" {
+			t.Errorf("%s: type is %v, want object", tool.Name, tool.InputSchema["type"])
+		}
+	}
+}
+
+// MCP clients only read "content" text blocks from tools/call results.
+func TestToolsCallReturnsMCPContent(t *testing.T) {
+	out := toolCallResult(map[string]any{"context": "<project_memory/>", "token_count": 3})
+	m := out.(map[string]any)
+	blocks, ok := m["content"].([]any)
+	if !ok || len(blocks) != 1 {
+		t.Fatalf("content = %#v", m["content"])
+	}
+	block := blocks[0].(map[string]any)
+	if block["type"] != "text" || block["text"] != "<project_memory/>" {
+		t.Fatalf("block = %#v", block)
+	}
+	if m["context"] != "<project_memory/>" {
+		t.Fatal("original fields must stay for existing callers")
+	}
+	plain := toolCallResult(map[string]any{"id": "m1", "status": "active"}).(map[string]any)
+	text := plain["content"].([]any)[0].(map[string]any)["text"].(string)
+	if !strings.Contains(text, `"id": "m1"`) {
+		t.Fatalf("plain result text = %q", text)
+	}
+}

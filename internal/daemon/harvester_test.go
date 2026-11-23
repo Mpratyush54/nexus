@@ -195,7 +195,7 @@ func TestMatchesWorkspace(t *testing.T) {
 }
 
 // TestWorkspaceMatchPriority pins the issue-#109 ordering: normalized
-// remote URL > root commit > folder name. Pure — no git binary needed.
+// remote URL > root commit > folder name. Pure Ã¢â‚¬â€ no git binary needed.
 func TestWorkspaceMatchPriority(t *testing.T) {
 	const origin = "git@github.com:org/proj.git"
 	const root = "abc123root"
@@ -236,6 +236,12 @@ func TestWorkspaceMatchPriority(t *testing.T) {
 			want: MatchNone,
 		},
 		{
+			name:   "folder substring inside a segment does not match",
+			origin: "", root: "", folder: "api",
+			candOrigin: "", candRoot: "", candPath: "/x/capital/abc.jsonl",
+			want: MatchNone,
+		},
+		{
 			name:   "URL mismatch and root mismatch reject",
 			origin: origin, root: root, folder: "proj",
 			candOrigin: "git@github.com:org/other.git", candRoot: "zzz", candPath: "/x/api/abc.jsonl",
@@ -268,7 +274,7 @@ func TestWorkspaceMatchPriority(t *testing.T) {
 }
 
 // TestMatchesCandidateIdentity pins MatchesCandidate on a harvester with
-// injected git identity (struct literal — no git binary): a transcript
+// injected git identity (struct literal Ã¢â‚¬â€ no git binary): a transcript
 // from an unrelated repo sharing the generic folder name "api" must be
 // rejected once identities differ, while the same-remote transcript is
 // accepted even when the path carries no folder hint.
@@ -670,5 +676,62 @@ func TestMatchesTranscriptCwdPeek(t *testing.T) {
 	}
 	if h.MatchesTranscript(other, true) {
 		t.Fatal("foreign cwd must not match")
+	}
+}
+
+func TestFileMentionsFolderRequiresPathBoundary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "transcript.jsonl")
+	if err := os.WriteFile(path, []byte(`{"cwd":"D:\\src\\workplace\\repo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if fileMentionsFolder(path, "work") {
+		t.Fatal("folder name matched inside a larger path segment")
+	}
+	if err := os.WriteFile(path, []byte(`{"cwd":"D:\\work\\api\\repo"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !fileMentionsFolder(path, "work") {
+		t.Fatal("folder name did not match a whole path segment")
+	}
+}
+
+func TestSQLiteFallbackDedupesOldTurns(t *testing.T) {
+	// Dedup is the subject here, not the per-file scan rate limit.
+	defer func(v time.Duration) { sqliteFallbackInterval = v }(sqliteFallbackInterval)
+	sqliteFallbackInterval = 0
+	var got []Event
+	h := NewHarvesterWithPoll(t.TempDir(), sliceEmitter{&got}, time.Second, time.Minute)
+	path := filepath.Join(t.TempDir(), "state.vscdb")
+	write := func(payload string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(payload), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := `{"role":"user","content":"an old cursor turn about redis queues"}`
+	write("sqlite header " + old)
+	h.agents[path] = "cursor"
+	st, _ := os.Stat(path)
+	if h.TrackSQLite(path, st) {
+		t.Fatal("first sight must only baseline")
+	}
+
+	write("sqlite header " + old + ` {"role":"assistant","content":"a fresh cursor reply about redis streams"}`)
+	st, _ = os.Stat(path)
+	if !h.TrackSQLite(path, st) {
+		t.Fatal("changed file must report activity")
+	}
+	got = nil
+
+	write("sqlite header " + old + ` {"role":"assistant","content":"a fresh cursor reply about redis streams"}` + ` {"role":"user","content":"another fresh cursor question about queues"}`)
+	st, _ = os.Stat(path)
+	if !h.TrackSQLite(path, st) {
+		t.Fatal("second change must report activity")
+	}
+	if n := countTurns(got); n != 1 {
+		t.Fatalf("fallback emitted %d turns, want only the new one", n)
+	}
+	if content, _ := got[0].Payload["content"].(string); !strings.Contains(content, "another fresh cursor question") {
+		t.Fatalf("fallback emitted an already-seen turn: %q", content)
 	}
 }

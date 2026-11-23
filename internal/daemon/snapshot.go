@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"central-memory/internal/security"
 	"central-memory/internal/store"
@@ -49,21 +50,12 @@ func CollectSnapshot(root, conversationID, harness, machineID string) (*store.Se
 		artifacts = nil
 	}
 
-	branch, commit, dirty, _, _ := GitStatus(root)
-	diffText, diffTrunc, err := collectUncommittedDiff(root)
-	if err != nil {
-		log.Printf("daemon: snapshot git diff: %v", err)
-	}
-	if security.ContainsSecret([]byte(diffText)) {
-		if redacted, ok := RedactSecrets(diffText); ok {
-			diffText = redacted
-		}
-	}
-	diffSize := len(diffText)
-	gzDiff, err := gzipBytes([]byte(diffText))
+	branch, commit, dirty, _, _ := GitStatusCached(root)
+	diff, err := snapshotDiff(root)
 	if err != nil {
 		return nil, err
 	}
+	gzDiff, diffSize, diffTrunc := diff.gz, diff.size, diff.trunc
 
 	turnCount := bytes.Count(transcriptRaw, []byte("\n"))
 	if len(transcriptRaw) > 0 && !bytes.HasSuffix(transcriptRaw, []byte("\n")) {
@@ -115,6 +107,36 @@ func readSnapshotTranscript(layout SnapshotLayout, workspaceRoot string) ([]byte
 		return nil, fmt.Errorf("no transcript at %s", path)
 	}
 	return nil, fmt.Errorf("no transcript path")
+}
+
+// snapshotDiffBundle is the redacted, gzipped uncommitted diff of a snapshot.
+type snapshotDiffBundle struct {
+	gz    []byte
+	size  int
+	trunc bool
+}
+
+// snapshotDiff builds the uncommitted-diff bundle, reusing the previous one
+// while the workspace's git state and sources are unchanged
+// (git_state_cache.go): `git diff`, `git ls-files` and the untracked-file
+// reads run only after files changed.
+func snapshotDiff(root string) (snapshotDiffBundle, error) {
+	return cachedGit(root, "snapshot-diff", func() (snapshotDiffBundle, error) {
+		diffText, diffTrunc, err := collectUncommittedDiff(root)
+		if err != nil {
+			log.Printf("daemon: snapshot git diff: %v", err)
+		}
+		if security.ContainsSecret([]byte(diffText)) {
+			if redacted, ok := RedactSecrets(diffText); ok {
+				diffText = redacted
+			}
+		}
+		gz, err := gzipBytes([]byte(diffText))
+		if err != nil {
+			return snapshotDiffBundle{}, err
+		}
+		return snapshotDiffBundle{gz: gz, size: len(diffText), trunc: diffTrunc}, nil
+	})
 }
 
 func collectUncommittedDiff(root string) (string, bool, error) {
@@ -190,10 +212,15 @@ func tarGzipArtifacts(layout SnapshotLayout) ([]byte, error) {
 		}
 	}
 
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gz)
-	err = filepath.Walk(brainDir, func(path string, info os.FileInfo, err error) error {
+	// Pass 1: list the files to pack from directory entries only (no reads).
+	type artifactFile struct {
+		path, rel string
+		size      int64
+		mod       int64
+	}
+	var files []artifactFile
+	var fp strings.Builder
+	_ = filepath.WalkDir(brainDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -207,7 +234,7 @@ func tarGzipArtifacts(layout SnapshotLayout) ([]byte, error) {
 		}
 		for _, skip := range skipPrefixes {
 			if relSlash == skip || strings.HasPrefix(relSlash, skip+"/") {
-				if info.IsDir() {
+				if d.IsDir() {
 					return filepath.SkipDir
 				}
 				return nil
@@ -216,7 +243,13 @@ func tarGzipArtifacts(layout SnapshotLayout) ([]byte, error) {
 		if transcriptRel != "" && relSlash == transcriptRel {
 			return nil
 		}
-		if info.IsDir() {
+		if otherClaudeSession(layout, relSlash) {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(path))
@@ -225,21 +258,45 @@ func tarGzipArtifacts(layout SnapshotLayout) ([]byte, error) {
 		default:
 			return nil
 		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
 		// Cap individual artifact files (avoid packing huge jsonl dumps twice).
 		if info.Size() > maxUntrackedFileBytes*20 {
 			return nil
 		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
-		hdr := &tar.Header{Name: relSlash, Mode: 0o644, Size: int64(len(raw))}
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-		_, err = tw.Write(raw)
-		return err
+		f := artifactFile{path: path, rel: relSlash, size: info.Size(), mod: info.ModTime().UnixNano()}
+		files = append(files, f)
+		fmt.Fprintf(&fp, "%s\x00%d\x00%d\n", f.rel, f.size, f.mod)
+		return nil
 	})
+	if p := strings.TrimSpace(layout.SQLiteSource); p != "" {
+		fmt.Fprintf(&fp, "sqlite\x00%s\x00%s\n", p, statStamp(p))
+	}
+	cacheKey := layout.Harness + "\x00" + layout.ConversationID + "\x00" + brainDir
+	fingerprint := fp.String()
+	if cached, ok := artifactCacheGet(cacheKey, fingerprint); ok {
+		return cached, nil
+	}
+
+	// Pass 2: pack them.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for _, f := range files {
+		raw, rerr := os.ReadFile(f.path)
+		if rerr != nil {
+			continue
+		}
+		hdr := &tar.Header{Name: f.rel, Mode: 0o644, Size: int64(len(raw))}
+		if err = tw.WriteHeader(hdr); err != nil {
+			break
+		}
+		if _, err = tw.Write(raw); err != nil {
+			break
+		}
+	}
 	if err == nil {
 		if aerr := appendSmallSQLiteArtifact(tw, layout, brainDir); aerr != nil {
 			err = aerr
@@ -250,7 +307,59 @@ func tarGzipArtifacts(layout SnapshotLayout) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return buf.Bytes(), nil
+	out := buf.Bytes()
+	artifactCachePut(cacheKey, fingerprint, out)
+	return out, nil
+}
+
+// otherClaudeSession reports whether relSlash (relative to a Claude project
+// folder) belongs to a different conversation: <uuid>.jsonl transcripts and
+// <uuid>/ sub-agent and tool-result folders of other chats. They are not
+// part of this chat's state; packing them read and gzipped every chat of the
+// project on each snapshot, and a restore would write them all back.
+func otherClaudeSession(layout SnapshotLayout, relSlash string) bool {
+	if layout.Harness != "claude" {
+		return false
+	}
+	first := relSlash
+	if i := strings.IndexByte(first, '/'); i >= 0 {
+		first = first[:i]
+	}
+	stem := strings.TrimSuffix(first, ".jsonl")
+	return looksLikeUUID(stem) && !strings.EqualFold(stem, layout.ConversationID)
+}
+
+// artifactCache keeps the last artifacts bundle per conversation, reused
+// while the packed files' names, sizes and modification times are unchanged.
+var artifactCache = struct {
+	sync.Mutex
+	m map[string]artifactCacheEntry
+}{m: map[string]artifactCacheEntry{}}
+
+type artifactCacheEntry struct {
+	fingerprint string
+	bundle      []byte
+}
+
+const artifactCacheMax = 32
+
+func artifactCacheGet(key, fingerprint string) ([]byte, bool) {
+	artifactCache.Lock()
+	defer artifactCache.Unlock()
+	e, ok := artifactCache.m[key]
+	if !ok || e.fingerprint != fingerprint {
+		return nil, false
+	}
+	return e.bundle, true
+}
+
+func artifactCachePut(key, fingerprint string, bundle []byte) {
+	artifactCache.Lock()
+	defer artifactCache.Unlock()
+	if _, ok := artifactCache.m[key]; !ok && len(artifactCache.m) >= artifactCacheMax {
+		artifactCache.m = map[string]artifactCacheEntry{}
+	}
+	artifactCache.m[key] = artifactCacheEntry{fingerprint: fingerprint, bundle: bundle}
 }
 
 func artifactSkipPrefixes(layout SnapshotLayout) []string {
