@@ -21,7 +21,9 @@ import (
 //	</image>
 //
 // Turns that are only an envelope (<environment_context>, "# AGENTS.md
-// instructions for …" + <INSTRUCTIONS>) come back empty. Anything inside code
+// instructions for …" + <INSTRUCTIONS>, harness tags such as
+// <external_codex_apps_open_page>{…}</external_codex_apps_open_page>) come
+// back empty. Anything inside code
 // (``` fences, `spans`) is never stripped, and a message with no wrapper comes
 // back exactly as it was. "" means no request text (pure wrapper, or a preview
 // cut before the request).
@@ -39,10 +41,12 @@ var (
 	hmTagOpen     = regexp.MustCompile(`(?i)<([\w-]+)\b([^>]*)>`)
 	hmAmbientAttr = regexp.MustCompile(`(?i)\bsource="ambient-ui-state"`)
 	// A cut-off block with no closing tag: the rest is context.
-	hmContextOpen = regexp.MustCompile(`(?i)<(?:in-app-browser-context|environment_context)\b[^>]*>`)
-	hmAgentsBlock = regexp.MustCompile(`(?ism)^[ \t]*#\s*AGENTS\.md instructions for[^\n]*(?:\n\s*<INSTRUCTIONS>.*?(?:</INSTRUCTIONS>|\z))?[ \t]*\n?`)
-	hmImageTag    = regexp.MustCompile(`(?i)<image\b[^>\n]*>(?:[ \t]*\n?[ \t]*</image>)?[ \t]*\n?`)
-	hmImageClose  = regexp.MustCompile(`(?im)^[ \t]*</image>[ \t]*\n?`)
+	hmContextOpen = regexp.MustCompile(`(?i)<(?:in-app-browser-context|environment_context|external_[\w-]*)\b[^>]*>`)
+	// A self-closing harness tag (<external_codex_x/>) carries no text.
+	hmExternalSelf = regexp.MustCompile(`(?i)<external_[\w-]*\b[^>]*/>[ \t]*\n?`)
+	hmAgentsBlock  = regexp.MustCompile(`(?ism)^[ \t]*#\s*AGENTS\.md instructions for[^\n]*(?:\n\s*<INSTRUCTIONS>.*?(?:</INSTRUCTIONS>|\z))?[ \t]*\n?`)
+	hmImageTag     = regexp.MustCompile(`(?i)<image\b[^>\n]*>(?:[ \t]*\n?[ \t]*</image>)?[ \t]*\n?`)
+	hmImageClose   = regexp.MustCompile(`(?im)^[ \t]*</image>[ \t]*\n?`)
 	// Preamble lines (matched against one line at a time).
 	hmFilesHeader = regexp.MustCompile(`(?i)^\s*#{0,3}\s*Files mentioned by the user:\s*$`)
 	hmMention     = regexp.MustCompile(`(?i)^\s*(?:#{1,3}\s+)?[^\n:<>#]+?\.[A-Za-z0-9]{1,10}:\s+(?:[A-Za-z]:[\\/]|\\\\|/|~[\\/])[^\n]*?\s*$`)
@@ -57,7 +61,7 @@ var (
 	hmCues       = []string{
 		"<image", "-context", "my request", "files mentioned by the user", "image attachment:",
 		"distinguish instructions", "context from my ide setup", "</image>",
-		"<environment_context", "agents.md instructions", "ambient-ui-state",
+		"<environment_context", "agents.md instructions", "ambient-ui-state", "<external_",
 	}
 )
 
@@ -80,6 +84,7 @@ func harnessParse(original string) string {
 	text = hmReplaceOutsideCode(text, hmAgentsBlock, &changed)
 	// Ambient context blocks, wherever they sit outside code.
 	text = hmStripContextBlocks(text, &changed)
+	text = hmReplaceOutsideCode(text, hmExternalSelf, &changed)
 	// A preview cut mid-block leaves an opening tag: the rest is context.
 	if loc := hmFirstOutsideCode(text, hmContextOpen, 0); loc != nil {
 		text = text[:loc[0]]
@@ -227,7 +232,8 @@ func hmReplaceOutsideCode(text string, re *regexp.Regexp, changed *bool) string 
 	return b.String()
 }
 
-// Removes <in-app-browser-context>, <environment_context> and any block
+// Removes <in-app-browser-context>, <environment_context>, harness tags
+// named external_… (Codex: <external_codex_apps_open_page>) and any block
 // marked source="ambient-ui-state", through its closing tag.
 func hmStripContextBlocks(text string, changed *bool) string {
 	code := hmCodeRanges(text)
@@ -241,8 +247,10 @@ func hmStripContextBlocks(text string, changed *bool) string {
 		start, end := pos+m[0], pos+m[1]
 		name, attrs := text[pos+m[2]:pos+m[3]], text[pos+m[4]:pos+m[5]]
 		lname := strings.ToLower(name)
-		block := lname == "in-app-browser-context" || lname == "environment_context" || hmAmbientAttr.MatchString(attrs)
-		if !block || hmInCode(code, start) {
+		block := lname == "in-app-browser-context" || lname == "environment_context" ||
+			strings.HasPrefix(lname, "external_") || hmAmbientAttr.MatchString(attrs)
+		// A self-closing tag has no body (hmExternalSelf removes it).
+		if !block || strings.HasSuffix(strings.TrimSpace(attrs), "/") || hmInCode(code, start) {
 			pos = start + 1
 			continue
 		}

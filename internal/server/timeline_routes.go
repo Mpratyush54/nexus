@@ -128,6 +128,17 @@ func (s *Server) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// A placeholder title ("Captured codex session") is presented as the
+	// chat's first request, as in the timeline; the stored title is kept.
+	if store.IsPlaceholderTitle(row.Title) {
+		if src, ok := s.Store.(store.SessionTitleSource); ok {
+			if turns, err := src.FirstUserTurns(r.Context(), row.ID); err == nil {
+				shown := *row
+				shown.Title = store.PresentTitle(row.Title, turns)
+				row = &shown
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, row)
 }
 
