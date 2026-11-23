@@ -41,6 +41,8 @@ func (s *Server) handleAgentDiscovery(w http.ResponseWriter, r *http.Request) {
 			{"method": "POST", "path": "/v1/agent-sessions", "purpose": "create or touch a harness session by native id"},
 			{"method": "GET", "path": "/v1/agent-sessions/{id}/fetch", "purpose": "paged raw turns for a session the caller can read"},
 			{"method": "GET", "path": "/v1/agent-sessions/{id}/summary", "purpose": "session summary for a session the caller can read"},
+			{"method": "DELETE", "path": "/v1/agent-sessions/{id}", "purpose": "owner only: delete a chat with its turns, usage and shares (memories stay)"},
+			{"method": "POST", "path": "/v1/agent-sessions/{id}/turns/dedupe", "purpose": "owner only: remove undated exact copies of dated turns; ?dry_run=1 to count"},
 			{"method": "GET", "path": "/v1/projects/{id}/knowledge", "purpose": "project knowledge; status is active, superseded, or forgotten"},
 			{"method": "POST", "path": "/memory/{id}/pin", "purpose": "pin a memory item"},
 			{"method": "POST", "path": "/memory/{id}/scope", "purpose": "change memory level: session, project, personal, or organization"},
