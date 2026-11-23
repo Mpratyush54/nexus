@@ -26,14 +26,62 @@ type SessionDeleteResult struct {
 	Snapshots int    `json:"snapshots"`
 }
 
+// Turn clean-up rules. Each removes only undated turns (source_ts NULL);
+// dated turns are never touched.
+const (
+	// DedupeRuleExact: an exact copy (role, text, tool_calls) of a dated turn.
+	DedupeRuleExact = "exact"
+	// DedupeRulePartialCopy: same role and trimmed text as a dated turn, and
+	// every tool call it carries (possibly none) is already stored on a dated
+	// turn of that role, matched by id, or by value when the call has no id.
+	// Old captures stored an assistant message once undated with all its
+	// tool calls, and again dated as a text turn plus one turn per call.
+	DedupeRulePartialCopy = "partial_copy"
+	// DedupeRuleEnvelope: a user turn with no tool calls whose text is
+	// nothing but harness envelopes (<system-reminder>, <task-notification>,
+	// <agent-message> blocks). The capture no longer stores these.
+	DedupeRuleEnvelope = "envelope"
+)
+
+// Modes for DedupeSessionTurns: which rules run.
+const (
+	DedupeModeAll       = "all"       // exact, partial_copy and envelope (default)
+	DedupeModeExact     = "exact"     // exact copies only
+	DedupeModeCopies    = "copies"    // exact and partial_copy
+	DedupeModeEnvelopes = "envelopes" // envelope only
+)
+
+// ErrBadDedupeMode is returned for an unknown mode.
+var ErrBadDedupeMode = errors.New("mode must be all, exact, copies or envelopes")
+
+// TurnDedupeOptions selects the rules and whether to only count.
+type TurnDedupeOptions struct {
+	Mode   string
+	DryRun bool
+}
+
+// NormalizeDedupeMode maps "" to DedupeModeAll and rejects unknown modes.
+func NormalizeDedupeMode(mode string) (string, error) {
+	switch m := strings.ToLower(strings.TrimSpace(mode)); m {
+	case "":
+		return DedupeModeAll, nil
+	case DedupeModeAll, DedupeModeExact, DedupeModeCopies, DedupeModeEnvelopes:
+		return m, nil
+	}
+	return "", ErrBadDedupeMode
+}
+
 // TurnDedupeResult is the outcome of DedupeSessionTurns. Removed is the
-// number of copies removed (or that would be, on a dry run); Kept is the
-// number of turns the session has afterwards. RemovedIdx lists the copies.
+// number of turns removed (or that would be, on a dry run); Kept is the
+// number of turns the session has afterwards. RemovedIdx lists them and
+// Rules counts them per rule.
 type TurnDedupeResult struct {
-	Removed    int   `json:"removed"`
-	Kept       int   `json:"kept"`
-	RemovedIdx []int `json:"removed_idx"`
-	DryRun     bool  `json:"dry_run"`
+	Mode       string         `json:"mode"`
+	Removed    int            `json:"removed"`
+	Kept       int            `json:"kept"`
+	RemovedIdx []int          `json:"removed_idx"`
+	Rules      map[string]int `json:"rules"`
+	DryRun     bool           `json:"dry_run"`
 }
 
 // AgentSessionDeleter removes a chat or its duplicate turns.
@@ -42,10 +90,11 @@ type AgentSessionDeleter interface {
 	// grants, usage, guest links, teleports, code changes, snapshots and
 	// provenance. Memories made from it stay. ErrNotFound when missing.
 	DeleteAgentSession(ctx context.Context, sessionID string) (*SessionDeleteResult, error)
-	// DedupeSessionTurns removes undated turns (source_ts NULL) that are an
-	// exact copy (role, text, tool_calls) of a dated turn in the same
-	// session. Claude Code api-request-blob lines used to be stored this way.
-	DedupeSessionTurns(ctx context.Context, sessionID string, dryRun bool) (*TurnDedupeResult, error)
+	// DedupeSessionTurns removes undated turns (source_ts NULL) matched by
+	// the rules opts.Mode selects (see DedupeRule*): copies of dated turns,
+	// which Claude Code api-request-blob lines used to be stored as, and
+	// harness-only user envelopes. ErrBadDedupeMode for an unknown mode.
+	DedupeSessionTurns(ctx context.Context, sessionID string, opts TurnDedupeOptions) (*TurnDedupeResult, error)
 }
 
 var (
@@ -70,22 +119,151 @@ func sameToolCalls(a, b json.RawMessage) bool {
 	return bytes.Equal(norm(a), norm(b))
 }
 
-// duplicateTurnIdx returns the idx of each undated turn that copies a dated one.
-func duplicateTurnIdx(turns []SessionTurn) []int {
-	var out []int
+// toolCallKeys returns one key per tool call: its id when it has one,
+// otherwise its JSON value. ok is false when the JSON is not an array.
+func toolCallKeys(raw json.RawMessage) (keys []string, ok bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, true
+	}
+	var calls []json.RawMessage
+	if err := json.Unmarshal(trimmed, &calls); err != nil {
+		return nil, false
+	}
+	for _, c := range calls {
+		var head struct {
+			ID any `json:"id"`
+		}
+		if err := json.Unmarshal(c, &head); err == nil {
+			if id, isStr := head.ID.(string); isStr && strings.TrimSpace(id) != "" {
+				keys = append(keys, "id:"+strings.TrimSpace(id))
+				continue
+			}
+		}
+		var v any
+		if err := json.Unmarshal(c, &v); err != nil {
+			return nil, false
+		}
+		norm, _ := json.Marshal(v)
+		keys = append(keys, "v:"+string(norm))
+	}
+	return keys, true
+}
+
+// envelopeTags are the harness wrappers a user turn may consist of.
+var envelopeTags = []string{"system-reminder", "task-notification", "agent-message"}
+
+// isHarnessEnvelope reports whether text, trimmed, is one or more whole
+// envelope blocks and nothing else. Truncated text (no closing tag) and
+// text with anything outside the blocks are not envelopes.
+func isHarnessEnvelope(text string) bool {
+	s := strings.TrimSpace(text)
+	if s == "" {
+		return false
+	}
+	for s != "" {
+		matched := false
+		for _, tag := range envelopeTags {
+			open := "<" + tag
+			if !strings.HasPrefix(s, open) || len(s) == len(open) {
+				continue
+			}
+			if next := s[len(open)]; next != '>' && next != ' ' && next != '\t' && next != '\n' && next != '\r' {
+				continue
+			}
+			closeTag := "</" + tag + ">"
+			end := strings.Index(s, closeTag)
+			if end < 0 {
+				return false
+			}
+			s = strings.TrimSpace(s[end+len(closeTag):])
+			matched = true
+			break
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
+}
+
+// duplicateTurns classifies, by idx, the undated turns that the rules of
+// mode (already normalized) remove.
+func duplicateTurns(turns []SessionTurn, mode string) map[int]string {
+	exact := mode == DedupeModeAll || mode == DedupeModeExact || mode == DedupeModeCopies
+	partial := mode == DedupeModeAll || mode == DedupeModeCopies
+	envelope := mode == DedupeModeAll || mode == DedupeModeEnvelopes
+	// Trimmed texts and tool calls of dated turns, per role.
+	datedText := map[string]bool{}
+	datedCalls := map[string]map[string]bool{}
+	if partial {
+		for _, o := range turns {
+			if o.SourceAt == nil {
+				continue
+			}
+			datedText[o.Role+"\x00"+strings.TrimSpace(o.TextPreview)] = true
+			keys, _ := toolCallKeys(o.ToolCalls)
+			if len(keys) > 0 && datedCalls[o.Role] == nil {
+				datedCalls[o.Role] = map[string]bool{}
+			}
+			for _, k := range keys {
+				datedCalls[o.Role][k] = true
+			}
+		}
+	}
+	out := map[int]string{}
 	for _, t := range turns {
 		if t.SourceAt != nil {
 			continue
 		}
-		for _, o := range turns {
-			if o.SourceAt != nil && o.Role == t.Role && o.TextPreview == t.TextPreview && sameToolCalls(o.ToolCalls, t.ToolCalls) {
-				out = append(out, t.Idx)
-				break
+		if exact {
+			found := false
+			for _, o := range turns {
+				if o.SourceAt != nil && o.Role == t.Role && o.TextPreview == t.TextPreview && sameToolCalls(o.ToolCalls, t.ToolCalls) {
+					found = true
+					break
+				}
+			}
+			if found {
+				out[t.Idx] = DedupeRuleExact
+				continue
+			}
+		}
+		if partial && datedText[t.Role+"\x00"+strings.TrimSpace(t.TextPreview)] {
+			keys, covered := toolCallKeys(t.ToolCalls)
+			for _, k := range keys {
+				if !datedCalls[t.Role][k] {
+					covered = false
+					break
+				}
+			}
+			if covered {
+				out[t.Idx] = DedupeRulePartialCopy
+				continue
+			}
+		}
+		if envelope && t.Role == "user" && isHarnessEnvelope(t.TextPreview) {
+			if keys, ok := toolCallKeys(t.ToolCalls); ok && len(keys) == 0 {
+				out[t.Idx] = DedupeRuleEnvelope
 			}
 		}
 	}
-	sort.Ints(out)
 	return out
+}
+
+// newDedupeResult builds the result for the classified turns.
+func newDedupeResult(found map[int]string, total int, opts TurnDedupeOptions) *TurnDedupeResult {
+	res := &TurnDedupeResult{
+		Mode: opts.Mode, Removed: len(found), Kept: total - len(found), DryRun: opts.DryRun,
+		RemovedIdx: make([]int, 0, len(found)),
+		Rules:      map[string]int{DedupeRuleExact: 0, DedupeRulePartialCopy: 0, DedupeRuleEnvelope: 0},
+	}
+	for idx, rule := range found {
+		res.RemovedIdx = append(res.RemovedIdx, idx)
+		res.Rules[rule]++
+	}
+	sort.Ints(res.RemovedIdx)
+	return res
 }
 
 func (m *MemStore) DeleteAgentSession(ctx context.Context, sessionID string) (*SessionDeleteResult, error) {
@@ -167,8 +345,13 @@ func (m *MemStore) DeleteAgentSession(ctx context.Context, sessionID string) (*S
 	return res, nil
 }
 
-func (m *MemStore) DedupeSessionTurns(ctx context.Context, sessionID string, dryRun bool) (*TurnDedupeResult, error) {
+func (m *MemStore) DedupeSessionTurns(ctx context.Context, sessionID string, opts TurnDedupeOptions) (*TurnDedupeResult, error) {
 	_ = ctx
+	mode, err := NormalizeDedupeMode(opts.Mode)
+	if err != nil {
+		return nil, err
+	}
+	opts.Mode = mode
 	sessionID = strings.TrimSpace(sessionID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -178,27 +361,20 @@ func (m *MemStore) DedupeSessionTurns(ctx context.Context, sessionID string, dry
 		return nil, ErrNotFound
 	}
 	turns := m.sessionTurns[sessionID]
-	dups := duplicateTurnIdx(turns)
-	res := &TurnDedupeResult{Removed: len(dups), Kept: len(turns) - len(dups), RemovedIdx: dups, DryRun: dryRun}
-	if res.RemovedIdx == nil {
-		res.RemovedIdx = []int{}
-	}
-	if dryRun || len(dups) == 0 {
+	drop := duplicateTurns(turns, mode)
+	res := newDedupeResult(drop, len(turns), opts)
+	if opts.DryRun || len(drop) == 0 {
 		return res, nil
 	}
-	drop := make(map[int]bool, len(dups))
-	for _, idx := range dups {
-		drop[idx] = true
-	}
-	kept := make([]SessionTurn, 0, len(turns)-len(dups))
+	kept := make([]SessionTurn, 0, len(turns)-len(drop))
 	for _, t := range turns {
-		if !drop[t.Idx] {
+		if _, gone := drop[t.Idx]; !gone {
 			kept = append(kept, t)
 		}
 	}
 	m.sessionTurns[sessionID] = kept
-	// The copies were stamped with upload time; once every turn left is
-	// dated, the chat's activity is its newest source time.
+	// The removed turns were stamped with upload time; once every turn left
+	// is dated, the chat's activity is its newest source time.
 	if latest, ok := latestSourceTime(kept); ok {
 		row.LastActiveAt = latest
 	}
@@ -274,7 +450,12 @@ func (s *PostgresStore) DeleteAgentSession(ctx context.Context, sessionID string
 	return res, nil
 }
 
-func (s *PostgresStore) DedupeSessionTurns(ctx context.Context, sessionID string, dryRun bool) (*TurnDedupeResult, error) {
+func (s *PostgresStore) DedupeSessionTurns(ctx context.Context, sessionID string, opts TurnDedupeOptions) (*TurnDedupeResult, error) {
+	mode, err := NormalizeDedupeMode(opts.Mode)
+	if err != nil {
+		return nil, err
+	}
+	opts.Mode = mode
 	sessionID = strings.TrimSpace(sessionID)
 	if !looksLikeUUID(sessionID) {
 		return nil, ErrNotFound
@@ -291,46 +472,48 @@ func (s *PostgresStore) DedupeSessionTurns(ctx context.Context, sessionID string
 		}
 		return nil, err
 	}
+	// The rules run in Go (duplicateTurns) so both stores agree. Only the
+	// fields they read are loaded; a dated turn gets a placeholder time.
 	// text_preview is stored NULLIF(...,''), so COALESCE makes empty and
-	// missing text equal; jsonb = compares tool_calls as values.
+	// missing text equal.
 	rows, err := tx.Query(ctx, `
-		SELECT t.idx FROM session_turns t
-		WHERE t.session_id = $1::uuid AND t.source_ts IS NULL
-		  AND EXISTS (SELECT 1 FROM session_turns o
-		              WHERE o.session_id = t.session_id AND o.source_ts IS NOT NULL
-		                AND o.role = t.role
-		                AND COALESCE(o.text_preview, '') = COALESCE(t.text_preview, '')
-		                AND o.tool_calls = t.tool_calls)
-		ORDER BY t.idx`, id)
+		SELECT idx, role, source_ts IS NOT NULL, COALESCE(text_preview, ''), COALESCE(tool_calls, '[]'::jsonb)
+		FROM session_turns WHERE session_id = $1::uuid ORDER BY idx`, id)
 	if err != nil {
 		return nil, err
 	}
-	dups := []int{}
+	var turns []SessionTurn
+	dated := time.Unix(0, 0).UTC()
 	for rows.Next() {
-		var idx int
-		if err := rows.Scan(&idx); err != nil {
+		var (
+			t       SessionTurn
+			isDated bool
+			calls   []byte
+		)
+		if err := rows.Scan(&t.Idx, &t.Role, &isDated, &t.TextPreview, &calls); err != nil {
 			rows.Close()
 			return nil, err
 		}
-		dups = append(dups, idx)
+		if isDated {
+			t.SourceAt = &dated
+		}
+		t.ToolCalls = json.RawMessage(calls)
+		turns = append(turns, t)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	var total int
-	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM session_turns WHERE session_id = $1::uuid`, id).Scan(&total); err != nil {
-		return nil, err
-	}
-	res := &TurnDedupeResult{Removed: len(dups), Kept: total - len(dups), RemovedIdx: dups, DryRun: dryRun}
-	if dryRun || len(dups) == 0 {
+	drop := duplicateTurns(turns, mode)
+	res := newDedupeResult(drop, len(turns), opts)
+	if opts.DryRun || len(drop) == 0 {
 		return res, nil
 	}
-	if _, err := tx.Exec(ctx, `DELETE FROM session_turns WHERE session_id = $1::uuid AND idx = ANY($2::bigint[])`, id, dups); err != nil {
+	if _, err := tx.Exec(ctx, `DELETE FROM session_turns WHERE session_id = $1::uuid AND source_ts IS NULL AND idx = ANY($2::bigint[])`, id, res.RemovedIdx); err != nil {
 		return nil, err
 	}
 	// Same rule as AppendSessionTurn's repair: a fully dated history dates
-	// the chat (the copies carried upload time).
+	// the chat (the removed turns carried upload time).
 	if _, err := tx.Exec(ctx, `UPDATE agent_sessions s
 		SET last_active_at = t.latest
 		FROM (SELECT MAX(source_ts) AS latest FROM session_turns WHERE session_id = $1::uuid) t

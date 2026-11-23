@@ -88,8 +88,10 @@ func TestAgentSessionTurnDedupeOwnerOnly(t *testing.T) {
 		{Idx: 2, Role: "assistant", TextPreview: "done", ToolCalls: calls, SourceAt: &at2},
 		{Idx: 3, Role: "user", TextPreview: "fix it"},                                                                               // copy of 1
 		{Idx: 4, Role: "assistant", TextPreview: "done", ToolCalls: json.RawMessage(`[ {"input":{"path":"a.go"},"name":"Read"} ]`)}, // copy of 2
-		{Idx: 5, Role: "assistant", TextPreview: "done"},                                                                            // different tool calls
+		{Idx: 5, Role: "assistant", TextPreview: "done"},                                                                            // partial copy of 2 (no tool calls)
 		{Idx: 6, Role: "system", TextPreview: "fix it"},                                                                             // different role
+		{Idx: 7, Role: "user", TextPreview: "<system-reminder>ctx</system-reminder>\n<task-notification>x</task-notification>"},     // envelope
+		{Idx: 8, Role: "user", TextPreview: "<system-reminder>ctx</system-reminder>\nreal question"},                                // real text
 	}
 	for _, turn := range turns {
 		turn.SessionID = sid
@@ -106,34 +108,50 @@ func TestAgentSessionTurnDedupeOwnerOnly(t *testing.T) {
 		t.Fatalf("missing dedupe: %d", rec.Code)
 	}
 	var res store.TurnDedupeResult
-	rec := doJSON(t, s, http.MethodPost, base+"/turns/dedupe?dry_run=1", alice, nil)
+	rec := doJSON(t, s, http.MethodPost, base+"/turns/dedupe?dry_run=1&mode=exact", alice, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dry run: %d %s", rec.Code, rec.Body.String())
 	}
 	decodeBody(t, rec, &res)
-	if res.Removed != 2 || res.Kept != 4 || !res.DryRun || len(res.RemovedIdx) != 2 || res.RemovedIdx[0] != 3 || res.RemovedIdx[1] != 4 {
+	if res.Removed != 2 || res.Kept != 6 || !res.DryRun || res.Mode != "exact" || len(res.RemovedIdx) != 2 || res.RemovedIdx[0] != 3 || res.RemovedIdx[1] != 4 {
 		t.Fatalf("dry run = %+v", res)
 	}
-	if got, _ := mem.ListSessionTurns(ctx, sid); len(got) != 6 {
+	if got, _ := mem.ListSessionTurns(ctx, sid); len(got) != 8 {
 		t.Fatalf("dry run removed turns: %d", len(got))
 	}
-	rec = doJSON(t, s, http.MethodPost, base+"/turns/dedupe", alice, nil)
+	rec = doJSON(t, s, http.MethodPost, base+"/turns/dedupe?mode=exact", alice, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dedupe: %d %s", rec.Code, rec.Body.String())
 	}
 	res = store.TurnDedupeResult{}
 	decodeBody(t, rec, &res)
-	if res.Removed != 2 || res.Kept != 4 || res.DryRun {
+	if res.Removed != 2 || res.Kept != 6 || res.DryRun || res.Rules[store.DedupeRuleExact] != 2 {
 		t.Fatalf("dedupe = %+v", res)
 	}
 	got, _ := mem.ListSessionTurns(ctx, sid)
-	if len(got) != 4 {
+	if len(got) != 6 {
 		t.Fatalf("turns after dedupe: %+v", got)
 	}
 	for _, turn := range got {
 		if turn.Idx == 3 || turn.Idx == 4 {
 			t.Fatalf("copy %d survived", turn.Idx)
 		}
+	}
+	if rec := doJSON(t, s, http.MethodPost, base+"/turns/dedupe?mode=bogus", alice, nil); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad mode: %d %s", rec.Code, rec.Body.String())
+	}
+	// Default mode: the undated "done" without tool calls is a partial copy
+	// of turn 2, and turn 7 is only harness envelopes. Turn 8 has real text.
+	res = store.TurnDedupeResult{}
+	decodeBody(t, doJSON(t, s, http.MethodPost, base+"/turns/dedupe?dry_run=1", alice, nil), &res)
+	if res.Mode != "all" || res.Removed != 2 || res.Kept != 4 || !res.DryRun ||
+		res.Rules[store.DedupeRulePartialCopy] != 1 || res.Rules[store.DedupeRuleEnvelope] != 1 || res.Rules[store.DedupeRuleExact] != 0 {
+		t.Fatalf("default dry run = %+v", res)
+	}
+	res = store.TurnDedupeResult{}
+	decodeBody(t, doJSON(t, s, http.MethodPost, base+"/turns/dedupe", alice, nil), &res)
+	if res.Removed != 2 || res.Kept != 4 || len(res.RemovedIdx) != 2 || res.RemovedIdx[0] != 5 || res.RemovedIdx[1] != 7 {
+		t.Fatalf("default dedupe = %+v", res)
 	}
 	// Idempotent.
 	res = store.TurnDedupeResult{}
@@ -164,7 +182,7 @@ func TestMemStoreDedupeDatesFullyDatedChat(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	res, err := mem.DedupeSessionTurns(ctx, row.ID, false)
+	res, err := mem.DedupeSessionTurns(ctx, row.ID, store.TurnDedupeOptions{})
 	if err != nil || res.Removed != 1 || res.Kept != 1 {
 		t.Fatalf("dedupe = %+v %v", res, err)
 	}
@@ -172,7 +190,7 @@ func TestMemStoreDedupeDatesFullyDatedChat(t *testing.T) {
 	if err != nil || !after.LastActiveAt.Equal(at) {
 		t.Fatalf("last_active_at = %v %v", after.LastActiveAt, err)
 	}
-	if _, err := mem.DedupeSessionTurns(ctx, "missing", true); err == nil {
+	if _, err := mem.DedupeSessionTurns(ctx, "missing", store.TurnDedupeOptions{DryRun: true}); err == nil {
 		t.Fatal("missing session deduped")
 	}
 }
