@@ -4,9 +4,12 @@ import { authApi } from '@/api/auth'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { useAuth } from '@/providers/AuthProvider'
 
-function isLoopbackRedirect(raw: string): boolean {
+function isDesktopRedirect(raw: string): boolean {
   try {
     const u = new URL(raw)
+    if (u.protocol === 'nexus:') {
+      return u.hostname === 'auth' && (u.pathname === '/callback' || u.pathname === '/callback/')
+    }
     if (u.protocol !== 'http:') return false
     if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') return false
     if (u.pathname !== '/callback' && u.pathname !== '/callback/') return false
@@ -34,8 +37,8 @@ export function CliAuthPage() {
   }, [redirect, state])
 
   useEffect(() => {
-    if (!redirect || !isLoopbackRedirect(redirect)) {
-      setError('Invalid desktop redirect URL. Expected http://127.0.0.1:<port>/callback')
+    if (!redirect || !isDesktopRedirect(redirect)) {
+      setError('Invalid desktop redirect URL. Expected nexus://auth/callback or a loopback callback.')
       return
     }
     if (!isAuthenticated || !token || !user) {
@@ -59,10 +62,17 @@ export function CliAuthPage() {
       if (cancelled) return
       setPhase('redirect')
       const target = new URL(redirect)
-      target.searchParams.set('token', desktopToken)
-      target.searchParams.set('user_id', user.userId)
-      target.searchParams.set('username', user.username)
-      if (state) target.searchParams.set('state', state)
+      const payload = new URLSearchParams({
+        token: desktopToken,
+        user_id: user.userId,
+        username: user.username,
+      })
+      if (state) payload.set('state', state)
+      if (target.protocol === 'nexus:') {
+        target.hash = payload.toString()
+      } else {
+        payload.forEach((value, key) => target.searchParams.set(key, value))
+      }
       setPhase('done')
       window.location.replace(target.toString())
     })()

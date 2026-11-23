@@ -27,7 +27,7 @@ export function ActivityHeatmap({ days = [], loading }: Props) {
   const { cells, weeks, total, monthLabels } = useMemo(() => {
     const byDate = new Map(days.map((d) => [d.date, d.count]))
     const today = new Date()
-    today.setUTCHours(0, 0, 0, 0)
+    today.setTime(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate()))
 
     // Align to Sunday start like GitHub (UTC).
     const end = new Date(today)
@@ -79,7 +79,7 @@ export function ActivityHeatmap({ days = [], loading }: Props) {
     <div className="space-y-3">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <p className="text-sm text-fg-dim">
-          <span className="font-medium text-fg">{total}</span> project events in the last year
+          <span className="font-medium text-fg">{total}</span> of your agent messages in the last year
         </p>
         <div className="flex items-center gap-1 text-[10px] text-muted">
           Less
