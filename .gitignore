@@ -25,3 +25,5 @@ videos/**/.media/
 videos/**/*.mp3
 videos/**/*.mp4
 videos/**/*.wav
+videos/**/.thumbnails/
+videos/**/.waveform-cache/
