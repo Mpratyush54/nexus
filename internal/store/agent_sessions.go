@@ -225,8 +225,10 @@ func (m *MemStore) UpsertAgentSession(ctx context.Context, in *AgentSession) (*A
 		if cur.OwnerUserID != in.OwnerUserID {
 			return nil, fmt.Errorf("store: session owned by someone else: %w", ErrConflict)
 		}
-		if strings.TrimSpace(in.Title) != "" {
-			cur.Title = strings.TrimSpace(in.Title)
+		// A placeholder ("Captured codex session") never replaces a real or
+		// derived title: captures resend it on every upsert.
+		if t := strings.TrimSpace(in.Title); t != "" && (!IsPlaceholderTitle(t) || IsPlaceholderTitle(cur.Title)) {
+			cur.Title = t
 		}
 		if strings.TrimSpace(in.Summary) != "" {
 			cur.Summary = strings.TrimSpace(in.Summary)
@@ -549,6 +551,12 @@ func (m *MemStore) AppendSessionTurn(ctx context.Context, turn SessionTurn) erro
 		}
 	}
 	m.sessionTurns[turn.SessionID] = append(turns, turn)
+	// A captured chat with a placeholder title takes its first request.
+	if turn.Role == "user" && IsPlaceholderTitle(row.Title) {
+		if derived := TitleFromRequest(turn.TextPreview); derived != "" {
+			row.Title = derived
+		}
+	}
 	activity := turn.At
 	if turn.SourceAt != nil && !turn.SourceAt.IsZero() {
 		activity = *turn.SourceAt
@@ -854,7 +862,7 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 			item.MatchTurnIdx, item.MatchRole = &idx, matchTurn.Role
 			item.MatchPreview = TimelineMatchPreview(matchTurn.TextPreview, q.Query)
 		}
-		if strings.TrimSpace(item.Summary) == "" {
+		if strings.TrimSpace(item.Summary) == "" || IsPlaceholderTitle(item.Title) {
 			var users []SessionTurn
 			for _, turn := range m.sessionTurns[row.ID] {
 				if turn.Role == "user" && strings.TrimSpace(turn.TextPreview) != "" {
@@ -866,7 +874,10 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 			for _, turn := range users {
 				previews = append(previews, turn.TextPreview)
 			}
-			item.Summary = timelineFirstRequestPreview(previews)
+			if strings.TrimSpace(item.Summary) == "" {
+				item.Summary = timelineFirstRequestPreview(previews)
+			}
+			item.Title = PresentTitle(item.Title, previews)
 		}
 		var best *SessionVersion
 		for i := range m.sessionVersions[row.ID] {
@@ -983,7 +994,11 @@ func (s *PostgresStore) UpsertAgentSession(ctx context.Context, in *AgentSession
 			$1::uuid, $2::uuid, $3, $4, $5, NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,'')
 		)
 		ON CONFLICT (project_id, harness, native_id, origin_machine_id) DO UPDATE
-		SET title = COALESCE(NULLIF(EXCLUDED.title, ''), agent_sessions.title),
+		-- A placeholder ($10) never replaces a real or derived title:
+		-- captures resend "Captured <harness> session" on every upsert.
+		SET title = CASE WHEN $10::bool AND NULLIF(agent_sessions.title, '') IS NOT NULL
+		                      AND agent_sessions.title !~* $11 THEN agent_sessions.title
+		                 ELSE COALESCE(NULLIF(EXCLUDED.title, ''), agent_sessions.title) END,
 		    summary = COALESCE(NULLIF(EXCLUDED.summary, ''), agent_sessions.summary)
 		WHERE agent_sessions.owner_user_id = EXCLUDED.owner_user_id
 		RETURNING id::text, project_id::text, COALESCE(owner_user_id::text,''), harness, native_id,
@@ -991,7 +1006,8 @@ func (s *PostgresStore) UpsertAgentSession(ctx context.Context, in *AgentSession
 		          started_at, last_active_at, ended_at, visibility,
 		          COALESCE(parent_session_id::text,''), COALESCE(lineage_kind,''), COALESCE(summary,'')`,
 		in.ProjectID, in.OwnerUserID, in.Harness, in.NativeID, in.OriginMachineID,
-		in.WorkspaceRootHint, in.Title, in.Visibility, in.Summary)
+		in.WorkspaceRootHint, in.Title, in.Visibility, in.Summary,
+		IsPlaceholderTitle(in.Title), placeholderTitlePattern)
 	out, err := scanAgentSession(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("store: session owned by someone else: %w", ErrConflict)
@@ -1322,6 +1338,14 @@ func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn)
 		SET last_active_at = CASE WHEN last_active_at = started_at THEN $2
 		                          ELSE GREATEST(last_active_at, $2) END
 		WHERE id = $1::uuid`, turn.SessionID, activity)
+	// A captured chat with a placeholder title takes its first request.
+	if turn.Role == "user" {
+		if derived := TitleFromRequest(turn.TextPreview); derived != "" {
+			_, _ = s.pool.Exec(ctx, `UPDATE agent_sessions SET title = $2
+				WHERE id = $1::uuid AND (NULLIF(BTRIM(title), '') IS NULL OR title ~* $3)`,
+				turn.SessionID, derived, placeholderTitlePattern)
+		}
+	}
 	return nil
 }
 
@@ -1524,19 +1548,41 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		cursorID = q.Cursor[i+1:]
 	}
 	// The project filter compares uuids so the (project_id, last_active_at)
-	// index applies. A text search tests sessions with EXISTS: the planner
-	// can probe each candidate session's turns by primary key or, for a rare
-	// word, collect matching sessions from the trigram index on
-	// LOWER(text_preview) (migration 045). The LIKE is that index's handle;
-	// STRPOS keeps the exact substring rule. The LATERAL only builds the
-	// preview for sessions that already matched.
-	rows, err := s.pool.Query(ctx, `
+	// index applies. The page is chosen first (inner SELECT … LIMIT) and only
+	// those rows pay for the preview, turn-count and match subqueries.
+	//
+	// Text search (q) matches title, summary, native id or any user/assistant
+	// turn. A q of three or more characters collects matching sessions once,
+	// from the trigram index on LOWER(text_preview) (migration 045), as a
+	// materialized set the session filter probes by hash. An EXISTS under the
+	// OR cannot be turned into a join, so the planner ran it per candidate
+	// session: every turn of every visible chat read and lower()ed until the
+	// page filled, which a cold cache made seconds long. Shorter q has no
+	// trigram to use; it keeps the per-session probe, which stops as soon as
+	// the page is full (short needles match almost every chat).
+	// LIKE pattern for q, lower()ed in SQL like the index expression.
+	pattern := "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q.Query) + "%"
+	turnMatch := `EXISTS (
+		       SELECT 1 FROM session_turns m
+		       WHERE m.session_id = s.id AND m.role IN ('user', 'assistant')
+		         AND LOWER(m.text_preview) LIKE LOWER($10)
+		     )`
+	with := ""
+	if len([]rune(q.Query)) >= 3 {
+		with = `WITH turn_hits AS MATERIALIZED (
+		  SELECT DISTINCT m.session_id FROM session_turns m
+		  WHERE m.role IN ('user', 'assistant') AND LOWER(m.text_preview) LIKE LOWER($10)
+		)`
+		turnMatch = `s.id IN (SELECT session_id FROM turn_hits)`
+	}
+	rows, err := s.pool.Query(ctx, with+`
 		SELECT s.id::text, s.project_id::text, s.harness, s.native_id, COALESCE(s.title,''),
 		       COALESCE(s.summary,''),
-		       -- Fallback preview source, only when there is no summary: the raw
-		       -- first user turns. Go removes harness wrapper and skips
-		       -- envelope-only turns (timelineFirstRequestPreview).
-		       CASE WHEN NULLIF(s.summary,'') IS NULL THEN ARRAY(
+		       -- Fallback preview and title source, only when there is no
+		       -- summary or the title is a placeholder: the raw first user
+		       -- turns. Go removes harness wrapper and skips envelope-only
+		       -- turns (timelineFirstRequestPreview, PresentTitle).
+		       CASE WHEN NULLIF(s.summary,'') IS NULL OR NULLIF(BTRIM(s.title),'') IS NULL OR s.title ~* $9 THEN ARRAY(
 		         SELECT LEFT(t.text_preview, 4000)
 		         FROM session_turns t WHERE t.session_id = s.id AND t.role = 'user'
 		           AND NULLIF(BTRIM(t.text_preview), '') IS NOT NULL
@@ -1556,7 +1602,37 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		         WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only')
 		         ORDER BY v.version DESC LIMIT 1
 		       ), ''), COALESCE(hit.preview, ''), hit.idx, COALESCE(hit.role, '')
-		FROM agent_sessions s
+		FROM (
+		  SELECT s.id, s.project_id, s.harness, s.native_id, s.title, s.summary,
+		         s.visibility, s.owner_user_id, s.last_active_at
+		  FROM agent_sessions s
+		  WHERE (
+		    s.owner_user_id = $1::uuid
+		    OR EXISTS (
+		      SELECT 1 FROM session_grants g
+		      WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid
+		    )
+		    OR (
+		      s.visibility = 'team' AND (
+		        EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
+		        OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		      )
+		    )
+		  )
+		  AND ($2 = '' OR s.project_id = NULLIF($2, '')::uuid)
+		  AND ($3 = '' OR s.harness = $3)
+		  AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0 OR STRPOS(LOWER(s.summary), LOWER($7)) > 0
+		       OR STRPOS(LOWER(s.native_id), LOWER($7)) > 0
+		       OR `+turnMatch+`)
+		  AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
+		  AND (NOT $8::bool
+		    OR EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = s.id)
+		    OR EXISTS (SELECT 1 FROM session_versions v
+		               WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only') AND v.turn_count > 0))
+		  ORDER BY s.last_active_at DESC, s.id DESC
+		  LIMIT $6
+		) s
+		-- The first matching turn of each listed chat (by primary key).
 		LEFT JOIN LATERAL (
 		  SELECT t.idx, t.role,
 		    t.text_preview AS preview
@@ -1565,36 +1641,9 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		    AND STRPOS(LOWER(t.text_preview), LOWER($7)) > 0
 		  ORDER BY t.idx LIMIT 1
 		) hit ON TRUE
-		WHERE (
-		  s.owner_user_id = $1::uuid
-		  OR EXISTS (
-		    SELECT 1 FROM session_grants g
-		    WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid
-		  )
-		  OR (
-		    s.visibility = 'team' AND (
-		      EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
-		      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
-		    )
-		  )
-		)
-		AND ($2 = '' OR s.project_id = NULLIF($2, '')::uuid)
-		AND ($3 = '' OR s.harness = $3)
-		AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0 OR STRPOS(LOWER(s.summary), LOWER($7)) > 0 OR STRPOS(LOWER(s.native_id), LOWER($7)) > 0
-		     OR EXISTS (
-		       SELECT 1 FROM session_turns m
-		       WHERE m.session_id = s.id AND m.role IN ('user', 'assistant')
-		         AND LOWER(m.text_preview) LIKE '%' || REPLACE(REPLACE(REPLACE(LOWER($7), '\', '\\'), '%', '\%'), '_', '\_') || '%'
-		         AND STRPOS(LOWER(m.text_preview), LOWER($7)) > 0
-		     ))
-		AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
-		AND (NOT $8::bool
-		  OR EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = s.id)
-		  OR EXISTS (SELECT 1 FROM session_versions v
-		             WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only') AND v.turn_count > 0))
-		ORDER BY s.last_active_at DESC, s.id DESC
-		LIMIT $6`,
-		q.UserID, q.ProjectID, q.Harness, cursorAt, cursorID, q.Limit+1, q.Query, q.HideEmpty)
+		ORDER BY s.last_active_at DESC, s.id DESC`,
+		q.UserID, q.ProjectID, q.Harness, cursorAt, cursorID, q.Limit+1, q.Query, q.HideEmpty,
+		placeholderTitlePattern, pattern)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1610,6 +1659,7 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		if it.Summary == "" {
 			it.Summary = timelineFirstRequestPreview(firstTurns)
 		}
+		it.Title = PresentTitle(it.Title, firstTurns)
 		// Same excerpt rules as every other store: centred on the match,
 		// cut at word boundaries, marked with … where text was cut.
 		if it.MatchPreview != "" {
