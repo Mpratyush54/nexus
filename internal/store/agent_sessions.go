@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"central-memory/internal/capture"
 
@@ -70,6 +71,7 @@ type SessionTurn struct {
 	Idx         int             `json:"idx"`
 	Role        string          `json:"role"`
 	At          time.Time       `json:"ts"`
+	SourceAt    *time.Time      `json:"source_ts,omitempty"`
 	TextPreview string          `json:"text_preview,omitempty"`
 	ToolCalls   json.RawMessage `json:"tool_calls"`
 	BlobRef     string          `json:"blob_ref,omitempty"`
@@ -88,6 +90,9 @@ type TimelineItem struct {
 	LastActiveAt time.Time `json:"last_active_at"`
 	TurnCount    int       `json:"turn_count"`
 	VersionState string    `json:"version_state,omitempty"`
+	MatchPreview string    `json:"match_preview,omitempty"`
+	MatchTurnIdx *int      `json:"match_turn_idx,omitempty"`
+	MatchRole    string    `json:"match_role,omitempty"`
 }
 
 // TimelineQuery filters GET /v1/timeline.
@@ -113,6 +118,7 @@ type AgentCloudStore interface {
 	UpsertAgentSession(ctx context.Context, in *AgentSession) (*AgentSession, error)
 	GetAgentSession(ctx context.Context, id string) (*AgentSession, error)
 	CanReadAgentSession(ctx context.Context, userID, sessionID string) (bool, error)
+	CanReadAgentSessionLive(ctx context.Context, userID, sessionID string) (bool, error)
 	GrantAgentSession(ctx context.Context, sessionID, granteeUserID, grantedBy string) error
 	GrantAgentSessionOpts(ctx context.Context, sessionID, granteeUserID, grantedBy string, opts SessionGrantOpts) error
 	ListVisibleSessionVersions(ctx context.Context, sessionID, userID string) ([]SessionVersion, error)
@@ -217,8 +223,6 @@ func (m *MemStore) UpsertAgentSession(ctx context.Context, in *AgentSession) (*A
 		if cur.OwnerUserID != in.OwnerUserID {
 			return nil, fmt.Errorf("store: session owned by someone else: %w", ErrConflict)
 		}
-		now := time.Now().UTC()
-		cur.LastActiveAt = now
 		if strings.TrimSpace(in.Title) != "" {
 			cur.Title = strings.TrimSpace(in.Title)
 		}
@@ -271,6 +275,18 @@ func (m *MemStore) CanReadAgentSession(ctx context.Context, userID, sessionID st
 	return m.agentVisibleLocked(userID, row), nil
 }
 
+func (m *MemStore) CanReadAgentSessionLive(ctx context.Context, userID, sessionID string) (bool, error) {
+	_ = ctx
+	userID = strings.TrimSpace(userID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	row := m.agentSessions[strings.TrimSpace(sessionID)]
+	if row == nil {
+		return false, ErrNotFound
+	}
+	return m.agentLiveVisibleLocked(userID, row), nil
+}
+
 func (m *MemStore) agentVisibleLocked(userID string, row *AgentSession) bool {
 	if row.OwnerUserID == userID {
 		return true
@@ -280,6 +296,25 @@ func (m *MemStore) agentVisibleLocked(userID string, row *AgentSession) bool {
 			continue
 		}
 		if g.Grantee != "" && g.Grantee == userID {
+			return true
+		}
+	}
+	if row.Visibility == "team" && m.projectMemberLocked(userID, row.ProjectID) {
+		return true
+	}
+	return false
+}
+
+func (m *MemStore) agentLiveVisibleLocked(userID string, row *AgentSession) bool {
+	if row.OwnerUserID == userID {
+		return true
+	}
+	for _, g := range m.agentGrants[row.ID] {
+		if g.Revoked || g.Grantee == "" || g.Grantee != userID {
+			continue
+		}
+		// A grant without a pin predates point-in-time sharing and remains live.
+		if g.Live || g.VersionID == "" {
 			return true
 		}
 	}
@@ -461,6 +496,12 @@ func (m *MemStore) ForkAgentSession(ctx context.Context, parentSessionID, ownerU
 	key := nativeKey(row.ProjectID, row.Harness, row.NativeID, row.OriginMachineID)
 	m.agentSessions[id] = row
 	m.agentByNative[key] = id
+	for _, original := range m.sessionTurns[parent.ID] {
+		copyTurn := original
+		copyTurn.SessionID = id
+		copyTurn.ToolCalls = append(json.RawMessage(nil), original.ToolCalls...)
+		m.sessionTurns[id] = append(m.sessionTurns[id], copyTurn)
+	}
 	cp := *row
 	return &cp, nil
 }
@@ -513,13 +554,37 @@ func (m *MemStore) AppendSessionTurn(ctx context.Context, turn SessionTurn) erro
 		turn.At = time.Now().UTC()
 	}
 	turns := m.sessionTurns[turn.SessionID]
-	for _, existing := range turns {
+	for i, existing := range turns {
 		if existing.Idx == turn.Idx {
+			if turn.SourceAt != nil && existing.SourceAt == nil {
+				turns[i].SourceAt = turn.SourceAt
+				// Same as Postgres: a fully dated history dates the chat.
+				var latest time.Time
+				complete := true
+				for _, t := range turns {
+					if t.SourceAt == nil {
+						complete = false
+						break
+					}
+					if t.SourceAt.After(latest) {
+						latest = *t.SourceAt
+					}
+				}
+				if complete && !latest.IsZero() {
+					row.LastActiveAt = latest
+				}
+			}
 			return fmt.Errorf("store: turn %d: %w", turn.Idx, ErrConflict)
 		}
 	}
 	m.sessionTurns[turn.SessionID] = append(turns, turn)
-	row.LastActiveAt = turn.At
+	activity := turn.At
+	if turn.SourceAt != nil && !turn.SourceAt.IsZero() {
+		activity = *turn.SourceAt
+	}
+	if len(turns) == 0 || activity.After(row.LastActiveAt) {
+		row.LastActiveAt = activity
+	}
 	return nil
 }
 
@@ -722,6 +787,15 @@ func (m *MemStore) SetStorageUsage(ctx context.Context, scope string, used, cap 
 	return nil
 }
 
+func timelineTurnPreview(raw string) string {
+	text := strings.Join(strings.Fields(raw), " ")
+	chars := []rune(text)
+	if len(chars) > 260 {
+		return string(chars[:260]) + "…"
+	}
+	return text
+}
+
 func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]TimelineItem, string, error) {
 	_ = ctx
 	if q.Limit <= 0 || q.Limit > 100 {
@@ -754,8 +828,28 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 		if q.Harness != "" && row.Harness != q.Harness {
 			continue
 		}
-		if q.Query != "" && !strings.Contains(strings.ToLower(row.Title+" "+row.Summary+" "+row.NativeID), strings.ToLower(q.Query)) {
-			continue
+		var matchTurn *SessionTurn
+		live := m.agentLiveVisibleLocked(q.UserID, row)
+		if q.Query != "" {
+			needle := strings.ToLower(q.Query)
+			matched := strings.Contains(strings.ToLower(row.Title+" "+row.NativeID), needle)
+			if live && strings.Contains(strings.ToLower(row.Summary), needle) {
+				matched = true
+			}
+			for _, turn := range m.sessionTurns[row.ID] {
+				if !live {
+					break
+				}
+				if (turn.Role == "user" || turn.Role == "assistant") && strings.Contains(strings.ToLower(turn.TextPreview), needle) {
+					matched = true
+					copy := turn
+					matchTurn = &copy
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
 		}
 		if !cursorAt.IsZero() {
 			if row.LastActiveAt.After(cursorAt) {
@@ -769,6 +863,22 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 			SessionID: row.ID, ProjectID: row.ProjectID, Harness: row.Harness,
 			NativeID: row.NativeID, Title: row.Title, Summary: row.Summary,
 			Visibility: row.Visibility, OwnerUserID: row.OwnerUserID, LastActiveAt: row.LastActiveAt,
+		}
+		if !live {
+			item.Summary = ""
+		}
+		if matchTurn != nil {
+			idx := matchTurn.Idx
+			item.MatchTurnIdx, item.MatchRole = &idx, matchTurn.Role
+			item.MatchPreview = TimelineMatchPreview(matchTurn.TextPreview, q.Query)
+		}
+		if live && strings.TrimSpace(item.Summary) == "" {
+			for _, turn := range m.sessionTurns[row.ID] {
+				if turn.Role == "user" && strings.TrimSpace(turn.TextPreview) != "" {
+					item.Summary = timelineTurnPreview(turn.TextPreview)
+					break
+				}
+			}
 		}
 		var best *SessionVersion
 		for i := range m.sessionVersions[row.ID] {
@@ -878,8 +988,7 @@ func (s *PostgresStore) UpsertAgentSession(ctx context.Context, in *AgentSession
 			$1::uuid, $2::uuid, $3, $4, $5, NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,'')
 		)
 		ON CONFLICT (project_id, harness, native_id, origin_machine_id) DO UPDATE
-		SET last_active_at = now(),
-		    title = COALESCE(NULLIF(EXCLUDED.title, ''), agent_sessions.title),
+		SET title = COALESCE(NULLIF(EXCLUDED.title, ''), agent_sessions.title),
 		    summary = COALESCE(NULLIF(EXCLUDED.summary, ''), agent_sessions.summary)
 		WHERE agent_sessions.owner_user_id = EXCLUDED.owner_user_id
 		RETURNING id::text, project_id::text, COALESCE(owner_user_id::text,''), harness, native_id,
@@ -940,6 +1049,37 @@ func (s *PostgresStore) CanReadAgentSession(ctx context.Context, userID, session
 		    OR EXISTS (
 		      SELECT 1 FROM session_grants g
 		      WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid
+		    )
+		    OR (
+		      s.visibility = 'team' AND (
+		        EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
+		        OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		        OR EXISTS (
+		          SELECT 1 FROM projects p
+		          JOIN organization_members om ON om.org_id = p.org_id
+		          WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER')
+		        )
+		      )
+		    )
+		  )
+		)`, userID, sessionID).Scan(&ok)
+	return ok, err
+}
+
+func (s *PostgresStore) CanReadAgentSessionLive(ctx context.Context, userID, sessionID string) (bool, error) {
+	if !looksLikeUUID(sessionID) || !looksLikeUUID(userID) {
+		return false, nil
+	}
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM agent_sessions s
+		  WHERE s.id = $2::uuid AND (
+		    s.owner_user_id = $1::uuid
+		    OR EXISTS (
+		      SELECT 1 FROM session_grants g
+		      WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid
+		        AND g.live
 		    )
 		    OR (
 		      s.visibility = 'team' AND (
@@ -1096,7 +1236,12 @@ func (s *PostgresStore) ForkAgentSession(ctx context.Context, parentSessionID, o
 	}
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano()%1_000_000)
 	native := parent.NativeID + "-fork-" + suffix
-	row := s.pool.QueryRow(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+	row := tx.QueryRow(ctx, `
 		INSERT INTO agent_sessions (
 			project_id, owner_user_id, harness, native_id, origin_machine_id,
 			workspace_root_hint, title, visibility, summary, parent_session_id, lineage_kind
@@ -1110,7 +1255,21 @@ func (s *PostgresStore) ForkAgentSession(ctx context.Context, parentSessionID, o
 		          COALESCE(parent_session_id::text,''), COALESCE(lineage_kind,''), COALESCE(summary,'')`,
 		parent.ProjectID, ownerUserID, parent.Harness, native, parent.OriginMachineID,
 		parent.WorkspaceRootHint, parent.Title, parent.Summary, parent.ID)
-	return scanAgentSession(row)
+	child, err := scanAgentSession(row)
+	if err != nil {
+		return nil, err
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO session_turns (session_id, idx, role, ts, text_preview, tool_calls, blob_ref)
+		SELECT $1::uuid, idx, role, ts, text_preview, tool_calls, blob_ref
+		FROM session_turns WHERE session_id = $2::uuid`, child.ID, parent.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return child, nil
 }
 
 // MarkAgentSessionCodeMerged records a code-only merge on the source session.
@@ -1158,12 +1317,29 @@ func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn)
 		turn.At = time.Now().UTC()
 	}
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO session_turns (session_id, idx, role, ts, text_preview, tool_calls, blob_ref)
-		VALUES ($1::uuid, $2, $3, $4, NULLIF($5,''), $6::jsonb, NULLIF($7,''))`,
-		turn.SessionID, turn.Idx, turn.Role, turn.At, turn.TextPreview, string(turn.ToolCalls), turn.BlobRef)
+		INSERT INTO session_turns (session_id, idx, role, ts, text_preview, tool_calls, blob_ref, source_ts)
+		VALUES ($1::uuid, $2, $3, $4, NULLIF($5,''), $6::jsonb, NULLIF($7,''), $8)`,
+		turn.SessionID, turn.Idx, turn.Role, turn.At, turn.TextPreview, string(turn.ToolCalls), turn.BlobRef, turn.SourceAt)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			if turn.SourceAt != nil {
+				repaired, repairErr := s.pool.Exec(ctx, `UPDATE session_turns SET source_ts = $3
+					WHERE session_id = $1::uuid AND idx = $2 AND source_ts IS NULL`, turn.SessionID, turn.Idx, turn.SourceAt)
+				if repairErr != nil {
+					return repairErr
+				}
+				// Once a re-sent history has every turn dated, date the chat
+				// from them; an import stamped it with the upload time.
+				if repaired.RowsAffected() > 0 {
+					_, _ = s.pool.Exec(ctx, `UPDATE agent_sessions s
+						SET last_active_at = t.latest
+						FROM (SELECT MAX(source_ts) AS latest FROM session_turns WHERE session_id = $1::uuid) t
+						WHERE s.id = $1::uuid AND t.latest IS NOT NULL
+						  AND NOT EXISTS (SELECT 1 FROM session_turns WHERE session_id = $1::uuid AND source_ts IS NULL)`,
+						turn.SessionID)
+				}
+			}
 			return ErrConflict
 		}
 		return err
@@ -1171,7 +1347,17 @@ func (s *PostgresStore) AppendSessionTurn(ctx context.Context, turn SessionTurn)
 	if tag.RowsAffected() == 0 {
 		return ErrConflict
 	}
-	_, _ = s.pool.Exec(ctx, `UPDATE agent_sessions SET last_active_at = $2 WHERE id = $1::uuid`, turn.SessionID, turn.At)
+	// Activity is when the message was written (source time), not when it
+	// was uploaded. The first turn replaces the insert-time default; later
+	// turns only move it forward, so out-of-order imports cannot rewind it.
+	activity := turn.At
+	if turn.SourceAt != nil && !turn.SourceAt.IsZero() {
+		activity = *turn.SourceAt
+	}
+	_, _ = s.pool.Exec(ctx, `UPDATE agent_sessions
+		SET last_active_at = CASE WHEN last_active_at = started_at THEN $2
+		                          ELSE GREATEST(last_active_at, $2) END
+		WHERE id = $1::uuid`, turn.SessionID, activity)
 	return nil
 }
 
@@ -1180,7 +1366,7 @@ func (s *PostgresStore) ListSessionTurns(ctx context.Context, sessionID string) 
 		return nil, ErrNotFound
 	}
 	rows, err := s.pool.Query(ctx, `
-		SELECT session_id::text, idx, role, ts, COALESCE(text_preview,''), tool_calls, COALESCE(blob_ref,'')
+		SELECT session_id::text, idx, role, ts, COALESCE(text_preview,''), tool_calls, COALESCE(blob_ref,''), source_ts
 		FROM session_turns WHERE session_id = $1::uuid ORDER BY idx`, sessionID)
 	if err != nil {
 		return nil, err
@@ -1190,7 +1376,7 @@ func (s *PostgresStore) ListSessionTurns(ctx context.Context, sessionID string) 
 	for rows.Next() {
 		var t SessionTurn
 		var calls []byte
-		if err := rows.Scan(&t.SessionID, &t.Idx, &t.Role, &t.At, &t.TextPreview, &calls, &t.BlobRef); err != nil {
+		if err := rows.Scan(&t.SessionID, &t.Idx, &t.Role, &t.At, &t.TextPreview, &calls, &t.BlobRef, &t.SourceAt); err != nil {
 			return nil, err
 		}
 		t.ToolCalls = calls
@@ -1245,29 +1431,108 @@ func (s *PostgresStore) PutBlob(ctx context.Context, projectID, sum, kind, purpo
 	if purpose == "" {
 		purpose = "file"
 	}
-	if purpose == "file" {
-		var used, cap int64
-		var state string
-		err := s.pool.QueryRow(ctx, `
-			SELECT bytes_used, bytes_cap, state FROM storage_usage WHERE plan_scope = $1`, "project:"+projectID).Scan(&used, &cap, &state)
-		if err != nil || cap <= 0 {
-			planCap, _ := s.planCapForScope(ctx, "project:"+projectID)
-			if cap <= 0 {
-				cap = planCap
-			}
-		}
-		if state == "full" || (cap > 0 && used >= cap) {
-			return fmt.Errorf("store: %w", ErrStorageFull)
-		}
+	if purpose != "file" {
+		_, err := s.pool.Exec(ctx, `
+			INSERT INTO blobs (project_id, sha256, size, kind, purpose, verified_at, body)
+			VALUES ($1::uuid, $2, $3, $4, $5, now(), $6)
+			ON CONFLICT (project_id, sha256) DO UPDATE
+			SET size = EXCLUDED.size, kind = EXCLUDED.kind, purpose = EXCLUDED.purpose,
+			    verified_at = now(), body = EXCLUDED.body`,
+			projectID, sum, len(body), kind, purpose, body)
+		return err
 	}
-	_, err := s.pool.Exec(ctx, `
+
+	scope, _, cap, err := s.fileStorageScope(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO storage_usage (plan_scope, bytes_used, bytes_cap, state)
+		VALUES ($1, 0, $2, $3)
+		ON CONFLICT (plan_scope) DO NOTHING`, scope, cap, capture.UsageState(0, cap)); err != nil {
+		return err
+	}
+	var used, storedCap int64
+	if err := tx.QueryRow(ctx, `
+		SELECT bytes_used, bytes_cap FROM storage_usage WHERE plan_scope = $1 FOR UPDATE`, scope).Scan(&used, &storedCap); err != nil {
+		return err
+	}
+	if storedCap <= 0 {
+		storedCap = cap
+	}
+	var oldSize int64
+	oldPurpose := ""
+	err = tx.QueryRow(ctx, `
+		SELECT size, purpose FROM blobs WHERE project_id = $1::uuid AND sha256 = $2`,
+		projectID, sum).Scan(&oldSize, &oldPurpose)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	delta := int64(len(body))
+	if oldPurpose == "file" {
+		delta -= oldSize
+	}
+	if storedCap > 0 && delta > 0 && used+delta > storedCap {
+		return fmt.Errorf("store: %w", ErrStorageFull)
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO blobs (project_id, sha256, size, kind, purpose, verified_at, body)
 		VALUES ($1::uuid, $2, $3, $4, $5, now(), $6)
 		ON CONFLICT (project_id, sha256) DO UPDATE
 		SET size = EXCLUDED.size, kind = EXCLUDED.kind, purpose = EXCLUDED.purpose,
 		    verified_at = now(), body = EXCLUDED.body`,
-		projectID, sum, len(body), kind, purpose, body)
-	return err
+		projectID, sum, len(body), kind, purpose, body); err != nil {
+		return err
+	}
+	if delta != 0 {
+		used += delta
+		if used < 0 {
+			used = 0
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE storage_usage SET bytes_used = $2, bytes_cap = $3, state = $4 WHERE plan_scope = $1`,
+		scope, used, storedCap, capture.UsageState(used, storedCap)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) fileStorageScope(ctx context.Context, projectID string) (string, int64, int64, error) {
+	owner := ""
+	_ = s.pool.QueryRow(ctx, `SELECT COALESCE(created_by::text, '') FROM projects WHERE id = $1::uuid`, projectID).Scan(&owner)
+	candidates := []string{"project:" + projectID, projectID}
+	if owner != "" {
+		candidates = append(candidates, "user:"+owner)
+	}
+	for _, scope := range candidates {
+		var used, cap int64
+		err := s.pool.QueryRow(ctx, `
+			SELECT bytes_used, bytes_cap FROM storage_usage WHERE plan_scope = $1`, scope).Scan(&used, &cap)
+		if err == nil {
+			return scope, used, cap, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, 0, err
+		}
+	}
+	scope := "project:" + projectID
+	if owner != "" {
+		scope = "user:" + owner
+	}
+	cap, err := s.planCapForScope(ctx, scope)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if cap <= 0 {
+		cap = PlanStorageBytes(PlanFree)
+	}
+	return scope, 0, cap, nil
 }
 
 func (s *PostgresStore) MissingBlobs(ctx context.Context, projectID string, hashes []string) ([]string, error) {
@@ -1372,7 +1637,12 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	}
 	rows, err := s.pool.Query(ctx, `
 		SELECT s.id::text, s.project_id::text, s.harness, s.native_id, COALESCE(s.title,''),
-		       COALESCE(s.summary,''), s.visibility, COALESCE(s.owner_user_id::text,''), s.last_active_at,
+		       CASE WHEN acl.can_read_live THEN COALESCE(NULLIF(s.summary,''), (
+		         SELECT LEFT(REGEXP_REPLACE(t.text_preview, '\s+', ' ', 'g'), 260)
+		         FROM session_turns t WHERE t.session_id = s.id AND t.role = 'user'
+		           AND NULLIF(BTRIM(t.text_preview), '') IS NOT NULL
+		         ORDER BY t.idx LIMIT 1
+		       ), '') ELSE '' END, s.visibility, COALESCE(s.owner_user_id::text,''), s.last_active_at,
 		       COALESCE((
 		         SELECT v.turn_count FROM session_versions v
 		         WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only')
@@ -1382,8 +1652,27 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		         SELECT v.state FROM session_versions v
 		         WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only')
 		         ORDER BY v.version DESC LIMIT 1
-		       ), '')
+		       ), ''), COALESCE(hit.preview, ''), hit.idx, COALESCE(hit.role, '')
 		FROM agent_sessions s
+		CROSS JOIN LATERAL (SELECT (
+		  s.owner_user_id = $1::uuid
+		  OR EXISTS (SELECT 1 FROM session_grants g WHERE g.session_id = s.id
+		    AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid AND g.live)
+		  OR (s.visibility = 'team' AND (
+		    EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
+		    OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		    OR EXISTS (SELECT 1 FROM projects p JOIN organization_members om ON om.org_id = p.org_id
+		      WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER'))
+		  ))
+		) AS can_read_live) acl
+		LEFT JOIN LATERAL (
+		  SELECT t.idx, t.role,
+		    t.text_preview AS preview
+		  FROM session_turns t
+		  WHERE t.session_id = s.id AND acl.can_read_live AND $7 <> '' AND t.role IN ('user', 'assistant')
+		    AND STRPOS(LOWER(t.text_preview), LOWER($7)) > 0
+		  ORDER BY t.idx LIMIT 1
+		) hit ON TRUE
 		WHERE (
 		  s.owner_user_id = $1::uuid
 		  OR EXISTS (
@@ -1394,12 +1683,14 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		    s.visibility = 'team' AND (
 		      EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
 		      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		      OR EXISTS (SELECT 1 FROM projects p JOIN organization_members om ON om.org_id = p.org_id
+		        WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER'))
 		    )
 		  )
 		)
 		AND ($2 = '' OR s.project_id::text = $2)
 		AND ($3 = '' OR s.harness = $3)
-		AND ($7 = '' OR s.title ILIKE '%' || $7 || '%' OR s.summary ILIKE '%' || $7 || '%' OR s.native_id ILIKE '%' || $7 || '%')
+		AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0 OR (acl.can_read_live AND STRPOS(LOWER(s.summary), LOWER($7)) > 0) OR STRPOS(LOWER(s.native_id), LOWER($7)) > 0 OR hit.idx IS NOT NULL)
 		AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
 		ORDER BY s.last_active_at DESC, s.id DESC
 		LIMIT $6`,
@@ -1412,8 +1703,13 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	for rows.Next() {
 		var it TimelineItem
 		if err := rows.Scan(&it.SessionID, &it.ProjectID, &it.Harness, &it.NativeID, &it.Title, &it.Summary,
-			&it.Visibility, &it.OwnerUserID, &it.LastActiveAt, &it.TurnCount, &it.VersionState); err != nil {
+			&it.Visibility, &it.OwnerUserID, &it.LastActiveAt, &it.TurnCount, &it.VersionState, &it.MatchPreview, &it.MatchTurnIdx, &it.MatchRole); err != nil {
 			return nil, "", err
+		}
+		// Same excerpt rules as every other store: centred on the match,
+		// cut at word boundaries, marked with … where text was cut.
+		if it.MatchPreview != "" {
+			it.MatchPreview = TimelineMatchPreview(it.MatchPreview, q.Query)
 		}
 		items = append(items, it)
 	}
@@ -1432,5 +1728,125 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	return items, next, nil
 }
 
+// TimelineMatchPreview centers the excerpt on the match instead of returning
+// the start of a long message where the searched phrase may not be visible.
+func TimelineMatchPreview(text, query string) string {
+	text = strings.Join(strings.Fields(text), " ")
+	lower := strings.ToLower(text)
+	at := strings.Index(lower, strings.ToLower(query))
+	start := 0
+	if at > 0 {
+		start = utf8.RuneCountInString(lower[:at]) - 70
+	}
+	if start < 0 {
+		start = 0
+	}
+	runes := []rune(text)
+	if start > len(runes) {
+		start = 0
+	}
+	end := start + 260
+	if end > len(runes) {
+		end = len(runes)
+	}
+	// Snap a cut edge to a word boundary so the excerpt never starts or
+	// ends mid-word (a long unbroken token keeps the hard cut).
+	if start > 0 {
+		for i := start; i < end && i-start < 20; i++ {
+			if runes[i-1] == ' ' {
+				start = i
+				break
+			}
+		}
+	}
+	if end < len(runes) {
+		for i := end; i > start && end-i < 20; i-- {
+			if runes[i] == ' ' {
+				end = i
+				break
+			}
+		}
+	}
+	preview := strings.TrimSpace(string(runes[start:end]))
+	if start > 0 {
+		preview = "…" + preview
+	}
+	if end < len(runes) {
+		preview += "…"
+	}
+	return preview
+}
+
 var _ AgentCloudStore = (*MemStore)(nil)
 var _ AgentCloudStore = (*PostgresStore)(nil)
+
+// NativeSessionKeys returns "harness\x00native_id" for every agent session in
+// the given projects that viewerID can read. The timeline uses it to drop old
+// snapshots of conversations that are now captured as sessions, whatever page
+// those sessions fall on. Only readable sessions count: a snapshot shared with
+// someone who cannot open the modern copy must stay on their timeline, or the
+// chat disappears for them. The readability rule matches ListTimeline.
+func (m *MemStore) NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error) {
+	_ = ctx
+	viewerID = strings.TrimSpace(viewerID)
+	out := map[string]bool{}
+	if viewerID == "" {
+		return out, nil
+	}
+	want := map[string]bool{}
+	for _, id := range projectIDs {
+		want[id] = true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, sess := range m.agentSessions {
+		if sess != nil && want[sess.ProjectID] && m.agentVisibleLocked(viewerID, sess) {
+			out[sess.Harness+"\x00"+sess.NativeID] = true
+		}
+	}
+	return out, nil
+}
+
+// NativeSessionKeys: see MemStore.NativeSessionKeys.
+func (s *PostgresStore) NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	if !looksLikeUUID(viewerID) {
+		return out, nil
+	}
+	ids := make([]string, 0, len(projectIDs))
+	for _, id := range projectIDs {
+		if looksLikeUUID(id) {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT s.harness, s.native_id FROM agent_sessions s
+		WHERE s.project_id = ANY($1::uuid[]) AND (
+		  s.owner_user_id = $2::uuid
+		  OR EXISTS (
+		    SELECT 1 FROM session_grants g
+		    WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $2::uuid
+		  )
+		  OR (
+		    s.visibility = 'team' AND (
+		      EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $2::uuid)
+		      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $2::uuid)
+		    )
+		  )
+		)`, ids, viewerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var harness, native string
+		if err := rows.Scan(&harness, &native); err != nil {
+			return nil, err
+		}
+		out[harness+"\x00"+native] = true
+	}
+	return out, rows.Err()
+}

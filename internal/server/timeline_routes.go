@@ -18,6 +18,8 @@ import (
 )
 
 func (s *Server) registerTimelineRoutes() {
+	s.Mux.HandleFunc("GET /v1/sharing/recipients", s.requireAuth(s.handleSharingRecipients))
+	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/grants/organization", s.requireAuth(s.handleShareWithOrganization))
 	s.Mux.HandleFunc("POST /v1/agent-sessions", s.requireAuth(s.handleAgentSessionUpsert))
 	s.Mux.HandleFunc("GET /v1/agent-sessions/{id}", s.requireAuth(s.handleAgentSessionGet))
 	s.Mux.HandleFunc("POST /v1/agent-sessions/{id}/grants", s.requireAuth(s.handleAgentSessionGrant))
@@ -119,10 +121,74 @@ func (s *Server) requireAgentRead(w http.ResponseWriter, r *http.Request, sessio
 	return row, true
 }
 
+func (s *Server) requireAgentOwner(w http.ResponseWriter, r *http.Request, sessionID string) (*store.AgentSession, bool) {
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return nil, false
+	}
+	row, err := cs.GetAgentSession(r.Context(), sessionID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "session not found")
+			return nil, false
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if row.OwnerUserID != authSubject(r) {
+		writeError(w, http.StatusForbidden, "only the session owner can modify it")
+		return nil, false
+	}
+	if row.LineageKind == "legacy_snapshot" {
+		writeError(w, http.StatusForbidden, "archived sessions are read-only")
+		return nil, false
+	}
+	return row, true
+}
+
+func (s *Server) requireAgentLive(w http.ResponseWriter, r *http.Request, sessionID string) (*store.AgentSession, bool) {
+	row, ok := s.requireAgentRead(w, r, sessionID)
+	if !ok {
+		return nil, false
+	}
+	if row.LineageKind == "legacy_snapshot" {
+		return row, true
+	}
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return nil, false
+	}
+	allowed, err := cs.CanReadAgentSessionLive(r.Context(), authSubject(r), sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "session content is only shared as a point-in-time version")
+		return nil, false
+	}
+	return row, true
+}
+
 func (s *Server) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
 	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
 	if !ok {
 		return
+	}
+	if row.LineageKind != "legacy_snapshot" {
+		cs, _ := s.agentCloud()
+		live, err := cs.CanReadAgentSessionLive(r.Context(), authSubject(r), row.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not check live access")
+			return
+		}
+		if !live {
+			copy := *row
+			copy.Summary = ""
+			row = &copy
+		}
 	}
 	writeJSON(w, http.StatusOK, row)
 }
@@ -133,7 +199,7 @@ func (s *Server) handleAgentSessionForks(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+	if _, ok := s.requireAgentOwner(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	items, err := cs.ListAgentSessionForks(r.Context(), r.PathValue("id"))
@@ -154,7 +220,7 @@ func (s *Server) handleAgentSessionFork(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	parent, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	parent, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -175,7 +241,7 @@ func (s *Server) handleAgentSessionMergeCode(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	target, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	target, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -190,7 +256,7 @@ func (s *Server) handleAgentSessionMergeCode(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "from_session_id is required")
 		return
 	}
-	from, ok := s.requireAgentRead(w, r, fromID)
+	from, ok := s.requireAgentOwner(w, r, fromID)
 	if !ok {
 		return
 	}
@@ -291,7 +357,7 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -304,6 +370,7 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 		TextPreview string          `json:"text_preview"`
 		ToolCalls   json.RawMessage `json:"tool_calls"`
 		BlobRef     string          `json:"blob_ref"`
+		SourceAt    *time.Time      `json:"source_ts"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -311,6 +378,7 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 	err := cs.AppendSessionTurn(r.Context(), store.SessionTurn{
 		SessionID: r.PathValue("id"), Idx: body.Idx, Role: body.Role,
 		TextPreview: body.TextPreview, ToolCalls: body.ToolCalls, BlobRef: body.BlobRef,
+		SourceAt: validAgentSourceTime(body.SourceAt),
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -333,7 +401,7 @@ func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -346,6 +414,7 @@ func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request
 			Role        string          `json:"role"`
 			TextPreview string          `json:"text_preview"`
 			ToolCalls   json.RawMessage `json:"tool_calls"`
+			SourceAt    *time.Time      `json:"source_ts"`
 		} `json:"turns"`
 	}
 	if !decodeJSON(w, r, &body) {
@@ -360,6 +429,7 @@ func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request
 		err := cs.AppendSessionTurn(r.Context(), store.SessionTurn{
 			SessionID: row.ID, Idx: turn.Idx, Role: turn.Role,
 			TextPreview: turn.TextPreview, ToolCalls: turn.ToolCalls,
+			SourceAt: validAgentSourceTime(turn.SourceAt),
 		})
 		if errors.Is(err, store.ErrConflict) {
 			duplicates++
@@ -380,7 +450,7 @@ func (s *Server) handleAgentTurnList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+	if _, ok := s.requireAgentLive(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	turns, err := cs.ListSessionTurns(r.Context(), r.PathValue("id"))
@@ -466,7 +536,7 @@ func (s *Server) handleAgentVersionCreate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -487,7 +557,7 @@ func (s *Server) handleAgentVersionComplete(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -627,14 +697,39 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not list captured snapshots")
 		return
 	}
-	seen := make(map[string]bool, len(items))
+	// A conversation captured both ways (an old snapshot and a modern
+	// session) is one chat: the snapshot's id is the native id, so match on
+	// harness + native id too, and keep the modern session.
+	seen := make(map[string]bool, len(items)*2)
 	for _, item := range items {
 		seen[item.SessionID] = true
+		if item.NativeID != "" {
+			seen[item.Harness+"\x00"+item.NativeID] = true
+		}
+	}
+	// The modern copy may be on another page; ask the store directly. Only
+	// copies this viewer can read hide a snapshot, so a snapshot shared with
+	// someone stays listed when the modern copy is private to its owner.
+	if lister, ok := s.Store.(nativeSessionKeyLister); ok && len(legacy) > 0 {
+		projectSet := map[string]bool{}
+		for _, item := range legacy {
+			projectSet[item.ProjectID] = true
+		}
+		projectIDs := make([]string, 0, len(projectSet))
+		for id := range projectSet {
+			projectIDs = append(projectIDs, id)
+		}
+		if keys, kerr := lister.NativeSessionKeys(r.Context(), authSubject(r), projectIDs); kerr == nil {
+			for key := range keys {
+				seen[key] = true
+			}
+		}
 	}
 	for _, item := range legacy {
-		if !seen[item.SessionID] {
-			items = append(items, item)
+		if seen[item.SessionID] || (item.NativeID != "" && seen[item.Harness+"\x00"+item.NativeID]) {
+			continue
 		}
+		items = append(items, item)
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].LastActiveAt.Equal(items[j].LastActiveAt) {
@@ -652,6 +747,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		next = last.LastActiveAt.UTC().Format(time.RFC3339Nano) + "|" + last.SessionID
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next})
+}
+
+// nativeSessionKeyLister reports the harness/native-id keys of the agent
+// sessions a viewer can read (MemStore and PostgresStore implement it).
+type nativeSessionKeyLister interface {
+	NativeSessionKeys(ctx context.Context, viewerID string, projectIDs []string) (map[string]bool, error)
 }
 
 // legacySnapshotSession turns an owner-visible historical snapshot into the
@@ -746,12 +847,19 @@ func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness,
 		if err != nil {
 			return nil, err
 		}
+		// Snapshots of conversations now captured as sessions this viewer can
+		// read are hidden from the list anyway; skip them before the costly
+		// transcript search.
+		var captured map[string]bool
+		if lister, ok := s.Store.(nativeSessionKeyLister); ok {
+			captured, _ = lister.NativeSessionKeys(ctx, userID, []string{project.ID})
+		}
 		for i := range snaps {
 			snap := &snaps[i]
 			if harness != "" && !strings.EqualFold(harness, snap.Harness) {
 				continue
 			}
-			if query != "" && !strings.Contains(strings.ToLower(snap.Harness+" "+snap.ConversationID), strings.ToLower(query)) {
+			if captured[snap.Harness+"\x00"+snap.ConversationID] {
 				continue
 			}
 			if !s.canReadSnapshot(ctx, userID, snap) {
@@ -762,11 +870,43 @@ func (s *Server) legacyTimeline(ctx context.Context, userID, projectID, harness,
 				(legacy.LastActiveAt.Equal(cursorAt) && legacy.ID >= cursorID)) {
 				continue
 			}
+			var matchPreview, matchRole string
+			var matchIdx *int
+			if query != "" && !strings.Contains(strings.ToLower(legacy.Title+" "+snap.Harness+" "+snap.ConversationID), strings.ToLower(query)) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
+				// One unreadable snapshot only drops out of the search
+				// results; it must not fail the whole timeline.
+				full, err := ps.GetLatestSnapshot(ctx, snap.SessionID)
+				if err != nil || full == nil {
+					if cerr := ctx.Err(); cerr != nil {
+						return nil, cerr
+					}
+					continue
+				}
+				raw, err := gunzipSnapshot(full.TranscriptPayload)
+				if err != nil {
+					continue
+				}
+				for _, turn := range ParseTranscriptJSONL(raw) {
+					if (turn.Role == "user" || turn.Role == "assistant") && strings.Contains(strings.ToLower(turn.TextPreview), strings.ToLower(query)) {
+						idx := turn.Idx
+						matchIdx, matchRole = &idx, turn.Role
+						matchPreview = store.TimelineMatchPreview(turn.TextPreview, query)
+						break
+					}
+				}
+				if matchIdx == nil {
+					continue
+				}
+			}
 			items = append(items, store.TimelineItem{
 				SessionID: legacy.ID, ProjectID: legacy.ProjectID, Harness: legacy.Harness,
 				NativeID: legacy.NativeID, Title: legacy.Title, Summary: legacy.Summary,
 				Visibility: legacy.Visibility, OwnerUserID: legacy.OwnerUserID,
 				LastActiveAt: legacy.LastActiveAt, TurnCount: snap.TurnCount, VersionState: "legacy_snapshot",
+				MatchPreview: matchPreview, MatchTurnIdx: matchIdx, MatchRole: matchRole,
 			})
 		}
 	}

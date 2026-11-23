@@ -201,3 +201,36 @@ func TestOrgCreateRequiresAuth(t *testing.T) {
 		t.Fatalf("unauthenticated POST /orgs: %d, want 401", rec.Code)
 	}
 }
+
+// The last owner can neither leave nor demote themselves: the organization
+// would have nobody left who can manage members, owners or billing.
+func TestOrgKeepsAtLeastOneOwner(t *testing.T) {
+	s := newTestServer()
+	alice := loginAs(t, s, "alice")
+	_ = loginAs(t, s, "bob")
+	rec := doJSON(t, s, http.MethodPost, "/orgs", alice, map[string]string{"name": "Solo"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create org: %d %s", rec.Code, rec.Body.String())
+	}
+	var org store.Organization
+	decodeBody(t, rec, &org)
+
+	rec = doJSON(t, s, http.MethodDelete, "/orgs/"+org.ID+"/members/alice", alice, nil)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("last owner removed self: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodPut, "/orgs/"+org.ID+"/members/alice/role", alice, map[string]string{"role": "MEMBER"})
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("last owner demoted self: %d %s, want 409", rec.Code, rec.Body.String())
+	}
+
+	// With a second owner, the first may step down.
+	rec = doJSON(t, s, http.MethodPost, "/orgs/"+org.ID+"/members", alice, map[string]string{"user_id": "bob", "role": "OWNER"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add bob owner: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodPut, "/orgs/"+org.ID+"/members/alice/role", alice, map[string]string{"role": "MEMBER"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("owner stepping down with another owner: %d %s, want 200", rec.Code, rec.Body.String())
+	}
+}

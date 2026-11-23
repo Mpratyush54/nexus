@@ -3,7 +3,8 @@ package store
 // Pure tests for the #36 election helpers: threshold predicates and
 // app-side filtering. All DB-free with a fixed clock. The PostgresStore
 // election writes (ElectDesignatedProcessor/ReassignStaleDesignated) need a
-// live Postgres and are covered by integration runs gated on TEST_POSTGRES_DSN.
+// live Postgres and are covered by integration runs against the shared
+// Postgres test database.
 
 import (
 	"testing"
