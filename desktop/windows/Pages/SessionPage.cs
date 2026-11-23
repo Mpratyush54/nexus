@@ -2921,7 +2921,7 @@ public sealed partial class SessionPage : NexusPage
             }
             if (hasBitmap)
             {
-                var cachePath = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nexus", "Chat images");
+                var cachePath = System.IO.Path.Combine(Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData), "Nexus", "Chat images");
                 System.IO.Directory.CreateDirectory(cachePath);
                 var cache = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(cachePath);
                 var file = await cache.CreateFileAsync("Pasted-" + Guid.NewGuid().ToString("N") + ".png");

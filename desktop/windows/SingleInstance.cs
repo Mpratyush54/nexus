@@ -206,19 +206,19 @@ public static class SingleInstance
 
     private static string TokenPath()
     {
-        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var root = Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData);
         return Path.Combine(root, "Nexus", "instance.token");
     }
 
     private static string MutexName()
     {
         var sid = WindowsIdentity.GetCurrent().User?.Value ?? "user";
-        return "Local\\Nexus-" + sid;
+        return Nexus.Core.ProfilePaths.InstanceName("Local\\Nexus-" + sid);
     }
 
     private static string PipeName()
     {
         var sid = WindowsIdentity.GetCurrent().User?.Value ?? "user";
-        return "nexus-" + sid;
+        return Nexus.Core.ProfilePaths.InstanceName("nexus-" + sid);
     }
 }

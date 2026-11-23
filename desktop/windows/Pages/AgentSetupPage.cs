@@ -36,7 +36,7 @@ public sealed partial class AgentSetupPage : NexusPage
 
     private static readonly FontFamily MonoFont = new("Cascadia Mono, Consolas");
     private static readonly string CacheFile = System.IO.Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nexus", "agents-browse.json");
+        Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData), "Nexus", "agents-browse.json");
 
     private readonly TextBlock _status = new() { FontSize = 11.5, Opacity = 0.55, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBox _search = new() { PlaceholderText = "Search every agent: names, descriptions, paths, commands", FontSize = 12.5, MinWidth = 280, MaxWidth = 420 };

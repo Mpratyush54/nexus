@@ -22,7 +22,7 @@ public partial class App : Application
     {
         try
         {
-            var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var root = ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData);
             var directory = Path.Combine(root, "Nexus");
             Directory.CreateDirectory(directory);
             File.WriteAllText(Path.Combine(directory, "last-error.log"),
@@ -39,6 +39,9 @@ public partial class App : Application
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
     {
+        // NEXUS_PROFILE: must run before anything loads the Go core, which
+        // reads per-user folders from this process's environment.
+        ProfilePaths.ApplyToProcess();
         var argv = Environment.GetCommandLineArgs();
         if (!SingleInstance.ClaimOrForward(argv))
         {
@@ -52,7 +55,12 @@ public partial class App : Application
             return;
         }
 
-        ProtocolRegistration.Register();
+        // A profiled instance never claims the per-user nexus:// handler,
+        // which belongs to the normal install.
+        if (!ProfilePaths.Active)
+        {
+            ProtocolRegistration.Register();
+        }
         var background = argv.Any(a => string.Equals(a, "--background", StringComparison.OrdinalIgnoreCase));
         ReadDeepLink(argv);
 
