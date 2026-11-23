@@ -49,7 +49,7 @@ func TestPostgresDurableExecution(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer db.Close()
-	sql, e := os.ReadFile("../../migrations/039_desktop_execution.up.sql")
+	sql, e := os.ReadFile("../../migrations/050_desktop_execution.up.sql")
 	if e != nil {
 		t.Fatal(e)
 	}
