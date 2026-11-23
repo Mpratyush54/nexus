@@ -1,0 +1,60 @@
+{
+  "name": "Nexus Film Recording",
+  "current_scene": "Nexus only",
+  "current_program_scene": "Nexus only",
+  "scene_order": [{"name":"Nexus only"}],
+  "sources": [
+    {
+      "name":"Nexus only",
+      "uuid":"9065d9b0-c845-472e-9ae8-0f826f995a49",
+      "id":"scene",
+      "versioned_id":"scene",
+      "settings": {
+        "items":[{
+          "name":"Nexus window only",
+          "source_uuid":"141fe400-4359-45c4-98ee-d59a78d20f35",
+          "visible":true,
+          "locked":false,
+          "rot":0.0,
+          "pos":{"x":0.0,"y":0.0},
+          "scale":{"x":1.0,"y":1.0},
+          "align":5,
+          "bounds_type":0,
+          "bounds_align":0,
+          "bounds":{"x":0.0,"y":0.0},
+          "crop_left":0,"crop_top":0,"crop_right":0,"crop_bottom":0,
+          "id":1
+        }]
+      },
+      "mixers":0,
+      "enabled":true
+    },
+    {
+      "name":"Nexus window only",
+      "uuid":"141fe400-4359-45c4-98ee-d59a78d20f35",
+      "id":"window_capture",
+      "versioned_id":"window_capture",
+      "settings":{
+        "window":"Nexus Beta:WinUIDesktopWin32WindowClass:Nexus.exe",
+        "priority":2,
+        "method":2,
+        "cursor":true,
+        "client_area":false,
+        "capture_audio":false,
+        "force_sdr":true
+      },
+      "mixers":0,
+      "enabled":true
+    }
+  ],
+  "transitions":[],
+  "quick_transitions":[],
+  "current_transition":"Fade",
+  "transition_duration":300,
+  "DesktopAudioDevice1":null,
+  "DesktopAudioDevice2":null,
+  "AuxAudioDevice1":null,
+  "AuxAudioDevice2":null,
+  "AuxAudioDevice3":null,
+  "AuxAudioDevice4":null
+}

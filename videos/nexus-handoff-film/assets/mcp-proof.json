@@ -1,0 +1,38 @@
+{
+  "memory_search": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "budget_remaining": 3685,
+      "context": "\u003cproject_memory project=\"Checkout · Demo workspace\" branch=\"\"\u003e\n\u003cproject\u003e\n\u003citem key=\"checkout/cart-preservation\" confidence=\"1.00\" scope=\"decision\"\u003e\n    Preserve the cart until payment is confirmed so customers can recover from a failed checkout without rebuilding their order.\n  \u003c/item\u003e\n\u003c/project\u003e\n\u003c/project_memory\u003e",
+      "items_included": 1,
+      "reflection_hint": "If you've made decisions or learned facts in this session not shown above, call memory_write to record them.",
+      "token_count": 78
+    }
+  },
+  "project_knowledge": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "result": {
+      "count": 2,
+      "items": [
+        {
+          "confidence": 1,
+          "content": "Preserve the cart until payment is confirmed so customers can recover from a failed checkout without rebuilding their order.",
+          "id": "mem_1792868586908890100_3",
+          "key": "checkout/cart-preservation",
+          "level": "project",
+          "status": "active"
+        },
+        {
+          "confidence": 1,
+          "content": "Before merging a payment change, review the recovery patch and verify failure-path coverage with a teammate.",
+          "id": "mem_1792868586908890100_4",
+          "key": "team/release-verification",
+          "level": "organization",
+          "status": "active"
+        }
+      ]
+    }
+  }
+}

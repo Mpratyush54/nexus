@@ -1,0 +1,4 @@
+# Original window captures are private working material. Only reviewed video
+# frames/crops may be published; never ship these raw screenshots as web assets.
+*.jpg
+*.png
