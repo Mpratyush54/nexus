@@ -63,7 +63,7 @@ func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request)
 	if row.LineageKind == "legacy_snapshot" {
 		// Archived sessions have no session_turns rows; serve the redacted
 		// transcript stored in their snapshot so Chat is never empty.
-		items, next = pageSessionTurns(s.legacySnapshotTurns(r, row), after, limit)
+		items, next = pageSessionTurns(s.legacySnapshotTurns(r.Context(), row), after, limit)
 	} else {
 		cs, ok := s.agentCloud()
 		if !ok {
@@ -141,6 +141,18 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	writeJSON(w, http.StatusOK, map[string]any{"summary": s.sessionSummaryText(r.Context(), row)})
+}
+
+// sessionSummaryText is a readable session's summary: the stored summary,
+// else the harvest worker's session/<id> memory, else an extractive overview
+// of the captured turns (first request and latest agent reply). The caller
+// has already checked that the session is readable. Shared by GET
+// /v1/agent-sessions/{id}/summary and the MCP session_summary_get tool.
+func (s *Server) sessionSummaryText(ctx context.Context, row *store.AgentSession) string {
+	if row == nil {
+		return ""
+	}
 	summary := strings.TrimSpace(row.Summary)
 	if row.LineageKind == "legacy_snapshot" && summary == "Archived snapshot" {
 		// Placeholder text, not a real summary: fall through to the memory
@@ -157,7 +169,7 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 			if sid == "" {
 				continue
 			}
-			if item := s.findMemoryByKey(r.Context(), row.ProjectID, "session/"+sid); item != nil {
+			if item := s.findMemoryByKey(ctx, row.ProjectID, "session/"+sid); item != nil {
 				summary = strings.TrimSpace(item.Content)
 				break
 			}
@@ -166,20 +178,20 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 	if summary == "" {
 		var turns []store.SessionTurn
 		if row.LineageKind == "legacy_snapshot" {
-			turns = s.legacySnapshotTurns(r, row)
+			turns = s.legacySnapshotTurns(ctx, row)
 		} else if reader, ok := s.Store.(store.SessionTurnReader); ok {
 			// The overview needs two turns, not the whole session.
-			if first, last, err := reader.SessionTurnOverview(r.Context(), row.ID); err == nil {
+			if first, last, err := reader.SessionTurnOverview(ctx, row.ID); err == nil {
 				turns = []store.SessionTurn{first, last}
 			}
 		} else if cs, ok := s.agentCloud(); ok {
-			if found, err := cs.ListSessionTurns(r.Context(), row.ID); err == nil {
+			if found, err := cs.ListSessionTurns(ctx, row.ID); err == nil {
 				turns = found
 			}
 		}
 		summary = capturedTurnOverview(turns)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"summary": summary})
+	return summary
 }
 
 // An extractive fallback is more honest and useful than an empty Summary tab.
@@ -242,7 +254,7 @@ func (s *Server) handleProjectKnowledge(w http.ResponseWriter, r *http.Request) 
 	if limit < 0 {
 		return
 	}
-	viewerCtx := store.WithViewer(r.Context(), authSubject(r))
+	viewerCtx := store.WithoutEmbeddings(store.WithViewer(r.Context(), authSubject(r)))
 	found, err := s.Store.SearchMemory(viewerCtx, projectID, "", nil, MaxSearchLimit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())

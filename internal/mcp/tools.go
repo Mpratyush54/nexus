@@ -188,8 +188,8 @@ func ListTools() []Tool {
 		},
 		{
 			Name:        "workspace_info",
-			Description: "Return the current project name, branch, commit, dirty status, and path.",
-			InputSchema: schema(nil, map[string]any{}),
+			Description: "Return the current project name and id, plus branch, commit, dirty status and path when known (unknown fields are omitted). Pass project_id to pick a project.",
+			InputSchema: schema(nil, map[string]any{"project_id": str}),
 		},
 		{
 			Name:        "file_read",
@@ -1153,23 +1153,55 @@ func (s *Server) handleEpisodeReport(ctx context.Context, raw json.RawMessage) (
 // workspace_info
 // ---------------------------------------------------------------------------
 
+// ProjectRef names one project the caller can use (workspace_info lists
+// them when no project is selected).
+type ProjectRef struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// WorkspaceProjectResolver is optional: a store that can pick the caller's
+// project when the call named none (the cloud adapter picks the project of
+// the caller's most recently active workspace) and list the alternatives.
+type WorkspaceProjectResolver interface {
+	ResolveWorkspaceProject(ctx context.Context) (projectID string, options []ProjectRef, err error)
+}
+
+// handleWorkspaceInfo reports the project (name and id) and, when known,
+// its branch, commit, dirty flag and path. Fields the server does not know
+// are omitted rather than sent as placeholders.
 func (s *Server) handleWorkspaceInfo(ctx context.Context) map[string]any {
-	project := s.cfg.ProjectName
-	branch, commit, dirty, path := s.cfg.Branch, s.cfg.CommitSHA, s.cfg.Dirty, s.cfg.WorkspacePath
-	if s.store != nil && s.cfg.ProjectID != "" {
-		if ws, err := s.store.GetActiveWorkspace(ctx, s.cfg.ProjectID); err == nil && ws != nil {
+	out := map[string]any{}
+	projectID := s.cfg.ProjectID
+	var options []ProjectRef
+	if projectID == "" && s.store != nil {
+		if r, ok := s.store.(WorkspaceProjectResolver); ok {
+			if id, opts, err := r.ResolveWorkspaceProject(ctx); err == nil {
+				projectID, options = id, opts
+			}
+		}
+	}
+	project := strings.TrimSpace(s.cfg.ProjectName)
+	if projectID != s.cfg.ProjectID {
+		project = "" // resolved here: the configured name belongs to no project
+	}
+	branch, commit, path := s.cfg.Branch, s.cfg.CommitSHA, s.cfg.WorkspacePath
+	dirty, dirtyKnown := s.cfg.Dirty, s.cfg.Branch != "" || s.cfg.CommitSHA != ""
+	if s.store != nil && projectID != "" {
+		if ws, err := s.store.GetActiveWorkspace(ctx, projectID); err == nil && ws != nil &&
+			(ws.Branch != "" || ws.CommitSHA != "" || ws.Path != "") {
 			if ws.Branch != "" {
 				branch = ws.Branch
 			}
 			if ws.CommitSHA != "" {
 				commit = ws.CommitSHA
 			}
-			dirty = ws.IsDirty
 			if ws.Path != "" {
 				path = ws.Path
 			}
+			dirty, dirtyKnown = ws.IsDirty, true
 		}
-		if p, err := s.store.GetProject(ctx, s.cfg.ProjectID); err == nil && p != nil {
+		if p, err := s.store.GetProject(ctx, projectID); err == nil && p != nil {
 			if p.DisplayName != "" {
 				project = p.DisplayName
 			} else if p.FolderName != "" {
@@ -1177,10 +1209,26 @@ func (s *Server) handleWorkspaceInfo(ctx context.Context) map[string]any {
 			}
 		}
 	}
-	return map[string]any{
-		"project": project, "branch": branch, "commit": commit,
-		"is_dirty": dirty, "path": path,
+	set := func(k, v string) {
+		if v = strings.TrimSpace(v); v != "" {
+			out[k] = v
+		}
 	}
+	set("project_id", projectID)
+	set("project", project)
+	set("branch", branch)
+	set("commit", commit)
+	set("path", path)
+	if dirtyKnown {
+		out["is_dirty"] = dirty
+	}
+	if projectID == "" {
+		out["note"] = "no project selected: pass project_id (or the X-Nexus-Project header) for branch, commit and path"
+		if len(options) > 0 {
+			out["projects"] = options
+		}
+	}
+	return out
 }
 
 // ---------------------------------------------------------------------------

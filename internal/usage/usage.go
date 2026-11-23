@@ -43,27 +43,55 @@ func (e Entry) Valid() bool {
 // Cost returns a float pointer (helper for literals and tests).
 func Cost(v float64) *float64 { return &v }
 
-// Price is USD per million tokens.
+// Price is USD per million tokens. Long, when set, replaces the price for a
+// request whose prompt (input + cache read + cache write) is over
+// LongPromptTokens (Claude Haiku 5.5 is priced by prompt length).
 type Price struct {
 	Input, Output, CacheRead, CacheWrite float64
+	Long                                 *Price
 }
 
-// prices only lists models whose list price was verified. Unknown models
-// show tokens only: never guess a price. Cache reads are 0.1x input and
-// cache writes 1.25x input (5-minute TTL), per Anthropic's published rates.
+// LongPromptTokens is the prompt length above which Price.Long applies.
+const LongPromptTokens = 100_000
+
+// prices only lists models whose list price was verified against
+// https://platform.claude.com/docs/en/about-claude/pricing (Nov 2026).
+// Unknown models show tokens only: never guess a price. Cache writes are the
+// 5-minute rate (1.25x input); cache reads are 0.1x input except where the
+// page lists a lower multiplier (0.05x Opus/Sonnet 5.5, 0.025x Fable/Mythos
+// 5.1 and 5.2).
 var prices = map[string]Price{
+	"claude-fable-5-2":  {Input: 8, Output: 40, CacheRead: 0.20, CacheWrite: 10},
+	"claude-mythos-5-2": {Input: 8, Output: 40, CacheRead: 0.20, CacheWrite: 10},
+	"claude-fable-5-1":  {Input: 10, Output: 50, CacheRead: 0.25, CacheWrite: 12.50},
+	"claude-mythos-5-1": {Input: 10, Output: 50, CacheRead: 0.25, CacheWrite: 12.50},
 	"claude-fable-5":    anthropic(10, 50),
 	"claude-mythos-5":   anthropic(10, 50),
+	"claude-opus-5-5":   {Input: 4, Output: 20, CacheRead: 0.20, CacheWrite: 5},
 	"claude-opus-5":     anthropic(5, 25),
 	"claude-opus-4-8":   anthropic(5, 25),
 	"claude-opus-4-7":   anthropic(5, 25),
 	"claude-opus-4-6":   anthropic(5, 25),
-	"claude-sonnet-5":   anthropic(3, 15),
+	"claude-opus-4-5":   anthropic(5, 25),
+	"claude-sonnet-5-5": {Input: 2, Output: 10, CacheRead: 0.10, CacheWrite: 2.50},
+	"claude-sonnet-5":   {Input: 2, Output: 10, CacheRead: 0.20, CacheWrite: 2.50},
 	"claude-sonnet-4-6": anthropic(3, 15),
+	"claude-sonnet-4-5": anthropic(3, 15),
+	"claude-haiku-5-5": {Input: 0.10, Output: 0.50, CacheRead: 0.01, CacheWrite: 0.125,
+		Long: &Price{Input: 0.50, Output: 2.50, CacheRead: 0.05, CacheWrite: 0.625}},
+	"claude-haiku-4-5": anthropic(1, 5),
 }
 
 func anthropic(in, out float64) Price {
 	return Price{Input: in, Output: out, CacheRead: in * 0.1, CacheWrite: in * 1.25}
+}
+
+// IsFreeModel reports a model id that is free by name, such as
+// "muse-spark-1.3-contributor-free" or "vendor/model:free". Its cost is a
+// known $0, not unknown.
+func IsFreeModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasSuffix(m, "-free") || strings.HasSuffix(m, ":free")
 }
 
 // NormalizeModel lowercases and strips provider prefixes such as
@@ -80,9 +108,9 @@ func NormalizeModel(model string) string {
 }
 
 // PriceFor matches a known model id exactly or with a date / context /
-// region suffix (claude-opus-5-20260101, claude-opus-5[1m],
-// claude-opus-5@20260101). A different minor version such as
-// claude-fable-5-2 is a different model and stays unpriced.
+// region suffix (claude-opus-5-5-20261101, claude-opus-5[1m],
+// claude-opus-5@20260101). A minor version missing from the table (such as
+// claude-fable-5-3) is a different model and stays unpriced.
 func PriceFor(model string) (Price, bool) {
 	m := NormalizeModel(model)
 	if m == "" {
@@ -125,11 +153,30 @@ func isDate(s string) bool {
 	return len(s) == 8 || s[8] == '[' || s[8] == '@' || s[8] == ':'
 }
 
-// Estimate prices an entry from the table. ok=false for unknown models.
+// Estimate prices an entry from the table. ok=false for unknown models;
+// free models (IsFreeModel) cost a known 0. The entry is treated as one
+// request when choosing a prompt-length tier.
 func Estimate(e Entry) (float64, bool) {
+	return EstimateTier(e, LongPrompt(e))
+}
+
+// LongPrompt reports whether an entry's prompt is over LongPromptTokens.
+func LongPrompt(e Entry) bool {
+	return e.Input+e.CacheRead+e.CacheWrite > LongPromptTokens
+}
+
+// EstimateTier prices an entry (possibly a sum of several requests of the
+// same tier) at the long-prompt price when long is true.
+func EstimateTier(e Entry, long bool) (float64, bool) {
+	if IsFreeModel(e.Model) {
+		return 0, true
+	}
 	p, ok := PriceFor(e.Model)
 	if !ok {
 		return 0, false
+	}
+	if long && p.Long != nil {
+		p = *p.Long
 	}
 	return (float64(e.Input)*p.Input + float64(e.Output)*p.Output +
 		float64(e.CacheRead)*p.CacheRead + float64(e.CacheWrite)*p.CacheWrite) / 1e6, true

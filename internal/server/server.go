@@ -134,6 +134,8 @@ type Server struct {
 	// failing LLM warns once per project and reason, not on every rebuild.
 	briefWarned map[string]string
 	briefNow    func() time.Time
+	// briefWG tracks background brief builds scheduled by GET (tests wait).
+	briefWG sync.WaitGroup
 }
 
 // NewServer wires routes onto a fresh stdlib ServeMux.

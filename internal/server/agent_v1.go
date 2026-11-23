@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	memctx "central-memory/internal/context"
 	"central-memory/internal/mcp"
@@ -317,7 +318,7 @@ func (s *Server) handleAgentMCP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := "project"
+	name := ""
 	if projectID != "" {
 		if p, err := s.Store.GetProject(r.Context(), projectID); err == nil && p != nil {
 			if p.DisplayName != "" {
@@ -528,6 +529,37 @@ func (a agentMCPStore) GetActiveWorkspace(ctx context.Context, projectID string)
 		return &mcp.Workspace{}, nil
 	}
 	return &mcp.Workspace{Branch: ws.Branch, CommitSHA: ws.CommitSHA, IsDirty: ws.IsDirty, Path: ws.Path}, nil
+}
+
+// ResolveWorkspaceProject picks, for a workspace_info call that named no
+// project, the caller's project whose active workspace (the caller's own
+// machine, live heartbeat) was seen most recently. options lists every
+// project the caller can use so the agent can pass one.
+func (a agentMCPStore) ResolveWorkspaceProject(ctx context.Context) (string, []mcp.ProjectRef, error) {
+	projects, err := a.Store.ListProjectsForUser(ctx, a.UserID)
+	if err != nil {
+		return "", nil, err
+	}
+	var best string
+	var bestSeen time.Time
+	options := make([]mcp.ProjectRef, 0, len(projects))
+	for _, p := range projects {
+		if p == nil || p.ID == "" {
+			continue
+		}
+		options = append(options, mcp.ProjectRef{ID: p.ID, Name: firstNonEmpty(p.DisplayName, p.FolderName, p.ID)})
+		ws, err := a.Store.GetActiveWorkspace(ctx, p.ID)
+		if err != nil || ws == nil || ws.UserID != a.UserID {
+			continue
+		}
+		if best == "" || ws.LastSeen.After(bestSeen) {
+			best, bestSeen = p.ID, ws.LastSeen
+		}
+	}
+	if len(options) == 1 {
+		best = options[0].ID
+	}
+	return best, options, nil
 }
 
 func (a agentMCPStore) GetProject(ctx context.Context, id string) (*mcp.Project, error) {

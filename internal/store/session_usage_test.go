@@ -91,6 +91,32 @@ func exerciseUsageStore(t *testing.T, st UsageStore, owner, s1, s2, s3, s4, proj
 	if _, err := st.UsageSummary(ctx, UsageQuery{UserID: owner, GroupBy: "weekday"}); err == nil {
 		t.Fatal("unknown group_by must fail")
 	}
+
+	// Prompt-length tiers are priced per record, not on the summed tokens:
+	// one short and one long Haiku 5.5 call. A free model is a known $0.
+	if err := st.RecordSessionUsage(ctx, []SessionUsage{
+		{SessionID: s4, Key: "haiku:short", SourceAt: at(3), Entry: usage.Entry{Model: "claude-haiku-5-5", Input: 60_000, Output: 1_000}},
+		{SessionID: s4, Key: "haiku:long", SourceAt: at(3), Entry: usage.Entry{Model: "claude-haiku-5-5", Input: 2_000, CacheRead: 150_000, Output: 1_000}},
+		{SessionID: s4, Key: "muse:1", SourceAt: at(3), Entry: usage.Entry{Model: "muse-spark-1.3-contributor-free", Input: 300_000_000}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tiers, err := st.SessionUsageByModel(ctx, s4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]usage.Total{}
+	for _, r := range tiers {
+		byName[r.Model] = r
+	}
+	haiku := byName["claude-haiku-5-5"]
+	wantHaiku := (60_000*0.10+1_000*0.50)/1e6 + (2_000*0.50+150_000*0.05+1_000*2.50)/1e6
+	if haiku.Turns != 2 || haiku.Input != 62_000 || math.Abs(haiku.EstimatedUSD-wantHaiku) > 1e-12 {
+		t.Fatalf("haiku tiers: %+v want %v", haiku, wantHaiku)
+	}
+	if free := byName["muse-spark-1.3-contributor-free"]; !free.HasCost || free.CostUSD != 0 || free.UnpricedTokens != 0 {
+		t.Fatalf("free model: %+v", free)
+	}
 }
 
 func TestUsageStoreMem(t *testing.T) {
