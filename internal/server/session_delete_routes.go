@@ -5,9 +5,12 @@ package server
 //	DELETE /v1/agent-sessions/{id}              delete the chat (turns, usage,
 //	                                            versions, shares, snapshots).
 //	                                            Memories made from it stay.
-//	POST   /v1/agent-sessions/{id}/turns/dedupe remove undated exact copies of
-//	                                            dated turns; ?dry_run=1 counts
-//	                                            only. -> {removed, kept, ...}
+//	POST   /v1/agent-sessions/{id}/turns/dedupe remove undated legacy turns:
+//	                                            copies of dated turns and
+//	                                            harness-only user envelopes.
+//	                                            ?mode=all|exact|copies|envelopes
+//	                                            (default all); ?dry_run=1 counts
+//	                                            only. -> {removed, kept, rules, ...}
 //
 // Both answer 404 when the chat does not exist and 403 to anyone but its
 // owner, including people it is shared with.
@@ -82,8 +85,17 @@ func (s *Server) handleAgentSessionTurnDedupe(w http.ResponseWriter, r *http.Req
 		return
 	}
 	dryRun := queryFlag(r.URL.Query().Get("dry_run"))
-	res, err := deleter.DedupeSessionTurns(r.Context(), row.ID, dryRun)
+	mode, err := store.NormalizeDedupeMode(r.URL.Query().Get("mode"))
 	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	res, err := deleter.DedupeSessionTurns(r.Context(), row.ID, store.TurnDedupeOptions{Mode: mode, DryRun: dryRun})
+	if err != nil {
+		if errors.Is(err, store.ErrBadDedupeMode) {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "session not found")
 			return
@@ -94,7 +106,7 @@ func (s *Server) handleAgentSessionTurnDedupe(w http.ResponseWriter, r *http.Req
 	if !dryRun && res.Removed > 0 {
 		s.recordAudit(r, store.AuditEvent{
 			Action: "session.turns_deduped", ResourceKind: "session", ResourceID: row.ID, ProjectID: row.ProjectID,
-			Metadata: map[string]any{"removed": res.Removed, "kept": res.Kept},
+			Metadata: map[string]any{"removed": res.Removed, "kept": res.Kept, "mode": res.Mode, "rules": res.Rules},
 		})
 	}
 	writeJSON(w, http.StatusOK, res)

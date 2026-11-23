@@ -129,15 +129,15 @@ func TestDedupeSessionTurnsPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	dry, err := s.DedupeSessionTurns(ctx, row.ID, true)
+	dry, err := s.DedupeSessionTurns(ctx, row.ID, TurnDedupeOptions{Mode: DedupeModeExact, DryRun: true})
 	if err != nil || dry.Removed != 2 || dry.Kept != 3 || len(dry.RemovedIdx) != 2 || dry.RemovedIdx[0] != 3 || dry.RemovedIdx[1] != 4 {
 		t.Fatalf("dry run = %+v %v", dry, err)
 	}
 	if turns, _ := s.ListSessionTurns(ctx, row.ID); len(turns) != 5 {
 		t.Fatalf("dry run deleted: %d", len(turns))
 	}
-	res, err := s.DedupeSessionTurns(ctx, row.ID, false)
-	if err != nil || res.Removed != 2 || res.Kept != 3 {
+	res, err := s.DedupeSessionTurns(ctx, row.ID, TurnDedupeOptions{Mode: DedupeModeExact})
+	if err != nil || res.Removed != 2 || res.Rules[DedupeRuleExact] != 2 || res.Kept != 3 {
 		t.Fatalf("dedupe = %+v %v", res, err)
 	}
 	turns, err := s.ListSessionTurns(ctx, row.ID)
@@ -145,11 +145,11 @@ func TestDedupeSessionTurnsPostgres(t *testing.T) {
 		t.Fatalf("turns = %+v %v", turns, err)
 	}
 	// Turn 5 is undated, so the chat's activity is not rewritten.
-	again, err := s.DedupeSessionTurns(ctx, row.ID, false)
+	again, err := s.DedupeSessionTurns(ctx, row.ID, TurnDedupeOptions{Mode: DedupeModeExact})
 	if err != nil || again.Removed != 0 || again.Kept != 3 {
 		t.Fatalf("second dedupe = %+v %v", again, err)
 	}
-	if _, err := s.DedupeSessionTurns(ctx, "00000000-0000-0000-0000-000000000000", true); !errors.Is(err, ErrNotFound) {
+	if _, err := s.DedupeSessionTurns(ctx, "00000000-0000-0000-0000-000000000000", TurnDedupeOptions{DryRun: true}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing: %v", err)
 	}
 }
@@ -171,7 +171,7 @@ func TestDedupeSessionTurnsPostgresDatesChat(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.DedupeSessionTurns(ctx, row.ID, false); err != nil {
+	if _, err := s.DedupeSessionTurns(ctx, row.ID, TurnDedupeOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	after, err := s.GetAgentSession(ctx, row.ID)
