@@ -9,6 +9,18 @@ public sealed class NxClient
 {
     private static DispatcherQueue? _queue;
     private static Action<string>? _onEvent;
+    private static NxClient? _subscribedClient;
+    public event Action<string>? EventReceived;
+
+    // Each nx_call blocks a pool thread for the whole network round trip.
+    // Opening a chat starts about ten at once; with the default minimum (one
+    // thread per core) the rest queued behind the pool's slow thread injection
+    // and the chat waited seconds before its requests were even sent.
+    static NxClient()
+    {
+        ThreadPool.GetMinThreads(out var workers, out var io);
+        if (workers < 32) ThreadPool.SetMinThreads(32, io);
+    }
 
     public bool Init(string configJson) => NxNative.nx_init(configJson) == 0;
 
@@ -22,6 +34,7 @@ public sealed class NxClient
     {
         _queue = queue;
         _onEvent = onEvent;
+        _subscribedClient = this;
         NxNative.nx_subscribe(&OnCoreEvent);
     }
 
@@ -29,7 +42,7 @@ public sealed class NxClient
     private static void OnCoreEvent(nint json)
     {
         var copy = Marshal.PtrToStringUTF8(json) ?? "";
-        _queue?.TryEnqueue(() => _onEvent?.Invoke(copy));
+        _queue?.TryEnqueue(() => { _subscribedClient?.EventReceived?.Invoke(copy); _onEvent?.Invoke(copy); });
     }
 
     public Task<NxResponse> CallAsync(string method, object? args = null, CancellationToken ct = default)
