@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 )
 
 func TestOrgAdminPostgresCaptureAndStorage(t *testing.T) {
@@ -13,23 +15,34 @@ func TestOrgAdminPostgresCaptureAndStorage(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
+	if err := s.RunMigrations(ctx, "../../migrations"); err != nil {
+		t.Fatal(err)
+	}
 
+	// Own every row this test touches: a CI database (TEST_POSTGRES_DSN) is
+	// migrated but not seeded, so "the first user" may not exist, and fixed
+	// slugs would collide with leftovers from an earlier run.
+	name := fmt.Sprintf("org-admin-pg-%d", time.Now().UnixNano())
 	var userID string
-	if err := s.pool.QueryRow(ctx, `SELECT id::text FROM users ORDER BY created_at LIMIT 1`).Scan(&userID); err != nil {
+	if err := s.pool.QueryRow(ctx, `INSERT INTO users (username) VALUES ($1) RETURNING id::text`, name).Scan(&userID); err != nil {
 		t.Fatal(err)
 	}
-	org, err := s.CreateOrganization(ctx, "Org Admin PG", "org-admin-pg", userID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	proj, err := s.CreateOrgProject(ctx, org.ID, "org-admin-pg", "Org Admin PG", "", "", userID)
+	t.Cleanup(func() {
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1::uuid`, userID)
+	})
+	org, err := s.CreateOrganization(ctx, "Org Admin PG", name, userID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		bg := context.Background()
-		_, _ = s.pool.Exec(bg, `DELETE FROM projects WHERE id = $1::uuid`, proj.ID)
-		_, _ = s.pool.Exec(bg, `DELETE FROM organizations WHERE id = $1::uuid`, org.ID)
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM organizations WHERE id = $1::uuid`, org.ID)
+	})
+	proj, err := s.CreateOrgProject(ctx, org.ID, name, "Org Admin PG", "", "", userID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = s.pool.Exec(context.Background(), `DELETE FROM projects WHERE id = $1::uuid`, proj.ID)
 	})
 
 	on, err := s.CaptureEnabled(ctx, proj.ID)
@@ -45,7 +58,7 @@ func TestOrgAdminPostgresCaptureAndStorage(t *testing.T) {
 	}
 	if _, err := s.UpsertAgentSession(ctx, &AgentSession{
 		ProjectID: proj.ID, OwnerUserID: userID, Harness: "claude",
-		NativeID: "org-admin-pg", OriginMachineID: "pg", Title: "hidden-title",
+		NativeID: name, OriginMachineID: "pg", Title: "hidden-title",
 	}); err != nil {
 		t.Fatal(err)
 	}
