@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"central-memory/internal/platform"
 	projectpkg "central-memory/internal/project"
 )
 
@@ -315,18 +316,28 @@ func (e errNoTarget) Error() string {
 // are simply no-ops at scan time.
 func Registry() []Adapter {
 	const fiftyMB = 50 << 20
-	codeWS := `${APPDATA}\Code\User\workspaceStorage`
-	agUser := `${APPDATA}\Antigravity\User`
+	// VS Code-family folders live under %APPDATA% on Windows,
+	// ~/Library/Application Support on macOS and ~/.config on Linux. These
+	// were "${APPDATA}\..." strings, which off Windows expanded to a
+	// relative path full of literal backslashes.
+	var codeRoots, agRoots []string
+	if appData := platform.AppDataDir(); appData != "" {
+		codeRoots = []string{filepath.Join(appData, "Code", "User", "workspaceStorage")}
+		agUser := filepath.Join(appData, "Antigravity", "User")
+		for _, sub := range []string{"workspaceStorage", "globalStorage", "settings.json", "snippets", "History"} {
+			agRoots = append(agRoots, filepath.Join(agUser, sub))
+		}
+	}
 	return []Adapter{
 		genericAdapter{name: "claude", agentDirs: []string{".claude"}, projectDot: []string{".claude"}, maxBytes: fiftyMB},
 		genericAdapter{name: "opencode", agentDirs: []string{".config" + string(filepath.Separator) + "opencode", ".local" + string(filepath.Separator) + "share" + string(filepath.Separator) + "opencode"}, projectDot: []string{".opencode"}, maxBytes: fiftyMB},
 		genericAdapter{name: "cursor", agentDirs: []string{".cursor"}, projectDot: []string{".cursor"}, maxBytes: fiftyMB},
 		genericAdapter{name: "codex", agentDirs: []string{".codex"}, projectDot: []string{".codex"}, maxBytes: fiftyMB},
 		genericAdapter{name: "antigravity", agentDirs: []string{".antigravity"},
-			absRoots: []string{agUser + `\workspaceStorage`, agUser + `\globalStorage`, agUser + `\settings.json`, agUser + `\snippets`, agUser + `\History`},
+			absRoots: agRoots,
 			maxBytes: fiftyMB},
 		genericAdapter{name: "copilot", agentDirs: []string{".copilot"}, projectDot: []string{".github"},
-			absRoots: []string{codeWS}, maxBytes: fiftyMB},
+			absRoots: codeRoots, maxBytes: fiftyMB},
 		genericAdapter{name: "codeium", agentDirs: []string{".codeium"}, maxBytes: fiftyMB},
 		genericAdapter{name: "kimi", agentDirs: []string{".kimi-code", ".kimi"}, maxBytes: fiftyMB},
 		genericAdapter{name: "windsurf", agentDirs: []string{".windsurf"}, maxBytes: fiftyMB},

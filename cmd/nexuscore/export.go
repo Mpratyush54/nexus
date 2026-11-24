@@ -25,6 +25,7 @@ import (
 	"central-memory/internal/continuex"
 	"central-memory/internal/core"
 	"central-memory/internal/daemon"
+	"central-memory/internal/platform"
 )
 
 type coreState struct {
@@ -96,6 +97,12 @@ func nx_init(configJSON *C.char) (rc C.int) {
 	if configJSON != nil {
 		_ = json.Unmarshal([]byte(C.GoString(configJSON)), &cfg)
 	}
+	// A Finder-launched macOS app has launchd's bare PATH; without this
+	// every agent CLI looks uninstalled. No-op on other systems.
+	platform.AugmentGUIPath()
+	// Go raises the open-file limit only for executables; inside the
+	// desktop app the library inherits launchd's soft limit of 256.
+	platform.RaiseFileLimit()
 	stopEmbeddedCapture()
 	stopDesktopExecution()
 
