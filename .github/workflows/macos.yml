@@ -64,7 +64,7 @@ jobs:
         if: ${{ !cancelled() }}
         run: >
           go test -short -count=1 -v
-          -run 'FakeHome|ResolveSourcesUsesOSAppDataDir|WorkspaceJSONPosix|AppDataDir|AugmentGUIPath|AugmentedPath|LeavesSkipsMacHome|ResolveSources'
+          -run 'FakeHome|ResolveSourcesUsesOSAppDataDir|WorkspaceJSONPosix|AppDataDir|AugmentGUIPath|AugmentedPath|RaiseFileLimit|LeavesSkipsMacHome|ResolveSources'
           ./internal/daemon/ ./internal/platform/ ./internal/project/
 
       - name: kqueue descriptor cost of the project watcher (isolated process)

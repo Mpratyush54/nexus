@@ -59,6 +59,7 @@ int main(int argc, char **argv) {
     int rc = nx_init("{\"online\":false}");
     printf("nx_init -> %d\n", rc);
     printf("PATH after nx_init:  %s\n", getenv("PATH"));
+    print_nofile("after nx_init");
     if (rc != 0) return 4;
 
     int failed = 0;
