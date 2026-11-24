@@ -51,9 +51,21 @@
         document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.content = t === 'light' ? '#f7f6f3' : '#0a0a0a' })
       })()
     </script>
+    <style>
+      /* Boot splash for app routes, drawn before any script (src/lib/boot-splash.ts removes it). Mirrors .au-boot in src/auth/auth.css. */
+      #nx-boot { position: fixed; inset: 0; z-index: 99; display: grid; place-items: center; align-content: center; gap: 18px; background: #0e100f; transition: opacity .25s ease; }
+      html[data-theme='light'] #nx-boot { background: #f4f5f2; }
+      html.nx-home #nx-boot { display: none; }
+      #nx-boot b { display: block; width: 96px; height: 2px; border-radius: 2px; background: #2a2d2b; overflow: hidden; }
+      html[data-theme='light'] #nx-boot b { background: #d9dbd5; }
+      #nx-boot b i { display: block; width: 40%; height: 100%; border-radius: 2px; background: #e8bb67; }
+      @media (prefers-reduced-motion: no-preference) { #nx-boot b i { animation: nx-boot-slide 1.1s cubic-bezier(.22,1,.36,1) infinite; } }
+      @keyframes nx-boot-slide { from { transform: translateX(-110%); } to { transform: translateX(260%); } }
+    </style>
   </head>
   <body>
     <div id="root"></div>
+    <div id="nx-boot" role="status" aria-label="Loading Nexus"><svg viewBox="0 0 64 64" width="44" height="44" fill="none" aria-hidden="true"><rect width="64" height="64" rx="15" fill="#171918"/><g transform="translate(5 5) scale(.84375)"><path d="M14 47V20a6 6 0 0 1 6-6h5l25 33" stroke="#F4F1E9" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/><path d="M50 17v27a6 6 0 0 1-6 6h-5L14 17" stroke="#E8BB67" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/><path d="m25 32 8 10" stroke="#F4F1E9" stroke-width="8" stroke-linecap="round"/></g></svg><b><i></i></b></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

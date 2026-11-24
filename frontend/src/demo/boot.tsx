@@ -4,6 +4,7 @@
  * here is imported by the normal app routes.
  */
 import { installDemoMocks } from './mock'
+import { dismissBootSplash } from '@/lib/boot-splash'
 
 installDemoMocks()
 
@@ -41,6 +42,7 @@ async function boot() {
       <DemoBanner />
     </StrictMode>,
   )
+  dismissBootSplash()
 }
 
 void boot()
