@@ -48,6 +48,7 @@ export function AppShell() {
         <div className="app-content">
           <main className="app-main" style={{ paddingTop: '2rem' }}>
             <div className="app-main-inner">
+              <div id="app-top-slot" />
               <PageOutlet />
             </div>
           </main>
@@ -63,6 +64,8 @@ export function AppShell() {
         <MobileNav onOpenCommand={() => setCmdOpen(true)} />
         <main className="app-main">
           <div className="app-main-inner">
+            {/* In-flow strip for page-wide notices (the /demo bar portals here), so nothing floats over content. */}
+            <div id="app-top-slot" />
             {showLocalChrome ? (
               <>
                 <AccountMismatchBanner />

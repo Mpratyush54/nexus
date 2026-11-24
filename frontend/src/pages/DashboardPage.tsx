@@ -47,8 +47,8 @@ const THINGS = [
   },
   {
     icon: Smartphone,
-    title: 'Message an agent from your phone',
-    body: 'Send a running agent on your computer a quick instruction.',
+    title: 'Reply to an agent from your phone',
+    body: 'Open a chat running on your computer and reply from anywhere.',
     to: STEER_ROUTE,
   },
 ]

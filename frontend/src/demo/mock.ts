@@ -7,7 +7,7 @@
  * - WebSocket is a stand-in that opens and stays quiet.
  */
 import { API_BASE } from '@/lib/env'
-import { handle } from './api'
+import { demoJob, handle } from './api'
 import { CHECKOUT, ME } from './data'
 
 export const DEMO_TOKEN = 'demo-session'
@@ -42,6 +42,30 @@ function json(status: number, body: unknown) {
   })
 }
 
+/** Server-sent events for a sample relay run: one frame per new revision until it finishes. */
+function jobStream(id: string, signal?: AbortSignal) {
+  if (!demoJob(id)) return json(404, { error: { code: 404, message: 'Not found in the demo workspace' } })
+  const enc = new TextEncoder()
+  let last = -1
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      for (;;) {
+        if (signal?.aborted) { controller.close(); return }
+        const job = demoJob(id)
+        if (!job) { controller.close(); return }
+        if (job.revision > last) {
+          last = job.revision
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(job)}\n\n`))
+          if (['completed', 'failed', 'cancelled', 'expired'].includes(job.state)) controller.close()
+          return
+        }
+        await new Promise((r) => setTimeout(r, 250))
+      }
+    },
+  })
+  return new Response(body, { status: 200, headers: { 'Content-Type': 'text/event-stream' } })
+}
+
 function installFetch() {
   const realFetch = window.fetch.bind(window)
   const apiBase = new URL(API_BASE, location.origin)
@@ -58,6 +82,8 @@ function installFetch() {
       // A short pause so loading states look like the real app, not a flash.
       await new Promise((r) => setTimeout(r, 120 + Math.random() * 180))
       if (init?.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      const live = path.pathname.match(/^\/v1\/desktop\/jobs\/([^/]+)\/events$/)
+      if (live) return jobStream(live[1], init?.signal ?? undefined)
       const res = handle({ method, path: path.pathname, query: path.searchParams, body })
       return json(res.status, res.body)
     }

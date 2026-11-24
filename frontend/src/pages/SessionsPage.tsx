@@ -23,7 +23,7 @@ import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 
 /** `embedded` drops the page title when this renders inside another page's Advanced section. */
-export function SessionsPage({ embedded = false }: { embedded?: boolean } = {}) {
+export function SessionsPage({ embedded = false, showSteer = !embedded }: { embedded?: boolean; showSteer?: boolean } = {}) {
   const { projectId } = useAuth()
   const { push } = useToast()
   const sessions = useSessions()
@@ -267,8 +267,8 @@ export function SessionsPage({ embedded = false }: { embedded?: boolean } = {}) 
             )}
           </GlassPanel>
 
-          {/* Inside Phone & devices the main form already steers; keep the HUD for the standalone view. */}
-          {embedded ? null : (
+          {/* Inside Phone & devices the main form already steers, unless that form is the desktop relay. */}
+          {!showSteer ? null : (
           <GlassPanel className="space-y-4 p-5">
             <div className="flex items-center gap-2">
               <Radio className="h-4 w-4 text-fg-dim" />

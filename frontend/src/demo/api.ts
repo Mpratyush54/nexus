@@ -18,6 +18,8 @@ import {
   ago,
   chatSession,
   chatTurns,
+  forkChat,
+  newChat,
   dashboard,
 } from './data'
 
@@ -77,8 +79,12 @@ function timeline(q: URLSearchParams) {
   const text = (q.get('q') ?? '').toLowerCase().trim()
   let rows = CHATS.filter((c) => !project || c.card.project_id === project)
   if (text) rows = rows.filter((c) => `${c.card.title} ${c.summary} ${c.turns.map((t) => t.text ?? '').join(' ')}`.toLowerCase().includes(text))
-  return ok({ items: rows.map((c) => c.card) })
+  // The sample laptop's agent keeps working: its chat always looks active a moment ago.
+  const fresh = (c: (typeof CHATS)[number]) => (c.card.title === LIVE_TITLE ? { ...c.card, last_active_at: new Date(Date.now() - 40_000).toISOString() } : c.card)
+  return ok({ items: rows.map(fresh).sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)) })
 }
+
+const LIVE_TITLE = 'Add a test for declined captures'
 
 const chatById = (id: string) => CHATS.find((c) => c.card.session_id === decodeURIComponent(id))
 
@@ -140,7 +146,9 @@ const GET: [RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
     return ok({ items: c ? memories.filter((x) => x.project_id === c.card.project_id).slice(1, 4) : [] })
   }],
   [/^\/v1\/sharing\/recipients$/, () => ok({ people: people.map((p) => ({ user_id: p.id, name: p.name, project_role: p.id === ME.id ? 'owner' : 'member', organization_role: 'member' })) })],
-  [/^\/v1\/desktop\/devices$/, () => list([])],
+  // A fresh last_seen_at keeps the sample laptop "online" (the app treats >45 s as offline).
+  [/^\/v1\/desktop\/devices$/, () => list([{ id: DEMO_DEVICE, name: 'MAYA-LAPTOP', projects: PROJECTS.map((p) => p.id), harnesses: ['claude', 'codex', 'cursor', 'opencode'], last_seen_at: new Date().toISOString() }])],
+  [/^\/v1\/desktop\/jobs\/([^/]+)$/, (m) => { const j = demoJob(m[1]); return j ? ok(j) : missing() }],
   [/^\/v1\/teleports\/inbox$/, () => list([{ id: 'tp-1', session_id: CHATS[7].card.session_id, from_user_id: USERS.priya.id, to_user_id: ME.id, status: 'pending', preview: 'Explain the payment state machine', created_at: ago(3 * 3600000) }])],
   [/^\/v1\/teleports\/sent$/, () => list([])],
   [/^\/v1\/storage\/usage$/, () => ok({ scope: 'user', used: 312 * 1024 * 1024, cap: 1 << 30, state: 'ok' })],
@@ -226,9 +234,76 @@ const WRITE: [string, RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
     return ok(item)
   }],
   ['POST', /^\/notifications\/read$/, () => ok({ ok: true })],
+  ['POST', /^\/v1\/agent-sessions$/, (_m, r) => {
+    const body = (r.body ?? {}) as { project_id?: string; harness?: string; title?: string }
+    return ok(chatSession(newChat(body.project_id ?? CHECKOUT, body.harness ?? 'codex', body.title ?? 'New conversation')))
+  }],
+  ['POST', /^\/v1\/agent-sessions\/([^/]+)\/fork$/, (m) => { const c = chatById(m[1]); return c ? ok(chatSession(forkChat(c))) : missing() }],
+  ['POST', /^\/v1\/agent-sessions\/([^/]+)\/grants$/, (_m, r) => ok({ ok: true, user_id: (r.body as { user_id?: string } | undefined)?.user_id })],
+  ['POST', /^\/v1\/desktop\/jobs$/, (_m, r) => {
+    const body = (r.body ?? {}) as Partial<DemoJobRequest>
+    if (!body.id || !body.device_id || !body.kind) return { status: 400, body: { error: { code: 400, message: 'Missing request fields' } } }
+    jobs.set(body.id, { req: body as DemoJobRequest, started: Date.now() })
+    return ok(demoJob(body.id))
+  }],
+  ['POST', /^\/v1\/desktop\/jobs\/([^/]+)\/cancel$/, (m) => {
+    const j = jobs.get(m[1])
+    if (!j) return missing()
+    j.cancelledAt ??= Date.now()
+    return ok(demoJob(m[1]))
+  }],
   ['POST', /^\/sessions\/([^/]+)\/steer\/(prompt|interrupt|resume)$/, (m) => ok({ session_id: m[1], state: m[2] === 'interrupt' ? 'pause_requested' : 'running' })],
   ['POST', /^\/v1\/teleports\/([^/]+)\/accept$/, (m) => ok({ id: m[1], status: 'accepted' })],
 ]
+
+/* ---------- browser → desktop relay (sample laptop) ---------- */
+
+export const DEMO_DEVICE = 'dev-maya-laptop'
+type DemoJobRequest = { id: string; device_id: string; project_id: string; session_id: string; kind: 'turn' | 'models'; agent: string; model?: string; prompt?: string }
+const jobs = new Map<string, { req: DemoJobRequest; started: number; cancelledAt?: number }>()
+
+/** A scripted run on the sample laptop, advanced by wall-clock time since it was sent. */
+const STEPS = [
+  { at: 0, state: 'queued', status: 'Sent to MAYA-LAPTOP' },
+  { at: 700, state: 'awaiting_approval', status: 'Waiting for approval in the desktop app' },
+  { at: 1500, state: 'running', status: 'Reading the code' },
+  { at: 2600, state: 'running', status: 'Making the change' },
+  { at: 3700, state: 'running', status: 'Running the tests' },
+  { at: 4800, state: 'completed', status: 'Done' },
+]
+
+export function demoJob(id: string) {
+  const j = jobs.get(id)
+  if (!j) return undefined
+  const { req } = j
+  const now = Date.now()
+  const base = { id, device_id: req.device_id, session_id: req.session_id, project_id: req.project_id, kind: req.kind, agent: req.agent, model: req.model, prompt: req.prompt }
+  if (req.kind === 'models') {
+    return { ...base, state: 'completed', revision: 2, status: 'Done', result: { items: [{ id: 'default', name: 'Default model' }, { id: 'fast', name: 'Faster model' }] } }
+  }
+  const elapsed = (j.cancelledAt ?? now) - j.started
+  let step = 0
+  for (let i = 0; i < STEPS.length; i++) if (elapsed >= STEPS[i].at) step = i
+  if (j.cancelledAt) {
+    return { ...base, state: 'cancelled', revision: step + 2, status: 'Stopped', text: '', activities: [] }
+  }
+  const activities = [
+    { id: 'a1', tool: 'Read', status: step > 2 ? 'completed' : 'running', files: ['src/payments/retry.ts'] },
+    { id: 'a2', tool: 'Edit', status: step > 3 ? 'completed' : 'running', files: ['src/payments/retry.ts'] },
+    { id: 'a3', tool: 'Bash', status: step > 4 ? 'completed' : 'running', command: 'npm test -- payments', output: step > 4 ? 'Tests: 12 passed, 12 total' : undefined },
+  ].slice(0, Math.max(0, step - 1))
+  const reply = 'Done. I made the change in `src/payments/retry.ts` and ran the payment tests: all 12 pass.\n\n_This is a sample reply from the demo laptop._'
+  const text = step >= 5 ? reply : step >= 3 ? 'Working on it…' : ''
+  return {
+    ...base,
+    state: STEPS[step].state,
+    status: STEPS[step].status,
+    revision: step + 1,
+    text,
+    activities,
+    result: step >= 5 ? { text: reply, agent: req.agent, cloud_saved: true } : undefined,
+  }
+}
 
 export function handle(req: Req): Res {
   if (req.method === 'GET' || req.method === 'HEAD') {
