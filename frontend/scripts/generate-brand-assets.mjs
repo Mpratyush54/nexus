@@ -32,5 +32,8 @@ for (const size of [192, 512]) {
   if (size === 512) writeFileSync(path.join(windowsAssets, 'Nexus.png'), png)
 }
 writeFileSync(path.join(publicDir, 'favicon.svg'), appSvg)
+// The app icon as one SVG (dark tile + mark): the same artwork as Nexus.ico, used
+// wherever the brand appears on the web (landing header/footer, portal sidebar, OG).
+writeFileSync(path.join(publicDir, 'brand', 'nexus-app.svg'), appSvg)
 copyFileSync(path.join(windowsAssets, 'Nexus.ico'), path.join(publicDir, 'brand', 'nexus.ico'))
 console.log('Built Nexus brand assets: SVG, multi-resolution Windows ICO, tray PNG and PWA icons.')

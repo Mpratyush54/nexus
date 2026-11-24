@@ -38,7 +38,9 @@ aws_file_uri() {
   fi
 }
 
-# Client routes from frontend/src/App.tsx. S3 answers a missing key with the
+# Client routes from frontend/src/App.tsx, plus /demo (the sample-data demo
+# that frontend/src/main.tsx boots; its inner pages under /demo/app/* fall
+# through to the error document like dynamic routes). S3 answers a missing key with the
 # error document *and* HTTP 404, which crawlers and link previews treat as a
 # dead page, so each static route gets its own copy of the SPA shell and
 # returns 200. Dynamic routes (/app/org/:orgId) still fall through to the
@@ -49,6 +51,7 @@ SPA_ROUTES=(
   app app/connect app/onboarding app/dashboard app/timeline app/chats
   app/teleport app/memory app/agents app/team app/org app/branches
   app/sessions app/activity app/notifications app/admin app/settings
+  demo
 )
 
 sync_bucket() {

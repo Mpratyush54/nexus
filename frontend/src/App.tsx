@@ -26,10 +26,14 @@ const SignupPage = lazy(() => import("@/pages/SignupPage").then((m) => ({ defaul
 const TeamPage = lazy(() => import("@/pages/TeamPage").then((m) => ({ default: m.TeamPage })));
 const TeleportPage = lazy(() => import("@/pages/TeleportPage").then((m) => ({ default: m.TeleportPage })));
 
-export default function App() {
+/**
+ * `basename` and `demo` are set only by src/demo/boot.tsx, which mounts the
+ * same routes under /demo on sample data.
+ */
+export default function App({ basename, demo = false }: { basename?: string; demo?: boolean } = {}) {
   return (
     <AppProviders>
-      <BrowserRouter>
+      <BrowserRouter basename={basename}>
         <Suspense
           fallback={
             <div role="status" className="p-8 text-sm text-fg-dim">
@@ -38,7 +42,7 @@ export default function App() {
           }
         >
           <Routes>
-            <Route path="/" element={<HomeRedirect />} />
+            <Route path="/" element={demo ? <Navigate to="/app/dashboard" replace /> : <HomeRedirect />} />
             <Route path="/cli/auth" element={<CliAuthPage />} />
 
             <Route element={<GuestRoute />}>

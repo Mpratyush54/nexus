@@ -1,8 +1,10 @@
-import { ArrowRight, ChevronDown, Download, Menu, Moon, Play, Sun } from 'lucide-react'
-import type { ReactNode } from 'react'
+import { ArrowRight, ChevronDown, Download, Maximize, Menu, Minimize, Moon, MousePointerClick, Pause, Play, Sun, Volume2, VolumeX, X } from 'lucide-react'
+import type { CSSProperties, ReactNode } from 'react'
 import {
   AGENTS,
+  DEMO_PATH,
   DOWNLOAD_URL,
+  FILM_DURATION,
   FAQ,
   GITHUB_URL,
   SIGN_IN_PATH,
@@ -150,36 +152,81 @@ function Points({ items }: { items: { t: string; d: ReactNode }[] }) {
 
 /* ---------- product screenshots ---------- */
 
-// Real captures of Nexus for Windows and its server, signed in to a demo
-// workspace with fictional people and projects. Each image ships as AVIF and
-// WebP at two widths, with a PNG fallback at the larger one.
-type ShotSpec = { name: string; w: number; h: number; small: number; alt: string }
+// Real captures of Nexus for Windows, signed in to a demo workspace with
+// fictional people and projects. Every shot is cropped from a full 1800x1080
+// window to the same 5:3 frame, so they line up wherever they appear: the main
+// pane for whole pages, a closer crop for dialogs and panels. Each ships as
+// AVIF and WebP at two widths, with a PNG fallback at the larger one.
+// `focus` is the object-position used when the frame narrows to 4:3 on phones.
+type ShotSpec = { name: string; w: number; h: number; small: number; label: string; focus: string; alt: string }
 
 const SHOTS = {
-  chat: { name: 'chat', w: 1400, h: 840, small: 800, alt: 'Nexus chat with Claude Code: the request to retry failed card captures, an expanded work log with a memory search, a file read, a code search, an Explore sub-agent with its findings and an Open sub-agent chat link, three edits, a new test file and a test run.' },
-  timeline: { name: 'timeline', w: 390, h: 1000, small: 390, alt: 'Nexus sidebar with search and a filter above captured chats from Claude Code, Cursor, Gemini, Codex and OpenCode across two projects, newest first.' },
-  memory: { name: 'memory', w: 1380, h: 650, small: 800, alt: 'Memory page for the checkout-service project: a project brief with key decisions and the chats they came from, above filters for scope and category.' },
-  graph: { name: 'graph', w: 1370, h: 1000, small: 800, alt: 'Nexus 3D memory graph: memories, chats and code files connected by links, with stale memories marked and a legend.' },
-  agents: { name: 'agents', w: 1400, h: 1015, small: 800, alt: 'Nexus Agents page: Claude Code, Codex and Cursor installed with the Nexus MCP server, other detected agents without it, and an Install Nexus into all agents button.' },
-  share: { name: 'share', w: 680, h: 668, small: 480, alt: 'Share chat dialog: share with a person or team, keep their access up to date, and a list of who has access with a Remove button.' },
-  usage: { name: 'usage', w: 630, h: 775, small: 480, alt: 'Usage settings: tokens for today, the last 7 and 30 days, a tokens-per-day chart, and totals by agent and by model with estimated cost.' },
-  redaction: { name: 'redaction', w: 950, h: 470, small: 640, alt: 'A captured chat where a pasted .env file is stored with its keys replaced by [REDACTED].' },
+  chat: { name: 'chat', w: 1400, h: 840, small: 800, label: 'Chat', focus: '50% 0%', alt: 'Nexus chat with Claude Code: the request to retry failed card captures, an expanded work log with a memory search, a file read, a code search, an Explore sub-agent with its findings and an Open sub-agent chat link, three edits, a new test file and a test run.' },
+  timeline: { name: 'timeline', w: 1000, h: 600, small: 800, label: 'Timeline', focus: '0% 0%', alt: 'Nexus sidebar with search and a filter above captured chats from Claude Code, Cursor, Gemini and Codex across two projects, newest first, next to the All projects composer.' },
+  memory: { name: 'memory', w: 1400, h: 840, small: 800, label: 'Memory', focus: '0% 0%', alt: 'Memory page for the checkout-service project: a project brief with key decisions and the chats they came from, filters for scope and category, and the first memory in the list.' },
+  graph: { name: 'graph', w: 1400, h: 840, small: 800, label: 'Knowledge graph', focus: '0% 0%', alt: 'Nexus 3D memory graph: memories, chats and code files connected by links, with stale memories marked and a legend.' },
+  agents: { name: 'agents', w: 1400, h: 840, small: 800, label: 'Agents', focus: '0% 0%', alt: 'Nexus Agents page: Claude Code, Codex and Cursor installed with the Nexus MCP server, other detected agents without it, and an Install Nexus into all agents button.' },
+  share: { name: 'share', w: 1260, h: 756, small: 800, label: 'Share chat', focus: '35% 50%', alt: 'Share chat dialog: share with a person or team, keep their access up to date, and a list of who has access with a Remove button.' },
+  usage: { name: 'usage', w: 1334, h: 800, small: 800, label: 'Settings · Usage', focus: '0% 0%', alt: 'Usage settings: tokens for today, the last 7 and 30 days, a tokens-per-day chart, and totals by agent with estimated cost.' },
+  redaction: { name: 'redaction', w: 1140, h: 684, small: 800, label: 'Chat · redacted paste', focus: '50% 0%', alt: 'A captured chat where a pasted .env file is stored with its keys replaced by [REDACTED].' },
 } satisfies Record<string, ShotSpec>
 
-const SPLIT_SIZES = '(min-width: 960px) 700px, calc(100vw - 32px)'
+const SPLIT_SIZES = '(min-width: 1240px) 700px, (min-width: 980px) 56vw, calc(100vw - 32px)'
 
 function Shot({ s, sizes = SPLIT_SIZES, className = '' }: { s: ShotSpec; sizes?: string; className?: string }) {
   const base = `/landing/shots/${s.name}`
   const widths = s.small === s.w ? [s.w] : [s.small, s.w]
   const set = (ext: string) => widths.map((w) => `${base}-${w}.${ext} ${w}w`).join(', ')
   return (
-    <figure className={`nx-shot ${className}`}>
-      <picture>
-        <source type="image/avif" srcSet={set('avif')} sizes={sizes} />
-        <source type="image/webp" srcSet={set('webp')} sizes={sizes} />
-        <img src={`${base}-${s.w}.png`} width={s.w} height={s.h} alt={s.alt} loading="lazy" decoding="async" />
-      </picture>
+    <figure className={`nx-shot ${className}`} style={{ '--focus': s.focus } as CSSProperties}>
+      <div className="nx-shot-win">
+        <picture>
+          <source type="image/avif" srcSet={set('avif')} sizes={sizes} />
+          <source type="image/webp" srcSet={set('webp')} sizes={sizes} />
+          <img src={`${base}-${s.w}.png`} width={s.w} height={s.h} alt={s.alt} loading="lazy" decoding="async" />
+        </picture>
+      </div>
+      <figcaption className="nx-shot-cap">
+        <img src="/brand/nexus-app.svg" width="14" height="14" alt="" />
+        Nexus for Windows <span aria-hidden="true">·</span> {s.label}
+      </figcaption>
     </figure>
+  )
+}
+
+/* ---------- film player (a native modal <dialog>; wired up in client.ts) ---------- */
+
+function FilmPlayer() {
+  return (
+    <dialog className="nx-player" data-player aria-label="Nexus product film">
+      <div className="nx-player-stage" data-player-stage data-state="paused">
+        <video className="nx-player-video" data-player-video data-src="/landing/nexus-film-full.mp4" playsInline preload="none" poster="/landing/nexus-film-poster.jpg" />
+        <button type="button" className="nx-player-big" data-p="toggle" tabIndex={-1} aria-hidden="true">
+          <Play size={34} fill="currentColor" strokeWidth={0} />
+        </button>
+        <div className="nx-player-bar">
+          <button type="button" className="nx-player-btn" data-p="play" aria-label="Play">
+            <Play className="i-play" size={18} fill="currentColor" strokeWidth={0} aria-hidden="true" />
+            <Pause className="i-pause" size={18} fill="currentColor" strokeWidth={0} aria-hidden="true" />
+          </button>
+          <span className="nx-player-time" data-p="time" aria-hidden="true">0:00</span>
+          <input className="nx-player-seek" data-p="seek" type="range" min="0" max="1000" step="1" defaultValue="0" aria-label="Seek" aria-valuetext={`0:00 of ${FILM_DURATION}`} />
+          <span className="nx-player-time" data-p="dur" aria-hidden="true">{FILM_DURATION}</span>
+          <button type="button" className="nx-player-btn" data-p="mute" aria-label="Mute">
+            <Volume2 className="i-vol" size={18} aria-hidden="true" />
+            <VolumeX className="i-muted" size={18} aria-hidden="true" />
+          </button>
+          <button type="button" className="nx-player-btn" data-p="fs" aria-label="Full screen">
+            <Maximize className="i-fs" size={17} aria-hidden="true" />
+            <Minimize className="i-unfs" size={17} aria-hidden="true" />
+          </button>
+        </div>
+        <button type="button" className="nx-player-close" data-p="close" aria-label="Close film">
+          <X size={20} aria-hidden="true" />
+        </button>
+      </div>
+      <p className="nx-player-keys" aria-hidden="true">Space play/pause · ← → 5 s · M mute · F full screen · Esc close</p>
+    </dialog>
   )
 }
 
@@ -201,7 +248,7 @@ export function LandingPage() {
       <header className="nx-nav">
         <div className="nx-wrap nx-nav-in">
           <a className="nx-brand" href="/" aria-label="Nexus home">
-            <img src="/brand/nexus-mark.svg" width="28" height="28" alt="" />
+            <img src="/brand/nexus-app.svg" width="30" height="30" alt="" />
             <span>Nexus</span>
           </a>
           <nav className="nx-nav-links" aria-label="Main">
@@ -210,6 +257,7 @@ export function LandingPage() {
             <a href="#teams">Teams</a>
             <a href="#privacy">Privacy</a>
             <a href="#faq">FAQ</a>
+            <a href={DEMO_PATH}>Live demo</a>
           </nav>
           <div className="nx-nav-end">
             <button type="button" className="nx-theme" data-theme-toggle aria-label="Switch colour theme">
@@ -228,6 +276,7 @@ export function LandingPage() {
                 <a href="#teams">Teams</a>
                 <a href="#privacy">Privacy</a>
                 <a href="#faq">FAQ</a>
+                <a href={DEMO_PATH}>Live demo</a>
                 <a href={SIGN_IN_PATH}>Sign in</a>
               </nav>
             </details>
@@ -250,10 +299,13 @@ export function LandingPage() {
                 <a className="nx-btn nx-btn-primary" href={DOWNLOAD_URL}>
                   <Download size={17} aria-hidden="true" /> Download for Windows
                 </a>
-                <a className="nx-btn nx-btn-secondary" href={WEB_APP_PATH}>
-                  Open the web app <ArrowRight size={16} aria-hidden="true" />
+                <a className="nx-btn nx-btn-secondary" href={DEMO_PATH}>
+                  <MousePointerClick size={16} aria-hidden="true" /> Try the live demo
                 </a>
-                <p className="nx-hero-note">Beta for Windows x64. macOS is planned.</p>
+                <p className="nx-hero-note">
+                  Beta for Windows x64. macOS is planned. The demo runs in your browser on sample data, no account needed.{' '}
+                  <a href={WEB_APP_PATH}>Open the web app</a>
+                </p>
               </div>
               <ul className="nx-hero-agents" aria-label="Supported agents">
                 {AGENTS.map((a) => (
@@ -277,29 +329,27 @@ export function LandingPage() {
               <p className="nx-lede">From scattered agent chats to one shared record: the app, the memory and the handoff, shown end to end.</p>
             </header>
             <figure className="nx-film" data-film>
-              <div className="nx-film-fallback">
-                <img src="/brand/nexus-mark.svg" width="72" height="72" alt="" />
-                <p className="nx-film-soon">The product film is on its way. Until then, everything it shows is on this page.</p>
-              </div>
-              <img className="nx-film-poster" data-film-poster data-src="/landing/nexus-film-poster.jpg" alt="" width="1920" height="1080" />
-              <video
-                className="nx-film-video"
-                data-film-video
-                data-full-src="/landing/nexus-film-full.mp4"
-                muted
-                loop
-                playsInline
-                preload="none"
-                aria-label="Nexus product film"
-              >
+              <img className="nx-film-poster" src="/landing/nexus-film-poster.jpg" alt="" width="1600" height="900" loading="lazy" decoding="async" />
+              {/* A silent 16 s cut loops here while in view (never with reduced motion or Save-Data). */}
+              <video className="nx-film-loop" data-film-loop muted loop playsInline preload="none" aria-hidden="true" tabIndex={-1}>
                 <source data-src="/landing/nexus-film.webm" type="video/webm" />
                 <source data-src="/landing/nexus-film.mp4" type="video/mp4" />
               </video>
-              <button type="button" className="nx-film-play" data-film-play>
-                <Play size={18} aria-hidden="true" /> <span data-film-play-label>Play with sound</span>
+              <button type="button" className="nx-film-open" data-film-open aria-haspopup="dialog">
+                <span className="nx-film-disc" aria-hidden="true"><Play size={30} fill="currentColor" strokeWidth={0} /></span>
+                <span className="nx-film-cta">
+                  <span>Watch the film</span>
+                  <span className="nx-film-meta">{FILM_DURATION} · with sound</span>
+                </span>
               </button>
               <figcaption className="nx-sr">Product film showing chat, memory, the knowledge graph and session handoff in Nexus.</figcaption>
             </figure>
+            <div className="nx-film-after">
+              <p>Rather click around yourself?</p>
+              <a className="nx-btn nx-btn-secondary nx-btn-sm" href={DEMO_PATH}>
+                Try the live demo <ArrowRight size={15} aria-hidden="true" />
+              </a>
+            </div>
           </div>
         </section>
 
@@ -331,7 +381,7 @@ export function LandingPage() {
           className="nx-split nx-split-flip"
         >
           <div className="nx-split-grid">
-            <Shot s={SHOTS.timeline} sizes="340px" className="nx-shot-rail" />
+            <Shot s={SHOTS.timeline} />
             <Points
               items={[
                 { t: 'One searchable timeline', d: 'Fast full-text search across every agent and every project.' },
@@ -413,7 +463,7 @@ export function LandingPage() {
           className="nx-split nx-split-flip"
         >
           <div className="nx-split-grid">
-            <Shot s={SHOTS.share} className="nx-shot-narrow" />
+            <Shot s={SHOTS.share} />
             <Points
               items={[
                 { t: 'Share sessions', d: 'Give a teammate the full conversation, tool activity and saved changes.' },
@@ -430,8 +480,18 @@ export function LandingPage() {
           label="usage"
           title="See what each agent costs."
           lede="Tokens and cost are tracked per chat, per agent and per model, so you can tell which work is worth which model."
+          className="nx-split"
         >
-          <Shot s={SHOTS.usage} className="nx-shot-narrow" />
+          <div className="nx-split-grid">
+            <Shot s={SHOTS.usage} />
+            <Points
+              items={[
+                { t: 'Today, 7 and 30 days', d: 'Token totals for each window, split into input and output, with an estimated cost.' },
+                { t: 'Tokens per day', d: 'A 30-day chart shows when the heavy runs happened.' },
+                { t: 'By agent and by model', d: 'Cost is what the agent reported, or an estimate from list prices. Models with no known price show tokens only.' },
+              ]}
+            />
+          </div>
         </Section>
 
         <Section
@@ -486,7 +546,10 @@ export function LandingPage() {
               <a className="nx-btn nx-btn-primary" href={DOWNLOAD_URL}>
                 <Download size={17} aria-hidden="true" /> Download for Windows
               </a>
-              <a className="nx-btn nx-btn-secondary" href={SIGN_UP_PATH}>
+              <a className="nx-btn nx-btn-secondary" href={DEMO_PATH}>
+                <MousePointerClick size={16} aria-hidden="true" /> Try the live demo
+              </a>
+              <a className="nx-final-link" href={SIGN_UP_PATH}>
                 Create a free account <ArrowRight size={16} aria-hidden="true" />
               </a>
             </div>
@@ -497,19 +560,21 @@ export function LandingPage() {
       <footer className="nx-foot">
         <div className="nx-wrap nx-foot-in">
           <a className="nx-brand" href="/" aria-label="Nexus home">
-            <img src="/brand/nexus-mark.svg" width="24" height="24" alt="" />
+            <img src="/brand/nexus-app.svg" width="26" height="26" alt="" />
             <span>Nexus</span>
           </a>
           <p>Shared memory for AI coding agents.</p>
           <nav aria-label="Footer">
             <a href={DOWNLOAD_URL}>Desktop releases</a>
             <a href={WEB_APP_PATH}>Web app</a>
+            <a href={DEMO_PATH}>Live demo</a>
             <a href={SIGN_IN_PATH}>Sign in</a>
             <a href={SIGN_UP_PATH}>Create account</a>
             <a href={GITHUB_URL}>GitHub</a>
           </nav>
         </div>
       </footer>
+      <FilmPlayer />
     </div>
   )
 }
