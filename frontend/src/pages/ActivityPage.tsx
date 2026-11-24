@@ -143,7 +143,7 @@ export function ActivityPage() {
       {projectId ? (
         <Advanced
           title="Advanced"
-          summary="Filter by person or date, and manage how agents connect to Nexus (MCP tokens, permissions, rate limits)."
+          summary="Filter by person or date, and manage how agents connect to Nexus (access keys, permissions, limits)."
           defaultOpen={params.get('advanced') === 'agents'}
         >
           <div className="space-y-10">

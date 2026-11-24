@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+@import './fonts.css';
 @import './conversation.css';
 @import './theme.css';
 
@@ -27,7 +28,7 @@
   --color-danger-soft: rgba(196, 92, 92, 0.14);
 
   --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
-  --font-display: 'Syne', 'IBM Plex Sans', system-ui, sans-serif;
+  --font-display: 'Bricolage Grotesque', 'IBM Plex Sans', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
   --shadow-glass: 0 10px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
@@ -1058,3 +1059,16 @@ dialog.report-dialog::backdrop {
 .memory-prose blockquote { padding-left: 12px; border-left: 2px solid var(--color-border-strong); }
 .memory-prose table { display: block; overflow: auto; border-collapse: collapse; font-size: 12.5px; }
 .memory-prose :is(td, th) { padding: 5px 9px; border: 1px solid var(--color-border); }
+
+/* Settings tabs on small screens: fade the right edge while more tabs are off-screen. */
+.settings-tabs-row:not([data-end]) {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+}
+
+/* Checkboxes, radios and sliders use the brand gold, not the browser's blue. */
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--color-amber);
+}

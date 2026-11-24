@@ -1,10 +1,28 @@
 import tailwindcss from '@tailwindcss/vite'
 import react from '@vitejs/plugin-react'
+import { execSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vite'
 
 const root = path.dirname(fileURLToPath(import.meta.url))
+
+// The version error reports carry. CI can set VITE_APP_VERSION; otherwise
+// package.json's version (when it is a real one) plus the git commit.
+function buildVersion(): string {
+  const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')) as { version?: string }
+  let commit = ''
+  try {
+    commit = execSync('git rev-parse --short HEAD', { cwd: root, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+  } catch {
+    // Not a git checkout (e.g. a source tarball): the package version alone.
+  }
+  const base = pkg.version && pkg.version !== '0.0.0' ? pkg.version : 'web'
+  return commit ? `${base}+${commit}` : base
+}
+// Vite exposes VITE_* variables from the environment as import.meta.env.*.
+process.env.VITE_APP_VERSION ||= buildVersion()
 // Dev proxy target. Defaults to the hosted API; point it at a local server with
 // NEXUS_API_PROXY=http://localhost:8080 npm run dev
 const apiTarget = process.env.NEXUS_API_PROXY || 'https://api-nexus.pratyushes.dev'

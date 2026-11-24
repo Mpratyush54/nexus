@@ -31,7 +31,6 @@ import { memoryTitle } from '@/lib/plain-language'
 import { looksLikeMarkdown, markdownTitle, stripMarkdown, withoutTitle } from '@/lib/memory-text'
 import { agentName } from '@/lib/harness-message'
 import { PageHeader } from '@/components/PageHeader'
-import { ProjectPicker } from '@/components/ProjectPicker'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
@@ -83,7 +82,7 @@ const CATEGORY_CONFIG: Record<
     label: 'Infrastructure',
     icon: Server,
     badgeClass: 'text-purple-400 border-purple-500/30 bg-purple-500/10',
-    desc: 'Docker, AWS, Lightsail, CI/CD, systemd, hosting, ports',
+    desc: 'Hosting, servers, deploys, CI/CD, containers, ports',
   },
   auth: {
     label: 'Authentication',
@@ -95,7 +94,7 @@ const CATEGORY_CONFIG: Record<
     label: 'API & Schemas',
     icon: Code2,
     badgeClass: 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10',
-    desc: 'HTTP endpoints, payloads, RPC, schemas, protocols',
+    desc: 'API routes, request and response shapes, schemas',
   },
   conventions: {
     label: 'Conventions',
@@ -125,18 +124,41 @@ function normalizeItemCategory(cat?: string): string {
   return 'general'
 }
 
-function formatWeekLabel(bucket?: string, dateStr?: string): string {
-  if (bucket && bucket.includes('-W')) {
-    const parts = bucket.split('-W')
-    return `Week ${parts[1]}, ${parts[0]}`
-  }
-  if (dateStr) {
-    const d = new Date(dateStr)
-    if (!isNaN(d.getTime())) {
-      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-    }
-  }
-  return 'Recent Changes'
+/** Monday 00:00 (local) of the week a date falls in. */
+function weekStart(d: Date): Date {
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  start.setDate(start.getDate() - ((start.getDay() + 6) % 7))
+  return start
+}
+
+/** ISO "2026-W47" → the Monday that week starts on. */
+function isoWeekStart(bucket: string): Date | null {
+  const m = /^(\d{4})-W(\d{1,2})$/.exec(bucket.trim())
+  if (!m) return null
+  const jan4 = new Date(Number(m[1]), 0, 4)
+  const start = weekStart(jan4)
+  start.setDate(start.getDate() + (Number(m[2]) - 1) * 7)
+  return start
+}
+
+// Each memory's week: the server's ISO week bucket when it sends one, otherwise
+// the week it was saved. (Before, every memory without a bucket landed
+// in one group labelled with the first memory's date.)
+function memoryWeek(item: MemoryItem): Date | null {
+  const fromBucket = item.week_bucket ? isoWeekStart(item.week_bucket) : null
+  if (fromBucket) return fromBucket
+  const when = new Date(item.created_at || item.updated_at || '')
+  return isNaN(when.getTime()) ? null : weekStart(when)
+}
+
+function formatWeekLabel(start: Date | null): string {
+  if (!start) return 'Undated'
+  const thisWeek = weekStart(new Date()).getTime()
+  const days = Math.round((thisWeek - start.getTime()) / 86400000)
+  if (days === 0) return 'This week'
+  if (days === 7) return 'Last week'
+  const sameYear = start.getFullYear() === new Date().getFullYear()
+  return `Week of ${start.toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) })}`
 }
 
 export function MemoryPage() {
@@ -149,12 +171,19 @@ export function MemoryPage() {
   useFollowHarvestProject(harvestStatus, bridge.trusted)
 
   const [viewMode, setViewMode] = useState<'hierarchy' | 'timeline'>('hierarchy')
-  const [q, setQ] = useState('')
   const [level, setLevel] = useState('')
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
   const [tagFilter, setTagFilter] = useState<string | null>(null)
   const [moreFilters, setMoreFilters] = useState(false)
   const [params] = useSearchParams()
+  // Ctrl K "Search memory for …" links here with ?q=.
+  const urlQ = params.get('q')
+  const [q, setQ] = useState(() => urlQ ?? '')
+  const [seenQ, setSeenQ] = useState(urlQ)
+  if (urlQ !== seenQ) {
+    setSeenQ(urlQ)
+    if (urlQ !== null) setQ(urlQ)
+  }
   const deferredQ = useDeferredValue(q)
   const search = useMemorySearch(deferredQ)
   const harvestQ = useHarvestQueue()
@@ -177,7 +206,7 @@ export function MemoryPage() {
       setHarvestFull((prev) => ({ ...prev, [id]: job }))
     } catch (err) {
       push({
-        title: 'Could not load full harvest',
+        title: 'Couldn’t load the full list',
         detail: err instanceof Error ? err.message : 'Request failed',
         tone: 'danger',
       })
@@ -230,18 +259,17 @@ export function MemoryPage() {
 
   // Group confirmed items by week bucket for Timeline View
   const itemsByWeek = useMemo(() => {
-    const map: Record<string, MemoryItem[]> = {}
+    const map = new Map<number, { start: Date | null; items: MemoryItem[] }>()
     for (const item of confirmed) {
-      const bucket = item.week_bucket?.trim() || 'Current'
-      if (!map[bucket]) map[bucket] = []
-      map[bucket].push(item)
+      const start = memoryWeek(item)
+      const key = start ? start.getTime() : -1
+      const group = map.get(key) ?? { start, items: [] }
+      group.items.push(item)
+      map.set(key, group)
     }
-    const sortedKeys = Object.keys(map).sort((a, b) => b.localeCompare(a))
-    return sortedKeys.map((key) => ({
-      bucket: key,
-      label: formatWeekLabel(key, map[key][0]?.created_at),
-      items: map[key],
-    }))
+    return [...map.entries()]
+      .sort(([a], [b]) => b - a)
+      .map(([key, g]) => ({ bucket: String(key), label: formatWeekLabel(g.start), items: g.items }))
   }, [confirmed])
 
   // Only in-flight batches — done/failed leave this list; facts land in Library.
@@ -309,7 +337,6 @@ export function MemoryPage() {
         }
       />
 
-      <ProjectPicker />
 
       {harvestMismatch && harvestTargetId ? (
         <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/40 p-4">
@@ -573,7 +600,7 @@ export function MemoryPage() {
         >
           <div className="space-y-10">
             <div className="space-y-3">
-              <h3 className="text-sm font-medium text-fg">Memory copies (overlays)</h3>
+              <h3 className="text-sm font-medium text-fg">Memory copies</h3>
               <p className="text-xs text-fg-dim">
                 Make a copy, let an agent change it, compare it with the original, then merge. This is not git.
               </p>

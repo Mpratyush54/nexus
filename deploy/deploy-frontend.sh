@@ -54,6 +54,11 @@ SPA_ROUTES=(
   demo
 )
 
+# Static pages that are not part of the SPA: scripts/prerender.tsx writes
+# dist/<page>.html, and each is also uploaded under its extensionless key
+# (/privacy, /terms) as text/html so the clean URL answers 200 with that page.
+STATIC_PAGES=(privacy terms)
+
 sync_bucket() {
   local target="$1"
   echo "==> Syncing frontend assets to s3://${target}..."
@@ -67,7 +72,7 @@ sync_bucket() {
   # otherwise every deploy would drop them and briefly bring the 404s back.
   local route
   local route_excludes=()
-  for route in "${SPA_ROUTES[@]}"; do
+  for route in "${SPA_ROUTES[@]}" "${STATIC_PAGES[@]}"; do
     route_excludes+=(--exclude "$route")
   done
   aws s3 sync frontend/dist "s3://${target}" --delete \
@@ -78,7 +83,7 @@ sync_bucket() {
   # The CLI guesses Content-Type from the runner's mime table, which may not
   # know these; browsers refuse to play or decode them as octet-stream.
   local pair ext type
-  for pair in "avif:image/avif" "webp:image/webp" "webm:video/webm" "mp4:video/mp4" "xml:application/xml" "txt:text/plain; charset=utf-8"; do
+  for pair in "avif:image/avif" "webp:image/webp" "webm:video/webm" "mp4:video/mp4" "xml:application/xml" "txt:text/plain; charset=utf-8" "vtt:text/vtt; charset=utf-8"; do
     ext="${pair%%:*}"
     type="${pair#*:}"
     aws s3 cp frontend/dist "s3://${target}" --recursive \
@@ -98,6 +103,13 @@ sync_bucket() {
   for route in "${SPA_ROUTES[@]}"; do
     aws s3 cp frontend/dist/spa.html "s3://${target}/${route}" \
       --cache-control "public,max-age=60" --content-type "text/html; charset=utf-8" --only-show-errors
+  done
+
+  # Legal pages: the .html copy came with the sync above; add the clean URL.
+  local page
+  for page in "${STATIC_PAGES[@]}"; do
+    aws s3 cp "frontend/dist/${page}.html" "s3://${target}/${page}" \
+      --cache-control "public,max-age=300" --content-type "text/html; charset=utf-8" --only-show-errors
   done
 
   aws s3 cp frontend/dist/sw.js "s3://${target}/sw.js" \

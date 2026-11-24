@@ -39,6 +39,7 @@ import { NexusMark } from "@/components/NexusBrand";
 import { AccessibleModal } from "@/components/ui/AccessibleModal";
 import { useAuth } from "@/providers/AuthProvider";
 import { readableChatText } from "@/lib/chat-content";
+import { memoryTitle } from "@/lib/plain-language";
 import { DESKTOP_RELAY } from "@/lib/env";
 import { agentName, chatTitle, composerHarness } from "@/lib/harness-message";
 import { chatStatus, setLiveChat, useLiveChats } from "@/lib/live-chats";
@@ -76,6 +77,16 @@ export function ChatsPage() {
   // Home's search box links here with ?q=.
   const [search, setSearch] = useState(() => params.get("q") ?? ""),
     [query, setQuery] = useState(() => params.get("q") ?? "");
+  // Ctrl K "Search chats for …" can land here while the page is already open.
+  const urlQ = params.get("q");
+  const [seenQ, setSeenQ] = useState(urlQ);
+  if (urlQ !== seenQ) {
+    setSeenQ(urlQ);
+    if (urlQ !== null) {
+      setQuery(urlQ);
+      setSearch(urlQ);
+    }
+  }
   const feed = useInfiniteQuery({
     queryKey: ["chats", projectId, search],
     enabled: !!projectId,
@@ -127,7 +138,10 @@ export function ChatsPage() {
             <RefreshCw size={15} className={feed.isFetching ? "animate-spin" : ""} />
           </button>
         </header>
-        <ProjectSwitcher compact />
+        {/* The sidebar's project picker is hidden on narrow screens; this one stands in there. */}
+        <div className="chat-project-switch">
+          <ProjectSwitcher compact />
+        </div>
         {DESKTOP_RELAY && (
           <button
             className="chat-new"
@@ -252,14 +266,25 @@ export function ChatsPage() {
       ) : session.isPending ? (
         <p className="chat-muted conversation-state" role="status">Loading chat…</p>
       ) : session.error ? (
-        <div role="alert" className="chat-error conversation-state">
-          <p>
-            {session.error instanceof ApiError && session.error.status === 404
-              ? "This chat was deleted or you no longer have access."
-              : `Couldn't open this chat. ${message(session.error)}`}
-          </p>
-          <button onClick={() => setParams({})}>Back to chats</button>
-        </div>
+        session.error instanceof ApiError &&
+        (session.error.status === 404 || session.error.status === 403) ? (
+          <section className="conversation-welcome" role="status">
+            <NexusMark size={44} />
+            <h2>We couldn’t find this chat.</h2>
+            <p>
+              It may have been deleted, or it belongs to someone who hasn’t shared it with you.
+              Your other chats are in the list.
+            </p>
+            <button className="chat-welcome-action" onClick={() => setParams({})}>
+              Back to all chats
+            </button>
+          </section>
+        ) : (
+          <div role="alert" className="chat-error conversation-state">
+            <p>{`Couldn't open this chat. ${message(session.error)}`}</p>
+            <button onClick={() => setParams({})}>Back to chats</button>
+          </div>
+        )
       ) : !inProject ? (
         <div role="alert" className="chat-error conversation-state">
           <p>This chat is in another project.</p>
@@ -282,6 +307,34 @@ export function ChatsPage() {
           />
         )
       )}
+    </div>
+  );
+}
+
+/**
+ * A web reply runs on your computer only after you approve it there (so a
+ * stolen session can't run commands). While it waits, say so calmly and keep
+ * the clock moving so it never looks frozen.
+ */
+function ApprovalWait({ computer }: { computer: string }) {
+  const [start] = useState(() => Date.now());
+  const [now, setNow] = useState(start);
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const secs = Math.max(0, Math.round((now - start) / 1000));
+  const waited = secs < 60 ? `${secs} s` : `${Math.floor(secs / 60)} min ${secs % 60} s`;
+  return (
+    <div className="chat-approval" role="status">
+      <span className="chat-approval-pulse" aria-hidden="true" />
+      <div>
+        <p className="chat-approval-title">Waiting for approval on {computer}</p>
+        <p className="chat-approval-help">
+          Open Nexus on that computer and select Approve. Replies sent from the web always need this
+          step, so nobody else can run your agent.{secs > 0 ? ` Waiting ${waited}.` : ""}
+        </p>
+      </div>
     </div>
   );
 }
@@ -578,6 +631,10 @@ function Conversation({
         turn.role === "assistant" &&
         turn.cursor_idx === job.result?.answer_cursor,
     );
+  const jobComputer =
+    devices.data?.items.find((d) => d.id === job?.device_id)?.name ||
+    device?.name ||
+    "your computer";
   const liveTurns: ChatTurn[] =
     job && !responseAlreadySynced
       ? [
@@ -751,7 +808,7 @@ function Conversation({
                 : summary.error
                   ? message(summary.error)
                   : readableChatText(summary.data?.summary || session.summary || "") ||
-                    "No summary yet. Nexus writes one after the chat has a few turns."}
+                    "No summary yet. Nexus writes one after the chat has a few messages."}
             </p>
             <h3>Saved memories</h3>
             {memory.isPending ? (
@@ -761,9 +818,13 @@ function Conversation({
             ) : memory.data?.items.length ? (
               memory.data.items.map((item, i) => {
                 const row = item as { content?: string; key?: string };
+                const name = memoryTitle(row.key || "");
                 return (
                   <article key={i}>
-                    <strong>{row.key}</strong>
+                    <strong title={row.key}>
+                      {name.title}
+                      {name.group && <small className="chat-memory-group"> · {name.group}</small>}
+                    </strong>
                     <p>{row.content || "No readable content was saved."}</p>
                   </article>
                 );
@@ -846,19 +907,22 @@ function Conversation({
                 {job.error}
               </p>
             )}
-            {job && (
-              <p className="chat-live-status" role="status">
+            {job && job.state === "awaiting_approval" ? (
+              <ApprovalWait key={job.id} computer={jobComputer} />
+            ) : job && (
+              <p
+                className={`chat-live-status${job.state === "cancelled" ? " is-stopped" : ""}`}
+                role="status"
+              >
                 {job.state === "completed"
                   ? job.result?.cloud_saved === false
-                    ? "Saved on Desktop; cloud sync needs attention."
+                    ? "Saved on your computer; syncing to your account needs attention."
                     : "Reply complete"
                   : job.state === "cancelled"
-                    ? "Cancelled. Changes already made to files are not undone."
+                    ? "Stopped. The steps above already ran; changes they made to files stay."
                     : job.state === "expired"
                       ? "Request expired. It was not automatically retried."
-                      : job.state === "awaiting_approval"
-                        ? "Waiting for you to approve it in Nexus on your computer…"
-                        : job.status || job.state}
+                      : job.status || "Working…"}
                 {!isFinished(job.state) && (
                   <span className="chat-typing" aria-hidden="true">
                     <i />
@@ -1033,7 +1097,21 @@ function Conversation({
                 if (job)
                   void desktopApi
                     .cancel(job.id)
-                    .then(setJob)
+                    .then((next) => {
+                      // Keep what already ran: a stopped turn still shows its finished steps.
+                      setJob((prev) =>
+                        prev && !next.activities?.length && prev.activities?.length
+                          ? {
+                              ...next,
+                              text: next.text || prev.text,
+                              activities: prev.activities.filter(
+                                (a) => a.status !== "running",
+                              ),
+                            }
+                          : next,
+                      );
+                      setLiveChat(next.session_id, next.state);
+                    })
                     .catch((e) => setError(message(e)));
               }}
             >

@@ -6,7 +6,17 @@ export const SIGN_IN_PATH = '/login'
 export const SIGN_UP_PATH = '/signup'
 // The interactive demo: the real web app on sample data, no account needed.
 export const DEMO_PATH = '/demo'
-// Full product film: 1 min 26 s, with sound.
+// Static legal pages, prerendered by scripts/prerender.tsx (no React at runtime).
+export const PRIVACY_PATH = '/privacy'
+export const TERMS_PATH = '/terms'
+export const LEGAL_UPDATED = '25 November 2026'
+// Public contact points. There is no support mailbox yet: questions go to
+// GitHub issues and security reports to a private GitHub security advisory.
+export const ISSUES_URL = 'https://github.com/Mpratyush54/nexus/issues'
+export const SECURITY_URL = 'https://github.com/Mpratyush54/nexus/security/advisories/new'
+// Set to a real, monitored address to also show it on the legal pages and footer.
+export const CONTACT_EMAIL = ''
+// Full product film: 1 min 26 s, music only (captions describe the sound).
 export const FILM_DURATION = '1:26'
 
 export const TITLE = 'Nexus: shared memory for every AI coding agent'
@@ -27,7 +37,7 @@ export type AgentId = (typeof AGENTS)[number]['id']
 export const FAQ: { q: string; a: string }[] = [
   {
     q: 'What is Nexus?',
-    a: 'Nexus is a native Windows desktop app plus a cloud server. It lets you chat with your AI coding agents in one place, captures their sessions into a searchable timeline, and turns what they learn into a shared project memory that every agent can query through MCP.',
+    a: 'Nexus is a native Windows desktop app plus a cloud server. It lets you chat with your AI coding agents in one place, captures their sessions into a searchable timeline, and turns what they learn into a shared project memory that every agent can look things up in.',
   },
   {
     q: 'Which AI coding agents does Nexus work with?',
@@ -35,11 +45,11 @@ export const FAQ: { q: string; a: string }[] = [
   },
   {
     q: 'How do agents use the shared memory?',
-    a: 'Nexus installs an MCP server into each agent harness with one click. Agents get tools such as memory_search, related_to, file_history, why, line_history and project_knowledge, plus a project brief, so a new session starts with what earlier sessions decided instead of from zero.',
+    a: 'With one click, Nexus connects each agent to your shared memory (using MCP, the standard way agents get extra tools). Agents can then search memory, see a file’s history and ask why a line changed, and they read a short project brief first, so a new session starts with what earlier sessions decided instead of from zero.',
   },
   {
     q: 'What does "why" for a line of code mean?',
-    a: 'Nexus records which agent session changed each line and the reasoning behind it. The history is anchored to a hash of the line’s content rather than its line number, so it follows the code when lines move. Ask the why tool, or open a file in Nexus, and you see the session and the decision behind the change.',
+    a: 'Nexus records which agent session changed each line and the reasoning behind it. The history is tied to the line itself rather than its line number, so it follows the code when lines move. Ask the why tool, or open a file in Nexus, and you see the session and the decision behind the change.',
   },
   {
     q: 'What happens to secrets and private data?',
@@ -56,9 +66,5 @@ export const FAQ: { q: string; a: string }[] = [
   {
     q: 'How much does Nexus cost?',
     a: 'There is a free plan. Paid plans are not open yet; current plan limits are shown in the web app.',
-  },
-  {
-    q: 'Why is Nexus a native app instead of Electron?',
-    a: 'The desktop app is built with WinUI 3, so it uses the Windows UI stack directly instead of shipping a bundled browser. It stays light while it sits in the background capturing sessions.',
   },
 ]

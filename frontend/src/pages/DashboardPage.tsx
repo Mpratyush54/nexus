@@ -124,7 +124,7 @@ export function DashboardPage() {
             type="search"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search your chats, e.g. “retry backoff”"
+            placeholder="Search your chats"
             className="h-11 w-full rounded-lg border border-border bg-raised pl-9 pr-3 text-sm text-fg outline-none focus:border-amber"
           />
         </label>
@@ -256,7 +256,7 @@ export function DashboardPage() {
         </p>
       ) : null}
 
-      <Advanced title="Details" summary="Counts, a year of activity, and the desktop scanner on this computer.">
+      <Advanced title="Details" summary="Counts, a year of activity, and the desktop app on this computer.">
         <DashboardDetails />
       </Advanced>
     </div>
@@ -294,13 +294,13 @@ function DashboardDetails() {
         <ActivityHeatmap days={dash.data?.heatmap} loading={dash.isLoading} />
       </div>
       <div className="space-y-2">
-        <p className="text-sm font-medium text-fg">Desktop scanner on this computer</p>
+        <p className="text-sm font-medium text-fg">Desktop app on this computer</p>
         <p className="text-xs text-fg-dim">
-          {hs?.message || 'Start the desktop app on this computer to see its scans here.'}
+          {hs?.message || 'Open the desktop app on this computer to see what it is saving.'}
         </p>
         <dl className="grid gap-1 text-xs text-fg-dim sm:grid-cols-2">
           <div><dt className="inline text-muted">Project ID </dt><dd className="inline font-mono">{projectId}</dd></div>
-          <div><dt className="inline text-muted">Scanner project ID </dt><dd className="inline font-mono">{hs?.project_id || '—'}</dd></div>
+          <div><dt className="inline text-muted">Desktop app project ID </dt><dd className="inline font-mono">{hs?.project_id || '—'}</dd></div>
           <div><dt className="inline text-muted">Folder </dt><dd className="inline font-mono">{hs?.root || bridge.local.data?.status.root || '—'}</dd></div>
           <div><dt className="inline text-muted">Last scan </dt><dd className="inline">{hs?.last_scan_files ?? 0} files · {hs?.last_scan_turns ?? 0} messages</dd></div>
         </dl>

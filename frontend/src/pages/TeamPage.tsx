@@ -29,7 +29,21 @@ import { formatRelative } from '@/utils/format'
 import { initialsOf, usePeople } from '@/hooks/usePeople'
 import { MEMBER_ID_HELP, memberIdProblem, normalizeMemberId } from '@/lib/member-id'
 
-const BUILTIN_ROLES = ['OWNER', 'ADMIN', 'EDITOR', 'VIEWER'] as const
+// Roles someone can be given here. Owner is never offered: ownership moves
+// on the Organization page, and nobody changes their own role.
+const ASSIGNABLE_ROLES = ['ADMIN', 'EDITOR', 'VIEWER'] as const
+const ROLE_HINT: Record<string, string> = {
+  admin: 'Can add and remove people',
+  editor: 'Can edit memory',
+  member: 'Can edit memory',
+  viewer: 'Can read chats and memory',
+}
+
+/** "OWNER" / "owner" → "Owner". */
+function roleLabel(role: string) {
+  const r = role.trim().toLowerCase()
+  return r ? r[0].toUpperCase() + r.slice(1) : r
+}
 
 
 export function TeamPage() {
@@ -89,12 +103,17 @@ export function TeamPage() {
     return map
   }, [presence.data, user?.userId])
 
+  // One option per role, whatever case the server uses; the server's own
+  // spelling wins so the value we send back is one it knows.
   const roleOptions = useMemo(() => {
-    const names = new Set<string>(BUILTIN_ROLES)
+    const byKey = new Map<string, string>()
+    // The project's own roles when the server lists them; the built-ins otherwise.
+    if (!roles.data?.length) for (const r of ASSIGNABLE_ROLES) byKey.set(r.toLowerCase(), r)
     for (const r of roles.data ?? []) {
-      if (r.name) names.add(r.name)
+      const key = r.name?.trim().toLowerCase()
+      if (key && key !== 'owner') byKey.set(key, r.name)
     }
-    return [...names]
+    return [...byKey.values()]
   }, [roles.data])
 
   const onInvite = (e: FormEvent) => {
@@ -219,7 +238,7 @@ export function TeamPage() {
         </div>
         <div className="flex flex-wrap items-center gap-3">
           <Link
-            to="/app/org"
+            to="/app/org#invite"
             className="inline-flex h-9 items-center gap-1.5 rounded-lg bg-amber px-3 text-sm font-medium text-ink hover:opacity-90"
           >
             <UserPlus className="h-3.5 w-3.5" />
@@ -258,7 +277,7 @@ export function TeamPage() {
         <ul className="divide-y divide-border">
           {(members.data ?? []).map((m) => {
             const isSelf = m.user_id === user?.userId
-            const isOwner = m.role === 'OWNER'
+            const isOwner = (m.role ?? '').toLowerCase() === 'owner'
             return (
               <li key={m.user_id} className="flex flex-wrap items-center gap-3 py-3">
                 <div className="app-avatar flex h-9 w-9 items-center justify-center rounded-full bg-raised text-[10px] font-medium" aria-hidden>
@@ -273,32 +292,41 @@ export function TeamPage() {
                     {onlineByUser.has(m.user_id) ? 'Online' : 'Away'}
                   </p>
                 </div>
-                <select
-                  aria-label={`Role for ${nameFor(m.user_id, { you: false })}`}
-                  value={m.role ?? 'EDITOR'}
-                  disabled={isOwner || setRole.isPending}
-                  onChange={(e) =>
-                    setRole.mutate(
-                      { userId: m.user_id, role: e.target.value },
-                      {
-                        onSuccess: () => push({ title: 'Role updated', detail: e.target.value }),
-                        onError: (err) =>
-                          push({
-                            title: 'Role update failed',
-                            detail: err instanceof ApiError ? err.message : 'Unknown error',
-                            tone: 'danger',
-                          }),
-                      },
-                    )
-                  }
-                  className="h-9 rounded-lg border border-border bg-raised px-2 text-xs text-fg outline-none focus:border-amber"
-                >
-                  {roleOptions.map((r) => (
-                    <option key={r} value={r}>
-                      {r}
-                    </option>
-                  ))}
-                </select>
+                {isOwner || isSelf ? (
+                  <span
+                    className="inline-flex h-9 items-center rounded-lg px-2 text-xs text-fg-dim"
+                    title={isOwner ? 'Owners have full control' : 'You can’t change your own role'}
+                  >
+                    {roleLabel(m.role ?? 'EDITOR')}
+                  </span>
+                ) : (
+                  <select
+                    aria-label={`Role for ${nameFor(m.user_id, { you: false })}`}
+                    value={roleOptions.find((r) => r.toLowerCase() === (m.role ?? 'editor').toLowerCase()) ?? m.role ?? 'EDITOR'}
+                    disabled={setRole.isPending}
+                    onChange={(e) =>
+                      setRole.mutate(
+                        { userId: m.user_id, role: e.target.value },
+                        {
+                          onSuccess: () => push({ title: 'Role updated', detail: roleLabel(e.target.value) }),
+                          onError: (err) =>
+                            push({
+                              title: 'Role update failed',
+                              detail: err instanceof ApiError ? err.message : 'Unknown error',
+                              tone: 'danger',
+                            }),
+                        },
+                      )
+                    }
+                    className="h-9 rounded-lg border border-border bg-raised px-2 text-xs text-fg outline-none focus:border-amber"
+                  >
+                    {roleOptions.map((r) => (
+                      <option key={r} value={r} title={ROLE_HINT[r.toLowerCase()]}>
+                        {roleLabel(r)}
+                      </option>
+                    ))}
+                  </select>
+                )}
                 {!isOwner && !isSelf ? (
                   <Button
                     type="button"

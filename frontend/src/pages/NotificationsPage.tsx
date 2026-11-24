@@ -78,8 +78,8 @@ export function NotificationsPage() {
       const vapid = await notificationsApi.vapidPublicKey()
       if (!vapid.configured || !vapid.public_key) {
         push({
-          title: 'Web Push not configured',
-          detail: 'Set VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY on the server.',
+          title: 'Browser notifications aren’t set up on this server',
+          detail: 'Ask whoever runs your Nexus server to turn them on.',
           tone: 'amber',
         })
         return
@@ -116,7 +116,7 @@ export function NotificationsPage() {
     try {
       const res = await notificationsApi.testPush({
         title: 'Nexus test',
-        body: 'Web Push delivery is working.',
+        body: 'Notifications on this device are working.',
         url: '/app/notifications',
         project_id: projectId ?? undefined,
       })
@@ -234,7 +234,7 @@ export function NotificationsPage() {
           </div>
         </div>
         <p className="text-sm text-fg-dim">
-          Registered Web Push endpoints. Keys stay on the server; revoke a row to stop delivery.
+          Browsers that get Nexus notifications. Remove one to stop notifications there.
         </p>
         {devices.isLoading ? <p className="text-sm text-muted">Loading devices…</p> : null}
         {!devices.isLoading && (devices.data ?? []).length === 0 ? (

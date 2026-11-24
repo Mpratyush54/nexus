@@ -118,7 +118,7 @@ const clock = (t: number) => {
   return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`
 }
 
-/** The full film, with sound, in a modal dialog with its own controls. */
+/** The full film, with music and a captions track, in a modal dialog with its own controls. */
 function initPlayer() {
   const dlg = document.querySelector<HTMLDialogElement>('[data-player]')
   const open = document.querySelector<HTMLButtonElement>('[data-film-open]')

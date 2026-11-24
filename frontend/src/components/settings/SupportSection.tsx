@@ -35,14 +35,13 @@ export function SupportSection({ username }: { username?: string }) {
       description="Help us find and fix problems. You choose what is sent."
     >
       <FieldRow
-        label="Send error reports"
+        label="Send anonymous error reports"
         id="error-reports"
         help={
           <>
-            When a screen crashes or the app hits an unexpected error, send the error message, where in the code it happened,
-            the app version, your browser and OS, the page path, and the last few requests the app made (method, path, status).
-            Never chats, memories, page text, tokens or anything after a “?” in a link. Reports aren’t linked to your account and are
-            deleted after 30 days.
+            On unless you turn it off. When something breaks, Nexus sends what went wrong, the app version, your browser and
+            the page you were on. These reports are anonymous: they aren’t linked to your account and never include your chats,
+            memories or files. They’re deleted after 30 days. <a href="/privacy" className="underline underline-offset-2 hover:text-fg">Privacy Policy</a>
           </>
         }
       >
@@ -62,13 +61,13 @@ export function SupportSection({ username }: { username?: string }) {
             <span className={['absolute top-0.5 h-4 w-4 rounded-full transition', enabled ? 'left-5 bg-teal' : 'left-0.5 bg-muted'].join(' ')} />
           </button>
           <span className="text-sm text-fg-dim" aria-live="polite">
-            {enabled ? 'On in this browser' : 'Off in this browser'}
+            {enabled ? 'On in this browser' : 'Off in this browser. Nothing is sent automatically.'}
           </span>
         </div>
       </FieldRow>
       <FieldRow
         label="Report a problem"
-        help="Describe what went wrong. You’ll see everything that will be sent before you send it, and get a report ID to quote."
+        help="Tell us what went wrong. Unlike automatic reports, this one is linked to your account so we can reply. You’ll see what’s sent first."
       >
         <Button type="button" variant="secondary" onClick={() => setOpen(true)}>
           Report a problem…
@@ -186,19 +185,41 @@ export function ReportProblemDialog({ username, onClose }: { username?: string; 
           </label>
 
           <div>
-            <p className="text-sm font-medium text-fg">Exactly what will be sent</p>
-            <p className="mt-0.5 text-xs text-fg-dim">
-              {username ? `Linked to your account (@${username}) so we can follow up. ` : ''}Kept for 30 days.
-            </p>
-            <pre
-              aria-label="Report preview"
-              className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-raised/60 p-3 font-mono text-[11px] leading-relaxed text-fg-dim"
-            >
-              {preview}
-            </pre>
+            <p className="text-sm font-medium text-fg">What will be sent</p>
+            <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 rounded-lg border border-border bg-raised/40 p-3 text-xs">
+              <dt className="text-fg-dim">Your account</dt>
+              <dd className="min-w-0 truncate text-fg">{username ? `@${username}, so we can reply` : 'Linked, so we can reply'}</dd>
+              <dt className="text-fg-dim">Your message</dt>
+              <dd className="min-w-0 truncate text-fg">{report.user_note ? report.user_note : <span className="text-muted">Not written yet</span>}</dd>
+              <dt className="text-fg-dim">App version</dt>
+              <dd className="text-fg">{report.app_version}</dd>
+              <dt className="text-fg-dim">Browser</dt>
+              <dd className="text-fg">{report.os}</dd>
+              <dt className="text-fg-dim">Page</dt>
+              <dd className="min-w-0 truncate font-mono text-fg">{report.context?.route || '/'}</dd>
+              <dt className="text-fg-dim">Request log</dt>
+              <dd className="text-fg">
+                {report.logs?.length ? `${report.logs.length} recent ${report.logs.length === 1 ? 'request' : 'requests'}, addresses and status only` : 'Not included'}
+              </dd>
+              <dt className="text-fg-dim">Kept for</dt>
+              <dd className="text-fg">30 days</dd>
+            </dl>
+            <details className="mt-2 text-xs">
+              <summary className="cursor-pointer text-fg-dim hover:text-fg">Show technical details</summary>
+              <pre
+                aria-label="Report preview"
+                className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border bg-raised/60 p-3 font-mono text-[11px] leading-relaxed text-fg-dim"
+              >
+                {preview}
+              </pre>
+            </details>
           </div>
 
-          {demo ? <FormMessage kind="error">Reports aren’t sent from the demo.</FormMessage> : null}
+          {demo ? (
+            <p role="note" className="rounded-lg border border-border bg-raised/50 px-3 py-2 text-xs text-fg-dim">
+              This is the demo, so Send is turned off. In your own account, the report goes to the Nexus team.
+            </p>
+          ) : null}
           {error ? <FormMessage kind="error">{error}</FormMessage> : null}
 
           <div className="flex flex-wrap justify-end gap-2">

@@ -1,7 +1,8 @@
 /* One scroll surface, selectable messages and real, readable tool output. */
 dialog.chat-modal{margin:auto;color:var(--chat-fg)}dialog.chat-modal::backdrop{background:var(--chat-backdrop);backdrop-filter:blur(5px)}
 .chat-new{border:1px solid color-mix(in srgb, var(--chat-accent) 25%, transparent);background:color-mix(in srgb, var(--chat-accent) 7%, transparent);font-size:12px;color:var(--chat-accent)!important}
-@media(min-width:768px){.app-shell.is-conversation{grid-template-columns:64px 1fr}.is-conversation .app-sidebar{padding:20px 10px}.is-conversation .app-sidebar-top>div,.is-conversation .app-sidebar-foot{display:none}.is-conversation .app-sidebar .nexus-brand>span{display:none}.is-conversation .app-sidebar .app-nav-link{font-size:0;gap:0;justify-content:center;padding:12px 0}.is-conversation .app-sidebar .app-nav{overflow:auto;scrollbar-width:thin}}
+/* The icon-only rail is for narrow desktops only; from 1280px Chats keeps the same sidebar as every other page. */
+@media(min-width:768px) and (max-width:1279px){.app-shell.is-conversation{grid-template-columns:64px 1fr}.is-conversation .app-sidebar{padding:20px 10px}.is-conversation .app-sidebar-top>div,.is-conversation .app-sidebar-foot{display:none}.is-conversation .app-sidebar .nexus-brand>span{display:none}.is-conversation .app-sidebar .app-nav-link{font-size:0;gap:0;justify-content:center;padding:12px 0}.is-conversation .app-sidebar .app-nav{overflow:auto;scrollbar-width:thin}}
 @media(max-width:767px){.is-conversation .app-main{padding-top:64px!important}.is-conversation .app-main-inner{height:calc(100dvh - 64px)!important}}
 .is-conversation .app-main {
   padding: 0;
@@ -209,7 +210,6 @@ dialog.chat-modal{margin:auto;color:var(--chat-fg)}dialog.chat-modal::backdrop{b
   font-size: 12px;
 }
 .conversation-tabs button {
-  text-transform: capitalize;
   border-radius: 0;
   border-bottom: 2px solid transparent;
   color: var(--chat-dim);
@@ -521,7 +521,10 @@ dialog.chat-modal{margin:auto;color:var(--chat-fg)}dialog.chat-modal::backdrop{b
   color: var(--chat-dim);
 }
 .conversation-composer {
-  margin: 0 22px 20px;
+  /* Same column as the messages above it (850px transcript minus its side padding). */
+  width: calc(100% - 44px);
+  max-width: 772px;
+  margin: 0 auto 20px;
   padding: 11px 14px;
   border: 1px solid var(--chat-line-strong);
   border-radius: 16px;
@@ -979,7 +982,7 @@ details[open] > summary > .chat-chevron {
   font-size: 14px;
   margin: 14px 0 6px;
 }
-@media(min-width:768px){.is-conversation .app-sidebar .app-nav-heading{display:none}.is-conversation .app-sidebar .app-nav-section+.app-nav-section{margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--color-border)}}
+@media(min-width:768px) and (max-width:1279px){.is-conversation .app-sidebar .app-nav-heading{display:none}.is-conversation .app-sidebar .app-nav-section+.app-nav-section{margin-top:.5rem;padding-top:.5rem;border-top:1px solid var(--color-border)}}
 
 /* ---------- Agent filter, live status, compact composer ---------- */
 .conversation-filters {
@@ -1074,3 +1077,70 @@ details[open] > summary > .chat-chevron {
     margin: 0 10px max(10px, env(safe-area-inset-bottom));
   }
 }
+
+/* A web reply waiting for approval on the computer: calm, clearly alive. */
+.chat-approval {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  margin: 12px 0 4px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--color-raised) 60%, transparent);
+  max-width: 640px;
+}
+.chat-approval-title { margin: 0; font-size: 13px; font-weight: 600; color: var(--color-fg); }
+.chat-approval-help { margin: 2px 0 0; font-size: 12px; line-height: 1.5; color: var(--color-fg-dim); }
+.chat-approval-pulse {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 4px;
+  border-radius: 999px;
+  background: var(--color-amber);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .chat-approval-pulse { animation: chat-approval-pulse 1.8s ease-in-out infinite; }
+}
+@keyframes chat-approval-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 color-mix(in oklab, var(--color-amber) 45%, transparent); }
+  50% { opacity: 0.7; box-shadow: 0 0 0 6px transparent; }
+}
+.chat-live-status.is-stopped { color: var(--color-fg-dim); }
+
+/* One project picker per screen: from 1280px the sidebar shows it. */
+@media (min-width: 1280px) {
+  .chat-project-switch { display: none; }
+}
+
+.chat-subagent-heading { margin: 10px 0 2px; font-size: 11px; font-weight: 600; letter-spacing: .02em; text-transform: uppercase; color: var(--color-fg-dim); }
+.chat-subagent-body > .chat-subagent-heading:first-child { margin-top: 4px; }
+
+.chat-memory-group { font-weight: 400; color: var(--chat-dim); }
+
+.chat-welcome-action { margin-top: 4px; border: 1px solid var(--chat-line); border-radius: 8px; font-size: 13px; padding: 8px 14px; }
+.chat-welcome-action:hover { background: var(--color-raised); }
+
+/* Sub-agent report: one bordered body, no card-in-card. */
+.chat-subagent-body { border-top: 1px solid var(--chat-line); padding: 6px 14px 12px; font-size: 13px; line-height: 1.7; }
+.chat-subagent-body > .chat-prose, .chat-subagent-body > .chat-turn-note { border-top: 0; padding: 0; }
+
+/* Steps inside "Worked through N steps" are rows, not cards inside a card. */
+.chat-worklog > .chat-tool-list { padding: 0; gap: 0; }
+.chat-worklog > .chat-tool-list > :is(.chat-tool, .chat-subagent) {
+  border: 0;
+  border-radius: 0;
+  margin: 0;
+  background: transparent;
+}
+.chat-worklog > .chat-tool-list > * + * { border-top: 1px solid var(--chat-line); }
+
+/* The prompt rail reads as a control, not stray marks on the window edge. */
+.conversation-prompt-rail {
+  border: 1px solid var(--chat-line);
+  border-radius: 999px;
+  background: var(--chat-surface);
+  margin-right: 6px;
+}
+.prompt-tick { background: var(--chat-dim); opacity: 0.55; }

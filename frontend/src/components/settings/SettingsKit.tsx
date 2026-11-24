@@ -1,4 +1,4 @@
-import { type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 
 export type SectionLink = { id: string; label: string }
@@ -135,13 +135,28 @@ export function SettingsNav({ sections, active }: { sections: SectionLink[]; act
       </a>
     )
   }
+  const row = useRef<HTMLDivElement>(null)
+  const [atEnd, setAtEnd] = useState(false)
+  const onRowScroll = () => {
+    const el = row.current
+    if (el) setAtEnd(el.scrollLeft + el.clientWidth >= el.scrollWidth - 4)
+  }
+  // Keep the current section's tab in view as the page scrolls.
+  useEffect(() => {
+    const el = row.current?.querySelector<HTMLElement>('[aria-current="location"]')
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+    onRowScroll()
+  }, [active])
   return (
     <>
       <nav
         aria-label="Settings sections"
         className="sticky top-[3.2rem] z-20 -mx-[0.85rem] mb-6 border-b border-border bg-base/90 px-[0.85rem] py-2 backdrop-blur md:top-0 md:mx-0 md:rounded-xl md:border md:px-2 lg:hidden"
       >
-        <div className="flex gap-1 overflow-x-auto [scrollbar-width:none]">{sections.map((s) => link(s, 'row'))}</div>
+        {/* The faded right edge says "there's more, scroll"; it clears once you reach the end. */}
+        <div ref={row} onScroll={onRowScroll} data-end={atEnd ? '' : undefined} className="settings-tabs-row flex gap-1 overflow-x-auto [scrollbar-width:none]">
+          {sections.map((s) => link(s, 'row'))}
+        </div>
       </nav>
       <nav aria-label="Settings sections" className="hidden lg:block">
         <div className="sticky top-8 space-y-0.5">{sections.map((s) => link(s, 'col'))}</div>

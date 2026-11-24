@@ -160,8 +160,9 @@ export function lastErrorRef(): string | undefined {
 
 // --- environment ---------------------------------------------------------------
 
+/** Stamped at build time by vite.config.ts (git commit, or VITE_APP_VERSION from CI). */
 export function appVersion(): string {
-  return (import.meta.env?.VITE_APP_VERSION as string | undefined) ?? 'dev'
+  return (import.meta.env?.VITE_APP_VERSION as string | undefined) || 'dev'
 }
 
 /** Coarse platform and browser, e.g. "Windows · Chrome 131". No full user agent. */

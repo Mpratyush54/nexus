@@ -33,3 +33,16 @@ function deployedPaths(): string[] {
 test('every static client route is uploaded as its own S3 object, so it answers 200', () => {
   assert.deepEqual(deployedPaths(), routerPaths())
 })
+
+test('the static legal pages are uploaded under clean URLs, listed in the sitemap and not SPA routes', () => {
+  const sh = readFileSync(path.join(repo, 'deploy', 'deploy-frontend.sh'), 'utf8')
+  const block = sh.match(/STATIC_PAGES=\(([^)]*)\)/)
+  assert.ok(block, 'STATIC_PAGES array not found in deploy-frontend.sh')
+  const pages = block[1].split(/\s+/).filter(Boolean).sort()
+  assert.deepEqual(pages, ['privacy', 'terms'])
+  const sitemap = readFileSync(path.join(repo, 'frontend', 'public', 'sitemap.xml'), 'utf8')
+  for (const p of pages) {
+    assert.ok(sitemap.includes(`/${p}</loc>`), `${p} missing from sitemap.xml`)
+    assert.ok(!deployedPaths().includes(p), `${p} must not be served the SPA shell`)
+  }
+})

@@ -75,6 +75,8 @@ export function AuthLayout({ children, topAction }: { children?: ReactNode; topA
             <span>© {new Date().getFullYear()} Nexus</span>
             <span style={{ display: 'flex', gap: 18 }}>
               <a href="/#faq">Help</a>
+              <a href="/privacy">Privacy</a>
+              <a href="/terms">Terms</a>
               <a href="https://github.com/Mpratyush54/nexus" target="_blank" rel="noreferrer">
                 GitHub
               </a>
@@ -134,13 +136,13 @@ function ProductPanel() {
         <MemoryGraph />
         <figure className="au-shot">
           <picture>
-            <source type="image/avif" srcSet="/landing/shots/memory-800.avif 800w, /landing/shots/memory-1400.avif 1400w" sizes="50vw" />
-            <source type="image/webp" srcSet="/landing/shots/memory-800.webp 800w, /landing/shots/memory-1400.webp 1400w" sizes="50vw" />
+            <source type="image/avif" srcSet="/landing/shots/memory-800.avif 800w, /landing/shots/memory-1140.avif 1140w" sizes="50vw" />
+            <source type="image/webp" srcSet="/landing/shots/memory-800.webp 800w, /landing/shots/memory-1140.webp 1140w" sizes="50vw" />
             <img
-              src="/landing/shots/memory-1400.png"
-              width={1400}
-              height={840}
-              alt="The Nexus Windows app showing a project's shared memory: decisions captured from agent sessions."
+              src="/landing/shots/memory-1140.png"
+              width={1140}
+              height={684}
+              alt="The Nexus Windows app showing a project's shared memory: a project brief with key decisions captured from agent chats."
               loading="lazy"
               decoding="async"
             />

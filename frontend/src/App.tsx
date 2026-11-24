@@ -1,5 +1,6 @@
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
-import { lazy, Suspense, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, type ReactNode } from "react";
+import { routeTitle } from "@/lib/route-title";
 import { AppShell } from "@/components/AppShell";
 import { AppProviders } from "@/providers/AppProviders";
 import { GuestRoute, ProtectedRoute } from "@/routes/guards";
@@ -34,6 +35,7 @@ export default function App({ basename, demo = false }: { basename?: string; dem
   return (
     <AppProviders>
       <BrowserRouter basename={basename}>
+        <RouteTitle demo={demo} />
         <RoutedBoundary>
           <Suspense fallback={<BootSplash />}>
             <Routes>
@@ -82,6 +84,15 @@ export default function App({ basename, demo = false }: { basename?: string; dem
       </BrowserRouter>
     </AppProviders>
   );
+}
+
+/** Keeps the tab title in step with the page. */
+function RouteTitle({ demo }: { demo: boolean }) {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    document.title = routeTitle(pathname, demo);
+  }, [pathname, demo]);
+  return null;
 }
 
 /** Resets the error screen when the user navigates somewhere else. */

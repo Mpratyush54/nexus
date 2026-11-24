@@ -107,7 +107,8 @@ export function SignupPage() {
   }
 
   const emailProblem = (v: string) => (!v.trim() ? 'Enter your email.' : looksLikeEmail(v) ? null : 'That email looks incomplete, e.g. you@company.com.')
-  const userProblem = (v: string) => (v.trim().length >= 2 ? null : 'Use at least 2 characters.')
+  const userProblem = (v: string) =>
+    !v.trim() ? 'Choose a username. Teammates see it next to your chats.' : v.trim().length >= 2 ? null : 'Use at least 2 characters.'
   const passProblem = (v: string) => (v.length >= 8 ? null : `Use at least 8 characters${v ? ` (${8 - v.length} more)` : ''}.`)
 
   const onSendCode = (e: FormEvent) => {
@@ -246,7 +247,7 @@ export function SignupPage() {
         {step === 'details' ? (
           <form className="au-form" onSubmit={onSendCode} noValidate>
             <Field
-              label="Work email"
+              label="Email"
               name="email"
               type="email"
               autoComplete="email"
@@ -290,9 +291,12 @@ export function SignupPage() {
             <SubmitButton busy={sendCode.isPending} busyLabel="Sending code…">
               Continue
             </SubmitButton>
+            <p className="au-note au-legal">
+              By continuing you agree to the <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.
+            </p>
             <div className="au-row">
               <button type="button" className="au-link is-quiet" onClick={() => go('resume')}>
-                Started on another device?
+                Already got a code by email? Finish signing up
               </button>
             </div>
           </form>

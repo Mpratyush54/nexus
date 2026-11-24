@@ -72,7 +72,7 @@ export function ConnectPage() {
         hint:
           Boolean(detected) || bridge.serverView.data?.online
             ? 'Found on this computer'
-            : 'Run the install command below',
+            : 'Download and run the installer below',
       },
       {
         id: 'same-account',
@@ -100,13 +100,13 @@ export function ConnectPage() {
     if (!bridge.trusted) {
       push({
         title: 'Accounts must match',
-        detail: 'Sign Desktop in as the same user as this portal first',
+        detail: 'Sign the desktop app in with this account first',
         tone: 'danger',
       })
       return
     }
     if (!folder) {
-      push({ title: 'No folder detected', detail: 'Start Nexus Desktop first', tone: 'danger' })
+      push({ title: 'No folder found', detail: 'Open Nexus on this computer first', tone: 'danger' })
       return
     }
     bind.mutate(folder, {
@@ -125,7 +125,7 @@ export function ConnectPage() {
     if (!bridge.trusted) {
       push({
         title: 'Blocked',
-        detail: 'Desktop and portal accounts do not match',
+        detail: 'The desktop app uses a different account',
         tone: 'danger',
       })
       return
@@ -133,14 +133,14 @@ export function ConnectPage() {
     scanNow.mutate(undefined, {
       onSuccess: (st) =>
         push({
-          title: 'Scan complete',
-          detail: st.message || `${st.last_scan_files ?? 0} files · ${st.last_scan_turns ?? 0} turns`,
+          title: 'Check complete',
+          detail: st.message || `${st.last_scan_files ?? 0} files · ${st.last_scan_turns ?? 0} messages`,
           tone: 'teal',
         }),
       onError: (err) =>
         push({
-          title: 'Scan failed',
-          detail: err instanceof Error ? err.message : 'Daemon unreachable',
+          title: 'Check failed',
+          detail: err instanceof Error ? err.message : 'The desktop app didn’t answer',
           tone: 'danger',
         }),
     })
@@ -149,7 +149,7 @@ export function ConnectPage() {
   const onRelink = () => {
     const base = detected?.baseUrl
     if (!base) {
-      push({ title: 'Desktop offline', detail: 'Install / start Nexus Desktop first', tone: 'danger' })
+      push({ title: 'Desktop app not running', detail: 'Install or open Nexus first', tone: 'danger' })
       return
     }
     void daemonApi
@@ -157,7 +157,7 @@ export function ConnectPage() {
       .then(() =>
         push({
           title: 'Sign-in opened',
-          detail: 'Use the same account as this portal',
+          detail: 'Use the same account as this page',
           tone: 'teal',
         }),
       )
@@ -210,30 +210,14 @@ export function ConnectPage() {
         ))}
       </div>
 
-      {/* Install instructions — always visible */}
       <GlassPanel className="space-y-4 p-5">
-        <DesktopInstallPicker
-          description="Copy this command into a terminal. It installs the app and starts it when you log in."
-        />
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" size="sm" variant="secondary" onClick={onRelink}>
+        <DesktopInstallPicker />
+        <div className="border-t border-border pt-4">
+          <p className="text-xs text-fg-dim">Already installed? Make sure the app uses this account.</p>
+          <Button type="button" size="sm" variant="secondary" className="mt-2" onClick={onRelink}>
             Sign in the desktop app
           </Button>
-          <a
-            className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-xs text-fg-dim hover:border-border-strong hover:text-fg"
-            href={detected?.baseUrl || 'http://127.0.0.1:7272/'}
-            target="_blank"
-            rel="noreferrer"
-            title="Local Desktop status page on this PC (loopback). Not a shared file browser."
-          >
-            Desktop status page <ExternalLink size={12} />
-          </a>
         </div>
-        <p className="text-[11px] text-muted">
-          The status page at <span className="font-mono">127.0.0.1:7272</span> is only on{' '}
-          <span className="text-fg">this machine</span> — it shows whether Desktop is signed in and
-          which folder it watches. It only opens on the computer running Desktop.
-        </p>
       </GlassPanel>
 
       <Advanced title="Check this computer" summary="See whether the desktop app here is running, which folder it watches, and scan now.">
@@ -243,24 +227,24 @@ export function ConnectPage() {
               <div className="flex items-center gap-2">
                 <ScanSearch size={18} className="text-amber" />
                 <div>
-                  <h2 className="text-sm font-medium text-fg">Live harvest</h2>
+                  <h2 className="text-sm font-medium text-fg">Chat saving on this computer</h2>
                   <p className="mt-0.5 text-xs text-fg-dim">
                     {!bridge.trusted
-                      ? 'Unlocks when Desktop is signed in as this portal user'
+                      ? 'Shows once the desktop app is signed in with this account'
                       : hs?.message ||
                         (harvestOnline
-                          ? 'Reading agent transcripts from this machine…'
-                          : 'Start Nexus Desktop to stream scan status here')}
+                          ? 'Reading your agent chats on this computer…'
+                          : 'Open Nexus on this computer to see its progress here')}
                   </p>
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <StatusPill tone={hs?.running ? 'teal' : harvestOnline ? 'amber' : 'danger'}>
-                  {hs?.running ? 'scanning' : harvestOnline ? 'daemon only' : 'offline'}
+                  {hs?.running ? 'saving chats' : harvestOnline ? 'open, not saving' : 'not running'}
                 </StatusPill>
                 {bridge.trusted ? (
                   <StatusPill tone={hs?.designated ? 'teal' : 'neutral'}>
-                    {hs?.designated ? 'designated' : 'not designated'}
+                    {hs?.designated ? 'saves chats' : 'another computer saves chats'}
                   </StatusPill>
                 ) : null}
               </div>
@@ -272,11 +256,11 @@ export function ConnectPage() {
                   {[
                     { label: 'Last scan', value: shortTime(hs?.last_scan_at) },
                     {
-                      label: 'Files · new turns',
+                      label: 'Files · new messages',
                       value: `${hs?.last_scan_files ?? 0} · ${hs?.last_scan_turns ?? 0}`,
                     },
-                    { label: 'Turns emitted', value: String(hs?.turns_emitted ?? 0) },
-                    { label: 'Active harnesses', value: String(activeAgents) },
+                    { label: 'Messages saved', value: String(hs?.turns_emitted ?? 0) },
+                    { label: 'Agents found', value: String(activeAgents) },
                   ].map((c) => (
                     <div key={c.label} className="rounded-lg border border-border bg-raised/40 px-3 py-2.5">
                       <p className="text-[11px] uppercase tracking-wide text-muted">{c.label}</p>
@@ -310,7 +294,7 @@ export function ConnectPage() {
                       )}
                     </p>
                     <p>
-                      <span className="text-muted">Poll</span> every {hs?.poll_seconds ?? 30}s
+                      <span className="text-muted">Checks</span> every {hs?.poll_seconds ?? 30}s
                     </p>
                   </div>
                 )}
@@ -323,7 +307,7 @@ export function ConnectPage() {
                     disabled={!bridgeUrl || scanNow.isPending}
                   >
                     <ScanSearch size={14} className={scanNow.isPending ? 'animate-pulse' : ''} />
-                    {scanNow.isPending ? 'Scanning…' : 'Scan now'}
+                    {scanNow.isPending ? 'Checking…' : 'Check for new chats'}
                   </Button>
                   <Button
                     type="button"
@@ -342,6 +326,17 @@ export function ConnectPage() {
                     />
                     Refresh
                   </Button>
+                  {detected?.baseUrl ? (
+                    <a
+                      className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-xs text-fg-dim hover:border-border-strong hover:text-fg"
+                      href={detected.baseUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Opens the desktop app's own status page. It only works on the computer running the app."
+                    >
+                      Status page <ExternalLink size={12} aria-hidden />
+                    </a>
+                  ) : null}
                   {folder ? (
                     <Button
                       type="button"
@@ -363,7 +358,7 @@ export function ConnectPage() {
                 ) : null}
 
                 <div>
-                  <p className="mb-2 text-xs font-medium text-fg">Harnesses</p>
+                  <p className="mb-2 text-xs font-medium text-fg">Agents</p>
                   <div className="flex flex-wrap gap-1.5">
                     {(hs?.agents?.length ? hs.agents : []).map((a) => (
                       <span
@@ -381,14 +376,14 @@ export function ConnectPage() {
                       </span>
                     ))}
                     {!hs?.agents?.length ? (
-                      <span className="text-xs text-muted">Waiting for daemon harness list…</span>
+                      <span className="text-xs text-muted">Waiting for the list of agents…</span>
                     ) : null}
                   </div>
                 </div>
 
                 <div className="grid gap-4 lg:grid-cols-2">
                   <div>
-                    <p className="mb-2 text-xs font-medium text-fg">Daemon activity</p>
+                    <p className="mb-2 text-xs font-medium text-fg">Recent activity</p>
                     <ul className="max-h-56 space-y-1.5 overflow-auto rounded-lg border border-border bg-raised/30 p-2 text-[11px]">
                       {[...(hs?.recent ?? [])].reverse().slice(0, 24).map((line, i) => (
                         <li key={`${line.at}-${i}`} className="flex gap-2 text-fg-dim">
@@ -398,13 +393,13 @@ export function ConnectPage() {
                         </li>
                       ))}
                       {!hs?.recent?.length ? (
-                        <li className="px-1 py-3 text-muted">No harvest events yet.</li>
+                        <li className="px-1 py-3 text-muted">Nothing yet.</li>
                       ) : null}
                     </ul>
                   </div>
                   <div>
                     <div className="mb-2 flex items-center justify-between gap-2">
-                      <p className="text-xs font-medium text-fg">Recent portal memories</p>
+                      <p className="text-xs font-medium text-fg">Recently learned</p>
                       <Link to="/app/memory" className="text-[11px] text-ember hover:underline">
                         Review →
                       </Link>
@@ -425,7 +420,7 @@ export function ConnectPage() {
                           </li>
                         ))}
                       {!projectId ? (
-                        <li className="px-1 py-3 text-muted">Link a project to see harvested memories.</li>
+                        <li className="px-1 py-3 text-muted">Pick a project to see what was learned.</li>
                       ) : null}
                     </ul>
                   </div>
@@ -434,8 +429,8 @@ export function ConnectPage() {
             ) : (
               <div className="space-y-3">
                 <p className="text-sm text-fg-dim">
-                  Scan details appear once Nexus Desktop on this computer is signed in to the same
-                  account, so nobody can read another person&apos;s local chats.
+                  Details appear once Nexus on this computer is signed in with this account, so nobody
+                  can see another person&apos;s chats.
                 </p>
                 <Button
                   type="button"
@@ -449,8 +444,8 @@ export function ConnectPage() {
                 </Button>
                 {bridge.local.isFetched && !bridge.local.isFetching && !bridge.local.data ? (
                   <p className="text-xs text-muted" role="status">
-                    No older Nexus daemon answered here. Nexus Desktop reports in through your account
-                    once it&apos;s signed in.
+                    Nexus didn&apos;t answer on this computer. Once the app is signed in, it reports in
+                    through your account.
                   </p>
                 ) : null}
               </div>

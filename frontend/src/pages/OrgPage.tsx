@@ -1,6 +1,6 @@
 import { Building2, Copy, FolderPlus, KeyRound, Plus, RefreshCw, UserPlus } from 'lucide-react'
-import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { PageHeader } from '@/components/PageHeader'
 import { TeamTabs } from '@/components/TeamTabs'
@@ -32,6 +32,12 @@ const ROLE_HELP: Record<string, string> = {
   MEMBER: 'Opens the organization’s projects',
 }
 
+/** "OWNER" → "Owner". Roles arrive in either case. */
+function roleLabel(role: string) {
+  const r = role.trim().toLowerCase()
+  return r ? r[0].toUpperCase() + r.slice(1) : r
+}
+
 const inputClass =
   'h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none focus:border-amber'
 
@@ -50,14 +56,16 @@ function Section({
   description,
   aside,
   children,
+  id,
 }: {
+  id?: string
   title: string
   description?: string
   aside?: ReactNode
   children: ReactNode
 }) {
   return (
-    <GlassPanel className="space-y-4 p-5">
+    <GlassPanel id={id} className="scroll-mt-24 space-y-4 p-5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 className="text-sm font-medium text-fg">{title}</h2>
@@ -76,7 +84,13 @@ export function OrgPage() {
   const { push } = useToast()
   const orgs = useOrgs()
   const [selected, setSelected] = useState<string | null>(orgIdParam ?? null)
-  const [panel, setPanel] = useState<'none' | 'create' | 'join'>('none')
+  // Invite emails link to /app/org?invite=<code>: open "Join with a code" filled in.
+  const [params, setParams] = useSearchParams()
+  const [inviteCode] = useState(() => params.get('invite') ?? '')
+  const [panel, setPanel] = useState<'none' | 'create' | 'join'>(() => (inviteCode ? 'join' : 'none'))
+  useEffect(() => {
+    if (params.has('invite')) setParams({}, { replace: true })
+  }, [params, setParams])
 
   useEffect(() => {
     if (orgIdParam) {
@@ -154,6 +168,7 @@ export function OrgPage() {
       ) : null}
       {panel === 'join' ? (
         <JoinOrgForm
+          initialCode={inviteCode}
           onDone={(orgId) => {
             setPanel('none')
             choose(orgId)
@@ -235,16 +250,24 @@ function CreateOrgForm({ onDone, onCancel }: { onDone: (id: string) => void; onC
   )
 }
 
-function JoinOrgForm({ onDone, onCancel }: { onDone: (orgId: string) => void; onCancel: () => void }) {
+function JoinOrgForm({
+  onDone,
+  onCancel,
+  initialCode = '',
+}: {
+  onDone: (orgId: string) => void
+  onCancel: () => void
+  initialCode?: string
+}) {
   const qc = useQueryClient()
   const { push } = useToast()
-  const [code, setCode] = useState('')
+  const [code, setCode] = useState(initialCode)
   const accept = useMutation({
     mutationFn: (token: string) => orgsApi.acceptInvite(token),
     onSuccess: (member) => {
       void qc.invalidateQueries({ queryKey: queryKeys.orgs.all })
       void qc.invalidateQueries({ queryKey: queryKeys.project.list })
-      push({ title: 'You joined the organization', detail: `Role: ${member.role}`, tone: 'teal' })
+      push({ title: 'You joined the organization', detail: `Role: ${roleLabel(member.role)}`, tone: 'teal' })
       onDone(member.org_id)
     },
   })
@@ -270,7 +293,9 @@ function JoinOrgForm({ onDone, onCancel }: { onDone: (orgId: string) => void; on
         className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end"
       >
         <label className="block">
-          <span className="mb-1 block text-xs text-fg-dim">Invite code from your email</span>
+          <span className="mb-1 block text-xs text-fg-dim">
+            {initialCode ? 'Your invite code is filled in. Select Join to accept.' : 'Invite code from your email'}
+          </span>
           <input
             value={code}
             onChange={(e) => setCode(e.target.value)}
@@ -336,7 +361,7 @@ function OrgDetail({ orgId }: { orgId: string }) {
           <div className="flex flex-wrap items-center gap-2">
             <h2 className="truncate text-lg font-medium text-fg">{org.name}</h2>
             {myRole ? (
-              <StatusPill tone={canManage ? 'teal' : 'neutral'}>{`You: ${myRole.toLowerCase()}`}</StatusPill>
+              <StatusPill tone={canManage ? 'teal' : 'neutral'}>{`You: ${roleLabel(myRole)}`}</StatusPill>
             ) : null}
           </div>
           <p className="mt-1 text-xs text-muted">
@@ -429,7 +454,7 @@ function MembersSection({
                     setRole.mutate(
                       { userId: m.user_id, role: e.target.value },
                       {
-                        onSuccess: () => push({ title: 'Role updated', detail: `${label}: ${e.target.value.toLowerCase()}` }),
+                        onSuccess: () => push({ title: 'Role updated', detail: `${label}: ${roleLabel(e.target.value)}` }),
                         onError: (err) => push({ title: 'Couldn’t change role', detail: errorText(err), tone: 'danger' }),
                       },
                     )
@@ -438,12 +463,12 @@ function MembersSection({
                 >
                   {assignable.map((r) => (
                     <option key={r} value={r}>
-                      {r.toLowerCase()}
+                      {roleLabel(r)}
                     </option>
                   ))}
                 </select>
               ) : (
-                <StatusPill>{m.role.toLowerCase()}</StatusPill>
+                <StatusPill>{roleLabel(m.role)}</StatusPill>
               )}
               {canManage && !isSelf && !lockOwner ? (
                 <Button
@@ -490,7 +515,7 @@ function MembersSection({
             >
               {assignable.map((r) => (
                 <option key={r} value={r}>
-                  {r.toLowerCase()}
+                  {roleLabel(r)}
                 </option>
               ))}
             </select>
@@ -535,11 +560,21 @@ function InvitesSection({ orgId, isOwner }: { orgId: string; isOwner: boolean })
   })
   const pending = (invites.data?.items ?? []).filter(pendingInvite)
   const roles = isOwner ? ['OWNER', 'ADMIN', 'MEMBER'] : ['ADMIN', 'MEMBER']
+  // The Team page's "Invite by email" links to #invite: bring the form into view.
+  const location = useLocation()
+  const emailRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (location.hash !== '#invite') return
+    const el = document.getElementById('invite')
+    el?.scrollIntoView({ block: 'start', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+    emailRef.current?.focus({ preventScroll: true })
+  }, [location.hash])
 
   return (
     <Section
-      title="Invites"
-      description="Invite by email. They get a code by email and paste it under “Join with a code”."
+      id="invite"
+      title="Invite people"
+      description="Invite by email. They get a link that adds them to this organization."
       aside={pending.length ? <StatusPill tone="amber">{`${pending.length} pending`}</StatusPill> : null}
     >
       <form
@@ -553,6 +588,7 @@ function InvitesSection({ orgId, isOwner }: { orgId: string; isOwner: boolean })
         <label className="block min-w-0 flex-1">
           <span className="mb-1 block text-xs text-fg-dim">Email</span>
           <input
+            ref={emailRef}
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             type="email"
@@ -569,7 +605,7 @@ function InvitesSection({ orgId, isOwner }: { orgId: string; isOwner: boolean })
         >
           {roles.map((r) => (
             <option key={r} value={r}>
-              {r.toLowerCase()}
+              {roleLabel(r)}
             </option>
           ))}
         </select>
@@ -581,7 +617,7 @@ function InvitesSection({ orgId, isOwner }: { orgId: string; isOwner: boolean })
       {fresh?.token ? (
         <div className="space-y-1 rounded-lg border border-teal/30 bg-teal/5 px-3 py-2.5">
           <p className="text-xs text-fg">
-            Invite created for {fresh.email}. If the email doesn’t arrive, send them this code:
+            Invite sent to {fresh.email}. If the email doesn’t arrive, send them this code to paste under “Join with a code”:
           </p>
           <div className="flex items-center gap-2">
             <code className="min-w-0 flex-1 break-all font-mono text-[11px] text-fg-dim">{fresh.token}</code>
@@ -616,7 +652,7 @@ function InvitesSection({ orgId, isOwner }: { orgId: string; isOwner: boolean })
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm text-fg">{inv.email}</p>
                 <p className="text-[11px] text-muted">
-                  {inv.role.toLowerCase()}
+                  {roleLabel(inv.role)}
                   {inv.created_at ? ` · sent ${formatRelative(inv.created_at)}` : ''}
                   {inv.expires_at ? ` · expires ${new Date(inv.expires_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}` : ''}
                 </p>

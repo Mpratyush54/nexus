@@ -303,8 +303,8 @@ function PlanSection() {
           <dl className="grid grid-cols-3 gap-3">
             {[
               ['Memories', usage.data.memories_created],
-              ['Episodes', usage.data.episodes_created],
-              ['Writes (approx.)', usage.data.requests_approx],
+              ['Chat summaries', usage.data.episodes_created],
+              ['Changes saved', usage.data.requests_approx],
             ].map(([k, v]) => (
               <div key={k} className="rounded-lg border border-border bg-raised/50 px-3 py-2">
                 <dt className="text-[11px] text-fg-dim">{k}</dt>
@@ -316,7 +316,7 @@ function PlanSection() {
           <RowSkeleton lines={2} />
         )}
       </FieldRow>
-      <FieldRow label="Storage" help="File blobs your agents upload. Transcripts don’t count.">
+      <FieldRow label="Storage" help="Files your agents upload. Chat history doesn’t count.">
         {storage.isError ? (
           <LoadError what="storage" onRetry={() => void storage.refetch()} />
         ) : s ? (
@@ -398,7 +398,7 @@ function NotificationsSection({ isAdmin }: { isAdmin: boolean }) {
     try {
       const res = await notificationsApi.testPush({
         title: 'Nexus test',
-        body: 'Web Push delivery is working.',
+        body: 'Notifications on this device are working.',
         url: '/app/settings',
         project_id: projectId ?? undefined,
       })
@@ -696,7 +696,7 @@ function ProjectDataSection() {
           />
         </label>
       </FieldRow>
-      <FieldRow label="Fork project" htmlFor="fork-name" id="fork-name" help="Copies memories and branch names into a new project and switches you to it. The original is untouched.">
+      <FieldRow label="Copy project" htmlFor="fork-name" id="fork-name" help="Copies this project’s memories into a new project and switches you to it. The original stays as it is.">
         <form
           className="flex flex-wrap gap-2"
           onSubmit={(e) => {
@@ -705,7 +705,7 @@ function ProjectDataSection() {
               const res = await projectsApi.fork(projectId, { folder_name: forkName.trim() || undefined })
               setProjectId(res.project.id)
               setForkName('')
-              push({ title: 'Project forked', detail: `${res.memories_copied} memories copied`, tone: 'teal' })
+              push({ title: 'Project copied', detail: `${res.memories_copied} memories copied`, tone: 'teal' })
             })
           }}
         >
@@ -718,7 +718,7 @@ function ProjectDataSection() {
             className={`${inputClass} min-w-[12rem] flex-1`}
           />
           <Button type="submit" variant="secondary" disabled={busy !== null}>
-            {busy === 'Fork' ? 'Forking…' : 'Fork'}
+            {busy === 'Fork' ? 'Copying…' : 'Copy'}
           </Button>
         </form>
       </FieldRow>

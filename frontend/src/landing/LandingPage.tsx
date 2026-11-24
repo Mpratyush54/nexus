@@ -6,12 +6,12 @@ import {
   DOWNLOAD_URL,
   FILM_DURATION,
   FAQ,
-  GITHUB_URL,
   SIGN_IN_PATH,
   SIGN_UP_PATH,
   WEB_APP_PATH,
   type AgentId,
 } from './content'
+import { SiteFooter } from './SiteFooter'
 
 /*
  * The public landing page. Rendered to static HTML at build time
@@ -113,7 +113,7 @@ function WhyFile() {
             </span>
           </p>
           <p className="nx-why-note-text" data-why-field="why">{sel.why}</p>
-          <p className="nx-why-note-foot nx-mono">Anchored to the line’s content hash, so it follows the code when it moves.</p>
+          <p className="nx-why-note-foot nx-mono">Tied to the line itself, not its number, so it follows the code when it moves.</p>
         </aside>
       </div>
     </figure>
@@ -163,11 +163,11 @@ type ShotSpec = { name: string; w: number; h: number; small: number; label: stri
 const SHOTS = {
   chat: { name: 'chat', w: 1400, h: 840, small: 800, label: 'Chat', focus: '50% 0%', alt: 'Nexus chat with Claude Code: the request to retry failed card captures, an expanded work log with a memory search, a file read, a code search, an Explore sub-agent with its findings and an Open sub-agent chat link, three edits, a new test file and a test run.' },
   timeline: { name: 'timeline', w: 1000, h: 600, small: 800, label: 'Timeline', focus: '0% 0%', alt: 'Nexus sidebar with search and a filter above captured chats from Claude Code, Cursor, Gemini and Codex across two projects, newest first, next to the All projects composer.' },
-  memory: { name: 'memory', w: 1400, h: 840, small: 800, label: 'Memory', focus: '0% 0%', alt: 'Memory page for the checkout-service project: a project brief with key decisions and the chats they came from, filters for scope and category, and the first memory in the list.' },
+  memory: { name: 'memory', w: 1140, h: 684, small: 800, label: 'Memory', focus: '0% 0%', alt: 'Memory page for the checkout-service project: a project brief with key decisions (payments go through the Stripe adapter, orders are idempotent on order_key) and the chats they came from, filters for who can see each memory, topic and tag, and a count of five memories.' },
   graph: { name: 'graph', w: 1400, h: 840, small: 800, label: 'Knowledge graph', focus: '0% 0%', alt: 'Nexus 3D memory graph: memories, chats and code files connected by links, with stale memories marked and a legend.' },
-  agents: { name: 'agents', w: 1400, h: 840, small: 800, label: 'Agents', focus: '0% 0%', alt: 'Nexus Agents page: Claude Code, Codex and Cursor installed with the Nexus MCP server, other detected agents without it, and an Install Nexus into all agents button.' },
+  agents: { name: 'agents', w: 1400, h: 840, small: 800, label: 'Agents', focus: '0% 0%', alt: 'Nexus Agents page: Claude Code, Codex and Cursor connected to Nexus, other agents found on the computer not yet connected, and an Install Nexus into all agents button.' },
   share: { name: 'share', w: 1260, h: 756, small: 800, label: 'Share chat', focus: '35% 50%', alt: 'Share chat dialog: share with a person or team, keep their access up to date, and a list of who has access with a Remove button.' },
-  usage: { name: 'usage', w: 1334, h: 800, small: 800, label: 'Settings · Usage', focus: '0% 0%', alt: 'Usage settings: tokens for today, the last 7 and 30 days, a tokens-per-day chart, and totals by agent with estimated cost.' },
+  usage: { name: 'usage', w: 1000, h: 600, small: 800, label: 'Settings · Usage', focus: '0% 0%', alt: 'Usage settings: tokens for today, the last 7 and the last 30 days, each split into input and output with an estimated cost, and a tokens-per-day chart.' },
   redaction: { name: 'redaction', w: 1140, h: 684, small: 800, label: 'Chat · redacted paste', focus: '50% 0%', alt: 'A captured chat where a pasted .env file is stored with its keys replaced by [REDACTED].' },
 } satisfies Record<string, ShotSpec>
 
@@ -179,16 +179,18 @@ function Shot({ s, sizes = SPLIT_SIZES, className = '' }: { s: ShotSpec; sizes?:
   const set = (ext: string) => widths.map((w) => `${base}-${w}.${ext} ${w}w`).join(', ')
   return (
     <figure className={`nx-shot ${className}`} style={{ '--focus': s.focus } as CSSProperties}>
-      <div className="nx-shot-win">
+      {/* Tapping a shot opens the full-size image, which phones can pinch-zoom. */}
+      <a className="nx-shot-win" href={`${base}-${s.w}.png`} target="_blank" rel="noopener">
         <picture>
           <source type="image/avif" srcSet={set('avif')} sizes={sizes} />
           <source type="image/webp" srcSet={set('webp')} sizes={sizes} />
           <img src={`${base}-${s.w}.png`} width={s.w} height={s.h} alt={s.alt} loading="lazy" decoding="async" />
         </picture>
-      </div>
+      </a>
       <figcaption className="nx-shot-cap">
         <img src="/brand/nexus-app.svg" width="14" height="14" alt="" />
         Nexus for Windows <span aria-hidden="true">·</span> {s.label}
+        <span className="nx-shot-zoom" aria-hidden="true">Tap to enlarge</span>
       </figcaption>
     </figure>
   )
@@ -200,7 +202,10 @@ function FilmPlayer() {
   return (
     <dialog className="nx-player" data-player aria-label="Nexus product film">
       <div className="nx-player-stage" data-player-stage data-state="paused">
-        <video className="nx-player-video" data-player-video data-src="/landing/nexus-film-full.mp4" playsInline preload="none" poster="/landing/nexus-film-poster.jpg" />
+        <video className="nx-player-video" data-player-video data-src="/landing/nexus-film-full.mp4" playsInline preload="none" poster="/landing/nexus-film-poster.jpg">
+          {/* Music only, no narration: the track describes the sound. */}
+          <track kind="captions" srcLang="en" label="English" src="/landing/nexus-film.en.vtt" default />
+        </video>
         <button type="button" className="nx-player-big" data-p="toggle" tabIndex={-1} aria-hidden="true">
           <Play size={34} fill="currentColor" strokeWidth={0} />
         </button>
@@ -231,12 +236,12 @@ function FilmPlayer() {
 }
 
 const TOOLS = [
-  { name: 'memory_search', sig: '(query)', d: 'Find decisions, conventions and facts by meaning, using embeddings, not just keywords.' },
+  { name: 'memory_search', sig: '(query)', d: 'Find decisions, conventions and facts by meaning, not just exact words.' },
   { name: 'project_knowledge', sig: '()', d: 'The project brief and the memories an agent should read before it starts.' },
   { name: 'related_to', sig: '(file | memory)', d: 'Memories, sessions and files linked to the thing you are touching.' },
   { name: 'file_history', sig: '(path)', d: 'Every session that changed a file, newest first, with its summary.' },
   { name: 'why', sig: '(path, line)', d: 'The session and the reasoning behind one line of code.' },
-  { name: 'line_history', sig: '(path, line)', d: 'Each change to a line over time, followed through moves by content hash.' },
+  { name: 'line_history', sig: '(path, line)', d: 'Each change to a line over time, even after the line has moved.' },
 ]
 
 /* ---------- page ---------- */
@@ -296,10 +301,10 @@ export function LandingPage() {
                 code changed.
               </p>
               <div className="nx-hero-cta">
-                <a className="nx-btn nx-btn-primary" href={DOWNLOAD_URL}>
+                <a className="nx-btn nx-btn-primary nx-cta-download" href={DOWNLOAD_URL}>
                   <Download size={17} aria-hidden="true" /> Download for Windows
                 </a>
-                <a className="nx-btn nx-btn-secondary" href={DEMO_PATH}>
+                <a className="nx-btn nx-btn-secondary nx-cta-demo" href={DEMO_PATH}>
                   <MousePointerClick size={16} aria-hidden="true" /> Try the live demo
                 </a>
                 <p className="nx-hero-note">
@@ -339,17 +344,11 @@ export function LandingPage() {
                 <span className="nx-film-disc" aria-hidden="true"><Play size={30} fill="currentColor" strokeWidth={0} /></span>
                 <span className="nx-film-cta">
                   <span>Watch the film</span>
-                  <span className="nx-film-meta">{FILM_DURATION} · with sound</span>
+                  <span className="nx-film-meta">{FILM_DURATION} · with music</span>
                 </span>
               </button>
               <figcaption className="nx-sr">Product film showing chat, memory, the knowledge graph and session handoff in Nexus.</figcaption>
             </figure>
-            <div className="nx-film-after">
-              <p>Rather click around yourself?</p>
-              <a className="nx-btn nx-btn-secondary nx-btn-sm" href={DEMO_PATH}>
-                Try the live demo <ArrowRight size={15} aria-hidden="true" />
-              </a>
-            </div>
           </div>
         </section>
 
@@ -377,7 +376,7 @@ export function LandingPage() {
           id="capture"
           label="capture"
           title="Every session, captured without asking."
-          lede="Nexus quietly records sessions from all six harnesses, including the ones you run in a terminal or another editor, into one timeline."
+          lede="Nexus quietly saves chats from all six agents, including the ones you run in a terminal or another editor, into one timeline. Only from the folders you choose."
           className="nx-split nx-split-flip"
         >
           <div className="nx-split-grid">
@@ -396,10 +395,10 @@ export function LandingPage() {
           id="memory"
           label="memory"
           title="Memory your agents can actually use."
-          lede="Notes in a wiki don’t help an agent mid-task. Nexus gives every agent the same memory through an MCP server, so a new session starts where the last one stopped."
+          lede="Notes in a wiki don’t help an agent mid-task. Nexus gives every agent the same memory, which it can look things up in while it works, so a new session starts where the last one stopped."
         >
           <div className="nx-memory">
-            <dl className="nx-tools" aria-label="Nexus MCP tools">
+            <dl className="nx-tools" aria-label="What your agents can ask Nexus">
               {TOOLS.map((t) => (
                 <div key={t.name}>
                   <dt><code>{t.name}<span>{t.sig}</span></code></dt>
@@ -411,7 +410,7 @@ export function LandingPage() {
               items={[
                 { t: 'A project brief', d: 'A short, current summary of the project that agents read first.' },
                 { t: 'Staleness tracking', d: 'When the code a memory describes changes, the memory is flagged for review instead of silently going wrong.' },
-                { t: 'Instruction files in sync', d: 'CLAUDE.md, AGENTS.md and the other agent instruction files stay consistent across harnesses.' },
+                { t: 'Instruction files in sync', d: 'CLAUDE.md, AGENTS.md and the other agent instruction files stay the same across every agent.' },
                 { t: 'Review and history', d: 'Approve, edit or retire memories, and see every version of each one.' },
               ]}
             />
@@ -423,7 +422,7 @@ export function LandingPage() {
           id="why"
           label="why"
           title="Know which agent changed a line, and why."
-          lede="Nexus links memories, sessions and files into one code knowledge graph, and keeps a per-line history anchored to content hashes, so the answer follows the code when it moves."
+          lede="Nexus links memories, chats and files together, and keeps a history for every line of code that follows the line when it moves."
         >
           <div className="nx-why-grid">
             <Shot s={SHOTS.graph} />
@@ -440,8 +439,8 @@ export function LandingPage() {
         <Section
           id="install"
           label="install"
-          title="One click to wire up every harness."
-          lede="Nexus finds the agents on your machine and installs its MCP server and instruction files into each of them. No config files to edit."
+          title="One click to connect every agent."
+          lede="Nexus finds the agents on your computer and connects each of them to your shared memory. No config files to edit."
           className="nx-split"
         >
           <div className="nx-split-grid">
@@ -449,7 +448,7 @@ export function LandingPage() {
             <Points
               items={[
                 { t: 'Detects what you have', d: 'Only the agents installed on this machine are offered.' },
-                { t: 'Reversible', d: 'Remove Nexus tools from any harness from the same screen.' },
+                { t: 'Reversible', d: 'Disconnect any agent from the same screen.' },
               ]}
             />
           </div>
@@ -543,10 +542,10 @@ export function LandingPage() {
             <h2 id="final-title">Give your agents a memory.</h2>
             <p>Free to start. Install the Windows beta, connect your agents, and your next session begins with everything the last one learned.</p>
             <div className="nx-hero-cta">
-              <a className="nx-btn nx-btn-primary" href={DOWNLOAD_URL}>
+              <a className="nx-btn nx-btn-primary nx-cta-download" href={DOWNLOAD_URL}>
                 <Download size={17} aria-hidden="true" /> Download for Windows
               </a>
-              <a className="nx-btn nx-btn-secondary" href={DEMO_PATH}>
+              <a className="nx-btn nx-btn-secondary nx-cta-demo" href={DEMO_PATH}>
                 <MousePointerClick size={16} aria-hidden="true" /> Try the live demo
               </a>
               <a className="nx-final-link" href={SIGN_UP_PATH}>
@@ -557,23 +556,7 @@ export function LandingPage() {
         </section>
       </main>
 
-      <footer className="nx-foot">
-        <div className="nx-wrap nx-foot-in">
-          <a className="nx-brand" href="/" aria-label="Nexus home">
-            <img src="/brand/nexus-app.svg" width="26" height="26" alt="" />
-            <span>Nexus</span>
-          </a>
-          <p>Shared memory for AI coding agents.</p>
-          <nav aria-label="Footer">
-            <a href={DOWNLOAD_URL}>Desktop releases</a>
-            <a href={WEB_APP_PATH}>Web app</a>
-            <a href={DEMO_PATH}>Live demo</a>
-            <a href={SIGN_IN_PATH}>Sign in</a>
-            <a href={SIGN_UP_PATH}>Create account</a>
-            <a href={GITHUB_URL}>GitHub</a>
-          </nav>
-        </div>
-      </footer>
+      <SiteFooter />
       <FilmPlayer />
     </div>
   )

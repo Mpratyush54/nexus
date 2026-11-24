@@ -98,7 +98,7 @@ const billingPlan = {
   public: true,
   rank: 0,
   limits: { orgs: 1, projects: 3, members: 5, memories: 2000, storage_bytes: 1 << 30, github_import: true },
-  features: ['Shared project memory', 'Six agent harnesses', 'Session sharing'],
+  features: ['Shared project memory', 'Works with six coding agents', 'Session sharing'],
 }
 
 /** GET routes: [pattern, handler]. Patterns are matched against the path without the API prefix. */
@@ -143,7 +143,9 @@ const GET: [RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
   [/^\/v1\/agent-sessions\/([^/]+)\/summary$/, (m) => ok({ summary: chatById(m[1])?.summary ?? '' })],
   [/^\/v1\/agent-sessions\/([^/]+)\/memories$/, (m) => {
     const c = chatById(m[1])
-    return ok({ items: c ? memories.filter((x) => x.project_id === c.card.project_id).slice(1, 4) : [] })
+    // Only the memories this chat actually produced (matching what its replies say).
+    const keys = c ? CHAT_MEMORY_KEYS[c.card.title ?? ''] ?? [] : []
+    return ok({ items: memories.filter((x) => x.project_id === c?.card.project_id && keys.includes(x.key)) })
   }],
   [/^\/v1\/sharing\/recipients$/, () => ok({ people: people.map((p) => ({ user_id: p.id, name: p.name, project_role: p.id === ME.id ? 'owner' : 'member', organization_role: 'member' })) })],
   // A fresh last_seen_at keeps the sample laptop "online" (the app treats >45 s as offline).
@@ -261,17 +263,31 @@ const WRITE: [string, RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
 /* ---------- browser → desktop relay (sample laptop) ---------- */
 
 export const DEMO_DEVICE = 'dev-maya-laptop'
+
+/** Which sample memories each sample chat saved, for its "What it learned" tab. */
+const CHAT_MEMORY_KEYS: Record<string, string[]> = {
+  'Retry failed card captures with backoff': ['payments/capture-retries', 'payments/idempotency-key', 'observability/retry-logging'],
+  'Draft the v2 orders migration notes': ['orders/v2-migration'],
+  'Review the refund flow for partial captures': ['refunds/partial-captures'],
+  'Export orders as CSV': ['exports/orders-csv'],
+  'Set up local payment sandbox keys': ['personal/sandbox-notes'],
+  'Show a retry notice on the checkout page': ['checkout/retry-notice'],
+  'Tidy cart reducer types': ['cart/reducer-types'],
+}
 type DemoJobRequest = { id: string; device_id: string; project_id: string; session_id: string; kind: 'turn' | 'models'; agent: string; model?: string; prompt?: string }
 const jobs = new Map<string, { req: DemoJobRequest; started: number; cancelledAt?: number }>()
 
 /** A scripted run on the sample laptop, advanced by wall-clock time since it was sent. */
+// The real app waits for you to approve each web request on the computer; the
+// demo laptop "approves" by itself after about 1.5 s so the run keeps moving.
 const STEPS = [
   { at: 0, state: 'queued', status: 'Sent to MAYA-LAPTOP' },
-  { at: 700, state: 'awaiting_approval', status: 'Waiting for approval in the desktop app' },
-  { at: 1500, state: 'running', status: 'Reading the code' },
-  { at: 2600, state: 'running', status: 'Making the change' },
-  { at: 3700, state: 'running', status: 'Running the tests' },
-  { at: 4800, state: 'completed', status: 'Done' },
+  { at: 300, state: 'awaiting_approval', status: 'Waiting for approval on MAYA-LAPTOP' },
+  { at: 1500, state: 'running', status: 'Approved on MAYA-LAPTOP' },
+  { at: 2400, state: 'running', status: 'Reading the code' },
+  { at: 3400, state: 'running', status: 'Making the change' },
+  { at: 4400, state: 'running', status: 'Running the tests' },
+  { at: 5400, state: 'completed', status: 'Done' },
 ]
 
 export function demoJob(id: string) {
@@ -286,16 +302,18 @@ export function demoJob(id: string) {
   const elapsed = (j.cancelledAt ?? now) - j.started
   let step = 0
   for (let i = 0; i < STEPS.length; i++) if (elapsed >= STEPS[i].at) step = i
-  if (j.cancelledAt) {
-    return { ...base, state: 'cancelled', revision: step + 2, status: 'Stopped', text: '', activities: [] }
-  }
   const activities = [
-    { id: 'a1', tool: 'Read', status: step > 2 ? 'completed' : 'running', files: ['src/payments/retry.ts'] },
-    { id: 'a2', tool: 'Edit', status: step > 3 ? 'completed' : 'running', files: ['src/payments/retry.ts'] },
-    { id: 'a3', tool: 'Bash', status: step > 4 ? 'completed' : 'running', command: 'npm test -- payments', output: step > 4 ? 'Tests: 12 passed, 12 total' : undefined },
-  ].slice(0, Math.max(0, step - 1))
+    { id: 'a1', tool: 'Read', status: step > 3 ? 'completed' : 'running', files: ['src/payments/retry.ts'] },
+    { id: 'a2', tool: 'Edit', status: step > 4 ? 'completed' : 'running', files: ['src/payments/retry.ts'] },
+    { id: 'a3', tool: 'Bash', status: step > 5 ? 'completed' : 'running', command: 'npm test -- payments', output: step > 5 ? 'Tests: 12 passed, 12 total' : undefined },
+  ].slice(0, Math.max(0, step - 2))
+  if (j.cancelledAt) {
+    // Like the desktop app: steps that finished stay, the one in flight is dropped.
+    const done = activities.filter((a) => a.status === 'completed')
+    return { ...base, state: 'cancelled', revision: step + 2, status: 'Stopped', text: '', activities: done }
+  }
   const reply = 'Done. I made the change in `src/payments/retry.ts` and ran the payment tests: all 12 pass.\n\n_This is a sample reply from the demo laptop._'
-  const text = step >= 5 ? reply : step >= 3 ? 'Working on it…' : ''
+  const text = step >= 6 ? reply : step >= 4 ? 'Working on it…' : ''
   return {
     ...base,
     state: STEPS[step].state,
@@ -303,7 +321,7 @@ export function demoJob(id: string) {
     revision: step + 1,
     text,
     activities,
-    result: step >= 5 ? { text: reply, agent: req.agent, cloud_saved: true } : undefined,
+    result: step >= 6 ? { text: reply, agent: req.agent, cloud_saved: true } : undefined,
   }
 }
 

@@ -331,6 +331,9 @@
 .au-alt { margin-top: 26px; padding-top: 20px; border-top: 1px solid var(--au-rule); color: var(--au-ink-2); font-size: 14.5px; }
 .au-alt a { color: var(--au-ink); font-weight: 600; text-decoration: underline; text-decoration-color: var(--au-amber); text-decoration-thickness: 2px; text-underline-offset: 4px; }
 .au-note { margin-top: 14px; font-size: 13px; color: var(--au-ink-3); line-height: 1.5; }
+.au-legal { margin-top: -4px; }
+.au-note a { color: var(--au-ink-2); text-decoration: underline; text-underline-offset: 3px; }
+.au-note a:hover { color: var(--au-ink); }
 
 .au-demo-note {
   display: flex; gap: 10px; align-items: flex-start;

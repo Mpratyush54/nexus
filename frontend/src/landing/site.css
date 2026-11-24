@@ -326,16 +326,25 @@ html.nx-app #root > .nx { display: none; }
   .nx-hero-cta .nx-btn { flex: 1 1 100%; }
   .nx-why-hint { display: none; }
   .nx-why-bar .nx-label-chip { margin-left: auto; }
-  .nx-why-line { grid-template-columns: 84px 24px max-content; font-size: 12.5px; }
+  /* Phones wrap long code lines instead of cutting them off at the card edge. */
+  .nx-why-line { grid-template-columns: 30px 22px minmax(0, 1fr); font-size: 12px; }
+  /* Only the agent colour in the gutter; the note below names the agent. */
+  .nx-why-who { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .nx-why-line code { white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 10px; }
   .nx-why-gutter { padding-left: 10px; font-size: 11px; }
-  .nx-why-num { padding-right: 10px; }
+  .nx-why-num { padding-right: 8px; }
+  /* A phone can't install the Windows app: the demo leads, the download follows. */
+  .nx-hero-cta .nx-cta-demo { order: -1; background: var(--nx-cta); color: var(--nx-cta-ink); border-color: transparent; }
+  .nx-hero-cta .nx-cta-download { background: transparent; color: var(--nx-ink); border-color: var(--nx-rule); }
 }
 
 /* ---------- sections ---------- */
 
 .nx-section { padding: 112px 0; border-top: 1px solid var(--nx-rule); }
-/* Below-the-fold sections skip style and layout until they approach the viewport. */
-.nx-section, .nx-native, .nx-final, .nx-foot { content-visibility: auto; contain-intrinsic-size: auto 1000px; }
+/* No content-visibility here: the sections are anchor targets, and estimated
+   heights made nav links land far past their section while the page
+   re-measured. Images below the fold are lazy, so layout stays cheap. The
+   sticky nav offset comes from scroll-padding-top on html.nx-home. */
 .nx-section-head { display: grid; gap: 18px; margin-bottom: 56px; }
 .nx-section-head-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: end; gap: 18px 48px; }
 .nx-section-head-row > div { display: grid; gap: 18px; }
@@ -442,7 +451,13 @@ html.nx-app #root > .nx { display: none; }
 .nx-player :focus-visible { outline: 2px solid #e8bb67; outline-offset: 2px; }
 .nx-player-keys { margin: 12px 0 0; text-align: center; font: 400 12.5px/1.4 var(--f-mono); color: #9ea29d; }
 @media (max-width: 600px) {
-  .nx-player-bar { gap: 4px; padding: 24px 6px 6px; }
+  /* Phones: the controls sit under the picture instead of covering a third of it. */
+  .nx-player-stage { aspect-ratio: auto; display: flex; flex-direction: column; max-height: none; }
+  .nx-player-stage:not(:fullscreen) .nx-player-video { position: relative; inset: auto; aspect-ratio: 16 / 9; height: auto; }
+  .nx-player-stage:not(:fullscreen) .nx-player-big { top: calc((100vw - 32px) * 9 / 32); width: 64px; height: 64px; }
+  .nx-player-bar { position: static; gap: 4px; padding: 6px; background: #0b0c0c; }
+  .nx-player-stage.is-idle[data-state='playing'] .nx-player-bar { opacity: 1; }
+  .nx-player-close { width: 34px; height: 34px; top: 6px; right: 6px; }
   .nx-player-time[data-p='dur'], .nx-player-keys { display: none; }
 }
 
@@ -460,9 +475,12 @@ html.nx-app #root > .nx { display: none; }
 .nx-shot-win img { display: block; width: 100%; height: 100%; max-width: none; object-fit: cover; object-position: var(--focus, 0 0); }
 .nx-shot-cap { display: flex; align-items: center; gap: 8px; font: 400 12.5px/1.3 var(--f-mono); color: var(--nx-ink-2); }
 .nx-shot-cap img { border-radius: 3px; }
+a.nx-shot-win { display: block; color: inherit; cursor: zoom-in; }
+.nx-shot-zoom { display: none; margin-left: auto; color: var(--nx-ink-2); }
 .nx-shot-wide { margin-top: 48px; }
 @media (max-width: 600px) {
   .nx-shot-win { aspect-ratio: 4 / 3; }
+  .nx-shot-zoom { display: inline; }
 }
 
 /* memory tools */
@@ -524,15 +542,47 @@ html.nx-app #root > .nx { display: none; }
   .nx-final { padding: 88px 0; }
 }
 
-/* footer */
-.nx-foot { border-top: 1px solid var(--nx-rule); padding: 36px 0 48px; color: var(--nx-ink-2); font-size: 14.5px; }
-.nx-foot-in { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 32px; }
+/* footer (src/landing/SiteFooter.tsx, shared with /privacy and /terms) */
+.nx-foot { border-top: 1px solid var(--nx-rule); padding: 56px 0 40px; color: var(--nx-ink-2); font-size: 14.5px; }
+.nx-foot-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 40px 56px; }
+.nx-foot-about { display: grid; gap: 14px; align-content: start; max-width: 34ch; }
 .nx-foot .nx-brand { color: var(--nx-ink); font-size: 17px; }
-.nx-foot nav { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; }
-.nx-foot nav a { text-decoration: none; }
-.nx-foot nav a:hover { color: var(--nx-ink); text-decoration: underline; }
-@media (max-width: 700px) {
-  .nx-foot nav { margin-left: 0; flex-basis: 100%; }
+.nx-foot-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; }
+.nx-foot-h { font: 500 12.5px/1.4 var(--f-mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--nx-ink); margin-bottom: 14px; }
+.nx-foot-cols ul { display: grid; gap: 10px; }
+.nx-foot a { text-decoration: none; }
+.nx-foot a:hover { color: var(--nx-ink); text-decoration: underline; }
+.nx-foot-base { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--nx-rule); font-size: 13.5px; }
+@media (max-width: 860px) {
+  .nx-foot-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .nx-foot-cols { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 20px; }
+  .nx-foot-cols > :last-child { grid-column: 1 / -1; }
+}
+
+/* legal pages (src/landing/legal.tsx) */
+.nx-legal { padding: 40px 0 112px; }
+.nx-legal-in { max-width: calc(760px + var(--gut) * 2); }
+.nx-legal-back { display: inline-flex; align-items: center; gap: 6px; font-size: 14.5px; color: var(--nx-ink-2); text-decoration: none; }
+.nx-legal-back:hover { color: var(--nx-ink); }
+.nx-legal-head { display: grid; gap: 14px; margin: 32px 0 40px; }
+.nx-legal-head h1 { font-size: clamp(40px, 6vw, 64px); margin-top: 4px; }
+.nx-legal-date { font: 500 14px/1.4 var(--f-mono); color: var(--nx-ink); }
+.nx-legal-other { color: var(--nx-ink-2); }
+.nx-legal-signin { font-size: 15px; color: var(--nx-ink-2); text-decoration: none; }
+.nx-legal-signin:hover { color: var(--nx-ink); }
+.nx-legal-summary { padding: 24px 28px; border: 1px solid var(--nx-rule); border-radius: var(--r-3); background: var(--nx-panel); margin-bottom: 48px; }
+.nx-legal-summary h2, .nx-legal-body h2 { font-size: clamp(24px, 3vw, 30px); line-height: 1.15; max-width: none; }
+.nx-legal-body section { display: grid; gap: 14px; padding: 32px 0; border-top: 1px solid var(--nx-rule); scroll-margin-top: 84px; }
+.nx-legal-body p, .nx-legal-body li { max-width: 68ch; text-wrap: pretty; }
+.nx-legal-body ul { display: grid; gap: 10px; padding-left: 1.2em; list-style: disc; }
+.nx-legal-summary ul { margin-top: 16px; }
+.nx-legal-body li::marker { color: var(--nx-amber-ink); }
+.nx-legal-body a { color: var(--nx-ink); }
+.nx-legal-body code { font-size: 0.9em; padding: 1px 5px; border-radius: 4px; background: var(--nx-amber-wash); }
+@media (max-width: 900px) {
+  .nx-legal-signin { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {

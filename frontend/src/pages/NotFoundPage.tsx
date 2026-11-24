@@ -16,18 +16,18 @@ export function NotFoundPage() {
       <p className="au-sub">The link may be old or mistyped. Nothing on your account was affected.</p>
       <code className="au-edge-path">{pathname}</code>
       <div className="au-edge-actions">
+        <a className="au-btn" href="/">
+          Go to Nexus home
+        </a>
         {isAuthenticated ? (
-          <Link className="au-btn" to="/app/dashboard">
-            Go to your workspace
+          <Link className="au-btn is-secondary" to="/app/dashboard">
+            Open your workspace
           </Link>
         ) : (
-          <Link className="au-btn" to="/login">
-            Log in
+          <Link className="au-btn is-secondary" to="/login">
+            Sign in
           </Link>
         )}
-        <a className="au-btn is-secondary" href="/">
-          Nexus home
-        </a>
       </div>
     </EdgeFrame>
   )

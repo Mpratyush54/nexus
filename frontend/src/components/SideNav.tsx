@@ -5,6 +5,8 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { NotificationBell } from './NotificationBell'
 import { NexusBrand } from './NexusBrand'
 import { Button } from './ui/Button'
+import { shortcutLabel } from '@/lib/shortcut'
+import { isDemo } from '@/lib/diagnostics'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { useAuth } from '@/providers/AuthProvider'
 import { useMe } from '@/hooks/useAuthMutations'
@@ -91,7 +93,7 @@ function ProfileCard() {
 
   return (
     <div className="app-profile-wrap">
-      <Link to="/app/settings" className="app-profile" aria-label={`Settings for ${user?.username ?? 'your account'}`}>
+      <Link to="/app/settings" className="app-profile" title="Account settings">
         <span className="app-profile-avatar" aria-hidden>
           {initial}
         </span>
@@ -101,16 +103,23 @@ function ProfileCard() {
         </span>
         <ChevronRight size={14} className="app-profile-chevron" aria-hidden />
       </Link>
-      <button
-        type="button"
-        className="app-logout"
-        onClick={() => {
-          logout()
-          navigate('/login')
-        }}
-      >
-        Log out
-      </button>
+      {isDemo() ? (
+        // The demo has no account to sign out of: this leaves it, like the banner does.
+        <a className="app-logout" href="/">
+          Exit demo
+        </a>
+      ) : (
+        <button
+          type="button"
+          className="app-logout"
+          onClick={() => {
+            logout()
+            navigate('/login')
+          }}
+        >
+          Log out
+        </button>
+      )}
     </div>
   )
 }
@@ -152,7 +161,8 @@ function Presence() {
           <span
             key={p.id}
             className="app-avatar"
-            style={{ backgroundColor: colorFor(p.id) }}
+            // Light text: the avatar colours are dark in both themes.
+            style={{ backgroundColor: colorFor(p.id), color: '#f7f4ec' }}
             title={`${p.label} · ${p.status}`}
           >
             {initialsFor(p.id, p.label)}
@@ -185,7 +195,7 @@ export function SideNav({ onOpenCommand }: Props) {
           >
             <Search size={13} />
             <span className="app-search-label">Search</span>
-            <kbd className="app-search-kbd">⌘K</kbd>
+            <kbd className="app-search-kbd">{shortcutLabel()}</kbd>
           </button>
           <NotificationBell />
         </div>
@@ -322,7 +332,7 @@ export function MobileNav({ onOpenCommand }: Props) {
               >
                 <Search size={13} />
                 <span className="app-search-label">Search</span>
-                <kbd className="app-search-kbd">⌘K</kbd>
+                <kbd className="app-search-kbd">{shortcutLabel()}</kbd>
               </button>
 
               <div className="mt-3 px-0.5">
