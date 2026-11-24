@@ -17,6 +17,9 @@ function routerPaths(): string[] {
     // Nested routes under <Route path="/app"> are relative.
     out.add(p.startsWith('/') ? p.slice(1) : `app/${p}`)
   }
+  // /demo is booted by main.tsx (src/demo/boot.tsx) rather than declared in App.tsx.
+  const main = readFileSync(path.join(repo, 'frontend', 'src', 'main.tsx'), 'utf8')
+  if (main.includes("path === '/demo'")) out.add('demo')
   return [...out].sort()
 }
 

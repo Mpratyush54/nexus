@@ -4,6 +4,10 @@ export const GITHUB_URL = 'https://github.com/Mpratyush54/nexus'
 export const WEB_APP_PATH = '/app'
 export const SIGN_IN_PATH = '/login'
 export const SIGN_UP_PATH = '/signup'
+// The interactive demo: the real web app on sample data, no account needed.
+export const DEMO_PATH = '/demo'
+// Full product film: 1 min 26 s, with sound.
+export const FILM_DURATION = '1:26'
 
 export const TITLE = 'Nexus: shared memory for every AI coding agent'
 export const DESCRIPTION =

@@ -46,7 +46,9 @@ Radius: 6px controls, 10px panels, 14px app windows. One shadow, only on app win
 - Buttons: primary (solid `--nx-cta`), secondary (1px rule, transparent), quiet (text with underline on hover). Height 44px, 6px radius. Focus: 2px `--nx-amber-ink` outline, 3px offset. Disabled is not used on the site.
 - Links: ink, underline offset 3px; descriptive text, never "click here".
 - Nav: sticky, paper background with a bottom rule once scrolled. Under 860px the links move into a `<details>` menu (no JS).
-- App windows: real screenshots of the WinUI app (`public/landing/shots/`), captured from an isolated demo profile signed in to a local server with fictional people and projects. 14px radius and the window shadow. The hero's annotated file is the one HTML recreation and keeps its "Example" label.
+- App windows: real screenshots of the WinUI app (`public/landing/shots/`), captured from an isolated demo profile signed in to a local server with fictional people and projects. Every shot is cropped from the 1800x1080 window to one 5:3 frame (the main pane for pages, a closer crop for dialogs and panels), shown in the same frame (10px radius, hairline, window shadow) with a "Nexus for Windows · <screen>" caption; phones narrow the frame to 4:3 around each shot's focus point.
+- Brand mark: the desktop app icon itself (`public/brand/nexus-app.svg`, dark tile + mark, same artwork as `Nexus.ico`) everywhere: landing header/footer, portal sidebar, favicon, PWA icons, OG image.
+- Film: poster with a centred play button opens the full film with sound in a modal `<dialog>` player (custom controls, keyboard, Esc closes, focus restored). A muted 16 s cut loops behind the poster while in view, except with reduced motion or Save-Data. The hero's annotated file is the one HTML recreation and keeps its "Example" label.
 - FAQ: native `<details>`; content is also emitted as FAQPage JSON-LD from the same data.
 
 ## Imagery and icons
