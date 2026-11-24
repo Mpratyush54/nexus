@@ -14,25 +14,24 @@ using Nexus.Platform;
 namespace Nexus.Pages;
 
 /// <summary>
-/// First-run setup: welcome, connect to a server, detect agents, choose
-/// workspaces, privacy, startup, done. Shown in place of the shell on the
-/// first launch and again from Settings > General. Every step except the
-/// summary can be skipped; nothing here is required to use Nexus.
+/// First-run setup in four steps: sign in, connect agents, choose folders
+/// (with what is captured and the crash-report choice), done. Shown in place
+/// of the shell on the first launch and again from Settings > General. Each
+/// step has one primary action; the footer button says honestly whether it
+/// moves on ("Next") or leaves the step undone ("Skip for now"). The installer
+/// already asks about startup and the desktop shortcut, so this does not.
 /// </summary>
 public sealed class SetupWizardPage : NexusPage
 {
     public const string ProductionServer = "https://api-nexus.pratyushes.dev";
 
-    private enum Step { Welcome, Connect, Agents, Workspaces, Privacy, Startup, Done }
+    private enum Step { Connect, Agents, Workspaces, Done }
 
     private static readonly (Step Step, string Name)[] Steps =
     [
-        (Step.Welcome, "Welcome"),
-        (Step.Connect, "Connect"),
+        (Step.Connect, "Sign in"),
         (Step.Agents, "Agents"),
-        (Step.Workspaces, "Workspaces"),
-        (Step.Privacy, "Privacy"),
-        (Step.Startup, "Startup"),
+        (Step.Workspaces, "Folders"),
         (Step.Done, "Done")
     ];
 
@@ -64,8 +63,13 @@ public sealed class SetupWizardPage : NexusPage
     private readonly ContentControl _body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch };
     private readonly ScrollViewer _scroller = new() { HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
     private readonly Button _back = new() { Content = "Back", MinWidth = 88, AccessKey = "B" };
-    private readonly Button _skip = new() { Content = "Skip for now", MinWidth = 88, AccessKey = "K" };
+    // The one footer action: "Next" (primary) once the step is done, "Skip
+    // for now" (secondary) while the step's own primary action is pending.
     private readonly Button _next = new() { Content = "Next", MinWidth = 120, AccessKey = "N" };
+    private readonly Button _browserSignIn = new() { Content = "Sign in with browser", Padding = new Thickness(18, 8, 18, 9) };
+    private readonly StackPanel _browserBlock = new() { Spacing = 6 };
+    private readonly TextBlock _browserHint = new() { Opacity = 0.65, FontSize = 12, TextWrapping = TextWrapping.Wrap };
+    private readonly Expander _advanced = new() { HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch };
     private readonly Button _skipAll = new() { Content = "Skip setup", AccessKey = "S", Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
     private readonly Dictionary<Step, UIElement> _views = new();
 
@@ -84,7 +88,7 @@ public sealed class SetupWizardPage : NexusPage
     private readonly StackPanel _agentRows = new() { Spacing = 0 };
     private readonly StackPanel _agentReport = new() { Spacing = 6 };
     private readonly TextBlock _agentState = new() { TextWrapping = TextWrapping.Wrap, FontSize = NexusTokens.FontCaption, Foreground = NexusPalette.Muted };
-    private readonly Button _agentConnect = new() { Content = "Connect Nexus to these agents" };
+    private readonly Button _agentConnect = new() { Content = "Connect Nexus to these agents", Padding = new Thickness(18, 8, 18, 9) };
     private bool _agentPreviewed;
     private int _agentsInstalled;
     private int _agentsConnected;
@@ -98,27 +102,30 @@ public sealed class SetupWizardPage : NexusPage
     private bool _workspacesLoaded;
     private readonly TextBlock _workspaceState = new() { TextWrapping = TextWrapping.Wrap, FontSize = NexusTokens.FontCaption };
 
-    // startup
+    // crash reports (Folders step) and, for a copy that was not installed by
+    // the installer, start-at-login (one line on Done)
     private readonly ToggleSwitch _loginStart = new() { OnContent = "", OffContent = "", MinWidth = 0 };
-    private readonly ToggleSwitch _desktopShortcut = new() { OnContent = "", OffContent = "", MinWidth = 0 };
     private readonly ToggleSwitch _autoReports = new() { OnContent = "", OffContent = "", MinWidth = 0 };
     private bool _startupSync;
 
     public SetupWizardPage(Action finished)
     {
         _finished = finished;
-        // Transparent: the window shows Mica behind the setup guide.
-        Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        BrandPrimary(_next);
+        // The app's own canvas, so the guide and the shell it opens into are
+        // one continuous background.
+        Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
         foreach (var live in new[] { _connectResult, _accountState, _agentState, _workspaceState })
             AutomationProperties.SetLiveSetting(live, AutomationLiveSetting.Polite);
         AutomationProperties.SetHeadingLevel(_title, AutomationHeadingLevel.Level1);
         AutomationProperties.SetName(_rail, "Setup progress");
         AutomationProperties.SetName(_skipAll, "Skip setup and open Nexus");
+        AutomationProperties.SetName(_back, "Back");
+        AutomationProperties.SetName(_browserSignIn, "Sign in with browser");
         _server.Text = ProductionServer;
         _back.Click += (_, _) => Go(_index - 1);
-        _skip.Click += (_, _) => Go(_index + 1);
         _next.Click += async (_, _) => await NextAsync();
+        _browserSignIn.Click += async (_, _) => await BrowserSignInAsync();
+        _server.TextChanged += (_, _) => UpdateServerHint();
         _skipAll.Click += (_, _) => Finish();
         _agentConnect.Click += async (_, _) => await ConnectAgentsAsync();
         _token.KeyDown += async (_, e) =>
@@ -143,6 +150,7 @@ public sealed class SetupWizardPage : NexusPage
     /// <summary>A live theme switch: steps are rebuilt with the new theme's brushes.</summary>
     public void ThemeChanged()
     {
+        Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
         _views.Clear();
         _railShown = -1;
         foreach (var fill in _railFill) fill.Background = Brand;
@@ -177,7 +185,6 @@ public sealed class SetupWizardPage : NexusPage
         footer.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         footer.Children.Add(_skipAll);
         Grid.SetColumn(_back, 1); footer.Children.Add(_back);
-        Grid.SetColumn(_skip, 2); footer.Children.Add(_skip);
         Grid.SetColumn(_next, 3); footer.Children.Add(_next);
 
         var column = new Grid { MaxWidth = 720, Padding = new Thickness(40, 36, 40, 28), HorizontalAlignment = HorizontalAlignment.Stretch };
@@ -264,13 +271,10 @@ public sealed class SetupWizardPage : NexusPage
         UpdateRail();
         (_title.Text, _subtitle.Text) = step switch
         {
-            Step.Welcome => ("Welcome to Nexus", "Nexus keeps a shared memory of your coding agents' work, so any agent can pick up where another left off."),
-            Step.Connect => ("Connect to your Nexus account", "Sign in so captured sessions and memories sync to your account."),
-            Step.Agents => ("Your coding agents", "Nexus works with the agents you already use. Here is what it found on this computer."),
-            Step.Workspaces => ("Choose what to capture", CaptureSetup.FoldersExplained),
-            Step.Privacy => ("What Nexus captures and syncs", "A short summary before anything is monitored."),
-            Step.Startup => ("Startup", "Capture only runs while Nexus is running."),
-            _ => ("You're all set", "Here is how Nexus is set up. You can change any of it in Settings.")
+            Step.Connect => ("Welcome to Nexus", "One memory for all your coding agents. Sign in so your chats and memories sync to your account."),
+            Step.Agents => ("Connect your coding agents", "Nexus works with the agents you already use. Connect them so they can search your project memory."),
+            Step.Workspaces => ("Choose folders to capture", "Pick the folders where you use coding agents. Nothing outside them is read."),
+            _ => DoneTitles()
         };
         // The summary reflects the latest choices, so it is rebuilt each time.
         if (step == Step.Done || !_views.TryGetValue(step, out var view))
@@ -289,48 +293,60 @@ public sealed class SetupWizardPage : NexusPage
 
     private void FocusFirst(Step step)
     {
+        // The step's own primary action while it is pending, else Next.
         Control? target = step switch
         {
-            Step.Connect when !_signedIn => _views.TryGetValue(step, out var v) ? FirstButton(v) : null,
+            Step.Connect when !_signedIn => _browserSignIn,
+            Step.Agents when _agentConnect.Visibility == Visibility.Visible && _agentConnect.IsEnabled => _agentConnect,
             _ => null
         };
         (target ?? _next).Focus(FocusState.Programmatic);
     }
 
-    private static Control? FirstButton(UIElement root) =>
-        root is Panel panel ? panel.Children.Select(c => c is Button b ? b : FirstButton(c)).FirstOrDefault(c => c is not null)
-        : root is Border { Child: { } child } ? FirstButton(child) : null;
-
+    // One primary action per step: while the step's own action is pending,
+    // the footer button is a quiet "Skip for now"; once it is done, the footer
+    // becomes the primary "Next".
     private void UpdateButtons()
     {
         var step = Current;
         _back.Visibility = _index == 0 ? Visibility.Collapsed : Visibility.Visible;
         _skipAll.Visibility = step == Step.Done ? Visibility.Collapsed : Visibility.Visible;
-        _skip.Visibility = step switch
-        {
-            Step.Connect => _signedIn ? Visibility.Collapsed : Visibility.Visible,
-            Step.Workspaces => Visibility.Visible,
-            _ => Visibility.Collapsed
-        };
         _next.IsEnabled = true;
+        var pending = step switch
+        {
+            Step.Connect => !_signedIn,
+            Step.Agents => _agentConnect.Visibility == Visibility.Visible,
+            Step.Workspaces => !WorkspaceReady && _approved.Count == 0,
+            _ => false
+        };
         _next.Content = step switch
         {
-            Step.Welcome => "Get started",
-            Step.Connect => "Next",
-            Step.Workspaces when WorkspaceSaveNeeded => "Save and continue",
             Step.Done => "Open Nexus",
+            Step.Workspaces when WorkspaceSaveNeeded && WorkspaceReady => "Save and continue",
+            Step.Workspaces when WorkspaceSaveNeeded => "Skip for now",
+            _ when pending => "Skip for now",
             _ => "Next"
         };
-        if (step == Step.Connect) _next.IsEnabled = _signedIn;
-        if (step == Step.Workspaces) _next.IsEnabled = !WorkspaceSaveNeeded || (_consent?.IsChecked == true && _chooser?.Selected.Length > 0);
+        SetPrimary(_next, !pending && !(step == Step.Workspaces && WorkspaceSaveNeeded && !WorkspaceReady));
+        _browserSignIn.Visibility = step == Step.Connect && !_signedIn ? Visibility.Visible : Visibility.Collapsed;
+        _browserBlock.Visibility = _signedIn ? Visibility.Collapsed : Visibility.Visible;
         AutomationProperties.SetName(_next, step == Step.Done ? "Finish setup and open Nexus" : (_next.Content as string ?? "Next"));
     }
+
+    private static void SetPrimary(Button button, bool primary)
+    {
+        if (primary) BrandPrimary(button);
+        else button.ClearValue(StyleProperty);
+    }
+
+    // Folders chosen and monitoring allowed: the step can be saved.
+    private bool WorkspaceReady => _consent?.IsChecked == true && _chooser?.Selected.Length > 0;
 
     private async Task NextAsync()
     {
         if (!_next.IsEnabled) return;
         if (Current == Step.Done) { Finish(); return; }
-        if (Current == Step.Workspaces && WorkspaceSaveNeeded && !await SaveWorkspacesAsync()) return;
+        if (Current == Step.Workspaces && WorkspaceSaveNeeded && WorkspaceReady && !await SaveWorkspacesAsync()) return;
         Go(_index + 1);
     }
 
@@ -348,110 +364,34 @@ public sealed class SetupWizardPage : NexusPage
         Step.Connect => RefreshAccountAsync(),
         Step.Agents => LoadAgentsAsync(),
         Step.Workspaces => LoadWorkspacesAsync(),
-        Step.Startup => Task.Run(SyncStartup),
-        Step.Done => PlayDoneAsync(),
-        Step.Welcome => PlayWelcomeAsync(),
+        Step.Done => ShowDoneAsync(),
         _ => Task.CompletedTask
     };
 
-    private Task PlayDoneAsync()
+    // Done reads the real state (account, agents, folders) before it says
+    // anything, so it never claims a step that was skipped.
+    private async Task ShowDoneAsync()
     {
+        await RefreshAccountAsync();
+        if (!_workspacesLoaded) await LoadApprovedAsync();
+        if (!_agentsLoaded) await LoadAgentsAsync();
+        if (Current != Step.Done) return;
+        (_title.Text, _subtitle.Text) = DoneTitles();
+        var view = BuildDone();
+        _views[Step.Done] = view;
+        _body.Content = view;
+        if (!SupportsPortableStartup) { } else _ = Task.Run(SyncStartup);
         _playDone?.Invoke();
-        return Task.CompletedTask;
-    }
-
-    private Task PlayWelcomeAsync()
-    {
-        _playWelcome?.Invoke();
-        return Task.CompletedTask;
+        UpdateButtons();
     }
 
     private UIElement BuildStep(Step step) => step switch
     {
-        Step.Welcome => BuildWelcome(),
         Step.Connect => BuildConnect(),
         Step.Agents => BuildAgents(),
         Step.Workspaces => _workspaceHost,
-        Step.Privacy => BuildPrivacy(),
-        Step.Startup => BuildStartup(),
         _ => BuildDone()
     };
-
-    // ---- Welcome
-
-    private Action? _playWelcome;
-
-    // The Nexus mark inside a slowly orbiting ring of memory-graph nodes
-    // (same motif as the installer splash).
-    private UIElement Hero()
-    {
-        const double box = 168, radius = 70;
-        var host = new Grid { Width = box, Height = box, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(-14, -10, 0, 4) };
-        AutomationProperties.SetAccessibilityView(host, AccessibilityView.Raw);
-        var orbit = new Canvas { Width = box, Height = box };
-        orbit.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse
-        {
-            Width = radius * 2, Height = radius * 2, Stroke = NexusPalette.Hairline, StrokeThickness = 1,
-            Margin = new Thickness(box / 2 - radius, box / 2 - radius, 0, 0)
-        });
-        var dots = new List<UIElement>();
-        for (var i = 0; i < 7; i++)
-        {
-            var a = i * Math.PI * 2 / 7 + 0.4;
-            var size = i % 3 == 0 ? 9.0 : 6.0;
-            var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
-            {
-                Width = size, Height = size,
-                Fill = i % 3 == 0 ? Brand : ThemeService.Brush("TextFillColorSecondaryBrush", Windows.UI.Color.FromArgb(0x80, 0x80, 0x80, 0x80))
-            };
-            Canvas.SetLeft(dot, box / 2 + Math.Cos(a) * radius - size / 2);
-            Canvas.SetTop(dot, box / 2 + Math.Sin(a) * radius - size / 2);
-            orbit.Children.Add(dot);
-            dots.Add(dot);
-        }
-        host.Children.Add(orbit);
-        var glow = new Microsoft.UI.Xaml.Shapes.Ellipse
-        {
-            Width = 92, Height = 92, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
-            Fill = new RadialGradientBrush
-            {
-                GradientStops =
-                {
-                    new GradientStop { Color = Windows.UI.Color.FromArgb(90, NexusTokens.BrandGold.R, NexusTokens.BrandGold.G, NexusTokens.BrandGold.B), Offset = 0 },
-                    new GradientStop { Color = Windows.UI.Color.FromArgb(0, NexusTokens.BrandGold.R, NexusTokens.BrandGold.G, NexusTokens.BrandGold.B), Offset = 1 }
-                }
-            }
-        };
-        host.Children.Add(glow);
-        var logo = new Image { Source = new BitmapImage(new Uri("ms-appx:///Assets/Nexus.png")), Width = 76, Height = 76 };
-        var logoBox = new Border { Child = logo, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
-        host.Children.Add(logoBox);
-        _playWelcome = () =>
-        {
-            Motion.PopIn(logoBox, 120, 0.55f, 640);
-            Motion.Breathe(logo, 0.04f, 3200, 900);
-            Motion.PopIn(glow, 260, 0.3f, 900);
-            Motion.Spin(orbit, 36000);
-            var delay = 300;
-            foreach (var dot in dots)
-            {
-                Motion.PopIn(dot, delay, 0f, 420);
-                delay += 70;
-            }
-        };
-        return host;
-    }
-
-    private UIElement BuildWelcome()
-    {
-        var panel = new StackPanel { Spacing = 18 };
-        panel.Children.Add(Hero());
-        panel.Children.Add(Point("", "Shared memory", "Decisions, fixes and context from every session become memory your agents can search."));
-        panel.Children.Add(Point("", "All your chats in one place", "Claude Code, Codex, Cursor and other agents' sessions on one timeline. Continue any of them in another agent."));
-        panel.Children.Add(Point("", "You choose what is captured", "Nothing is monitored until you pick folders and allow it. You can pause any time."));
-        panel.Children.Add(Para("Setup takes about two minutes. Every step can be skipped and changed later in Settings.", 0.7, NexusTokens.FontCaption));
-        return panel;
-    }
 
     // ---- Connect
 
@@ -460,30 +400,39 @@ public sealed class SetupWizardPage : NexusPage
         var panel = new StackPanel { Spacing = 14 };
         panel.Children.Add(Card(_accountState));
 
-        var browser = new Button { Content = "Sign in with browser", Padding = new Thickness(18, 8, 18, 9) };
-        BrandPrimary(browser);
-        browser.Click += async (_, _) => await BrowserSignInAsync();
-        var browserBlock = new StackPanel { Spacing = 6 };
-        browserBlock.Children.Add(Label("Recommended"));
-        browserBlock.Children.Add(browser);
-        browserBlock.Children.Add(Para("Opens nexus.pratyushes.dev in your browser. When you finish there, Nexus signs in by itself.", 0.65, 12));
-        panel.Children.Add(browserBlock);
+        // Browser sign-in is the way in; the token form is for self-hosted
+        // servers and lives under Advanced.
+        BrandPrimary(_browserSignIn);
+        _browserBlock.Children.Clear();
+        _browserBlock.Children.Add(_browserSignIn);
+        _browserBlock.Children.Add(_browserHint);
+        UpdateServerHint();
+        panel.Children.Add(_browserBlock);
 
-        panel.Children.Add(Label("Or connect with an API token", 10));
-        AutomationProperties.SetName(_server, "Server URL");
+        var form = new StackPanel { Spacing = 12, Padding = new Thickness(0, 4, 0, 4) };
+        form.Children.Add(Para("For a self-hosted Nexus server, or to sign in with an API token from your account instead of the browser.", 0.7, NexusTokens.FontCaption));
+        AutomationProperties.SetName(_server, "Server address");
         AutomationProperties.SetName(_token, "API token");
-        AutomationProperties.SetHelpText(_server, "The Nexus server address. The default is the hosted Nexus server.");
-        panel.Children.Add(_server);
-        panel.Children.Add(_token);
+        _server.Header = "Server address";
+        AutomationProperties.SetHelpText(_server, "The Nexus server this computer signs in to.");
+        form.Children.Add(_server);
+        form.Children.Add(_token);
         var actions = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
         var test = new Button { Content = "Test connection" };
-        var connect = new Button { Content = "Connect" };
+        var connect = new Button { Content = "Sign in with token" };
+        AutomationProperties.SetName(test, "Test connection");
+        AutomationProperties.SetName(connect, "Sign in with token");
         test.Click += async (_, _) => await TokenConnectAsync(false);
         connect.Click += async (_, _) => await TokenConnectAsync(true);
         actions.Children.Add(test);
         actions.Children.Add(connect);
-        panel.Children.Add(actions);
-        panel.Children.Add(_connectResult);
+        form.Children.Add(actions);
+        form.Children.Add(_connectResult);
+        _advanced.Header = "Advanced: server address and API token";
+        _advanced.Content = form;
+        _advanced.IsExpanded = false;
+        AutomationProperties.SetName(_advanced, "Advanced: server address and API token");
+        panel.Children.Add(_advanced);
         var envServer = Environment.GetEnvironmentVariable("NEXUS_SERVER") ?? Environment.GetEnvironmentVariable("CENTRAL_SERVER_URL");
         var envToken = Environment.GetEnvironmentVariable("NEXUS_TOKEN") ?? Environment.GetEnvironmentVariable("CENTRAL_MEMORY_TOKEN");
         if (!string.IsNullOrWhiteSpace(envServer) || !string.IsNullOrWhiteSpace(envToken))
@@ -498,6 +447,12 @@ public sealed class SetupWizardPage : NexusPage
         return panel;
     }
 
+    // The server the app will actually sign in to, never a fixed name.
+    private string ServerInUse => _serverUrl.Length > 0 ? _serverUrl : _server.Text.Trim();
+
+    private void UpdateServerHint() =>
+        _browserHint.Text = $"Opens your browser to sign in to Nexus at {HostOf(ServerInUse)}. When you finish there, Nexus signs in by itself.";
+
     private async Task RefreshAccountAsync()
     {
         var response = await Call(NxMethods.AuthStatus);
@@ -505,13 +460,13 @@ public sealed class SetupWizardPage : NexusPage
         {
             _signedIn = NxJson.Text(status, "signed_in") == "true";
             _accountName = NxJson.Text(status, "username");
-            if (_accountName.Length == 0) _accountName = NxJson.Text(status, "user_id");
             _serverUrl = NxJson.Text(status, "server_url");
             if (_serverUrl.Length > 0 && _server.Text == ProductionServer) _server.Text = _serverUrl;
         }
         _accountState.Text = _signedIn
-            ? (_accountName.Length > 0 ? $"Signed in as {_accountName}" : "Signed in") + (_serverUrl.Length > 0 ? $" on {HostOf(_serverUrl)}." : ".")
-            : "Not signed in. Nexus still captures on this computer, and uploads once you sign in.";
+            ? SignedInText + $" on {HostOf(ServerInUse)}."
+            : "Not signed in yet. Nexus still captures on this computer and uploads once you sign in.";
+        UpdateServerHint();
         if (_signedIn) StopAuthPoll();
         UpdateButtons();
     }
@@ -522,7 +477,7 @@ public sealed class SetupWizardPage : NexusPage
         var url = response.Ok && response.Result is { } result ? NxJson.Text(result, "url") : "";
         if (url.Length == 0)
         {
-            _connectResult.Text = response.Error ?? "Could not start sign-in.";
+            _accountState.Text = response.Error ?? "Nexus couldn't start sign-in. Try again in a moment.";
             return;
         }
         try
@@ -534,7 +489,7 @@ public sealed class SetupWizardPage : NexusPage
         catch (Exception ex)
         {
             Nexus.Core.Diagnostics.DiagLog.Warn("auth", "could not open the sign-in page", ex);
-            _connectResult.Text = "Could not open the browser: " + ex.Message;
+            _connectResult.Text = "Nexus couldn't open your browser. Use the API token under Advanced instead.";
         }
     }
 
@@ -579,8 +534,7 @@ public sealed class SetupWizardPage : NexusPage
         var message = NxJson.Text(result, "message");
         var version = NxJson.Text(result, "server_version");
         var ok = reachable && (token.Length == 0 || valid);
-        if (ok && version.Length > 0) message += $" Server version {version}.";
-        if (ok && token.Length == 0) message += " Add a token to connect, or use browser sign-in.";
+        if (ok && token.Length == 0) message += " Add a token to sign in, or use browser sign-in.";
         ShowConnectResult(ok, message);
         if (save && NxJson.Text(result, "saved") == "true")
         {
@@ -588,6 +542,11 @@ public sealed class SetupWizardPage : NexusPage
             await Task.Run(() => App.InitializeCore());
             await UiThread.Resume(DispatcherQueue);
             await RefreshAccountAsync();
+            if (_signedIn && Current == Step.Connect)
+            {
+                _advanced.IsExpanded = false;
+                _next.Focus(FocusState.Programmatic);
+            }
         }
     }
 
@@ -601,15 +560,22 @@ public sealed class SetupWizardPage : NexusPage
 
     private UIElement BuildAgents()
     {
-        var panel = new StackPanel { Spacing = 14 };
-        panel.Children.Add(Card(_agentRows));
+        // The primary action sits above the list so it is in view without
+        // scrolling however many agents are found.
+        var panel = new StackPanel { Spacing = 12 };
         panel.Children.Add(_agentState);
-        panel.Children.Add(Para("Connecting adds the Nexus memory server to each agent's own settings so it can search your project memory. Each agent gets its own revocable token, never your sign-in. Changed files are backed up first.", 0.7, NexusTokens.FontCaption));
-        panel.Children.Add(_agentConnect);
+        BrandPrimary(_agentConnect);
+        AutomationProperties.SetName(_agentConnect, "Connect Nexus to these agents");
+        var connectRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+        connectRow.Children.Add(_agentConnect);
+        panel.Children.Add(connectRow);
         panel.Children.Add(_agentReport);
-        panel.Children.Add(Para("Sharing skills and sub-agents between agents, and project-only installs, are on the Agents page.", 0.55, 12));
+        panel.Children.Add(Card(_agentRows));
+        panel.Children.Add(Para("Connecting lets each agent search your Nexus memory. Each agent gets its own key that you can revoke, never your sign-in, and Nexus backs up any settings file before changing it. Sharing skills between agents is on the Agents page.", 0.6, 12));
         return panel;
     }
+
+    private bool _agentsLoaded;
 
     private async Task LoadAgentsAsync()
     {
@@ -644,11 +610,14 @@ public sealed class SetupWizardPage : NexusPage
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            // A check only when the agent really is connected; otherwise an
+            // empty ring, so no check mark ever sits next to "Not connected".
             var check = new Border
             {
                 Width = 20, Height = 20, CornerRadius = new CornerRadius(10),
-                Background = connected ? BrandFill : NexusPalette.AccentFill,
-                Child = new FontIcon { Glyph = "\uE73E", FontSize = 10, Foreground = connected ? OnBrand : Brand }
+                Background = connected ? BrandFill : new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+                BorderBrush = connected ? null : NexusPalette.Hairline, BorderThickness = new Thickness(connected ? 0 : 1.5),
+                Child = connected ? new FontIcon { Glyph = "\uE73E", FontSize = 10, Foreground = OnBrand } : null
             };
             row.Children.Add(check);
             var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -659,22 +628,31 @@ public sealed class SetupWizardPage : NexusPage
             var state = new TextBlock { Text = connected ? "Connected to Nexus" : "Not connected", FontSize = 12, Foreground = connected ? NexusPalette.Accent : NexusPalette.Muted, VerticalAlignment = VerticalAlignment.Center };
             Grid.SetColumn(state, 2);
             row.Children.Add(state);
-            AutomationProperties.SetName(row, $"{name} {version}, found, {state.Text}");
+            AutomationProperties.SetName(row, $"{name}{(version.Length > 0 ? " " + version : "")}: {state.Text}");
             _agentRows.Children.Add(row);
             // Live detection: each agent slides in, then its check pops.
             Motion.FadeSlideIn(row, _agentsInstalled * 90, 0, 10, 380);
             Motion.PopIn(check, _agentsInstalled * 90 + 200, 0.2f, 480);
         }
         if (_agentsInstalled == 0)
-            _agentRows.Children.Add(Para("No supported coding agents found yet. Install Claude Code, Codex, Cursor or another supported agent, then open Settings > Agents.", 0.75, NexusTokens.FontCaption));
-        _agentState.Text = (_agentsInstalled > 0 ? $"{_agentsInstalled} found, {_agentsConnected} connected." : "") +
+            _agentRows.Children.Add(Para("No supported coding agents found yet. Install Claude Code, Codex, Cursor or another supported agent, then connect it from the Agents page.", 0.75, NexusTokens.FontCaption));
+        _agentState.Text = (_agentsInstalled > 0
+                ? $"Found {Plural(_agentsInstalled, "agent")} on this computer · {_agentsConnected} connected."
+                : "") +
             (missing.Count > 0 ? (_agentsInstalled > 0 ? " " : "") + "Also supported: " + string.Join(", ", missing.Take(8)) + (missing.Count > 8 ? ", …" : "") + "." : "");
+        _agentsLoaded = true;
         var canConnect = _agentsInstalled > _agentsConnected;
         _agentConnect.Visibility = canConnect ? Visibility.Visible : Visibility.Collapsed;
         _agentConnect.IsEnabled = _signedIn || HasEnvToken();
-        ToolTipService.SetToolTip(_agentConnect, _agentConnect.IsEnabled ? null : "Sign in first: each agent gets its own token from your account.");
+        ToolTipService.SetToolTip(_agentConnect, _agentConnect.IsEnabled ? null : "Sign in first: each agent gets its own key from your account.");
         if (!_agentConnect.IsEnabled && canConnect && _agentReport.Children.Count == 0)
-            _agentReport.Children.Add(Para("Sign in on the previous step to connect your agents.", 0.7, 12));
+        {
+            var back = new HyperlinkButton { Content = "Sign in first", Padding = new Thickness(0) };
+            AutomationProperties.SetName(back, "Sign in first, then connect your agents");
+            back.Click += (_, _) => Go(IndexOf(Step.Connect));
+            _agentReport.Children.Add(back);
+        }
+        if (Current == Step.Agents) UpdateButtons();
     }
 
     private async Task ConnectAgentsAsync()
@@ -705,13 +683,18 @@ public sealed class SetupWizardPage : NexusPage
         {
             _agentPreviewed = true;
             _agentConnect.Content = "Apply these changes";
+            AutomationProperties.SetName(_agentConnect, "Apply these changes");
+            _agentConnect.Focus(FocusState.Programmatic);
             return;
         }
         _agentPreviewed = false;
         _agentConnect.Content = "Connect Nexus to these agents";
+        AutomationProperties.SetName(_agentConnect, "Connect Nexus to these agents");
         if (args.dry_run == false)
-            _agentReport.Children.Add(Para("Restart any open agents so they pick up the Nexus memory server.", 0.7, 12));
+            _agentReport.Children.Add(Para("Restart any agents that are open so they pick up Nexus.", 0.7, 12));
         await LoadAgentsAsync();
+        // Done here: the next thing to do is move on, never a skip button.
+        if (Current == Step.Agents && _agentConnect.Visibility != Visibility.Visible) _next.Focus(FocusState.Programmatic);
     }
 
     // ---- Workspaces
@@ -741,12 +724,16 @@ public sealed class SetupWizardPage : NexusPage
         _consent = CaptureSetup.ConsentBox();
         _consent.Checked += (_, _) => UpdateButtons();
         _consent.Unchecked += (_, _) => UpdateButtons();
-        _workspaceHost.Children.Add(_chooser.View);
-        _workspaceHost.Children.Add(Para(CaptureSetup.WhatIsCaptured, 0.7, NexusTokens.FontCaption));
+        // Privacy in two sentences above the list, and the list kept short,
+        // so the consent and the crash-report choice are in view without
+        // scrolling.
+        _workspaceHost.Children.Add(Para("Nexus saves your agents' chats and what they did (including bits of code they read or changed) from these folders only, and syncs them to your private account. Nothing outside these folders is read, and you can pause capture from the tray at any time.", 0.75, NexusTokens.FontCaption));
+        _workspaceHost.Children.Add(new ScrollViewer { Content = _chooser.View, MaxHeight = 210, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
         _workspaceHost.Children.Add(_consent);
         _workspaceHost.Children.Add(_workspaceState);
+        _workspaceHost.Children.Add(CrashReportsRow());
         if (_approved.Count > 0)
-            _workspaceState.Text = $"{_approved.Count} folder{(_approved.Count == 1 ? " is" : "s are")} already monitored.";
+            _workspaceState.Text = $"{Plural(_approved.Count, "folder")} already captured.";
         _workspacesLoaded = true;
         UpdateButtons();
     }
@@ -768,62 +755,76 @@ public sealed class SetupWizardPage : NexusPage
         _approved.Clear();
         _approved.AddRange(_chooser.Selected);
         _workspacesDirty = false;
-        _workspaceState.Text = $"Monitoring {_approved.Count} folder{(_approved.Count == 1 ? "" : "s")}.";
+        _workspaceState.Text = $"Capturing {Plural(_approved.Count, "folder")}.";
         return true;
     }
 
-    // ---- Privacy
-
-    private UIElement BuildPrivacy()
+    // Done needs the folders even when the Folders step was never opened.
+    private async Task LoadApprovedAsync()
     {
-        var panel = new StackPanel { Spacing = 16 };
-        panel.Children.Add(Point("", "Only the folders you approve", "Nexus monitors only the folders you chose. It does not add other projects by itself."));
-        panel.Children.Add(Point("", "What is captured", CaptureSetup.WhatIsCaptured));
-        panel.Children.Add(Point("", "Where it goes", "Captured sessions and the memories extracted from them upload to your account on the server you connected to. While offline they wait on this computer and upload later."));
-        panel.Children.Add(Point("", "Sharing is always your choice", "Chats stay private to you. Sharing a chat with a teammate or an organization is a separate action each time; joining an organization doesn't reveal private chats."));
-        panel.Children.Add(Point("", "You stay in control", "Pause capture from the tray icon at any time. Remove a folder in Settings > Workspaces & capture; your existing history stays in your account. Uninstalling Nexus asks whether to delete its data from this computer."));
-        // Crash reports: ask each time unless the person opts in here.
-        _autoReports.IsOn = AppPrefs.Data.AutoSendCrashReports;
-        _autoReports.Toggled += (_, _) =>
+        var response = await Call(NxMethods.StatusGet);
+        if (response.Ok && response.Result is { } status && status.TryGetProperty("capture", out var capture) && capture.ValueKind == JsonValueKind.Object)
         {
-            AppPrefs.Data.AutoSendCrashReports = _autoReports.IsOn;
-            AppPrefs.Save();
-        };
-        AutomationProperties.SetName(_autoReports, "Send crash reports automatically");
-        var reports = ToggleRow("Send crash reports automatically",
-            "If Nexus crashes it saves a short report: the error, where in Nexus's code it happened, and recent lines from its own log. Never your chats, memories, files or tokens. " +
-            "Off: Nexus asks you each time and shows exactly what would be sent. On: reports go without asking, and without your account.", _autoReports);
-        reports.Margin = new Thickness(0, 4, 0, 0);
-        panel.Children.Add(reports);
-        return panel;
+            _approved.Clear();
+            SettingsPage.ReadPaths(capture, "approved_workspaces", _approved);
+        }
     }
 
-    // ---- Startup
+    // ---- Crash reports (on the Folders step)
 
-    private UIElement BuildStartup()
+    private bool _autoReportsWired;
+
+    private Border CrashReportsRow()
     {
-        var integration = DesktopIntegration.Current;
-        _loginStart.Toggled += (_, _) => ApplyToggle(_loginStart, on => integration.SetStartsAtLogin(on));
-        _desktopShortcut.Toggled += (_, _) => ApplyToggle(_desktopShortcut, on => integration.SetDesktopShortcut(on));
-        var panel = new StackPanel();
-        panel.Children.Add(ToggleRow("Start Nexus when I sign in", "Nexus starts hidden in the system tray, so capture keeps running without opening a window.", _loginStart));
-        if (integration.SupportsDesktopShortcut)
-            panel.Children.Add(ToggleRow("Desktop shortcut", "Put a Nexus shortcut on the desktop.", _desktopShortcut));
-        panel.Children.Add(Para("Closing the Nexus window hides it to the system tray and capture keeps running. Quit from the tray icon's menu.", 0.65, NexusTokens.FontCaption, new Thickness(0, 14, 0, 0)));
-        return panel;
+        // Ask each time unless the person opts in here.
+        _autoReports.IsOn = AppPrefs.Data.AutoSendCrashReports;
+        if (!_autoReportsWired)
+        {
+            _autoReportsWired = true;
+            _autoReports.Toggled += (_, _) =>
+            {
+                AppPrefs.Data.AutoSendCrashReports = _autoReports.IsOn;
+                AppPrefs.Save();
+            };
+        }
+        return ToggleRow("Send crash reports automatically",
+            "Only the error and Nexus's own log lines, never your chats, files or tokens. Off: Nexus asks each time and shows what would be sent.", _autoReports);
+    }
+
+    // ---- Startup (only for a copy the installer did not set up)
+
+    // The installer asks about start-at-login and the desktop shortcut; a
+    // copy it installed is managed by Velopack. Anything else (a portable
+    // copy, a developer build) gets one line on Done instead.
+    private static bool SupportsPortableStartup
+    {
+        get
+        {
+            try { return !UpdateService.Shared.IsAvailable; }
+            catch { return false; }
+        }
+    }
+
+    private bool _loginStartWired;
+
+    private UIElement StartupLine()
+    {
+        if (!_loginStartWired)
+        {
+            _loginStartWired = true;
+            _loginStart.Toggled += (_, _) => ApplyToggle(_loginStart, on => DesktopIntegration.Current.SetStartsAtLogin(on));
+        }
+        return ToggleRow("Start Nexus when I sign in to Windows", "Nexus waits in the system tray so capture keeps running.", _loginStart);
     }
 
     private void SyncStartup()
     {
-        var integration = DesktopIntegration.Current;
-        bool login, shortcut;
-        try { login = integration.StartsAtLogin; } catch { login = false; }
-        try { shortcut = integration.HasDesktopShortcut; } catch { shortcut = false; }
+        bool login;
+        try { login = DesktopIntegration.Current.StartsAtLogin; } catch { login = false; }
         DispatcherQueue?.TryEnqueue(() =>
         {
             _startupSync = true;
             _loginStart.IsOn = login;
-            _desktopShortcut.IsOn = shortcut;
             _startupSync = false;
         });
     }
@@ -834,17 +835,39 @@ public sealed class SetupWizardPage : NexusPage
         try { apply(toggle.IsOn); }
         catch (Exception ex)
         {
+            Nexus.Core.Diagnostics.DiagLog.Warn("setup", "could not change a startup option", ex);
             _startupSync = true;
             toggle.IsOn = !toggle.IsOn;
             _startupSync = false;
-            AutomationProperties.SetHelpText(toggle, ex.Message);
-            ToolTipService.SetToolTip(toggle, ex.Message);
+            ToolTipService.SetToolTip(toggle, "Windows didn't allow this change. Try again from Settings.");
         }
     }
 
     // ---- Done
 
-    // A small memory graph blooms out from a check mark.
+    private bool Ready => _signedIn && _agentsConnected > 0 && _approved.Count > 0;
+
+    private string SignedInText => _accountName.Length > 0 ? $"Signed in as @{_accountName}" : "Signed in";
+
+    private (string Title, string Subtitle) DoneTitles()
+    {
+        var parts = new List<string>();
+        parts.Add(_signedIn ? SignedInText : "Not signed in");
+        parts.Add(_agentsConnected > 0 ? $"{Plural(_agentsConnected, "agent")} connected" : "No agents connected");
+        parts.Add(_approved.Count switch
+        {
+            0 => "No folders captured",
+            1 => "Capturing " + _approved[0],
+            _ => $"Capturing {_approved[0]} and {Plural(_approved.Count - 1, "more folder")}"
+        });
+        var line = string.Join(" · ", parts);
+        return Ready
+            ? ("Nexus is ready", line)
+            : ("Almost there", line + ". Finish the rest now or any time in Settings.");
+    }
+
+    // A small memory graph blooms out from a check mark (only when every
+    // part of setup is done; otherwise the screen says what is left).
     private UIElement Bloom()
     {
         const double w = 300, h = 150;
@@ -897,47 +920,45 @@ public sealed class SetupWizardPage : NexusPage
     private UIElement BuildDone()
     {
         var panel = new StackPanel { Spacing = 12 };
-        panel.Children.Add(Bloom());
-        bool login;
-        try { login = DesktopIntegration.Current.StartsAtLogin; } catch { login = false; }
+        _playDone = null;
+        if (Ready) panel.Children.Add(Bloom());
         panel.Children.Add(Summary(_signedIn, "Account",
-            _signedIn ? (_accountName.Length > 0 ? $"Signed in as {_accountName}." : "Signed in.") : "Not signed in. Sign in any time in Settings > Account."));
+            _signedIn ? SignedInText + " on " + HostOf(ServerInUse) + "." : "Not signed in. Chats stay on this computer until you sign in.",
+            _signedIn ? null : ("Sign in", Step.Connect)));
         panel.Children.Add(Summary(_agentsConnected > 0, "Agents",
-            _agentsConnected > 0 ? $"{_agentsConnected} agent{(_agentsConnected == 1 ? "" : "s")} connected to Nexus memory." : "No agents connected yet. Connect them from the Agents page."));
-        panel.Children.Add(Summary(_approved.Count > 0, "Workspaces",
-            _approved.Count > 0 ? $"Monitoring {_approved.Count} folder{(_approved.Count == 1 ? "" : "s")}." : "No folders monitored yet. Choose them in Settings > Workspaces & capture."));
-        panel.Children.Add(Summary(login, "Startup", login ? "Starts when you sign in to Windows." : "Starts when you open it."));
+            _agentsConnected > 0 ? $"{Plural(_agentsConnected, "agent")} connected to Nexus." : _agentsInstalled > 0 ? $"{Plural(_agentsInstalled, "agent")} found, none connected yet." : "No coding agents found on this computer yet.",
+            _agentsConnected > 0 || _agentsInstalled == 0 ? null : ("Connect agents", Step.Agents)));
+        panel.Children.Add(Summary(_approved.Count > 0, "Folders",
+            _approved.Count > 0 ? "Capturing " + string.Join(", ", _approved.Take(3)) + (_approved.Count > 3 ? $" and {_approved.Count - 3} more." : ".") : "No folders captured yet, so no chats are saved.",
+            _approved.Count > 0 ? null : ("Choose folders", Step.Workspaces)));
+        if (SupportsPortableStartup) panel.Children.Add(StartupLine());
         panel.Children.Add(Para("Run this setup again any time from Settings > General.", 0.6, 12, new Thickness(0, 8, 0, 0)));
         return panel;
     }
 
+    private int IndexOf(Step step) => Array.FindIndex(Steps, s => s.Step == step);
+
+    private static string Plural(int count, string noun) => count == 1 ? $"1 {noun}" : $"{count} {noun}s";
+
     // ---- small builders
 
-    private static UIElement Point(string glyph, string title, string text)
-    {
-        var grid = new Grid { ColumnSpacing = 14 };
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.Children.Add(new Border
-        {
-            Width = 34, Height = 34, CornerRadius = NexusTokens.RadiusMedium, Background = NexusPalette.AccentFill, VerticalAlignment = VerticalAlignment.Top,
-            Child = new FontIcon { Glyph = glyph, FontSize = 15, Foreground = Brand }
-        });
-        var text2 = new StackPanel { Spacing = 2 };
-        text2.Children.Add(new TextBlock { Text = title, FontWeight = Microsoft.UI.Text.FontWeights.Medium, TextWrapping = TextWrapping.Wrap });
-        text2.Children.Add(new TextBlock { Text = text, Foreground = NexusPalette.Muted, TextWrapping = TextWrapping.Wrap, FontSize = NexusTokens.FontCaption });
-        Grid.SetColumn(text2, 1);
-        grid.Children.Add(text2);
-        AutomationProperties.SetName(grid, title + ". " + text);
-        return grid;
-    }
-
-    private static UIElement Summary(bool done, string title, string text)
+    // One row of the Done summary; anything not done gets a link back to
+    // the step that sets it up.
+    private UIElement Summary(bool done, string title, string text, (string Label, Step Step)? fix = null)
     {
         var grid = new Grid { ColumnSpacing = 12, Padding = new Thickness(0, 10, 0, 10), BorderBrush = NexusPalette.Hairline, BorderThickness = new Thickness(0, 0, 0, 1) };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(110) });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        if (fix is { } action)
+        {
+            var link = new HyperlinkButton { Content = action.Label, Padding = new Thickness(6, 2, 6, 2), VerticalAlignment = VerticalAlignment.Center };
+            AutomationProperties.SetName(link, action.Label + " (" + title + ")");
+            link.Click += (_, _) => Go(IndexOf(action.Step));
+            Grid.SetColumn(link, 3);
+            grid.Children.Add(link);
+        }
         grid.Children.Add(new FontIcon { Glyph = done ? "" : "", FontSize = 13, Foreground = done ? NexusPalette.Accent : NexusPalette.Muted });
         var label = new TextBlock { Text = title, FontWeight = Microsoft.UI.Text.FontWeights.Medium };
         Grid.SetColumn(label, 1);
@@ -991,7 +1012,8 @@ public sealed class SetupWizardPage : NexusPage
         return scope;
     }
 
-    private static string HostOf(string url) => Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Host : url;
+    // Host with its port when it is not the default, e.g. "127.0.0.1:47900".
+    private static string HostOf(string url) => Uri.TryCreate(url, UriKind.Absolute, out var uri) ? uri.Authority : url;
 
     private static bool HasEnvToken() =>
         !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("NEXUS_TOKEN")) ||
