@@ -156,7 +156,7 @@ public sealed class AgentsPage : NexusPage
 
     private async Task AppendSpawnedSessionsAsync()
     {
-        var response = await Call(NxMethods.TimelineList, new { project_id = ShellProjectId(), limit = 50 });
+        var response = await Call(NxMethods.TimelineList, new { project_id = ShellProjectId(), limit = 50, include_subagents = true });
         if (!response.Ok)
         {
             return;

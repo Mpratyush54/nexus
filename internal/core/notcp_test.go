@@ -88,3 +88,28 @@ func TestConfigureMCPViaCall(t *testing.T) {
 		t.Fatalf("config missing bundled proxy: %+v %s", res, body)
 	}
 }
+
+func TestSourceScanSkipsDebugOnlyFiles(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, body string) {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("debug.go", "//go:build nexuscorelib && nexusdebug\n\npackage main\n\nimport \"net/http\"\n\nfunc init() { _ = http.ListenAndServe(\"127.0.0.1:0\", nil) }\n")
+	hits, err := SourceMentionsTCPListen(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 0 {
+		t.Fatalf("debug-only file flagged: %v", hits)
+	}
+	write("release.go", "//go:build nexuscorelib\n\npackage main\n\nimport \"net/http\"\n\nfunc init() { _ = http.ListenAndServe(\"127.0.0.1:0\", nil) }\n")
+	hits, err = SourceMentionsTCPListen(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("release listener not flagged: %v", hits)
+	}
+}

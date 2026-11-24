@@ -297,6 +297,8 @@ internal static class SubagentRuns
         return list;
     }
 
+    // Sub-agent runs are listed only on request (servers that predate the
+    // flag list them anyway and ignore it).
     private static object Args(string projectId, string q, int limit) =>
-        projectId.Length > 0 ? new { project_id = projectId, q, limit } : (object)new { q, limit };
+        projectId.Length > 0 ? new { project_id = projectId, q, limit, include_subagents = true } : (object)new { q, limit, include_subagents = true };
 }

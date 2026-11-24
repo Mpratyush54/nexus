@@ -204,7 +204,7 @@ public sealed partial class SettingsPage
 
     private static StackPanel SectionTitle(SettingsSection section)
     {
-        var title = new TextBlock { Text = section.Title, FontSize = 20, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+        var title = NexusTokens.PageTitle(section.Title);
         AutomationProperties.SetHeadingLevel(title, AutomationHeadingLevel.Level2);
         var header = new StackPanel { Spacing = 4, Margin = new Thickness(0, 0, 0, 24) };
         header.Children.Add(title);

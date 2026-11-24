@@ -11,26 +11,30 @@ internal sealed class ActivityCalendarView : UserControl
     private readonly StackPanel _content = new() { Spacing = 14 };
     internal ActivityCalendarView() => Content = _content;
 
+    // The page owns the "Activity" heading; this view is the numbers and grid.
     internal void ShowLoading(string scope)
     {
         _content.Children.Clear();
-        _content.Children.Add(new TextBlock { Text = "⌁  Your agent activity", FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = NexusPalette.Amber });
-        _content.Children.Add(new TextBlock { Text = "Loading activity for " + scope + "…", Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
+        _content.Children.Add(Skeleton.Block(280, 12, 6));
+        var grid = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3 };
+        for (var week = 0; week < 26; week++)
+        {
+            var column = new StackPanel { Spacing = 3 };
+            for (var day = 0; day < 7; day++) column.Children.Add(new Border { Width = 12, Height = 12, CornerRadius = new CornerRadius(2), Background = SessionChatRender.SubtleFill });
+            grid.Children.Add(column);
+        }
+        _content.Children.Add(grid);
+        AutomationProperties.SetName(_content, "Loading activity for " + scope);
     }
 
     /// <summary>Paints the calendar. scope names what it covers ("all your projects", a project name).</summary>
     internal void Render(ActivitySummary? activity, string scope, string? error = null)
     {
         _content.Children.Clear();
-        _content.Children.Add(new TextBlock { Text = "⌁  Your agent activity", FontSize = 18, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Foreground = NexusPalette.Amber });
-        if (NxErrors.IsSignedOut(error))
-        {
-            _content.Children.Add(new TextBlock { Text = NxErrors.SignedOutMessage, Foreground = NexusPalette.Amber, TextWrapping = TextWrapping.Wrap });
-            return;
-        }
+        AutomationProperties.SetName(_content, "Agent activity");
         if (activity is null)
         {
-            _content.Children.Add(new TextBlock { Text = error is { Length: > 0 } ? "Activity could not be loaded: " + error : "Activity by original agent date is unavailable. Refresh after the server is updated.", TextWrapping = TextWrapping.Wrap });
+            _content.Children.Add(StateView.Error("Activity isn't available right now", error is { Length: > 0 } ? error : "This server doesn't report activity yet.", null));
             return;
         }
         var days = activity.Days;
@@ -38,7 +42,11 @@ internal sealed class ActivityCalendarView : UserControl
         var summary = new Grid();
         summary.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         summary.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        summary.Children.Add(new TextBlock { Text = $"{activity.Total:N0} messages · {activity.ActiveDays} active days in the last year · {scope}", TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true });
+        var offset = TimeZoneInfo.Local.GetUtcOffset(DateTime.Now);
+        var line = new TextBlock { Text = $"{activity.Total:N0} agent messages on {activity.ActiveDays} days in the past year, {scope}", TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, FontSize = NexusTokens.FontBody, Opacity = 0.8 };
+        // How the days are counted is detail, not headline.
+        ToolTipService.SetToolTip(line, $"Days use each agent's own message times (UTC{(offset < TimeSpan.Zero ? "−" : "+")}{offset.Duration():hh\\:mm}). Uploading old history doesn't add activity.");
+        summary.Children.Add(line);
         var legend = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, VerticalAlignment = VerticalAlignment.Center };
         legend.Children.Add(new TextBlock { Text = "Less", FontSize = 10, Opacity = 0.7 });
         for (var level = 0; level < 5; level++) legend.Children.Add(new Border { Width = 10, Height = 10, CornerRadius = new CornerRadius(2), Background = Heat(level) });
@@ -74,17 +82,15 @@ internal sealed class ActivityCalendarView : UserControl
         // Open on the most recent weeks (the right end), not last year.
         scroller.SizeChanged += (_, _) => scroller.ChangeView(scroller.ScrollableWidth, null, null, true);
         _content.Children.Add(scroller);
-        var offset = TimeZoneInfo.Local.GetUtcOffset(DateTime.Now);
-        _content.Children.Add(new TextBlock { Text = $"Original agent timestamps · UTC{(offset < TimeSpan.Zero ? "−" : "+")}{offset.Duration():hh\\:mm}. Uploading history does not add activity.", FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
-        if (activity.Undated > 0) _content.Children.Add(new TextBlock { Text = $"{activity.Undated:N0} historical messages have no original date and are not placed on the calendar.", Foreground = NexusPalette.Amber, FontSize = 12, TextWrapping = TextWrapping.Wrap });
+        if (activity.Undated > 0) _content.Children.Add(new TextBlock { Text = $"{activity.Undated:N0} older messages have no date, so they aren't on the calendar.", Opacity = 0.65, FontSize = 12, TextWrapping = TextWrapping.Wrap });
         if (activity.FailedProjects > 0) _content.Children.Add(new TextBlock { Text = $"Activity for {activity.FailedProjects} project{(activity.FailedProjects == 1 ? "" : "s")} could not be loaded. This calendar may be incomplete.", Foreground = NexusPalette.Amber, FontSize = 12, TextWrapping = TextWrapping.Wrap });
         else if (activity.Partial) _content.Children.Add(new TextBlock { Text = "Some archived history could not be read. This calendar may be incomplete.", Foreground = NexusPalette.Amber, FontSize = 12, TextWrapping = TextWrapping.Wrap });
     }
 
     private static Brush Heat(int level)
     {
-        if (level == 0) return SessionChatRender.SubtleFill;
-        var color = ((SolidColorBrush)NexusPalette.Amber).Color;
+        if (level == 0) return NexusTokens.Brush("NexusSkeletonBrush", Windows.UI.Color.FromArgb(20, 255, 255, 255));
+        var color = ((SolidColorBrush)NexusPalette.Accent).Color;
         color.A = new byte[] { 0, 65, 115, 180, 255 }[level];
         return new SolidColorBrush(color);
     }

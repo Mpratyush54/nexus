@@ -145,10 +145,10 @@ internal sealed class ProjectSwitcher : UserControl
         var shell = ShellState.Current;
         var name = filter.Length == 0 ? "All projects" : NameOf(filter) is { Length: > 0 } named ? named : shell.ProjectDisplay;
         _name.Text = name;
-        _hint.Text = filter.Length == 0
-            ? (shell.ProjectName.Length > 0 ? "New chats and Memory use " + shell.ProjectName : "Choose a project for new chats")
-            : "Project · Ctrl+P to switch";
-        var color = BadgeColor(filter.Length == 0 ? "*" : name);
+        // Says what the list shows. Where a new chat starts is on Home's
+        // project chip, not here.
+        _hint.Text = filter.Length == 0 ? "Chats from every project" : "Switch project · Ctrl+P";
+        var color = NexusPalette.BadgeInk(BadgeColor(filter.Length == 0 ? "*" : name));
         _badge.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(46, color.R, color.G, color.B));
         _badge.Child = new TextBlock
         {
@@ -167,7 +167,7 @@ internal sealed class ProjectSwitcher : UserControl
         var projects = _projects();
         var filter = _filter();
         bool Matches(string name) => query.Length == 0 || name.Contains(query, StringComparison.OrdinalIgnoreCase);
-        if (Matches("All projects")) _list.Children.Add(Row("", "All projects", "Chats and activity from every project", filter.Length == 0));
+        if (Matches("All projects")) _list.Children.Add(Row("", "All projects", "Every project's chats and activity", filter.Length == 0));
         var recent = State.Recent.Where(id => projects.Any(p => p.Id == id)).Take(4).ToList();
         if (query.Length == 0 && recent.Count > 0)
         {

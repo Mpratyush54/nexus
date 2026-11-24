@@ -95,6 +95,8 @@ public static class AppPrefs
         public string MemoryScope { get; set; } = "all";
         // Agent last chosen for a new chat (Home's start composer).
         public string LastStartAgent { get; set; } = "claude";
+        // Appearance: "system" (follow Windows), "light" or "dark".
+        public string Theme { get; set; } = "system";
         public Dictionary<string, string> ChatModels { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         // project id -> local folder last used for chats in that project
         public Dictionary<string, string> ProjectFolders { get; set; } = new(StringComparer.OrdinalIgnoreCase);

@@ -18,14 +18,18 @@ public sealed partial class SettingsPage
 
     private UIElement BuildGeneralSection()
     {
-        var colors = new Button { Content = "Windows color settings" };
-        colors.Click += (_, _) =>
+        var theme = new ComboBox { MinWidth = 160 };
+        foreach (var (label, value) in new[] { ("Use Windows setting", ThemeService.System), ("Light", ThemeService.Light), ("Dark", ThemeService.Dark) })
+            theme.Items.Add(new ComboBoxItem { Content = label, Tag = value });
+        theme.SelectedItem = theme.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == ThemeService.Preference) ?? theme.Items[0];
+        AutomationProperties.SetName(theme, "Theme");
+        theme.SelectionChanged += (_, _) =>
         {
-            try { Process.Start(new ProcessStartInfo("ms-settings:colors") { UseShellExecute = true }); }
-            catch (Exception ex) { Notify("Could not open Windows settings: " + ex.Message, true); }
+            if ((theme.SelectedItem as ComboBoxItem)?.Tag is string chosen && chosen != ThemeService.Preference && MainWindow.Current is { } window)
+                ThemeService.Set(window, chosen);
         };
         var appearance = SettingsGroup("Appearance",
-            SettingRow(RowText("Theme", "Nexus follows your Windows light, dark, and contrast settings."), colors));
+            SettingRow(RowText("Theme", "Light, dark, or the same as Windows. High contrast always follows Windows."), theme));
 
         _loginStartSync = true;
         _loginStart.IsOn = LoginStart.IsEnabled();
@@ -88,7 +92,7 @@ public sealed partial class SettingsPage
             .ToList();
         if (items.Count == 0)
         {
-            _tokens.Children.Add(NoteRow("No API tokens. Install Nexus into your agents from the Agents page to create one per agent."));
+            _tokens.Children.Add(NoteRow("No agents connected yet. Connect them from the Agents page; each gets its own key."));
             return;
         }
         foreach (var token in items)
@@ -96,8 +100,12 @@ public sealed partial class SettingsPage
             var id = NxJson.Text(token, "id");
             var name = NxJson.Text(token, "name");
             if (name.Length == 0) name = "API token";
+            // "Nexus MCP · cursor (maya-desktop)" reads as "Cursor on maya-desktop".
+            var match = System.Text.RegularExpressions.Regex.Match(name, @"^Nexus MCP · (?<agent>[^(]+?)\s*(?:\((?<host>[^)]+)\))?$");
+            if (match.Success)
+                name = ChatTitles.AgentName(match.Groups["agent"].Value.Trim()) + (match.Groups["host"].Success ? " on " + match.Groups["host"].Value : "");
             var details = new List<string>();
-            if (NxJson.Text(token, "token_prefix", "prefix") is { Length: > 0 } prefix) details.Add(prefix + "…");
+            var prefix = NxJson.Text(token, "token_prefix", "prefix");
             if (FriendlyWhen(NxJson.Text(token, "created_at")) is { Length: > 0 } created) details.Add("created " + created);
             var used = FriendlyWhen(NxJson.Text(token, "last_used_at"));
             details.Add(used.Length > 0 ? "last used " + used : "never used");
@@ -112,7 +120,10 @@ public sealed partial class SettingsPage
                 Notify(result.Ok ? "Token revoked." : result.Error ?? "Could not revoke token.", !result.Ok);
                 await LoadTokensAsync();
             };
-            _tokens.Children.Add(SettingRow(RowText(name, string.Join(" · ", details)), revoke));
+            var row = SettingRow(RowText(name, string.Join(" · ", details)), revoke);
+            // The key's prefix identifies it for support; it is detail, not a headline.
+            if (prefix.Length > 0) ToolTipService.SetToolTip(row, "Key starts with " + prefix + "…");
+            _tokens.Children.Add(row);
         }
     }
 

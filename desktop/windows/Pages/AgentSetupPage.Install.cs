@@ -20,20 +20,25 @@ public sealed partial class AgentSetupPage
 
     private UIElement InstallBar()
     {
-        var install = new Button { Content = "Install Nexus into all agents", Padding = new Thickness(14, 6, 14, 7) };
+        var install = new Button { Content = "Connect Nexus to your agents", Padding = new Thickness(14, 6, 14, 7) };
+        ToolTipService.SetToolTip(install, "Adds Nexus to every coding agent on this computer so they share memory and chats. You review the changes first.");
         if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style)
             install.Style = style;
         install.Click += async (_, _) => await InstallAllAsync();
-        var uninstall = new Button
-        {
-            Content = "Uninstall", Padding = new Thickness(10, 6, 10, 7),
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0)
-        };
-        ToolTipService.SetToolTip(uninstall, "Remove the Nexus MCP server from every agent");
+        var uninstall = new MenuFlyoutItem { Text = "Disconnect Nexus from all agents", Icon = new FontIcon { Glyph = "\uE711" } };
+        ToolTipService.SetToolTip(uninstall, "Removes only the Nexus entry from each agent's settings");
         uninstall.Click += async (_, _) => await UninstallAllAsync();
-        var bar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6, Margin = new Thickness(0, 6, 0, 2) };
+        var more = new Button
+        {
+            Content = new FontIcon { Glyph = "\uE712", FontSize = 14 }, Padding = new Thickness(8), MinWidth = 34,
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0),
+            Flyout = new MenuFlyout { Items = { uninstall }, Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.BottomEdgeAlignedRight }
+        };
+        ToolTipService.SetToolTip(more, "More");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(more, "More agent actions");
+        var bar = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Margin = new Thickness(0, 6, 0, 2) };
         bar.Children.Add(install);
-        bar.Children.Add(uninstall);
+        bar.Children.Add(more);
         return bar;
     }
 
@@ -69,7 +74,7 @@ public sealed partial class AgentSetupPage
 
         var dialog = new ContentDialog
         {
-            XamlRoot = XamlRoot, Title = "Install Nexus into all agents",
+            XamlRoot = XamlRoot, Title = "Connect Nexus to your agents",
             Content = new ScrollViewer { Content = body, MaxHeight = 480 },
             PrimaryButtonText = "Install", CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary, IsPrimaryButtonEnabled = false
@@ -143,9 +148,9 @@ public sealed partial class AgentSetupPage
         else body.Children.Add(Small("Only the Nexus entry is removed; other MCP servers and settings stay. Files are backed up first. Agent tokens stay valid until you revoke them in Settings.", 0.6));
         var dialog = new ContentDialog
         {
-            XamlRoot = XamlRoot, Title = "Uninstall Nexus from agents",
+            XamlRoot = XamlRoot, Title = "Disconnect Nexus from your agents",
             Content = new ScrollViewer { Content = body, MaxHeight = 420 },
-            PrimaryButtonText = changes > 0 ? "Uninstall" : "", CloseButtonText = changes > 0 ? "Cancel" : "Close",
+            PrimaryButtonText = changes > 0 ? "Disconnect" : "", CloseButtonText = changes > 0 ? "Cancel" : "Close",
             DefaultButton = changes > 0 ? ContentDialogButton.Primary : ContentDialogButton.Close
         };
         if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;

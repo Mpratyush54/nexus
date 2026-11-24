@@ -116,8 +116,8 @@ public sealed partial class SettingsPage : NexusPage
         var refresh = new Button { Content = "Refresh" };
         AutomationProperties.SetName(refresh, "Refresh agent tokens");
         refresh.Click += async (_, _) => await LoadTokensAsync();
-        var tokens = SettingsGroup("Agent tokens",
-            SettingRow(RowText("API tokens", "Each agent connected with Install in all agents gets its own revocable token, named \"Nexus MCP · <agent>\". Your sign-in is never shared with agents."), refresh),
+        var tokens = SettingsGroup("Agent access",
+            SettingRow(RowText("Connected agents", "Each agent you connect gets its own key, which you can revoke at any time. Your own sign-in is never shared with agents."), refresh),
             _tokens);
         return new StackPanel { Children = { account, tokens } };
     }

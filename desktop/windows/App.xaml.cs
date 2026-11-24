@@ -16,6 +16,9 @@ public partial class App : Application
     {
         InitializeComponent();
         UnhandledException += OnUnhandledException;
+        // The theme must be chosen before the first window exists.
+        AppPrefs.Load();
+        ThemeService.ApplyAtLaunch(this);
     }
 
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
@@ -91,7 +94,7 @@ public partial class App : Application
         PendingAuthUrl = null;
     }
 
-    private static string CaptureWorkspaceRoot()
+    internal static string CaptureWorkspaceRoot()
     {
         var configured = Environment.GetEnvironmentVariable("NEXUS_WORKSPACE");
         if (!string.IsNullOrWhiteSpace(configured) && Directory.Exists(configured))

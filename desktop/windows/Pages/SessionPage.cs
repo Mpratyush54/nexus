@@ -1,5 +1,6 @@
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Documents;
 using Microsoft.UI.Xaml.Media;
@@ -446,6 +447,12 @@ public sealed partial class SessionPage : NexusPage
         var usageInline = new Border { Child = usage, VerticalAlignment = VerticalAlignment.Center };
         var usageBelow = new Border { Margin = new Thickness(0, -2, 0, 0) };
         InitSubagentsButton();
+        // Fork stays in the More menu; the header keeps the everyday actions.
+        _forkButton.Visibility = Visibility.Collapsed;
+        AutomationProperties.SetName(find, "Find in this chat");
+        AutomationProperties.SetName(detailsButton, "Details panel");
+        AutomationProperties.SetName(shareButton, "Share");
+        AutomationProperties.SetName(more, "More actions");
         var headerActions = Row(usageInline, _lineageMarker, _subagentsButton, find, detailsButton, _forkButton, shareButton, more);
         headerActions.Spacing = 2;
         foreach (var action in headerActions.Children.OfType<Button>())
@@ -546,7 +553,14 @@ public sealed partial class SessionPage : NexusPage
         // A newly opened chat starts pinned to its newest message.
         _stickToBottom = true;
         _lastSeenOffset = 0;
-        _header.Text = MainWindow.Current?.ChatTitleFor(nextId) is { Length: > 0 } listedTitle ? listedTitle : "Loading session…";
+        _header.Text = MainWindow.Current?.ChatTitleFor(nextId) is { Length: > 0 } listedTitle ? listedTitle : "Opening chat…";
+        // The title glides in from the chat list row that was clicked.
+        if (IsLoaded) DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => Motion.StartChatTitle(_header));
+        else
+        {
+            void StartOnce(object sender, RoutedEventArgs e) { Loaded -= StartOnce; Motion.StartChatTitle(_header); }
+            Loaded += StartOnce;
+        }
         _notice.Text = "";
         _sessionLoaded = false;
         _legacy = false;

@@ -16,6 +16,41 @@
             <CornerRadius x:Key="ControlCornerRadius">6</CornerRadius>
             <CornerRadius x:Key="OverlayCornerRadius">10</CornerRadius>
             <Thickness x:Key="TextControlBorderThemeThicknessFocused">1</Thickness>
+
+            <!-- Nexus tokens. Code-built pages read the same values from
+                 Pages/NexusTokens.cs; keep the two in step.
+                 Spacing: a 4px grid (4, 8, 12, 16, 24, 32).
+                 Type ramp: page title 22, section 15, body 13.5, caption 12. -->
+            <x:Double x:Key="NexusSpace1">4</x:Double>
+            <x:Double x:Key="NexusSpace2">8</x:Double>
+            <x:Double x:Key="NexusSpace3">12</x:Double>
+            <x:Double x:Key="NexusSpace4">16</x:Double>
+            <x:Double x:Key="NexusSpace6">24</x:Double>
+            <x:Double x:Key="NexusSpace8">32</x:Double>
+            <Thickness x:Key="NexusPagePadding">32,20,32,32</Thickness>
+            <x:Double x:Key="NexusFontPageTitle">22</x:Double>
+            <x:Double x:Key="NexusFontSection">15</x:Double>
+            <x:Double x:Key="NexusFontBody">13.5</x:Double>
+            <x:Double x:Key="NexusFontCaption">12</x:Double>
+            <CornerRadius x:Key="NexusRadiusSmall">6</CornerRadius>
+            <CornerRadius x:Key="NexusRadiusMedium">10</CornerRadius>
+            <CornerRadius x:Key="NexusRadiusLarge">14</CornerRadius>
+            <Style x:Key="NexusPageTitleStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="22"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="LineHeight" Value="28"/>
+                <Setter Property="TextWrapping" Value="Wrap"/>
+            </Style>
+            <Style x:Key="NexusSectionTitleStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="15"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="TextWrapping" Value="Wrap"/>
+            </Style>
+            <Style x:Key="NexusCaptionStyle" TargetType="TextBlock">
+                <Setter Property="FontSize" Value="12"/>
+                <Setter Property="Foreground" Value="{ThemeResource NexusMutedTextBrush}"/>
+                <Setter Property="TextWrapping" Value="Wrap"/>
+            </Style>
             <Thickness x:Key="ButtonPadding">10,5,10,6</Thickness>
             <x:Double x:Key="ComboBoxMinHeight">28</x:Double>
             <x:Double x:Key="TextControlThemeMinHeight">30</x:Double>
@@ -24,7 +59,30 @@
                 <!-- Dark: true-black canvas, surfaces lifted ~3%, hairline white
                      borders, white-alpha hover/selection; no grey fills. -->
                 <ResourceDictionary x:Key="Dark">
-                    <Color x:Key="NexusSidebarColor">#101010</Color>
+                    <Color x:Key="SystemAccentColor">#4F6EF7</Color>
+                    <Color x:Key="SystemAccentColorLight1">#6A84F8</Color>
+                    <Color x:Key="SystemAccentColorLight2">#4F6EF7</Color>
+                    <Color x:Key="SystemAccentColorLight3">#8EA2FF</Color>
+                    <Color x:Key="SystemAccentColorDark1">#4560DB</Color>
+                    <Color x:Key="SystemAccentColorDark2">#3A50BC</Color>
+                    <Color x:Key="SystemAccentColorDark3">#2E3F96</Color>
+                    <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#4F6EF7"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#5D7AF8"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#4560DB"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundChecked" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed" Color="#E5E5E5"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#4F6EF7"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#5D7AF8"/>
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="NexusSkeletonBrush" Color="#14FFFFFF"/>
+                    <Color x:Key="NexusSkeletonHighlightColor">#24FFFFFF</Color>
+                    <SolidColorBrush x:Key="NexusDangerBrush" Color="#F28B8B"/>
+                    <SolidColorBrush x:Key="NexusDangerFillBrush" Color="#1AF28B8B"/>
+                    <SolidColorBrush x:Key="NexusHoverFillBrush" Color="#0DFFFFFF"/>
+                    <Color x:Key="NexusSidebarColor">#D90E0E0E</Color>
                     <Color x:Key="NexusCanvasColor">#000000</Color>
                     <SolidColorBrush x:Key="NexusCanvasBrush" Color="#000000"/>
                     <SolidColorBrush x:Key="NexusSurfaceBrush" Color="#141414"/>
@@ -135,7 +193,43 @@
                     <SolidColorBrush x:Key="ContentDialogBackground" Color="#0F0F0F"/>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
-                    <Color x:Key="NexusSidebarColor">#FAFAFA</Color>
+                    <Color x:Key="SystemAccentColor">#3B5BDB</Color>
+                    <Color x:Key="SystemAccentColorLight1">#4F6EF7</Color>
+                    <Color x:Key="SystemAccentColorLight2">#6A84F8</Color>
+                    <Color x:Key="SystemAccentColorLight3">#8EA2FF</Color>
+                    <Color x:Key="SystemAccentColorDark1">#3B5BDB</Color>
+                    <Color x:Key="SystemAccentColorDark2">#3149B8</Color>
+                    <Color x:Key="SystemAccentColorDark3">#263A94</Color>
+                    <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#3B5BDB"/>
+                    <SolidColorBrush x:Key="AccentButtonBackground" Color="#3B5BDB"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#4F6EF7"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#3149B8"/>
+                    <SolidColorBrush x:Key="AccentButtonForeground" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#F4F4F5"/>
+                    <SolidColorBrush x:Key="AccentButtonBorderBrush" Color="#00000000"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#3B5BDB"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#4F6EF7"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#3149B8"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundChecked" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed" Color="#F4F4F5"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#3B5BDB"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#4F6EF7"/>
+                    <SolidColorBrush x:Key="NexusSkeletonBrush" Color="#0F000000"/>
+                    <Color x:Key="NexusSkeletonHighlightColor">#06000000</Color>
+                    <SolidColorBrush x:Key="NexusDangerBrush" Color="#B91C1C"/>
+                    <SolidColorBrush x:Key="NexusDangerFillBrush" Color="#14B91C1C"/>
+                    <SolidColorBrush x:Key="NexusHoverFillBrush" Color="#0A000000"/>
+                    <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#E4E4E7"/>
+                    <SolidColorBrush x:Key="TextFillColorPrimaryBrush" Color="#18181B"/>
+                    <SolidColorBrush x:Key="TextFillColorSecondaryBrush" Color="#52525B"/>
+                    <SolidColorBrush x:Key="TextFillColorTertiaryBrush" Color="#71717A"/>
+                    <SolidColorBrush x:Key="FlyoutPresenterBackground" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="#FFFFFF"/>
+                    <Color x:Key="NexusSidebarColor">#E6F7F7F8</Color>
                     <Color x:Key="NexusCanvasColor">#FFFFFF</Color>
                     <SolidColorBrush x:Key="NexusCanvasBrush" Color="#FFFFFF"/>
                     <SolidColorBrush x:Key="NexusSurfaceBrush" Color="#FFFFFF"/>
@@ -156,6 +250,11 @@
                     <SolidColorBrush x:Key="ExpanderContentBackground" Color="#00000000"/>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="HighContrast">
+                    <SolidColorBrush x:Key="NexusSkeletonBrush" Color="{ThemeResource SystemColorGrayTextColor}"/>
+                    <StaticResource x:Key="NexusSkeletonHighlightColor" ResourceKey="SystemColorWindowColor"/>
+                    <SolidColorBrush x:Key="NexusDangerBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>
+                    <SolidColorBrush x:Key="NexusDangerFillBrush" Color="{ThemeResource SystemColorWindowColor}"/>
+                    <SolidColorBrush x:Key="NexusHoverFillBrush" Color="{ThemeResource SystemColorHighlightColor}"/>
                     <StaticResource x:Key="NexusSidebarColor" ResourceKey="SystemColorWindowColor"/>
                     <StaticResource x:Key="NexusCanvasColor" ResourceKey="SystemColorWindowColor"/>
                     <SolidColorBrush x:Key="NexusCanvasBrush" Color="{ThemeResource SystemColorWindowColor}"/>

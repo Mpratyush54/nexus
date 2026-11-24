@@ -10,22 +10,25 @@ namespace Nexus.Pages;
 
 public sealed partial class MemoryPage : NexusPage
 {
-    private static readonly (string Id, string Label)[] Scopes =
+    // Who a memory is for, in plain words. The last two are rarely needed
+    // and sit under "More".
+    private static readonly (string Id, string Label, bool Advanced)[] Scopes =
     [
-        ("all", "All"),
-        ("organization", "Team"),
-        ("project", "Project"),
-        ("personal", "Personal"),
-        ("session", "Session"),
-        ("ephemeral", "Ephemeral")
+        ("all", "All", false),
+        ("organization", "Team", false),
+        ("project", "This project", false),
+        ("personal", "Only me", false),
+        ("session", "One chat", true),
+        ("ephemeral", "Temporary", true)
     ];
+    private readonly DropDownButton _moreScopes = new() { MinHeight = 32, Padding = new Thickness(12, 4, 10, 4) };
 
     private const int PageSize = 20;
     private const int FetchBatchSize = 50;
 
     private readonly TextBox _query = new()
     {
-        PlaceholderText = "Refine: redis, jwt, docker, auth…",
+        PlaceholderText = "Search memories",
         HorizontalAlignment = HorizontalAlignment.Stretch
     };
     private readonly StackPanel _scopeBar = new() { Orientation = Orientation.Horizontal, Spacing = 4 };
@@ -69,7 +72,10 @@ public sealed partial class MemoryPage : NexusPage
         };
         _prevPage.Click += async (_, _) => await GoToPageAsync(_pageIndex - 1);
         _nextPage.Click += async (_, _) => await GoToPageAsync(_pageIndex + 1);
-        var refresh = new Button { Content = "Refresh" };
+        var refresh = new Button { Content = new FontIcon { Glyph = "\uE72C", FontSize = 14 }, MinWidth = 34, MinHeight = 32, Padding = new Thickness(8) };
+        ToolTipService.SetToolTip(refresh, "Refresh");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(refresh, "Refresh memories");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_query, "Search memories");
         refresh.Click += async (_, _) =>
         {
             _briefProjectId = "";
@@ -147,12 +153,12 @@ public sealed partial class MemoryPage : NexusPage
         list.Children.Add(_categoryBar);
         list.Children.Add(_split);
 
-        var root = new Grid { Padding = new Thickness(32, 24, 32, 24), RowSpacing = 16 };
+        var root = new Grid { Padding = NexusTokens.PagePadding, RowSpacing = 16 };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         AddHeaderWithGraphToggle(root, PageHeader(
-            "Memory & knowledge",
-            "Browse retained decisions and facts for the selected project. Search refines the list."), list);
+            "Memory",
+            "What your agents have learned: decisions, conventions and facts they reuse in every chat."), list);
         Content = root;
         WatchShellProject(() => LoadPageAsync(reset: true));
     }
@@ -172,8 +178,17 @@ public sealed partial class MemoryPage : NexusPage
     {
         _scopeBar.Children.Clear();
         _scopeButtons.Clear();
-        foreach (var (id, label) in Scopes)
+        var more = new MenuFlyout();
+        foreach (var (id, label, advanced) in Scopes)
         {
+            if (advanced)
+            {
+                var item = new MenuFlyoutItem { Text = label, Tag = id };
+                ToolTipService.SetToolTip(item, id == "session" ? "Memories kept for a single chat" : "Short-lived notes that expire");
+                item.Click += (_, _) => SetActiveScope(id, reload: true);
+                more.Items.Add(item);
+                continue;
+            }
             var button = new ToggleButton
             {
                 Content = label,
@@ -185,6 +200,10 @@ public sealed partial class MemoryPage : NexusPage
             _scopeButtons[id] = button;
             _scopeBar.Children.Add(button);
         }
+        _moreScopes.Content = "More";
+        _moreScopes.Flyout = more;
+        ToolTipService.SetToolTip(_moreScopes, "Less common kinds of memory");
+        _scopeBar.Children.Add(_moreScopes);
         SetActiveScope("all", reload: false);
     }
 
@@ -203,6 +222,11 @@ public sealed partial class MemoryPage : NexusPage
         {
             button.IsChecked = string.Equals(scopeId, id, StringComparison.OrdinalIgnoreCase);
         }
+        // An advanced scope shows on the "More" button while it is active.
+        var advanced = Scopes.FirstOrDefault(s => s.Advanced && string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
+        _moreScopes.Content = advanced.Label ?? "More";
+        if (advanced.Label is null) _moreScopes.ClearValue(Control.BackgroundProperty);
+        else _moreScopes.Background = NexusPalette.AccentFill;
         ShellState.Current.MemoryScope = id;
         if (reload)
         {
@@ -256,9 +280,8 @@ public sealed partial class MemoryPage : NexusPage
             _selectedId = null;
             _briefProjectId = "";
             _briefCard.Visibility = Visibility.Collapsed;
-            _cards.Children.Add(EmptyCard(
-                "Choose a project",
-                "Choose a project in the project switcher at the top of the sidebar (Ctrl+P) to browse its shared knowledge."));
+            _cards.Children.Add(StateView.Empty("\uE8B7", "Pick a project",
+                "Memories belong to a project. Choose one at the top of the sidebar (Ctrl+P)."));
             return;
         }
         if (!string.Equals(_briefProjectId, projectId, StringComparison.Ordinal))
@@ -298,14 +321,16 @@ public sealed partial class MemoryPage : NexusPage
         _detail.Children.Clear();
         _cards.Children.Clear();
         _categoryBar.Children.Clear();
-        _count.Text = $"Loading memories for {ShellProjectLabel()}…";
+        _count.Text = "";
         _pageInfo.Text = "";
+        _cards.Children.Add(Skeleton.Cards(3));
 
         var fill = await FillVisiblePageAsync(projectId, apiOffset, pageCarry);
         _loading = false;
+        _cards.Children.Clear();
         if (fill.Error is not null)
         {
-            ShowError(_cards, fill.Error);
+            _cards.Children.Add(StateView.Error("Couldn't load memories", fill.Error.Error, () => _ = LoadPageAsync(reset: true)));
             UpdatePaginationUi();
             return;
         }
@@ -342,17 +367,18 @@ public sealed partial class MemoryPage : NexusPage
         {
             if (_reviewOnly)
             {
-                _cards.Children.Add(EmptyCard(
-                    "Nothing left to review",
-                    "Every memory here has been confirmed or rejected. Clear the Review filter to see them all."));
+                _cards.Children.Add(StateView.Empty("\uE73E", "All caught up",
+                    "Every memory here has been confirmed or rejected.", "Show all memories", () => { _reviewOnly = false; _ = LoadPageAsync(reset: true); }));
             }
             else
             {
-                _cards.Children.Add(EmptyCard(
-                    string.IsNullOrWhiteSpace(_query.Text) ? "No memories in this scope" : "No matching memories",
-                    string.IsNullOrWhiteSpace(_query.Text)
-                        ? "Try another scope tab or go to the next page if available."
-                        : "Clear the search box or try a different scope."));
+                var searching = !string.IsNullOrWhiteSpace(_query.Text);
+                _cards.Children.Add(searching
+                    ? StateView.Empty("\uE721", "No memories match", "Try other words, or clear the search.", "Clear search", () => { _query.Text = ""; _ = LoadPageAsync(reset: true); })
+                    : _activeScope != "all"
+                        ? StateView.Empty("\uE8F1", "Nothing here yet", "No memories of this kind in " + ShellProjectLabel() + ".", "Show all", () => SetActiveScope("all", reload: true))
+                        : StateView.Empty("\uE8F1", "No memories yet",
+                            "As you chat, agents save decisions and conventions here so the next chat starts with them."));
             }
         }
         UpdateDetailPaneLayout();
@@ -368,17 +394,20 @@ public sealed partial class MemoryPage : NexusPage
             : $"Page {pageNumber}{lastPageHint}";
         _prevPage.IsEnabled = !_loading && _pageIndex > 0;
         _nextPage.IsEnabled = !_loading && hasNext;
+        // One page needs no pager.
+        var paged = _pageIndex > 0 || hasNext;
+        if (_prevPage.Parent is FrameworkElement pager) pager.Visibility = paged ? Visibility.Visible : Visibility.Collapsed;
 
-        var scope = ScopeLabel(_activeScope) + (_reviewOnly ? " · not reviewed" : "");
         if (_visibleCount > 0)
         {
             var start = _pageIndex * PageSize + 1;
             var end = _pageIndex * PageSize + _visibleCount;
-            _count.Text = $"Showing {start}–{end} · Page {pageNumber} · {scope} · {ShellProjectLabel()}";
+            var noun = _reviewOnly ? "to review" : _visibleCount == 1 && !paged ? "memory" : "memories";
+            _count.Text = paged ? $"{start}–{end} {noun}" : $"{_visibleCount} {noun}";
         }
         else
         {
-            _count.Text = $"Page {pageNumber} · {scope} · {ShellProjectLabel()}";
+            _count.Text = "";
         }
     }
 
@@ -625,7 +654,7 @@ public sealed partial class MemoryPage : NexusPage
         if (_categoryFilter is { Length: > 0 } active) categories.Add(active);
         var ordered = categories.OrderBy(c => c, StringComparer.OrdinalIgnoreCase).ToList();
         if (ordered.Count == 0) { AddTagPills(); return; }
-        _categoryBar.Children.Add(Muted("Category:"));
+        _categoryBar.Children.Add(new TextBlock { Text = "Topic", FontSize = 12, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 2, 0) });
         _categoryBar.Children.Add(CategoryPill("All", null));
         foreach (var cat in ordered)
         {
@@ -645,10 +674,7 @@ public sealed partial class MemoryPage : NexusPage
             Padding = new Thickness(10, 2, 10, 3),
             FontSize = 12
         };
-        if (active)
-        {
-            button.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(48, 245, 158, 11));
-        }
+        if (active) MarkActivePill(button);
         button.Click += async (_, _) =>
         {
             _categoryFilter = categoryId;
@@ -657,8 +683,13 @@ public sealed partial class MemoryPage : NexusPage
         return button;
     }
 
-    private static UIElement EmptyCard(string title, string body) =>
-        Card(Line(title, title: true), Muted(body));
+    // Selected filter pill: the brand tint, same as the scope toggles' family.
+    internal static void MarkActivePill(Button button)
+    {
+        button.Background = NexusPalette.AccentFill;
+        button.BorderBrush = NexusPalette.Accent;
+        button.Foreground = NexusPalette.Accent;
+    }
 
     private async Task Mutate(string method, string id)
     {

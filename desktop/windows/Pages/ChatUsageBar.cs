@@ -77,6 +77,11 @@ internal static class UsageFormat
         return string.Join(" · ", parts);
     }
 
+    /// <summary>"About $0.50 used" or "620k tokens": the header's short form.</summary>
+    public static string Compact(UsageTotal t) => t.HasCost
+        ? (t.Estimated ? "About " : "") + Money(t.CostUsd) + " used"
+        : Tokens(t.AllTokens) + " tokens";
+
     /// <summary>One line per model for tooltips and lists.</summary>
     public static string Detail(UsageTotal t)
     {
@@ -179,11 +184,13 @@ public sealed class ChatUsageBar : UserControl
             return;
         }
         Visibility = Visibility.Visible;
-        _line.Text = UsageFormat.Line(total);
+        // Plain words in the header; token counts and models are in the tooltip.
+        _line.Text = UsageFormat.Compact(total);
         var tip = new StringBuilder();
         foreach (var t in byModel.Values.OrderByDescending(t => t.AllTokens)) tip.AppendLine(UsageFormat.Detail(t));
         if (_live.Count > 0) tip.AppendLine("Includes the reply in progress.");
-        if (total.Estimated) tip.AppendLine("(est.) = estimated from list prices where the agent didn't report cost.");
+        tip.Insert(0, UsageFormat.Line(total) + Environment.NewLine + Environment.NewLine);
+        if (total.Estimated) tip.AppendLine("Estimated from list prices where the agent didn't report its cost.");
         ToolTipService.SetToolTip(this, tip.ToString().TrimEnd());
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(this, "Chat usage: " + _line.Text);
     }

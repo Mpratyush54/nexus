@@ -280,7 +280,10 @@ public sealed class GraphPage : NexusPage
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        var tools = Row(_mode3D, _spin, zoomOut, zoomIn, fit, reset, refresh);
+        // "Reset view" had the same icon as Reload beside it; Fit (Ctrl+0)
+        // already brings everything back, so the bar keeps one of each.
+        _ = reset;
+        var tools = Row(_mode3D, _spin, zoomOut, zoomIn, fit, refresh);
         tools.Spacing = 4;
         Grid.SetColumn(_search, 0);
         Grid.SetColumn(_view, 1);
