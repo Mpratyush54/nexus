@@ -29,6 +29,8 @@ import (
 	"strings"
 
 	"github.com/fsnotify/fsnotify"
+
+	"central-memory/internal/platform"
 )
 
 const (
@@ -39,6 +41,22 @@ const (
 	// where each watched entry costs one (macOS, BSD).
 	kqueueWatchBudget = 4096
 )
+
+// kqueueBudget keeps one project watcher to at most a quarter of the
+// process's soft descriptor limit (and never above kqueueWatchBudget), so
+// sockets, databases and transcript reads always have room.
+func kqueueBudget(softLimit uint64) int {
+	if softLimit == 0 {
+		return kqueueWatchBudget
+	}
+	if q := softLimit / 4; q < kqueueWatchBudget {
+		if q < 16 {
+			q = 16
+		}
+		return int(q)
+	}
+	return kqueueWatchBudget
+}
 
 // watchCostsPerEntry reports whether fsnotify spends a file descriptor on
 // every entry of a watched directory (the kqueue backend).
@@ -143,7 +161,7 @@ func runProjectWatcher(ctx context.Context, root string, rep *FilesChangedReport
 	defer w.Close()
 	pw := &projectWatcher{root: filepath.Clean(root), w: w, watched: map[string]bool{}}
 	if watchCostsPerEntry {
-		pw.budget = kqueueWatchBudget
+		pw.budget = kqueueBudget(platform.FileLimit())
 	}
 	pw.addTree(pw.root)
 	// A capped tree misses changes: then git results are not cached

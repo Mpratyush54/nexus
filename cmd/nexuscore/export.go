@@ -100,6 +100,9 @@ func nx_init(configJSON *C.char) (rc C.int) {
 	// A Finder-launched macOS app has launchd's bare PATH; without this
 	// every agent CLI looks uninstalled. No-op on other systems.
 	platform.AugmentGUIPath()
+	// Go raises the open-file limit only for executables; inside the
+	// desktop app the library inherits launchd's soft limit of 256.
+	platform.RaiseFileLimit()
 	stopEmbeddedCapture()
 	stopDesktopExecution()
 

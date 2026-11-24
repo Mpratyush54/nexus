@@ -76,6 +76,9 @@ func TestProjectWatcherDescriptorBudgetKqueue(t *testing.T) {
 
 	pw, held, left := watchTree(t, root, kqueueWatchBudget)
 	t.Logf("budgeted: held %d descriptors (budget %d), capped=%v, %d still open after Close", held, kqueueWatchBudget, pw.capped, left)
+	if left > 64 {
+		t.Errorf("fsnotify left %d descriptors open after Close", left)
+	}
 	if held > kqueueWatchBudget+16 {
 		t.Errorf("budgeted watcher held %d descriptors, budget is %d", held, kqueueWatchBudget)
 	}
@@ -87,6 +90,6 @@ func TestProjectWatcherDescriptorBudgetKqueue(t *testing.T) {
 	t.Logf("unbudgeted (previous behaviour): %d folders / %d files held %d descriptors, capped=%v, %d still open after Close",
 		dirs+2, dirs*files, held, raw.capped, left)
 	if left > 64 {
-		t.Logf("WARNING: fsnotify left %d descriptors open after Close", left)
+		t.Errorf("fsnotify left %d descriptors open after Close (fsnotify < 1.10 kqueue leak)", left)
 	}
 }
