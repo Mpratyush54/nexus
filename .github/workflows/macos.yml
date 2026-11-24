@@ -64,8 +64,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: >
           go test -short -count=1 -v
-          -run 'FakeHome|ResolveSourcesUsesOSAppDataDir|WorkspaceJSONPosix|DescriptorBudget|AppDataDir|AugmentGUIPath|AugmentedPath|LeavesSkipsMacHome|ResolveSources'
+          -run 'FakeHome|ResolveSourcesUsesOSAppDataDir|WorkspaceJSONPosix|AppDataDir|AugmentGUIPath|AugmentedPath|LeavesSkipsMacHome|ResolveSources'
           ./internal/daemon/ ./internal/platform/ ./internal/project/
+
+      - name: kqueue descriptor cost of the project watcher (isolated process)
+        if: ${{ !cancelled() }}
+        run: NEXUS_FD_PROBE=1 go test -count=1 -v -run DescriptorBudget ./internal/daemon/
 
       - name: Build libnexuscore.dylib (arm64 + x86_64, universal)
         if: ${{ !cancelled() }}
@@ -105,7 +109,7 @@ jobs:
           chmod +x "$FAKE_HOME/.local/bin/claude"
           # A GUI app gets launchd's PATH, not the shell's, and launchd's
           # default soft descriptor limit of 256 (launchctl limit maxfiles).
-          ulimit -n 256
+          ulimit -Sn 256
           env -i HOME="$FAKE_HOME" USER="$USER" TMPDIR="$TMPDIR" \
             PATH=/usr/bin:/bin:/usr/sbin:/sbin NXSMOKE_EXPECT_CLAUDE=1 \
             ./dist/nxsmoke "$PWD/dist/libnexuscore.dylib"

@@ -85,6 +85,11 @@ func (p *projectWatcher) addTree(dir string) {
 		}
 		entries, err := os.ReadDir(d)
 		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				// Out of descriptors (EMFILE) or unreadable: this part of
+				// the tree goes unwatched, so cached git state would be stale.
+				p.capAt(fmt.Sprintf("cannot read %s: %v", d, err))
+			}
 			return
 		}
 		key := strings.ToLower(filepath.Clean(d))
@@ -98,6 +103,9 @@ func (p *projectWatcher) addTree(dir string) {
 				p.handles += cost
 			}
 			if err := p.w.AddWith(d, fsnotify.WithBufferSize(projectWatchBuffer)); err != nil {
+				if !errors.Is(err, os.ErrNotExist) {
+					p.capAt(fmt.Sprintf("cannot watch %s: %v", d, err))
+				}
 				return
 			}
 			p.watched[key] = true

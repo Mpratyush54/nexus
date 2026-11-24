@@ -13,9 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func openFDs(t *testing.T) int {
-	t.Helper()
-	// Probe each descriptor number: reading /dev/fd is unreliable on macOS.
+func openFDs() int {
+	// Probe each descriptor number: listing /dev/fd is unreliable on macOS.
 	n := 0
 	for fd := 0; fd < 65536; fd++ {
 		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil {
@@ -41,49 +40,53 @@ func makeTree(t *testing.T, root string, dirs, files int) {
 	}
 }
 
-// On kqueue (macOS) fsnotify holds one descriptor per watched entry. This
-// measures that cost for real and proves the watcher stays in its budget.
-func TestProjectWatcherDescriptorBudgetKqueue(t *testing.T) {
-	if !watchCostsPerEntry {
-		t.Skip("fsnotify does not spend a descriptor per entry on this OS")
-	}
-	var lim syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim); err == nil {
-		t.Logf("RLIMIT_NOFILE soft=%d hard=%d (Go raises soft at startup)", lim.Cur, lim.Max)
-	}
-	root := t.TempDir()
-	const dirs, files = 80, 100 // 8,000 files + 81 folders
-	makeTree(t, root, dirs, files)
-
-	// Unbudgeted: what the watcher cost before the budget existed.
-	before := openFDs(t)
+func watchTree(t *testing.T, root string, budget int) (pw *projectWatcher, held, leftAfterClose int) {
+	t.Helper()
+	before := openFDs()
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw := &projectWatcher{root: root, w: w, watched: map[string]bool{}}
-	raw.addTree(root)
-	rawCost := openFDs(t) - before
-	_ = w.Close()
-	t.Logf("unbudgeted watch of %d folders / %d files held %d descriptors", dirs+2, dirs*files, rawCost)
-	if rawCost < dirs*files/2 {
-		t.Logf("note: kqueue cost lower than expected (%d)", rawCost)
-	}
-
-	before = openFDs(t)
-	w2, err := fsnotify.NewWatcher()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer w2.Close()
-	pw := &projectWatcher{root: root, w: w2, watched: map[string]bool{}, budget: kqueueWatchBudget}
+	pw = &projectWatcher{root: root, w: w, watched: map[string]bool{}, budget: budget}
 	pw.addTree(root)
-	cost := openFDs(t) - before
-	t.Logf("budgeted watch held %d descriptors (budget %d), capped=%v", cost, kqueueWatchBudget, pw.capped)
-	if cost > kqueueWatchBudget+16 {
-		t.Fatalf("budgeted watcher held %d descriptors, budget is %d", cost, kqueueWatchBudget)
+	held = openFDs() - before
+	_ = w.Close()
+	leftAfterClose = openFDs() - before
+	return pw, held, leftAfterClose
+}
+
+// On kqueue (macOS) fsnotify holds one descriptor per watched entry. This
+// measures that cost and proves the watcher stays inside its budget. It
+// opens thousands of descriptors, so it runs only when asked for
+// (NEXUS_FD_PROBE=1), in its own test process, and never beside other tests.
+func TestProjectWatcherDescriptorBudgetKqueue(t *testing.T) {
+	if !watchCostsPerEntry {
+		t.Skip("fsnotify does not spend a descriptor per entry on this OS")
+	}
+	if os.Getenv("NEXUS_FD_PROBE") != "1" {
+		t.Skip("set NEXUS_FD_PROBE=1 to run (opens thousands of descriptors)")
+	}
+	var lim syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &lim); err == nil {
+		t.Logf("RLIMIT_NOFILE soft=%d hard=%d", lim.Cur, lim.Max)
+	}
+	root := t.TempDir()
+	const dirs, files = 60, 100 // 6,000 files + 62 folders
+	makeTree(t, root, dirs, files)
+
+	pw, held, left := watchTree(t, root, kqueueWatchBudget)
+	t.Logf("budgeted: held %d descriptors (budget %d), capped=%v, %d still open after Close", held, kqueueWatchBudget, pw.capped, left)
+	if held > kqueueWatchBudget+16 {
+		t.Errorf("budgeted watcher held %d descriptors, budget is %d", held, kqueueWatchBudget)
 	}
 	if !pw.capped {
-		t.Fatal("a tree over budget must be reported as capped (disables git caching)")
+		t.Error("a tree over budget must be reported as capped (disables git caching)")
+	}
+
+	raw, held, left := watchTree(t, root, 0)
+	t.Logf("unbudgeted (previous behaviour): %d folders / %d files held %d descriptors, capped=%v, %d still open after Close",
+		dirs+2, dirs*files, held, raw.capped, left)
+	if left > 64 {
+		t.Logf("WARNING: fsnotify left %d descriptors open after Close", left)
 	}
 }
