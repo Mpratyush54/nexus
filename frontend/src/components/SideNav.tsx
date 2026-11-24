@@ -1,5 +1,5 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { ChevronDown, ChevronRight, Menu, Search, X } from 'lucide-react'
+import { ChevronRight, Menu, Search, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { NotificationBell } from './NotificationBell'
@@ -11,13 +11,13 @@ import { useMe } from '@/hooks/useAuthMutations'
 import { initialsOf, usePeople } from '@/hooks/usePeople'
 import { useProjectPresence } from '@/hooks/useTeam'
 import {
+  FOOTER_ITEMS,
   MOBILE_TABS,
   NAV_SECTIONS,
   SETTINGS_ITEM,
   isNavActive,
   type NavItem,
 } from '@/lib/navigation'
-import { readPref, writePref } from '@/utils/prefs'
 
 const AVATAR_COLORS = ['#5c5346', '#4a5560', '#5a4a3a', '#3d5348', '#53485c', '#4a5340']
 
@@ -56,48 +56,27 @@ function NavItemLink({ item, onNavigate }: { item: NavItem; onNavigate?: () => v
   )
 }
 
-const ADVANCED_KEY = 'nexus.nav.advanced'
-
 function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   const me = useMe()
-  const { pathname } = useLocation()
   const admin = Boolean(me.data?.is_platform_admin)
-  const [advancedOpen, setAdvancedOpen] = useState(() => readPref(ADVANCED_KEY) === '1')
+  const footer = FOOTER_ITEMS.filter((i) => !i.adminOnly || admin)
 
   return (
     <nav className="app-nav" aria-label="Sections">
-      {NAV_SECTIONS.map((section) => {
-        const items = section.items.filter((i) => !i.adminOnly || admin)
-        if (!items.length) return null
-        const collapsible = section.id === 'more'
-        const hasActive = items.some((i) => isNavActive(i, pathname))
-        const open = !collapsible || advancedOpen || hasActive
-        return (
-          <div key={section.id} className="app-nav-section">
-            {collapsible ? (
-              <button
-                type="button"
-                className="app-nav-heading is-toggle"
-                aria-expanded={open}
-                onClick={() => {
-                  const next = !advancedOpen
-                  setAdvancedOpen(next)
-                  writePref(ADVANCED_KEY, next ? '1' : '0')
-                }}
-              >
-                <span>{section.label}</span>
-                {open ? <ChevronDown size={12} aria-hidden /> : <ChevronRight size={12} aria-hidden />}
-              </button>
-            ) : (
-              <p className="app-nav-heading">{section.label}</p>
-            )}
-            {open
-              ? items.map((item) => <NavItemLink key={item.to} item={item} onNavigate={onNavigate} />)
-              : null}
-          </div>
-        )
-      })}
+      {NAV_SECTIONS.map((section) => (
+        <div key={section.id} className="app-nav-section">
+          {section.label ? <p className="app-nav-heading">{section.label}</p> : null}
+          {section.items
+            .filter((i) => !i.adminOnly || admin)
+            .map((item) => (
+              <NavItemLink key={item.to} item={item} onNavigate={onNavigate} />
+            ))}
+        </div>
+      ))}
       <div className="app-nav-section app-nav-bottom">
+        {footer.map((item) => (
+          <NavItemLink key={item.to} item={item} onNavigate={onNavigate} />
+        ))}
         <NavItemLink item={SETTINGS_ITEM} onNavigate={onNavigate} />
       </div>
     </nav>

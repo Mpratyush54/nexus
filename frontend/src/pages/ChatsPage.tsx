@@ -71,8 +71,9 @@ export function ChatsPage() {
   const cache = useQueryClient();
   const [params, setParams] = useSearchParams();
   const id = params.get("chat") || "";
-  const [search, setSearch] = useState(""),
-    [query, setQuery] = useState("");
+  // Home's search box links here with ?q=.
+  const [search, setSearch] = useState(() => params.get("q") ?? ""),
+    [query, setQuery] = useState(() => params.get("q") ?? "");
   const feed = useInfiniteQuery({
     queryKey: ["chats", projectId, search],
     enabled: !!projectId,
@@ -160,7 +161,7 @@ export function ChatsPage() {
             <p className="chat-muted">
               {query
                 ? `No chats or messages match “${query.trim()}”.`
-                : "No chats yet. Install Nexus Desktop and approve this project's folder to capture your agent chats."}
+                : "No chats yet. Install the desktop app and chat with Claude Code, Codex or Cursor in this project — your chats show up here."}
             </p>
           )}
           {cards.map((card) => (
@@ -203,7 +204,8 @@ export function ChatsPage() {
           <NexusMark size={44} />
           <h2>Pick up where the work left off.</h2>
           <p>
-            Choose a chat to read its messages, tool steps and code changes.
+            Every chat you have with an AI coding agent is saved here. Pick one
+            to read it and see which files it changed.
           </p>
           {!feed.isPending && !cards.length && !query && (
             <Link to="/app/connect">
@@ -575,7 +577,7 @@ function Conversation({
           >
             <GitFork size={15} />
             <span className="conversation-action-label">
-              {fork.isPending ? "Forking…" : "Fork"}
+              {fork.isPending ? "Copying…" : "Continue as copy"}
             </span>
           </button>
           <button
@@ -594,8 +596,8 @@ function Conversation({
       <div className="conversation-tabs" role="tablist" aria-label="Chat views">
         {[
           ["chat", "Chat"],
-          ["activity", "Tool activity"],
-          ["memory", "Memory"],
+          ["activity", "Steps"],
+          ["memory", "What it learned"],
         ].map(([name, label]) => (
           <button
             role="tab"

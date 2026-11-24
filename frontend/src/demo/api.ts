@@ -141,6 +141,8 @@ const GET: [RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
   }],
   [/^\/v1\/sharing\/recipients$/, () => ok({ people: people.map((p) => ({ user_id: p.id, name: p.name, project_role: p.id === ME.id ? 'owner' : 'member', organization_role: 'member' })) })],
   [/^\/v1\/desktop\/devices$/, () => list([])],
+  [/^\/v1\/teleports\/inbox$/, () => list([{ id: 'tp-1', session_id: CHATS[7].card.session_id, from_user_id: USERS.priya.id, to_user_id: ME.id, status: 'pending', preview: 'Explain the payment state machine', created_at: ago(3 * 3600000) }])],
+  [/^\/v1\/teleports\/sent$/, () => list([])],
   [/^\/v1\/storage\/usage$/, () => ok({ scope: 'user', used: 312 * 1024 * 1024, cap: 1 << 30, state: 'ok' })],
   [/^\/sessions$/, (_m, r) => list([
     { id: 'b7e2c1d0-1111-4a2b-9c3d-4e5f6a7b8c9d', project_id: r.query.get('project_id') ?? CHECKOUT, title: 'Capture retries: review and hand-off', created_by: ME.id, is_active: true, created_at: ago(5 * 3600000) },
@@ -224,6 +226,8 @@ const WRITE: [string, RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
     return ok(item)
   }],
   ['POST', /^\/notifications\/read$/, () => ok({ ok: true })],
+  ['POST', /^\/sessions\/([^/]+)\/steer\/(prompt|interrupt|resume)$/, (m) => ok({ session_id: m[1], state: m[2] === 'interrupt' ? 'pause_requested' : 'running' })],
+  ['POST', /^\/v1\/teleports\/([^/]+)\/accept$/, (m) => ok({ id: m[1], status: 'accepted' })],
 ]
 
 export function handle(req: Req): Res {

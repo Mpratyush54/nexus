@@ -2,7 +2,7 @@ import { Suspense, useEffect, useState } from 'react'
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { AccountMismatchBanner } from './AccountMismatchBanner'
 import { CommandPalette } from './CommandPalette'
-import { DaemonBanner, LocalWorkspacePanel } from './LocalWorkspace'
+import { LocalWorkspacePanel } from './LocalWorkspace'
 import { MobileNav, SideNav } from './SideNav'
 import { useEnsureActiveProject } from '@/hooks/useProjectSummaries'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
@@ -66,7 +66,6 @@ export function AppShell() {
             {showLocalChrome ? (
               <>
                 <AccountMismatchBanner />
-                <DaemonBanner />
                 <LocalWorkspacePanel />
               </>
             ) : null}

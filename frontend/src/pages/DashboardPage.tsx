@@ -1,89 +1,103 @@
-import { motion } from 'framer-motion'
-import {
-  Activity,
-  Bot,
-  Cable,
-  Layers,
-  RefreshCw,
-  ScanSearch,
-  Users,
-} from 'lucide-react'
-import { Link } from 'react-router-dom'
-import { ProjectSwitcher } from '@/components/ProjectSwitcher'
+import { useQuery } from '@tanstack/react-query'
+import { History, Laptop, Layers, RefreshCw, ScanSearch, Search, Smartphone, X } from 'lucide-react'
+import { useState, type FormEvent } from 'react'
+import { Link, useNavigate } from 'react-router-dom'
+import { chatsApi } from '@/api/chats'
+import type { ActiveWorkspace } from '@/api/team'
 import { ActivityHeatmap } from '@/components/ActivityHeatmap'
-import { GlassPanel } from '@/components/ui/GlassPanel'
-import { StatusPill } from '@/components/ui/StatusPill'
-import { visibleMemoryStatus } from '@/lib/memory-status'
+import { Advanced } from '@/components/Advanced'
+import { PageHeader } from '@/components/PageHeader'
+import { ProjectSwitcher } from '@/components/ProjectSwitcher'
 import { Button } from '@/components/ui/Button'
+import { GlassPanel } from '@/components/ui/GlassPanel'
 import { useToast } from '@/components/ui/Toast'
 import { useDashboard } from '@/hooks/useDashboard'
+import { useLocalHarvest, useTriggerHarvestScan } from '@/hooks/useDaemon'
+import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
 import { useMemorySearch } from '@/hooks/useMemory'
-import {
-  useLocalHarvest,
-  useTriggerHarvestScan,
-} from '@/hooks/useDaemon'
 import { useCurrentProject } from '@/hooks/useProjects'
 import { useProjectSummaries } from '@/hooks/useProjectSummaries'
-import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
+import { useActiveWorkspaces } from '@/hooks/useTeam'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
+import { readableChatText } from '@/lib/chat-content'
+import { agentName, chatTitle } from '@/lib/harness-message'
+import { isActiveMemory } from '@/lib/memory-status'
+import { memoryTitle } from '@/lib/plain-language'
+import { projectLabel } from '@/lib/project-label'
+import { STEER_ROUTE } from '@/lib/navigation'
 import { useAuth } from '@/providers/AuthProvider'
 import { formatRelative } from '@/utils/format'
+import { readPref, writePref } from '@/utils/prefs'
 import { storage } from '@/utils/storage'
-import { projectLabel, projectSubtitle } from '@/lib/project-label'
 
-function shortTime(iso?: string) {
-  if (!iso) return '—'
-  try {
-    return formatRelative(iso)
-  } catch {
-    return iso
-  }
-}
+const HINT_KEY = 'nexus.home.hint.dismissed'
 
+const THINGS = [
+  {
+    icon: History,
+    title: 'Find a past chat',
+    body: 'Search everything you and your agents talked about.',
+    to: '/app/chats',
+  },
+  {
+    icon: Layers,
+    title: 'See what your agents learned',
+    body: 'Decisions and facts saved from your chats, so the next agent knows them.',
+    to: '/app/memory',
+  },
+  {
+    icon: Smartphone,
+    title: 'Message an agent from your phone',
+    body: 'Send a running agent on your computer a quick instruction.',
+    to: STEER_ROUTE,
+  },
+]
+
+/**
+ * Home: one search box (the main action), what is new, and whether a computer
+ * is saving chats. Counts, the activity heatmap and scanner diagnostics are
+ * under Details.
+ */
 export function DashboardPage() {
   const { projectId, setProjectId } = useAuth()
+  const navigate = useNavigate()
   const { current } = useCurrentProject()
   const summaries = useProjectSummaries()
-  const dash = useDashboard()
+  const workspaces = useActiveWorkspaces()
   const memories = useMemorySearch('')
+  const [hintOpen, setHintOpen] = useState(() => readPref(HINT_KEY) !== '1')
+  const [q, setQ] = useState('')
+  const chats = useQuery({
+    queryKey: ['home-chats', projectId],
+    enabled: Boolean(projectId),
+    queryFn: ({ signal }) => chatsApi.list(projectId!, '', '', signal),
+    select: (page) => page.items.slice(0, 5),
+  })
+
+  // Desktop on this computer may be saving to a different project.
   const bridge = useTrustedLocalBridge()
-  const bridgeUrl = bridge.bridgeUrl
-  const harvest = useLocalHarvest(bridgeUrl)
-  const scanNow = useTriggerHarvestScan(bridgeUrl)
-  const { push } = useToast()
+  const harvest = useLocalHarvest(bridge.bridgeUrl)
   useFollowHarvestProject(harvest.data, bridge.trusted)
-
-  const m = dash.data?.metrics
   const hs = harvest.data
-  const activeLabel = current ? projectLabel(current) : projectId ? `${projectId.slice(0, 8)}…` : 'No project'
-  const harvestTarget =
-    hs?.project_id && projectId && hs.project_id !== projectId
-      ? 'mismatch'
-      : hs?.project_id
-        ? 'matched'
-        : 'unknown'
-  const harvestProjectRow = (summaries.data ?? []).find((s) => s.project.id === hs?.project_id)
+  const mismatch = Boolean(hs?.project_id && projectId && hs.project_id !== projectId)
+  const mismatchRow = (summaries.data ?? []).find((s) => s.project.id === hs?.project_id)
 
-  const memoryItems = memories.data ?? []
-  const shown = memoryItems
-    .filter((x) => x.status === 'PROPOSED' || x.status === 'CONFIRMED' || x.status === 'active')
-    .slice(0, 8)
+  const online = ((workspaces.data ?? []) as ActiveWorkspace[]).filter((w) => w.is_online !== false)
+  const recentMemories = (memories.data ?? []).filter((m) => isActiveMemory(m.status)).slice(0, 5)
 
-  const richer = (summaries.data ?? []).find(
-    (s) =>
-      s.project.id !== projectId &&
-      s.metrics.proposed + s.metrics.memories >
-        (m?.proposed ?? 0) + (m?.memories ?? 0) + 5,
-  )
+  const onSearch = (e: FormEvent) => {
+    e.preventDefault()
+    const term = q.trim()
+    navigate(term ? `/app/chats?q=${encodeURIComponent(term)}` : '/app/chats')
+  }
 
   if (!projectId) {
     return (
       <div className="space-y-6 py-8">
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">Home</h1>
-        <p className="text-sm text-fg-dim">Pick or create a project to see memories and harvest.</p>
+        <PageHeader title="Home" description="Pick a project to see its chats and memory." />
         <ProjectSwitcher />
         <Link to="/app/onboarding" className="text-sm text-amber hover:underline">
-          Set up the Desktop app →
+          Set up the desktop app →
         </Link>
       </div>
     )
@@ -91,345 +105,233 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      <div className="min-w-0">
-        <p className="text-[11px] uppercase tracking-wide text-muted">Project</p>
-        <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">{activeLabel}</h1>
-        <p className="mt-1 text-sm text-fg-dim">
-          Chats, memory and activity for this project. Switch projects below.
-        </p>
+      <PageHeader
+        title="Home"
+        description={
+          <>
+            Your AI coding chats and what your agents learned in{' '}
+            <span className="font-medium text-fg">{current ? projectLabel(current) : 'this project'}</span>.
+          </>
+        }
+      />
+
+      <form onSubmit={onSearch} className="flex gap-2">
+        <label className="relative min-w-0 flex-1">
+          <span className="sr-only">Search your chats</span>
+          <Search size={16} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" aria-hidden />
+          <input
+            type="search"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="Search your chats, e.g. “retry backoff”"
+            className="h-11 w-full rounded-lg border border-border bg-raised pl-9 pr-3 text-sm text-fg outline-none focus:border-amber"
+          />
+        </label>
+        <Button type="submit">Search</Button>
+      </form>
+
+      {hintOpen ? (
+        <GlassPanel className="relative p-5">
+          <div className="flex items-start justify-between gap-3">
+            <h2 className="text-sm font-semibold text-fg">3 things you can do here</h2>
+            <button
+              type="button"
+              className="-m-1 rounded p-1 text-muted hover:text-fg"
+              aria-label="Dismiss tips"
+              onClick={() => {
+                setHintOpen(false)
+                writePref(HINT_KEY, '1')
+              }}
+            >
+              <X size={16} />
+            </button>
+          </div>
+          <ol className="mt-3 grid gap-3 sm:grid-cols-3">
+            {THINGS.map((t, i) => (
+              <li key={t.to}>
+                <Link to={t.to} className="block h-full rounded-lg border border-border p-3 transition hover:border-border-strong">
+                  <span className="flex items-center gap-2 text-sm font-medium text-fg">
+                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-raised text-[11px] text-fg-dim">{i + 1}</span>
+                    {t.title}
+                  </span>
+                  <span className="mt-1 block text-xs text-fg-dim">{t.body}</span>
+                </Link>
+              </li>
+            ))}
+          </ol>
+        </GlassPanel>
+      ) : null}
+
+      {mismatch && hs?.project_id ? (
+        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/40 p-4">
+          <p className="text-sm text-fg">
+            The desktop app on this computer is saving chats to{' '}
+            <span className="font-medium">{mismatchRow ? projectLabel(mismatchRow.project) : 'another project'}</span>.
+          </p>
+          <Button type="button" size="sm" onClick={() => setProjectId(hs.project_id!)}>
+            Show that project
+          </Button>
+        </GlassPanel>
+      ) : null}
+
+      <p className="flex items-center gap-2 text-sm text-fg-dim">
+        <Laptop size={16} className="shrink-0" aria-hidden />
+        {workspaces.isLoading ? (
+          'Checking your computers…'
+        ) : online.length ? (
+          <span>
+            <span className="text-fg">{online.map((w) => w.machine_id || 'A computer').join(', ')}</span>{' '}
+            {online.length === 1 ? 'is' : 'are'} online and saving chats.
+          </span>
+        ) : (
+          <span>
+            No computer is saving chats yet.{' '}
+            <Link to="/app/connect" className="text-amber hover:underline">
+              Set up the desktop app
+            </Link>
+          </span>
+        )}
+      </p>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        <GlassPanel className="p-5">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-fg">Recent chats</h2>
+            <Link to="/app/chats" className="text-xs text-ember hover:underline">
+              All chats →
+            </Link>
+          </div>
+          <ul className="mt-3 divide-y divide-border">
+            {(chats.data ?? []).map((c) => (
+              <li key={c.session_id}>
+                <Link to={`/app/chats?chat=${encodeURIComponent(c.session_id)}`} className="block py-2.5 hover:text-fg">
+                  <span className="block truncate text-sm text-fg">{chatTitle(c.title, c.summary, c.harness)}</span>
+                  <span className="block text-xs text-muted">
+                    {agentName(c.harness)} · {formatRelative(c.last_active_at)}
+                  </span>
+                </Link>
+              </li>
+            ))}
+            {chats.isLoading ? <li className="py-3 text-sm text-muted">Loading…</li> : null}
+            {!chats.isLoading && !(chats.data ?? []).length ? (
+              <li className="py-3 text-sm text-fg-dim">
+                No chats yet. Install the desktop app and chat with Claude Code, Codex or Cursor — your chats show up here.
+              </li>
+            ) : null}
+          </ul>
+        </GlassPanel>
+
+        <GlassPanel className="p-5">
+          <div className="flex items-center justify-between gap-2">
+            <h2 className="text-sm font-semibold text-fg">What your agents learned</h2>
+            <Link to="/app/memory" className="text-xs text-ember hover:underline">
+              All memories →
+            </Link>
+          </div>
+          <ul className="mt-3 divide-y divide-border">
+            {recentMemories.map((m) => (
+              <li key={m.id} className="py-2.5">
+                <span className="block truncate text-sm text-fg">{memoryTitle(m.key).title}</span>
+                <span className="mt-0.5 line-clamp-2 text-xs text-fg-dim">{readableChatText(m.content).replace(/(^|\s)#{1,6}\s+/g, ' ').trim()}</span>
+              </li>
+            ))}
+            {memories.isLoading ? <li className="py-3 text-sm text-muted">Loading…</li> : null}
+            {!memories.isLoading && !recentMemories.length ? (
+              <li className="py-3 text-sm text-fg-dim">
+                Nothing yet. When an agent figures something out in a chat, it’s saved here for next time.
+              </li>
+            ) : null}
+          </ul>
+        </GlassPanel>
       </div>
 
       {!storage.getOnboardingDone() ? (
-        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 p-4">
-          <p className="text-sm text-fg-dim">New here? Install the Desktop app so your agent chats turn into memory.</p>
-          <Link to="/app/onboarding" className="text-sm text-amber hover:underline">
-            Set up →
-          </Link>
-        </GlassPanel>
+        <p className="text-sm text-fg-dim">
+          New here?{' '}
+          <Link to="/app/onboarding" className="text-amber hover:underline">
+            Set up the desktop app
+          </Link>{' '}
+          so your agent chats are saved.
+        </p>
       ) : null}
 
-      {harvestTarget === 'mismatch' && hs?.project_id ? (
-        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/40 p-4">
-          <div>
-            <p className="text-sm text-fg">
-              Desktop is uploading memories to{' '}
-              <span className="font-medium">
-                {harvestProjectRow ? projectLabel(harvestProjectRow.project) : 'another project'}
-              </span>
-              , not the one selected here ({activeLabel}).
-            </p>
-            <p className="mt-1 text-xs text-fg-dim">
-              Folder <span className="font-mono">central-memory</span> often maps to git remote{' '}
-              <span className="font-mono">nexus</span> — switch to see live harvest.
-            </p>
-          </div>
-          <Button type="button" size="sm" onClick={() => setProjectId(hs.project_id!)}>
-            Show harvest project
-          </Button>
-        </GlassPanel>
-      ) : null}
+      <Advanced title="Details" summary="Counts, a year of activity, and the desktop scanner on this computer.">
+        <DashboardDetails />
+      </Advanced>
+    </div>
+  )
+}
 
-      {richer ? (
-        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/30 p-4">
-          <div>
-            <p className="text-sm text-fg">
-              <span className="font-medium">{projectLabel(richer.project)}</span> has{' '}
-              {richer.metrics.proposed > 0
-                ? `${richer.metrics.proposed} new`
-                : `${richer.metrics.memories} memories`}{' '}
-              — more than this project.
-            </p>
-            <p className="mt-1 text-xs text-fg-dim">Harvest and Memory pages only show the active project.</p>
+function DashboardDetails() {
+  const { projectId } = useAuth()
+  const dash = useDashboard()
+  const bridge = useTrustedLocalBridge()
+  const harvest = useLocalHarvest(bridge.bridgeUrl)
+  const scanNow = useTriggerHarvestScan(bridge.bridgeUrl)
+  const { push } = useToast()
+  const m = dash.data?.metrics
+  const hs = harvest.data
+  const stats: [string, string | number, string][] = [
+    ['Memories', m?.memories ?? '—', m ? `${m.proposed} new` : ''],
+    ['People', m?.members ?? '—', m ? `${m.online} online` : ''],
+    ['Agent lookups', m?.agent_calls ?? '—', 'Times an agent read memory'],
+    ['Saved by this computer', hs?.proposals_saved ?? 0, hs?.running ? `Last scan ${hs.last_scan_at ? formatRelative(hs.last_scan_at) : '—'}` : 'Desktop app not running here'],
+  ]
+  return (
+    <div className="space-y-6">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {stats.map(([label, value, sub]) => (
+          <div key={label} className="rounded-lg border border-border p-3">
+            <p className="text-xs text-muted">{label}</p>
+            <p className="mt-1 text-xl font-semibold text-fg">{value}</p>
+            <p className="mt-0.5 text-xs text-fg-dim">{sub}</p>
           </div>
+        ))}
+      </div>
+      <div className="space-y-2">
+        <p className="text-sm font-medium text-fg">Agent messages over the last year</p>
+        <ActivityHeatmap days={dash.data?.heatmap} loading={dash.isLoading} />
+      </div>
+      <div className="space-y-2">
+        <p className="text-sm font-medium text-fg">Desktop scanner on this computer</p>
+        <p className="text-xs text-fg-dim">
+          {hs?.message || 'Start the desktop app on this computer to see its scans here.'}
+        </p>
+        <dl className="grid gap-1 text-xs text-fg-dim sm:grid-cols-2">
+          <div><dt className="inline text-muted">Project ID </dt><dd className="inline font-mono">{projectId}</dd></div>
+          <div><dt className="inline text-muted">Scanner project ID </dt><dd className="inline font-mono">{hs?.project_id || '—'}</dd></div>
+          <div><dt className="inline text-muted">Folder </dt><dd className="inline font-mono">{hs?.root || bridge.local.data?.status.root || '—'}</dd></div>
+          <div><dt className="inline text-muted">Last scan </dt><dd className="inline">{hs?.last_scan_files ?? 0} files · {hs?.last_scan_turns ?? 0} messages</dd></div>
+        </dl>
+        <div className="flex flex-wrap gap-2 pt-1">
           <Button
             type="button"
             size="sm"
-            onClick={() => setProjectId(richer.project.id)}
+            variant="secondary"
+            disabled={!bridge.bridgeUrl || scanNow.isPending}
+            onClick={() =>
+              scanNow.mutate(undefined, {
+                onSuccess: (st) => push({ title: 'Scan complete', detail: st.message || `${st.last_scan_files ?? 0} files`, tone: 'teal' }),
+                onError: (err) => push({ title: 'Scan failed', detail: err instanceof Error ? err.message : 'Desktop app not running', tone: 'danger' }),
+              })
+            }
           >
-            Switch to {projectLabel(richer.project)}
+            <ScanSearch size={14} />
+            {scanNow.isPending ? 'Scanning…' : 'Scan now'}
           </Button>
-        </GlassPanel>
-      ) : null}
-
-      <section className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-medium text-fg">Your projects</h2>
-          <p className="text-[11px] text-muted">
-            {summaries.data ? `${summaries.data.length} ${summaries.data.length === 1 ? 'project' : 'projects'}` : 'Loading…'}
-          </p>
+          <Button
+            type="button"
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              void harvest.refetch()
+              void bridge.local.refetch()
+            }}
+          >
+            <RefreshCw size={14} />
+            Refresh
+          </Button>
         </div>
-        <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-          {(summaries.data ?? []).map((row) => {
-            const active = row.project.id === projectId
-            return (
-              <button
-                key={row.project.id}
-                type="button"
-                onClick={() => setProjectId(row.project.id)}
-                aria-pressed={active}
-                className={[
-                  'rounded-lg border px-3 py-3 text-left transition',
-                  active
-                    ? 'border-amber/50 bg-raised'
-                    : 'border-border bg-raised/40 hover:border-border-strong',
-                ].join(' ')}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-sm font-medium text-fg">
-                    {projectLabel(row.project)}
-                  </span>
-                  {active ? <StatusPill tone="amber">active</StatusPill> : null}
-                </div>
-                <p className="mt-1 truncate font-mono text-[10px] text-muted">
-                  {projectSubtitle(row.project)}
-                </p>
-                <p className="mt-2 text-xs text-fg-dim">
-                  {row.metrics.memories} memories
-                  {row.metrics.proposed ? ` · ${row.metrics.proposed} new` : ''}
-                </p>
-              </button>
-            )
-          })}
-          {summaries.isLoading ? (
-            <p className="text-xs text-muted sm:col-span-2 lg:col-span-3">Loading project counts…</p>
-          ) : null}
-        </div>
-      </section>
-
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <GlassPanel className="p-4">
-          <p className="text-[11px] uppercase tracking-wide text-muted">Memories</p>
-          <p className="mt-2 text-2xl font-semibold text-fg">{m?.memories ?? memoryItems.length}</p>
-          <p className="mt-1 text-xs text-fg-dim">
-            {m ? `${m.confirmed + m.proposed} active` : 'Loading…'}
-          </p>
-        </GlassPanel>
-        <GlassPanel className="p-4">
-          <p className="text-[11px] uppercase tracking-wide text-muted">Harvest</p>
-          <p className="mt-2 text-2xl font-semibold text-fg">{hs?.proposals_saved ?? 0}</p>
-          <p className="mt-1 text-xs text-fg-dim">
-            {hs?.running ? `Last scan ${shortTime(hs.last_scan_at)}` : 'Desktop offline'}
-          </p>
-        </GlassPanel>
-        <GlassPanel className="p-4">
-          <p className="text-[11px] uppercase tracking-wide text-muted">Team</p>
-          <p className="mt-2 text-2xl font-semibold text-fg">{m?.members ?? '—'}</p>
-          <p className="mt-1 text-xs text-fg-dim">{m ? `${m.online} online` : ''}</p>
-        </GlassPanel>
-        <GlassPanel className="p-4">
-          <p className="text-[11px] uppercase tracking-wide text-muted">Agents</p>
-          <p className="mt-2 text-2xl font-semibold text-fg">{m?.agent_calls ?? '—'}</p>
-          <p className="mt-1 text-xs text-fg-dim">MCP tool calls</p>
-        </GlassPanel>
-      </div>
-
-      <GlassPanel className="space-y-3 p-5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Activity size={16} className="text-amber" />
-            <h2 className="text-sm font-medium text-fg">Activity</h2>
-          </div>
-          <Link to="/app/activity" className="text-xs text-ember hover:underline">
-            Full log →
-          </Link>
-        </div>
-        <ActivityHeatmap days={dash.data?.heatmap} loading={dash.isLoading} />
-        <p className="text-xs text-muted">Based on original agent timestamps, not upload dates.</p>
-        {!!dash.data?.agent_activity?.undated_messages && <p className="text-xs text-amber">{dash.data.agent_activity.undated_messages} historical messages have no original date and are excluded.</p>}
-        {dash.data?.agent_activity?.partial && <p className="text-xs text-amber">Some archived history could not be read; activity may be incomplete.</p>}
-      </GlassPanel>
-
-      <div className="grid gap-6 lg:grid-cols-5">
-        <GlassPanel className="space-y-4 p-5 lg:col-span-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Layers size={16} className="text-amber" />
-              <h2 className="text-sm font-medium text-fg">Project memories</h2>
-            </div>
-            <Link to="/app/memory" className="text-xs text-ember hover:underline">
-              Open Memory →
-            </Link>
-          </div>
-
-          <ul className="divide-y divide-border">
-            {shown.map((item, i) => (
-              <motion.li
-                key={item.id}
-                initial={{ opacity: 0, y: 4 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.02 }}
-                className="py-3"
-              >
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <span className="font-mono text-xs text-fg">{item.key}</span>
-                  <StatusPill tone="teal">{visibleMemoryStatus(item.status)}</StatusPill>
-                </div>
-                <p className="mt-1 line-clamp-2 text-sm text-fg-dim">{item.content}</p>
-                <p className="mt-1 text-[11px] text-muted">
-                  {item.source || 'unknown'} · {item.created_at ? formatRelative(item.created_at) : ''}
-                </p>
-              </motion.li>
-            ))}
-            {!shown.length ? (
-              <li className="py-8 text-center text-sm text-muted">
-                No memories in this project yet. Chat in Cursor or Claude, or write via MCP.
-              </li>
-            ) : null}
-          </ul>
-        </GlassPanel>
-
-        <GlassPanel className="space-y-4 p-5 lg:col-span-2">
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <ScanSearch size={16} className="text-amber" />
-              <h2 className="text-sm font-medium text-fg">Scanner</h2>
-            </div>
-            <StatusPill tone={hs?.running ? 'teal' : 'danger'}>
-              {hs?.running ? 'live' : 'offline'}
-            </StatusPill>
-          </div>
-
-          <p className="text-xs text-fg-dim">
-            {hs?.message ||
-              'Start Nexus Desktop so this page can show scans for agent chats on your machine.'}
-          </p>
-
-          <div className="space-y-2 rounded-lg border border-border bg-raised/40 px-3 py-2.5 text-xs text-fg-dim">
-            <p>
-              <span className="text-muted">Portal project</span>{' '}
-              <span className="font-mono text-fg">{projectId.slice(0, 8)}…</span>
-            </p>
-            <p>
-              <span className="text-muted">Daemon target</span>{' '}
-              <span className="font-mono text-fg">
-                {hs?.project_id ? `${hs.project_id.slice(0, 8)}…` : '—'}
-              </span>
-              {harvestTarget === 'mismatch' ? (
-                <StatusPill tone="amber">different project</StatusPill>
-              ) : harvestTarget === 'matched' ? (
-                <StatusPill tone="teal">same project</StatusPill>
-              ) : null}
-            </p>
-            <p>
-              <span className="text-muted">Folder</span>{' '}
-              <span className="font-mono text-fg">{hs?.root || bridge.local.data?.status.root || '—'}</span>
-            </p>
-            <p>
-              <span className="text-muted">Last scan</span> {shortTime(hs?.last_scan_at)} ·{' '}
-              {hs?.last_scan_files ?? 0} files · {hs?.last_scan_turns ?? 0} turns
-            </p>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              size="sm"
-              disabled={!bridgeUrl || scanNow.isPending}
-              onClick={() =>
-                scanNow.mutate(undefined, {
-                  onSuccess: (st) =>
-                    push({
-                      title: 'Scan complete',
-                      detail: st.message || `${st.last_scan_files ?? 0} files`,
-                      tone: 'teal',
-                    }),
-                  onError: (err) =>
-                    push({
-                      title: 'Scan failed',
-                      detail: err instanceof Error ? err.message : 'Daemon offline',
-                      tone: 'danger',
-                    }),
-                })
-              }
-            >
-              <ScanSearch size={14} />
-              {scanNow.isPending ? 'Scanning…' : 'Scan now'}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="secondary"
-              onClick={() => {
-                void harvest.refetch()
-                void bridge.local.refetch()
-                void memories.refetch()
-              }}
-            >
-              <RefreshCw size={14} />
-              Refresh
-            </Button>
-            <Link to="/app/connect">
-              <Button type="button" size="sm" variant="ghost">
-                <Cable size={14} />
-                Desktop setup
-              </Button>
-            </Link>
-          </div>
-
-          <div>
-            <p className="mb-1.5 text-[11px] font-medium text-fg">Recent daemon events</p>
-            <ul className="max-h-40 space-y-1 overflow-auto text-[11px] text-fg-dim">
-              {[...(hs?.recent ?? [])].reverse().slice(0, 8).map((line, i) => (
-                <li key={`${line.at}-${i}`} className="truncate">
-                  <span className="text-muted">{shortTime(line.at)}</span> {line.type}{' '}
-                  {line.detail}
-                </li>
-              ))}
-              {!hs?.recent?.length ? (
-                <li className="text-muted">No scan events yet.</li>
-              ) : null}
-            </ul>
-          </div>
-        </GlassPanel>
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-3">
-        <GlassPanel className="space-y-3 p-5">
-          <div className="flex items-center gap-2">
-            <Activity size={14} className="text-amber" />
-            <h2 className="text-sm font-medium text-fg">Recent activity</h2>
-          </div>
-          <ul className="divide-y divide-border text-sm">
-            {(dash.data?.recent ?? []).slice(0, 6).map((ev) => (
-              <li key={ev.id} className="flex justify-between gap-2 py-2">
-                <span className="truncate font-mono text-[11px] text-fg">{ev.event_type}</span>
-                <span className="shrink-0 text-xs text-muted">{formatRelative(ev.created_at)}</span>
-              </li>
-            ))}
-            {!dash.data?.recent?.length ? (
-              <li className="py-3 text-sm text-muted">Nothing yet for this project.</li>
-            ) : null}
-          </ul>
-          <Link to="/app/activity" className="text-xs text-ember hover:underline">
-            Full activity →
-          </Link>
-        </GlassPanel>
-
-        <GlassPanel className="space-y-3 p-5">
-          <div className="flex items-center gap-2">
-            <Users size={14} className="text-amber" />
-            <h2 className="text-sm font-medium text-fg">People</h2>
-          </div>
-          <p className="text-sm text-fg-dim">
-            {m?.members ?? 0} members · {m?.online ?? 0} online on this project
-          </p>
-          <Link to="/app/team" className="text-xs text-ember hover:underline">
-            Team →
-          </Link>
-        </GlassPanel>
-
-        <GlassPanel className="space-y-3 p-5">
-          <div className="flex items-center gap-2">
-            <Bot size={14} className="text-amber" />
-            <h2 className="text-sm font-medium text-fg">Agents</h2>
-          </div>
-          <p className="text-sm text-fg-dim">
-            {m?.agent_calls ?? 0} MCP calls. Auto-harvest does not need MCP.
-          </p>
-          <Link to="/app/agents" className="text-xs text-ember hover:underline">
-            Agents →
-          </Link>
-        </GlassPanel>
       </div>
     </div>
   )

@@ -4,6 +4,7 @@ import { GlassPanel } from '@/components/ui/GlassPanel'
 import { Button } from '@/components/ui/Button'
 import { apiRequest } from '@/lib/api-client'
 import { formatRelative } from '@/utils/format'
+import { usePeople } from '@/hooks/usePeople'
 
 type TeleportItem = {
   id: string
@@ -17,7 +18,8 @@ type TeleportItem = {
 
 type TeleportList = { items: TeleportItem[]; count: number }
 
-export function TeleportPage() {
+/** `embedded` drops the page title when this renders inside another page's Advanced section. */
+export function TeleportPage({ embedded = false }: { embedded?: boolean } = {}) {
   const qc = useQueryClient()
   const inbox = useQuery({
     queryKey: ['teleports', 'inbox'],
@@ -42,12 +44,16 @@ export function TeleportPage() {
 
   return (
     <div className="space-y-8">
+      {embedded ? null : (
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Teleport inbox</h1>
         <p className="mt-1 text-sm text-fg-dim">
-          Sessions sent to you, and sessions you sent. Previews are redacted.
+          Chats a teammate sent to you, and chats you sent. Secrets are hidden in previews.
         </p>
       </div>
+      )}
+      {/* Phone & devices lists the inbox itself; embedded, this shows only what you sent. */}
+      {embedded ? null : (
       <TeleportList
         title="Inbox"
         query={inbox}
@@ -58,6 +64,7 @@ export function TeleportPage() {
           </Button>
         )}
       />
+      )}
       <TeleportList
         title="Sent"
         query={sent}
@@ -89,6 +96,7 @@ function TeleportList({
   action: (item: TeleportItem) => ReactNode
 }) {
   const items = query.data?.items ?? []
+  const { nameFor } = usePeople()
   return (
     <section className="space-y-3">
       <h2 className="text-xs font-medium uppercase tracking-wide text-muted">{title}</h2>
@@ -104,7 +112,7 @@ function TeleportList({
           <div>
             <p className="text-sm text-fg">{item.preview || 'Session preview'}</p>
             <p className="mt-1 text-xs text-fg-dim">
-              {item.from_user_id} → {item.to_user_id} · {item.status} · {formatRelative(item.created_at)}
+              {nameFor(item.from_user_id)} → {nameFor(item.to_user_id)} · {item.status} · {formatRelative(item.created_at)}
             </p>
           </div>
           {action(item)}

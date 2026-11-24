@@ -1,7 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   BookmarkCheck,
-  Bot,
   Calendar,
   ChevronDown,
   ChevronRight,
@@ -23,7 +22,11 @@ import { useDeferredValue, useMemo, useState } from 'react'
 import { MemoryEditorSlideOver } from '@/components/MemoryEditorSlideOver'
 import { SharingControlsModal } from '@/components/SharingControlsModal'
 import { VersionHistoryDrawer } from '@/components/VersionHistoryDrawer'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
+import { Advanced } from '@/components/Advanced'
+import { BranchesPage } from './BranchesPage'
+import { memoryTitle } from '@/lib/plain-language'
+import { agentName } from '@/lib/harness-message'
 import { PageHeader } from '@/components/PageHeader'
 import { ProjectPicker } from '@/components/ProjectPicker'
 import { Button } from '@/components/ui/Button'
@@ -147,6 +150,8 @@ export function MemoryPage() {
   const [level, setLevel] = useState('')
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
   const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const [moreFilters, setMoreFilters] = useState(false)
+  const [params] = useSearchParams()
   const deferredQ = useDeferredValue(q)
   const search = useMemorySearch(deferredQ)
   const harvestQ = useHarvestQueue()
@@ -263,7 +268,7 @@ export function MemoryPage() {
     <div className="space-y-8">
       <PageHeader
         title="Memory"
-        description="Facts and decisions your agents saved while you worked, one project at a time."
+        description="Facts and decisions your agents saved from your chats. The next agent that works on this project can use them."
         actions={
           <>
             <div className="flex rounded-lg border border-border bg-raised/70 p-0.5" role="group" aria-label="View">
@@ -316,68 +321,11 @@ export function MemoryPage() {
         </GlassPanel>
       ) : null}
 
-      {/* In-flight Harvest Queue */}
       {harvestInFlight > 0 ? (
-        <GlassPanel className="space-y-3 p-5">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-medium text-fg">Incoming harvest (raw batches)</h2>
-            <StatusPill tone="amber">
-              {`${harvestQueued} queued · ${harvestProcessing} processing${
-                harvestInFlight > incomingHarvest.length
-                  ? ` · ${harvestInFlight} total in flight`
-                  : ''
-              }`}
-            </StatusPill>
-          </div>
-          <p className="text-[11px] text-muted">
-            OpenRouter is extracting architecture facts and decisions. Processed items appear automatically.
-            {harvestInFlight > incomingHarvest.length
-              ? ` Showing ${incomingHarvest.length} of ${harvestInFlight} in-flight batches.`
-              : null}
-          </p>
-          <ul className="max-h-[28rem] space-y-2 overflow-auto text-sm">
-            {incomingHarvest.slice(0, 20).map((job) => {
-              const open = expandedHarvest === job.id
-              const full = harvestFull[job.id]
-              const body =
-                open && full?.turns?.length
-                  ? full.turns
-                      .map((t) => `${t.speaker || '?'}: ${t.content}`)
-                      .join('\n\n')
-                  : job.raw_preview || '(empty)'
-              return (
-                <li key={job.id} className="rounded-lg border border-border bg-raised/40 px-3 py-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <StatusPill tone="amber">{job.status}</StatusPill>
-                      <span className="text-[11px] text-muted">
-                        {job.turn_count} turns
-                        {job.result_count ? ` · ${job.result_count} memories` : ''}
-                        {job.provider ? ` · ${job.provider}` : ''}
-                      </span>
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => void toggleHarvest(job.id)}
-                    >
-                      {harvestLoading === job.id
-                        ? 'Loading…'
-                        : open
-                          ? 'Collapse'
-                          : 'Show full'}
-                    </Button>
-                  </div>
-                  <pre className="mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap font-sans text-xs text-fg-dim">
-                    {body}
-                  </pre>
-                  {job.error ? <p className="mt-1 text-[11px] text-danger">{job.error}</p> : null}
-                </li>
-              )
-            })}
-          </ul>
-        </GlassPanel>
+        <p className="text-sm text-fg-dim" role="status">
+          Reading {harvestInFlight} new {harvestInFlight === 1 ? 'chat' : 'chats'} for things worth remembering… New memories
+          appear here on their own.
+        </p>
       ) : null}
 
       {projectId ? (
@@ -388,7 +336,7 @@ export function MemoryPage() {
               type="search"
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Search memories, files, commands…"
+              placeholder="Search memories"
               className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
             />
           </label>
@@ -398,20 +346,28 @@ export function MemoryPage() {
             onChange={(v) => setSelectedCategory(v || null)}
             options={[['', 'All topics'], ...CATEGORY_ORDER.map((c) => [c, CATEGORY_CONFIG[c].label] as [string, string])]}
           />
-          <FilterSelect
-            label="Level"
-            value={level}
-            onChange={setLevel}
-            options={MEMORY_LEVELS.map((o) => [o.value, o.label] as [string, string])}
-          />
-          {allTags.length > 0 ? (
-            <FilterSelect
-              label="Tag"
-              value={tagFilter ?? ''}
-              onChange={(v) => setTagFilter(v || null)}
-              options={[['', 'All tags'], ...allTags.map((t) => [t, `#${t}`] as [string, string])]}
-            />
-          ) : null}
+          {moreFilters ? (
+            <>
+              <FilterSelect
+                label="Level"
+                value={level}
+                onChange={setLevel}
+                options={MEMORY_LEVELS.map((o) => [o.value, o.label] as [string, string])}
+              />
+              {allTags.length > 0 ? (
+                <FilterSelect
+                  label="Tag"
+                  value={tagFilter ?? ''}
+                  onChange={(v) => setTagFilter(v || null)}
+                  options={[['', 'All tags'], ...allTags.map((t) => [t, `#${t}`] as [string, string])]}
+                />
+              ) : null}
+            </>
+          ) : (
+            <Button type="button" variant="ghost" size="sm" onClick={() => setMoreFilters(true)}>
+              More filters
+            </Button>
+          )}
         </div>
       ) : null}
 
@@ -606,6 +562,87 @@ export function MemoryPage() {
         </div>
       ) : null}
 
+      {projectId ? (
+        <Advanced
+          title="Advanced"
+          summary="Try changes on a copy of this project’s memory and merge them back, and see chats still waiting to be read."
+          defaultOpen={params.get('advanced') === 'overlays'}
+        >
+          <div className="space-y-10">
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium text-fg">Memory copies (overlays)</h3>
+              <p className="text-xs text-fg-dim">
+                Make a copy, let an agent change it, compare it with the original, then merge. This is not git.
+              </p>
+              <BranchesPage embedded />
+            </div>
+        {/* In-flight harvest batches (raw) */}
+        {harvestInFlight > 0 ? (
+          <GlassPanel className="space-y-3 p-5">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-medium text-fg">Chats waiting to be read</h2>
+              <StatusPill tone="amber">
+                {`${harvestQueued} queued · ${harvestProcessing} processing${
+                  harvestInFlight > incomingHarvest.length
+                    ? ` · ${harvestInFlight} total in flight`
+                    : ''
+                }`}
+              </StatusPill>
+            </div>
+            <p className="text-[11px] text-muted">
+              OpenRouter is extracting architecture facts and decisions. Processed items appear automatically.
+              {harvestInFlight > incomingHarvest.length
+                ? ` Showing ${incomingHarvest.length} of ${harvestInFlight} in-flight batches.`
+                : null}
+            </p>
+            <ul className="max-h-[28rem] space-y-2 overflow-auto text-sm">
+              {incomingHarvest.slice(0, 20).map((job) => {
+                const open = expandedHarvest === job.id
+                const full = harvestFull[job.id]
+                const body =
+                  open && full?.turns?.length
+                    ? full.turns
+                        .map((t) => `${t.speaker || '?'}: ${t.content}`)
+                        .join('\n\n')
+                    : job.raw_preview || '(empty)'
+                return (
+                  <li key={job.id} className="rounded-lg border border-border bg-raised/40 px-3 py-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusPill tone="amber">{job.status}</StatusPill>
+                        <span className="text-[11px] text-muted">
+                          {job.turn_count} turns
+                          {job.result_count ? ` · ${job.result_count} memories` : ''}
+                          {job.provider ? ` · ${job.provider}` : ''}
+                        </span>
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => void toggleHarvest(job.id)}
+                      >
+                        {harvestLoading === job.id
+                          ? 'Loading…'
+                          : open
+                            ? 'Collapse'
+                            : 'Show full'}
+                      </Button>
+                    </div>
+                    <pre className="mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap font-sans text-xs text-fg-dim">
+                      {body}
+                    </pre>
+                    {job.error ? <p className="mt-1 text-[11px] text-danger">{job.error}</p> : null}
+                  </li>
+                )
+              })}
+            </ul>
+          </GlassPanel>
+        ) : null}
+          </div>
+        </Advanced>
+      ) : null}
+
       <MemoryEditorSlideOver
         item={editing}
         open={Boolean(editing)}
@@ -642,10 +679,14 @@ function MemoryCard({
   onHistory?: () => void
   onShare?: () => void
 }) {
-  const [expanded, setExpanded] = useState(item.scope === 'episode_summary')
+  const [expanded, setExpanded] = useState(false)
+  const [details, setDetails] = useState(false)
+  const name = memoryTitle(item.key)
   const proposed = item.status === 'PROPOSED'
   const { nameFor } = usePeople()
-  const agent = item.proposed_by ? nameFor(item.proposed_by) : item.source
+  const by = item.proposed_by ? nameFor(item.proposed_by) : item.source
+  // Agent ids ("claude") read as product names; a bare "agent" source reads as "an agent".
+  const agent = !by ? '' : by === 'agent' ? 'an agent' : /^[a-z-]+$/.test(by) ? agentName(by) : by
   const previewLimit = item.scope === 'episode_summary' ? 420 : 180
   const preview =
     item.content.length > previewLimit && !expanded
@@ -666,65 +707,23 @@ function MemoryCard({
       className="group overflow-hidden"
     >
       <GlassPanel glow={proposed ? 'amber' : 'none'} className="p-4 hover:border-border-strong">
-        <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1.5">
-          {/* Category Badge */}
-          <span
-            className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium border ${catConfig.badgeClass}`}
-          >
-            <CatIcon size={11} />
-            {catConfig.label}
-          </span>
-
-          <code className="font-mono text-[13px] font-semibold text-fg">{item.key}</code>
-
-          <StatusPill tone={visibleMemoryStatus(item.status) === 'active' ? 'teal' : 'neutral'}>
-            {visibleMemoryStatus(item.status)}
-          </StatusPill>
-
-          {item.outcome && item.outcome !== 'active' ? (
-            <span
-              className={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider ${
-                item.outcome === 'superseded'
-                  ? 'bg-zinc-800 text-zinc-400 border border-zinc-700'
-                  : item.outcome === 'deprecated'
-                    ? 'bg-rose-950/40 text-rose-400 border border-rose-800/40'
-                    : 'bg-emerald-950/40 text-emerald-400 border border-emerald-800/40'
-              }`}
-            >
-              {item.outcome}
-            </span>
-          ) : null}
-
-          {item.supersedes_key ? (
-            <span className="inline-flex items-center gap-1 text-[11px] font-mono text-amber/80 bg-amber/10 border border-amber/20 px-1.5 py-0.5 rounded">
-              <GitBranch size={10} />
-              supersedes: {item.supersedes_key}
-            </span>
-          ) : null}
-
-          <span className="font-mono text-[11px] text-muted">{item.level}</span>
-
-          {item.scope ? (
-            <span
-              className={[
-                'font-mono text-[11px]',
-                item.scope === 'episode_summary' ? 'text-amber font-medium' : 'text-muted',
-              ].join(' ')}
-            >
-              {item.scope}
-            </span>
-          ) : null}
-
-          {agent ? (
-            <span className="inline-flex items-center gap-1 text-[11px] text-muted" title={item.proposed_by || item.source}>
-              <Bot size={11} aria-hidden />
-              {agent}
-            </span>
-          ) : null}
-
-          <span className="text-[11px] text-muted">{formatRelative(item.updated_at)}</span>
-
-          <div className="ml-auto flex gap-1">
+        <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold text-fg">
+              {name.title}
+              {visibleMemoryStatus(item.status) !== 'active' ? (
+                <span className="ml-2 align-middle">
+                  <StatusPill tone="neutral">{visibleMemoryStatus(item.status)}</StatusPill>
+                </span>
+              ) : null}
+            </h3>
+            <p className="mt-0.5 text-xs text-muted">
+              {name.group ? `${name.group} · ` : ''}
+              {agent ? `Saved by ${agent} · ` : ''}
+              {formatRelative(item.updated_at)}
+            </p>
+          </div>
+          <div className="flex gap-1">
             {onEdit ? (
               <Button variant="ghost" size="sm" onClick={onEdit} type="button" aria-label="Edit">
                 <Pencil size={12} />
@@ -732,15 +731,8 @@ function MemoryCard({
               </Button>
             ) : null}
             {onHistory ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={onHistory}
-                type="button"
-                aria-label="Version history"
-              >
+              <Button variant="ghost" size="sm" onClick={onHistory} type="button" aria-label="Version history">
                 <History size={12} />
-                History
               </Button>
             ) : null}
             {onShare ? (
@@ -751,58 +743,76 @@ function MemoryCard({
           </div>
         </div>
 
-        <motion.div
-          initial={false}
-          animate={{ height: 'auto' }}
-          transition={{ duration: 0.22, ease: 'easeOut' }}
-        >
-          <p className="mt-2.5 whitespace-pre-wrap text-sm leading-relaxed text-fg-dim">
-            {preview}
-          </p>
-        </motion.div>
+        <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-fg-dim">{preview}</p>
 
-        {item.content.length > previewLimit ? (
+        <div className="mt-1 flex flex-wrap gap-3">
+          {item.content.length > previewLimit ? (
+            <button
+              type="button"
+              className="text-[11px] font-medium text-amber hover:underline"
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? 'Show less' : 'Read more'}
+            </button>
+          ) : null}
           <button
             type="button"
-            className="mt-1 text-[11px] font-medium text-amber hover:underline"
-            onClick={() => setExpanded((v) => !v)}
+            className="text-[11px] font-medium text-muted hover:text-fg"
+            aria-expanded={details}
+            onClick={() => setDetails((v) => !v)}
           >
-            {expanded ? 'Collapse' : 'Read full text'}
+            {details ? 'Hide details' : 'Details'}
           </button>
-        ) : null}
-
-        {/* Concrete Provenance Chips: Files & Tools */}
-        {((item.files_affected && item.files_affected.length > 0) ||
-          (item.tools_used && item.tools_used.length > 0)) && (
-          <div className="mt-3 pt-2.5 border-t border-border/40 flex flex-wrap items-center gap-2">
-            {item.files_affected?.map((f) => (
-              <span
-                key={f}
-                className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-dim bg-raised/80 border border-border px-2 py-0.5 rounded-md"
-              >
-                <FileCode2 size={11} className="text-sky-400" />
-                {f}
-              </span>
-            ))}
-            {item.tools_used?.map((t) => (
-              <span
-                key={t}
-                className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-dim bg-raised/80 border border-border px-2 py-0.5 rounded-md"
-              >
-                <Terminal size={11} className="text-amber" />
-                {t}
-              </span>
-            ))}
-          </div>
-        )}
-
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          {(item.tags ?? []).map((tag) => (
-            <span key={tag} className="font-mono text-[11px] text-muted">
-              #{tag}
-            </span>
-          ))}
         </div>
+
+        {details ? (
+          <dl className="mt-3 grid gap-1.5 border-t border-border/40 pt-3 text-[11px] text-fg-dim sm:grid-cols-[8rem_1fr]">
+            <dt className="text-muted">Key</dt>
+            <dd className="font-mono">{item.key}</dd>
+            <dt className="text-muted">Topic</dt>
+            <dd className="inline-flex items-center gap-1"><CatIcon size={11} aria-hidden />{catConfig.label}</dd>
+            <dt className="text-muted">Visible to</dt>
+            <dd>{item.level}{item.scope && item.scope !== item.level ? ` · ${item.scope}` : ''}</dd>
+            {item.outcome && item.outcome !== 'active' ? (
+              <>
+                <dt className="text-muted">Outcome</dt>
+                <dd>{item.outcome}</dd>
+              </>
+            ) : null}
+            {item.supersedes_key ? (
+              <>
+                <dt className="text-muted">Replaces</dt>
+                <dd className="inline-flex items-center gap-1 font-mono"><GitBranch size={10} aria-hidden />{item.supersedes_key}</dd>
+              </>
+            ) : null}
+            {item.files_affected?.length ? (
+              <>
+                <dt className="text-muted">Files</dt>
+                <dd className="flex flex-wrap gap-1.5">
+                  {item.files_affected.map((f) => (
+                    <span key={f} className="inline-flex items-center gap-1 font-mono"><FileCode2 size={11} aria-hidden />{f}</span>
+                  ))}
+                </dd>
+              </>
+            ) : null}
+            {item.tools_used?.length ? (
+              <>
+                <dt className="text-muted">Agent tools</dt>
+                <dd className="flex flex-wrap gap-1.5">
+                  {item.tools_used.map((t) => (
+                    <span key={t} className="inline-flex items-center gap-1 font-mono"><Terminal size={11} aria-hidden />{t}</span>
+                  ))}
+                </dd>
+              </>
+            ) : null}
+            {item.tags?.length ? (
+              <>
+                <dt className="text-muted">Tags</dt>
+                <dd className="font-mono">{item.tags.map((t) => `#${t}`).join(' ')}</dd>
+              </>
+            ) : null}
+          </dl>
+        ) : null}
       </GlassPanel>
     </motion.div>
   )

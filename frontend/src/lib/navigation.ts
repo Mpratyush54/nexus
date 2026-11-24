@@ -1,15 +1,12 @@
 import {
   Activity,
-  Bot,
   Cable,
   History,
   LayoutDashboard,
   Layers,
-  Send,
   Settings,
   Shield,
   Smartphone,
-  Split,
   Users,
   type LucideIcon,
 } from 'lucide-react'
@@ -29,42 +26,33 @@ export type NavSection = {
   items: NavItem[]
 }
 
-/**
- * Where "Steer from phone" points. The steering UI lives on the Sessions page
- * today; swap this when a dedicated phone-steer route lands.
- */
-export const STEER_ROUTE = '/app/sessions'
+/** Where "Steer from phone" points: the Phone & devices page. */
+export const STEER_ROUTE = '/app/devices'
 
+/**
+ * Six places, no groups. Older pages were folded in and their routes redirect:
+ * Agents → Activity, Memory overlays → Memory, Sessions and Teleport inbox →
+ * Phone & devices.
+ */
 export const NAV_SECTIONS: NavSection[] = [
   {
-    id: 'work',
-    label: 'Work',
+    id: 'main',
+    label: '',
     items: [
       { to: '/app/dashboard', label: 'Home', icon: LayoutDashboard },
       { to: '/app/chats', label: 'Chats', icon: History, match: ['/app/timeline'] },
-      { to: '/app/memory', label: 'Memory', icon: Layers },
-      { to: '/app/team', label: 'Team & org', icon: Users, match: ['/app/org'] },
+      { to: '/app/memory', label: 'Memory', icon: Layers, match: ['/app/branches'] },
+      { to: '/app/activity', label: 'Activity', icon: Activity, match: ['/app/agents'] },
+      { to: STEER_ROUTE, label: 'Phone & devices', icon: Smartphone, match: ['/app/sessions', '/app/teleport'] },
+      { to: '/app/team', label: 'Team', icon: Users, match: ['/app/org'] },
     ],
   },
-  {
-    id: 'devices',
-    label: 'Phone & devices',
-    items: [
-      { to: STEER_ROUTE, label: 'Steer from phone', icon: Smartphone },
-      { to: '/app/teleport', label: 'Teleport inbox', icon: Send },
-      { to: '/app/connect', label: 'Desktop app', icon: Cable },
-    ],
-  },
-  {
-    id: 'more',
-    label: 'Advanced',
-    items: [
-      { to: '/app/activity', label: 'Activity', icon: Activity },
-      { to: '/app/agents', label: 'Agents', icon: Bot },
-      { to: '/app/branches', label: 'Memory overlays', icon: Split },
-      { to: '/app/admin', label: 'Platform', icon: Shield, adminOnly: true },
-    ],
-  },
+]
+
+/** Quieter links under the main list. */
+export const FOOTER_ITEMS: NavItem[] = [
+  { to: '/app/connect', label: 'Desktop app', icon: Cable, match: ['/app/onboarding'] },
+  { to: '/app/admin', label: 'Platform', icon: Shield, adminOnly: true },
 ]
 
 export const SETTINGS_ITEM: NavItem = { to: '/app/settings', label: 'Settings', icon: Settings }
@@ -73,8 +61,8 @@ export const SETTINGS_ITEM: NavItem = { to: '/app/settings', label: 'Settings', 
 export const MOBILE_TABS: NavItem[] = [
   { to: '/app/dashboard', label: 'Home', icon: LayoutDashboard },
   { to: '/app/chats', label: 'Chats', icon: History, match: ['/app/timeline'] },
-  { to: '/app/memory', label: 'Memory', icon: Layers },
-  { to: STEER_ROUTE, label: 'Steer', icon: Smartphone },
+  { to: '/app/memory', label: 'Memory', icon: Layers, match: ['/app/branches'] },
+  { to: STEER_ROUTE, label: 'Phone', icon: Smartphone, match: ['/app/sessions', '/app/teleport'] },
 ]
 
 export function isNavActive(item: NavItem, pathname: string): boolean {
