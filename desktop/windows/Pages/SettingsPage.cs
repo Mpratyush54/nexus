@@ -148,10 +148,10 @@ public sealed partial class SettingsPage : NexusPage
         }
         var signedIn = NxJson.Text(status, "signed_in") == "true";
         var name = NxJson.Text(status, "username");
-        if (name.Length == 0) name = NxJson.Text(status, "user_id");
+        var server = Uri.TryCreate(NxJson.Text(status, "server_url"), UriKind.Absolute, out var serverUri) ? serverUri.Authority : "";
         _account.Text = signedIn
-            ? name.Length > 0 ? $"Signed in as {name}." : "Signed in to your Nexus account."
-            : "Not signed in. Sign in to sync captured sessions, memories, and teleports.";
+            ? (name.Length > 0 ? $"Signed in as @{name}" : "Signed in to your Nexus account") + (server.Length > 0 ? $" on {server}." : ".")
+            : "Not signed in. Sign in to sync your chats and memories across your computers.";
         SetSignedIn(signedIn);
         if (!signedIn || (_orgUser.Length > 0 && _orgUser != NxJson.Text(status, "user_id"))) ClearOrganizationState();
     }
@@ -235,7 +235,7 @@ public sealed partial class SettingsPage : NexusPage
         var workspaces = SettingsGroup("Approved workspaces", _workspaces);
         var device = SettingsGroup("This device",
             Disclosure("Agent history sources on this device", "Folders where installed agents keep their chat history.", _sources),
-            Disclosure("Cloud capture policy by project", "This policy controls uploads and learnings for each project. Local workspace consent is managed above.", _projects, LoadProjectsAsync));
+            Disclosure("Sync per project", "Choose, for each project, whether its chats upload to your account and feed its memories. The folders above still decide what Nexus reads.", _projects, LoadProjectsAsync));
         return new StackPanel { Children = { monitoring, workspaces, device } };
     }
 
@@ -261,8 +261,8 @@ public sealed partial class SettingsPage : NexusPage
             _pause.Content = _paused ? "Resume capture" : "Pause capture";
             _pause.IsEnabled = _approved.Count > 0;
             _capture.Text = _approved.Count == 0
-                ? "Capture is off. Set up your first workspace to get started."
-                : $"{_approved.Count} approved workspace{(_approved.Count == 1 ? "" : "s")} · {(_paused ? "Paused" : "Capture enabled")}";
+                ? "Capture is off. Choose a folder to get started."
+                : CaptureSummary(capture);
             _workspaces.Children.Clear();
             _sources.Children.Clear();
             if (capture.ValueKind == JsonValueKind.Object && capture.TryGetProperty("sources", out var sourceItems) && sourceItems.ValueKind == JsonValueKind.Array)
@@ -286,6 +286,17 @@ public sealed partial class SettingsPage : NexusPage
                     : "Waiting for the first scan of your approved folders…"));
         }
         finally { _loading = false; }
+    }
+
+    // One wording for capture everywhere (this section, Advanced, Home).
+    internal static string CaptureSummary(JsonElement capture)
+    {
+        var folders = capture.ValueKind == JsonValueKind.Object && capture.TryGetProperty("approved_workspaces", out var list) && list.ValueKind == JsonValueKind.Array
+            ? list.GetArrayLength() : 0;
+        if (folders == 0) return "Capture is off (no folders chosen)";
+        return NxJson.Text(capture, "paused") == "true"
+            ? $"Capture is paused · {Nexus.Core.FriendlyTime.Count(folders, "folder")}"
+            : $"Capturing {Nexus.Core.FriendlyTime.Count(folders, "folder")}";
     }
 
     private Border WorkspaceRow(JsonElement workspace, string path)

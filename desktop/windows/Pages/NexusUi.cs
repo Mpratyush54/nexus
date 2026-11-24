@@ -343,6 +343,11 @@ internal static class StateView
 
     public static FrameworkElement Error(string title, string? detail, Action? retry)
     {
+        // The server is unreachable: the banner on top already says so and
+        // the page reloads by itself on reconnect, so this is a calm note,
+        // not a second red error.
+        if ((detail ?? "").StartsWith(Nexus.Core.NxErrors.UnreachableMessage, StringComparison.Ordinal) || Nexus.Core.NxErrors.IsUnreachable(detail))
+            return Empty("", "Waiting for the connection", "This shows up again as soon as Nexus reconnects to the server.");
         var plain = Nexus.Core.NxErrors.IsSignedOut(detail) ? Nexus.Core.NxErrors.SignedOutMessage : Friendly(detail);
         var stack = new StackPanel { Spacing = 6, MaxWidth = 560, HorizontalAlignment = HorizontalAlignment.Left };
         var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
@@ -373,6 +378,8 @@ internal static class StateView
     {
         var text = (error ?? "").Trim();
         if (text.Length == 0) return "";
+        if (Nexus.Core.NxErrors.IsUnreachable(text) && !text.StartsWith(Nexus.Core.NxErrors.UnreachableMessage, StringComparison.Ordinal))
+            return Nexus.Core.NxErrors.UnreachableMessage;
         var lower = text.ToLowerInvariant();
         if (lower.Contains("no such host") || lower.Contains("connection refused") || lower.Contains("actively refused") ||
             lower.Contains("timeout") || lower.Contains("timed out") || lower.Contains("network"))

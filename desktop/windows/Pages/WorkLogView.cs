@@ -208,7 +208,7 @@ internal sealed class WorkLogView : UserControl
         Grid.SetColumn(_summary, 1);
         line.Children.Add(_summary);
         _header = WorkLogVisuals.RowButton(line);
-        _header.Click += (_, _) => { _expanded = !_expanded; ApplyLayout(); };
+        _header.Click += (_, _) => { _expanded = !_expanded; ApplyLayout(); if (_expanded) Reveal.AfterExpand(this); };
         _body = new Border { Child = _root.Panel, BorderBrush = NexusPalette.Hairline };
         var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Stretch };
         stack.Children.Add(_header);
@@ -549,6 +549,7 @@ internal sealed class WorkStepRow
         _childHost.Visibility = _open && _children is not null ? Visibility.Visible : Visibility.Collapsed;
         _tail.Visibility = _open && _tail.Child is not null ? Visibility.Visible : Visibility.Collapsed;
         Render();
+        if (_open) Reveal.AfterExpand(View);
     }
 
     private void BuildDetail()

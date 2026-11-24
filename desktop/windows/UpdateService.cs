@@ -54,20 +54,33 @@ public sealed class UpdateService
         return info.TargetFullRelease.Version.ToString();
     }
 
-    /// <summary>Background check a little after start; failures are silent (offline, feed down).</summary>
+    /// <summary>
+    /// Background check a little after start, then every few hours. Failures
+    /// (offline, feed down or not published) are never shown: they are logged
+    /// once per kind of failure, not on every attempt, so a missing feed
+    /// does not fill the log either.
+    /// </summary>
     public void CheckInBackground(TimeSpan delay)
     {
         if (!IsAvailable) return;
         _ = Task.Run(async () =>
         {
-            try
+            await Task.Delay(delay).ConfigureAwait(false);
+            var lastFailure = "";
+            while (true)
             {
-                await Task.Delay(delay).ConfigureAwait(false);
-                await CheckForUpdatesAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Nexus.Core.Diagnostics.DiagLog.Warn("update", "background update check failed", ex);
+                try
+                {
+                    await CheckForUpdatesAsync().ConfigureAwait(false);
+                    lastFailure = "";
+                }
+                catch (Exception ex)
+                {
+                    if (ex.Message != lastFailure) Nexus.Core.Diagnostics.DiagLog.Warn("update", "background update check failed", ex);
+                    lastFailure = ex.Message;
+                }
+                if (StagedVersion.Length > 0) return;
+                await Task.Delay(TimeSpan.FromHours(6)).ConfigureAwait(false);
             }
         });
     }

@@ -71,11 +71,11 @@ public class NexusPage : Page
             }
         }
         Apply();
-        ShellState.Changed += (_, _) =>
-        {
-            var queue = DispatcherQueue;
-            queue?.TryEnqueue(Apply);
-        };
+        // Subscribed only while on screen: a static event holding the page
+        // kept every dropped page alive.
+        void Handler(object? _, EventArgs __) => DispatcherQueue?.TryEnqueue(Apply);
+        Loaded += (_, _) => { ShellState.Changed += Handler; Apply(); };
+        Unloaded += (_, _) => ShellState.Changed -= Handler;
     }
 
     protected static void ShowError(StackPanel panel, NxResponse response)

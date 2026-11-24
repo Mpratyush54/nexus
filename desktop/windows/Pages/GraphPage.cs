@@ -227,9 +227,10 @@ public sealed class GraphPage : NexusPage
         ToolTipService.SetToolTip(_search, "Find a memory, chat or file and focus it (Ctrl+F)");
 
         _view = new ComboBox { MinHeight = 30, FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
-        _view.Items.Add("Whole graph");
-        _view.Items.Add("Focus: 1 hop");
-        _view.Items.Add("Focus: 2 hops");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_view, "Graph view");
+        _view.Items.Add("Everything");
+        _view.Items.Add("Around the selected item");
+        _view.Items.Add("Around it, two steps out");
         _view.SelectedIndex = 0;
         _view.SelectionChanged += (_, _) =>
         {
@@ -237,14 +238,14 @@ public sealed class GraphPage : NexusPage
             ApplyView(fit: true);
             if (_selected is not null) RenderSide(_selected);
         };
-        ToolTipService.SetToolTip(_view, "Focus shows only the selected item and what it links to");
+        ToolTipService.SetToolTip(_view, "Show everything, or only the selected item and what it connects to");
 
         _showMemories = FilterChip("Memories", GraphLayout.Memory, true);
         _showSessions = FilterChip("Chats", GraphLayout.Session, true);
         _showFiles = FilterChip("Files", GraphLayout.File, true);
-        _showUnlinked = FilterChip("Unlinked", -1, false);
-        ToolTipService.SetToolTip(_showUnlinked, "Show items with no links (drawn in a grid under the clusters)");
-        _staleOnly = FilterChip("Stale only", -2, false);
+        _showUnlinked = FilterChip("Unconnected", -1, false);
+        ToolTipService.SetToolTip(_showUnlinked, "Show items that aren't connected to anything (drawn in a grid under the clusters)");
+        _staleOnly = FilterChip("Out of date only", -2, false);
 
         var zoomOut = ToolButton("", "Zoom out (wheel)", () => ZoomBy(1 / 1.3));
         var zoomIn = ToolButton("", "Zoom in (wheel)", () => ZoomBy(1.3));
@@ -509,7 +510,7 @@ public sealed class GraphPage : NexusPage
         if (!response.Ok)
         {
             _status.Text = "";
-            if (IsMissingRoute(response.Error))
+            if (IsMissingRoute(response.RawError))
             {
                 ShowEmpty("Graph view isn't available yet",
                     "Your Nexus server doesn't serve the memory graph yet. It will appear here once the server is updated; the Memory list keeps working meanwhile.");
@@ -952,14 +953,16 @@ public sealed class GraphPage : NexusPage
         var f = _nodes.Count(n => n.KindCode == GraphLayout.File);
         var stale = _nodes.Count(n => n.Stale);
         var unlinked = _nodes.Count(n => n.Degree == 0);
-        var text = $"{m} memories · {s} chats · {f} files · {_edges.Count} links";
-        if (stale > 0) text += $" · {stale} stale";
-        if (_focusHops > 0 && _focusCenter is null) text += " · select an item to focus";
-        else if (shown != _nodes.Count) text += $" · {shown} shown";
-        if (_focusHops == 0 && _showUnlinked.IsChecked != true && unlinked > 0) text += $" · {unlinked} unlinked hidden";
-        if (_truncated) text += " · most connected only";
+        // One short line; the full breakdown is in the tooltip.
+        var text = $"{Nexus.Core.FriendlyTime.Count(m, "memory", "memories")} · {Nexus.Core.FriendlyTime.Count(s, "chat")} · {Nexus.Core.FriendlyTime.Count(f, "file")}";
+        var detail = text + $" · {Nexus.Core.FriendlyTime.Count(_edges.Count, "connection")}";
+        if (stale > 0) detail += $" · {stale} may be out of date";
+        if (_focusHops > 0 && _focusCenter is null) text += " · pick an item to focus on it";
+        else if (shown != _nodes.Count) { text += $" · showing {shown}"; detail += $" · showing {shown}"; }
+        if (_focusHops == 0 && _showUnlinked.IsChecked != true && unlinked > 0) detail += $" · {unlinked} with no connections are hidden";
+        if (_truncated) { text += " · most connected only"; detail += " · most connected only"; }
         _status.Text = text;
-        ToolTipService.SetToolTip(_status, text);
+        ToolTipService.SetToolTip(_status, detail);
     }
 
     // ---- labels (screen space) ----
@@ -1439,7 +1442,7 @@ public sealed class GraphPage : NexusPage
             if (top.Count > 0)
             {
                 _side.Children.Add(SectionHeader("Most connected"));
-                foreach (var n in top) _side.Children.Add(NodeLink(n, $"{n.Degree} links"));
+                foreach (var n in top) _side.Children.Add(NodeLink(n, Nexus.Core.FriendlyTime.Count(n.Degree, "link")));
             }
         }
     }
@@ -1611,6 +1614,7 @@ public sealed class GraphPage : NexusPage
             MinHeight = 28,
             Padding = new Thickness(10, 2, 10, 3)
         };
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chip, "Show " + label.ToLowerInvariant());
         chip.Click += (_, _) => ApplyView(fit: true);
         return chip;
     }
@@ -1665,15 +1669,5 @@ public sealed class GraphPage : NexusPage
                e.Contains("unknown method", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string FriendlyWhen(string raw)
-    {
-        if (!DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at)) return "";
-        var local = at.ToLocalTime();
-        var age = DateTimeOffset.Now - local;
-        if (age.TotalMinutes < 1) return "just now";
-        if (age.TotalHours < 1) return $"{(int)age.TotalMinutes} min ago";
-        if (age.TotalDays < 1) return $"{(int)age.TotalHours} h ago";
-        if (age.TotalDays < 7) return $"{(int)age.TotalDays} d ago";
-        return local.ToString(local.Year == DateTimeOffset.Now.Year ? "MMM d" : "MMM d, yyyy", CultureInfo.CurrentCulture);
-    }
+    private static string FriendlyWhen(string raw) => Nexus.Core.FriendlyTime.Relative(raw);
 }

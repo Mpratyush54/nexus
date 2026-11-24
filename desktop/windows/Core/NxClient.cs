@@ -51,33 +51,60 @@ public sealed class NxClient
         return Task.Run(() => Call(method, json), ct);
     }
 
+    /// <summary>Raw call without error mapping or reachability tracking (the reachability probe itself).</summary>
+    internal static (bool Ok, JsonElement? Result) CallDirect(string method, string json)
+    {
+        var (ok, _, result) = Invoke(method, json);
+        return (ok, result);
+    }
+
     private static NxResponse Call(string method, string json)
+    {
+        var (ok, raw, result) = Invoke(method, json);
+        if (ok)
+        {
+            if (Connectivity.IsServerMethod(method)) Connectivity.NoteReachable();
+            return new NxResponse(true, raw, result, raw);
+        }
+        // People see a plain sentence with a reference id; the raw engine
+        // text goes to the log under that id (method and error only:
+        // arguments may hold chat text).
+        string shown;
+        if (NxErrors.IsUnreachable(raw))
+        {
+            var reference = Connectivity.NoteUnreachable(method, raw ?? "");
+            shown = NxErrors.UnreachableMessage + " (ref " + reference + ")";
+        }
+        else
+        {
+            var (message, reference) = NxErrors.Friendly(raw);
+            AppDiagnostics.NoteCallFailure(method, reference.Length > 0 ? $"{raw} [ref {reference}]" : raw);
+            shown = message.Length > 0 ? message : "Something went wrong.";
+        }
+        return new NxResponse(false, shown, result, raw);
+    }
+
+    private static (bool Ok, string? Error, JsonElement? Result) Invoke(string method, string json)
     {
         var ptr = NxNative.nx_call(method, json);
         try
         {
-            if (ptr == 0)
-            {
-                AppDiagnostics.NoteCallFailure(method, "empty core response");
-                return new NxResponse(false, "empty core response", null);
-            }
+            if (ptr == 0) return (false, "empty core response", null);
             var text = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(ptr) ?? "";
             JsonDocument doc;
             try { doc = JsonDocument.Parse(text); }
             catch (JsonException ex)
             {
                 Diagnostics.DiagLog.Error("nx", $"{method}: unreadable core response", ex);
-                return new NxResponse(false, "Nexus's engine sent an unreadable response.", null);
+                return (false, "unreadable core response", null);
             }
             using (doc)
             {
                 var root = doc.RootElement;
                 var ok = root.TryGetProperty("ok", out var okEl) && okEl.ValueKind == JsonValueKind.True;
-                string? error = root.TryGetProperty("error", out var err) ? err.GetString() : null;
+                string? error = root.TryGetProperty("error", out var err) && err.ValueKind == JsonValueKind.String ? err.GetString() : null;
                 JsonElement? result = root.TryGetProperty("result", out var value) ? value.Clone() : null;
-                // Method and error only: arguments may hold chat text.
-                if (!ok) AppDiagnostics.NoteCallFailure(method, error);
-                return new NxResponse(ok, error, result);
+                return (ok, error, result);
             }
         }
         finally
@@ -90,4 +117,9 @@ public sealed class NxClient
     }
 }
 
-public sealed record NxResponse(bool Ok, string? Error, JsonElement? Result);
+/// <summary>
+/// One nx_call answer. <see cref="Error"/> is safe to show (a plain sentence,
+/// with a reference id when it stands for an engine error);
+/// <see cref="RawError"/> is the engine's text, for logic only.
+/// </summary>
+public sealed record NxResponse(bool Ok, string? Error, JsonElement? Result, string? RawError = null);

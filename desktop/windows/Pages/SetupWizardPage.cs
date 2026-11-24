@@ -88,7 +88,7 @@ public sealed class SetupWizardPage : NexusPage
     private readonly StackPanel _agentRows = new() { Spacing = 0 };
     private readonly StackPanel _agentReport = new() { Spacing = 6 };
     private readonly TextBlock _agentState = new() { TextWrapping = TextWrapping.Wrap, FontSize = NexusTokens.FontCaption, Foreground = NexusPalette.Muted };
-    private readonly Button _agentConnect = new() { Content = "Connect Nexus to these agents", Padding = new Thickness(18, 8, 18, 9) };
+    private readonly Button _agentConnect = new() { Content = "Connect Nexus to your agents", Padding = new Thickness(18, 8, 18, 9) };
     private bool _agentPreviewed;
     private int _agentsInstalled;
     private int _agentsConnected;
@@ -565,7 +565,7 @@ public sealed class SetupWizardPage : NexusPage
         var panel = new StackPanel { Spacing = 12 };
         panel.Children.Add(_agentState);
         BrandPrimary(_agentConnect);
-        AutomationProperties.SetName(_agentConnect, "Connect Nexus to these agents");
+        AutomationProperties.SetName(_agentConnect, "Connect Nexus to your agents");
         var connectRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
         connectRow.Children.Add(_agentConnect);
         panel.Children.Add(connectRow);
@@ -688,8 +688,8 @@ public sealed class SetupWizardPage : NexusPage
             return;
         }
         _agentPreviewed = false;
-        _agentConnect.Content = "Connect Nexus to these agents";
-        AutomationProperties.SetName(_agentConnect, "Connect Nexus to these agents");
+        _agentConnect.Content = "Connect Nexus to your agents";
+        AutomationProperties.SetName(_agentConnect, "Connect Nexus to your agents");
         if (args.dry_run == false)
             _agentReport.Children.Add(Para("Restart any agents that are open so they pick up Nexus.", 0.7, 12));
         await LoadAgentsAsync();

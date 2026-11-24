@@ -108,8 +108,8 @@ public sealed class TeleportPage : NexusPage
         if (!_hubChrome)
         {
             var header = new StackPanel { Spacing = 4 };
-            header.Children.Add(NexusTokens.PageTitle("Shared with you"));
-            header.Children.Add(NexusTokens.Caption("Chats and code your teammates send you. Review one, then continue it here or bring its code into your folder."));
+            header.Children.Add(NexusTokens.PageTitle("Chats sent to you"));
+            header.Children.Add(NexusTokens.Caption("Chats your teammates shared or sent to you. Open a shared chat to read it; review a sent chat before any of its code touches your folder."));
             Grid.SetRow(header, row++);
             root.Children.Add(header);
         }
@@ -154,7 +154,30 @@ public sealed class TeleportPage : NexusPage
             return;
         }
         var items = NxJson.Items(response.Result).ToList();
-        _count.Text = items.Count == 0 ? "" : items.Count + (items.Count == 1 ? " chat" : " chats");
+        // Chats shared with you directly (a teammate gave you access) are
+        // in the timeline, not in transfers: list them here too, so this
+        // page is every chat someone sent you.
+        var shared = _sent ? new List<(string Id, string Title, string Summary, string From, string When)>() : await SharedWithMeAsync();
+        if (version != _loadVersion) return;
+        var total = items.Count + shared.Count;
+        _count.Text = total == 0 ? "" : total + (total == 1 ? " chat" : " chats");
+        if (shared.Count > 0)
+        {
+            _list.Children.Add(NexusTokens.SectionTitle("Shared with you"));
+            foreach (var chat in shared)
+            {
+                var body = new StackPanel { Spacing = 6 };
+                body.Children.Add(Line(chat.Title, title: true));
+                if (chat.Summary.Length > 0) body.Children.Add(new TextBlock { Text = NxJson.Scrub(chat.Summary), TextWrapping = TextWrapping.Wrap, MaxLines = 2, TextTrimming = TextTrimming.CharacterEllipsis, Opacity = 0.8 });
+                body.Children.Add(Muted((chat.From.Length > 0 ? "From " + chat.From : "Shared with you") + (chat.When.Length > 0 ? " · " + chat.When : "")));
+                var openChat = new Button { Content = body, Padding = new Thickness(18), HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, CornerRadius = new CornerRadius(12) };
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(openChat, $"Open {chat.Title}{(chat.From.Length > 0 ? ", from " + chat.From : "")}");
+                var sessionToOpen = chat.Id;
+                openChat.Click += (_, _) => MainWindow.Current?.OpenSession(sessionToOpen);
+                _list.Children.Add(openChat);
+            }
+            if (items.Count > 0) _list.Children.Add(NexusTokens.SectionTitle("Sent to you with code"));
+        }
         if (method == NxMethods.TeleportInbox)
         {
             MainWindow.Current?.SetInboxCount(PendingCount(items, response));
@@ -179,12 +202,48 @@ public sealed class TeleportPage : NexusPage
                 await SelectAsync(id, sessionId, preview, status);
             }
         }
-        if (items.Count == 0)
+        if (total == 0)
         {
             _list.Children.Add(_sent
                 ? StateView.Empty("", "Nothing sent yet", "To send a chat, open it and choose Share, then pick a teammate. They get a copy with its code.")
                 : StateView.Empty("", "You're all caught up", "When a teammate sends you a chat, it shows up here. You review it before any code touches your folder."));
         }
+    }
+
+    // Private chats owned by someone else that you can see were shared
+    // with you (sessions.share grants). Names come from the project's
+    // sharing recipients, the list the Share dialog uses.
+    private async Task<List<(string Id, string Title, string Summary, string From, string When)>> SharedWithMeAsync()
+    {
+        var result = new List<(string, string, string, string, string)>();
+        var auth = await Call(NxMethods.AuthStatus);
+        var me = auth.Ok && auth.Result is { } account ? NxJson.Text(account, "user_id") : "";
+        if (me.Length == 0) return result;
+        var timeline = await Call(NxMethods.TimelineList, new { limit = 100 });
+        if (!timeline.Ok) return result;
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var looked = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in NxJson.Items(timeline.Result))
+        {
+            var owner = NxJson.Text(item, "owner_user_id");
+            if (owner.Length == 0 || owner == me || NxJson.Text(item, "visibility") != "private") continue;
+            if (SessionLineage.IsSubagentSession(item)) continue;
+            var project = NxJson.Text(item, "project_id");
+            if (!names.ContainsKey(owner) && project.Length > 0 && looked.Add(project))
+            {
+                var people = await Call(NxMethods.SharingRecipients, new { project_id = project });
+                if (people.Ok && people.Result is { } body && body.TryGetProperty("people", out var list))
+                    foreach (var person in NxJson.Items(list))
+                    {
+                        var name = NxJson.Text(person, "name");
+                        if (name.Length > 0 && name != NxJson.Text(person, "user_id")) names[NxJson.Text(person, "user_id")] = name;
+                    }
+            }
+            var title = ChatTitles.Title(NxJson.Text(item, "title"), ChatTitles.Clean(NxJson.Text(item, "summary")), NxJson.Text(item, "harness", "agent"));
+            var when = DateTimeOffset.TryParse(NxJson.Text(item, "last_active_at"), out var at) ? Nexus.Core.FriendlyTime.Relative(at) : "";
+            result.Add((NxJson.Text(item, "session_id", "id"), title, ChatTitles.Clean(NxJson.Text(item, "summary")), names.GetValueOrDefault(owner, ""), when));
+        }
+        return result;
     }
 
     private async Task SelectAsync(string id, string sessionId, string preview, string status)

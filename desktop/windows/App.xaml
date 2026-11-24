@@ -55,6 +55,72 @@
             <x:Double x:Key="ComboBoxMinHeight">28</x:Double>
             <x:Double x:Key="TextControlThemeMinHeight">30</x:Double>
 
+            <!-- Primary buttons, one treatment across installer, desktop and
+                 web: cream with ink text on dark, ink with cream text on
+                 light; gold stays the accent (links, toggles, focus). Our
+                 own template, so it never falls back to SystemAccentColor
+                 (which put white text on gold in light mode). Keyed
+                 AccentButtonStyle, so dialogs' primary buttons use it too. -->
+            <Style x:Key="AccentButtonStyle" TargetType="Button">
+                <Setter Property="Background" Value="{ThemeResource NexusPrimaryFillBrush}"/>
+                <Setter Property="Foreground" Value="{ThemeResource NexusPrimaryInkBrush}"/>
+                <Setter Property="BorderBrush" Value="Transparent"/>
+                <Setter Property="BorderThickness" Value="0"/>
+                <Setter Property="Padding" Value="{StaticResource ButtonPadding}"/>
+                <Setter Property="HorizontalAlignment" Value="Left"/>
+                <Setter Property="VerticalAlignment" Value="Center"/>
+                <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                <Setter Property="VerticalContentAlignment" Value="Center"/>
+                <Setter Property="FontFamily" Value="{ThemeResource ContentControlThemeFontFamily}"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="FontSize" Value="{ThemeResource ControlContentThemeFontSize}"/>
+                <Setter Property="CornerRadius" Value="{ThemeResource ControlCornerRadius}"/>
+                <Setter Property="UseSystemFocusVisuals" Value="True"/>
+                <Setter Property="FocusVisualMargin" Value="-3"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <ContentPresenter
+                                x:Name="ContentPresenter"
+                                Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="{TemplateBinding CornerRadius}"
+                                Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                ContentTransitions="{TemplateBinding ContentTransitions}"
+                                Padding="{TemplateBinding Padding}"
+                                Foreground="{TemplateBinding Foreground}"
+                                HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
+                                AutomationProperties.AccessibilityView="Raw">
+                                <VisualStateManager.VisualStateGroups>
+                                    <VisualStateGroup x:Name="CommonStates">
+                                        <VisualState x:Name="Normal"/>
+                                        <VisualState x:Name="PointerOver">
+                                            <VisualState.Setters>
+                                                <Setter Target="ContentPresenter.Background" Value="{ThemeResource NexusPrimaryFillHoverBrush}"/>
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                        <VisualState x:Name="Pressed">
+                                            <VisualState.Setters>
+                                                <Setter Target="ContentPresenter.Background" Value="{ThemeResource NexusPrimaryFillPressedBrush}"/>
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                        <VisualState x:Name="Disabled">
+                                            <VisualState.Setters>
+                                                <Setter Target="ContentPresenter.Background" Value="{ThemeResource NexusPrimaryFillDisabledBrush}"/>
+                                                <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource NexusPrimaryInkDisabledBrush}"/>
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                    </VisualStateGroup>
+                                </VisualStateManager.VisualStateGroups>
+                            </ContentPresenter>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
             <ResourceDictionary.ThemeDictionaries>
                 <!-- Dark: the brand ink canvas (#0E0F0E, as in the installer and
                      the landing page), surfaces lifted ~3%, hairline white
@@ -146,6 +212,10 @@
                     <SolidColorBrush x:Key="AccentButtonBorderBrushDisabled" Color="#00000000"/>
                     <SolidColorBrush x:Key="NexusPrimaryFillBrush" Color="#F2EFE6"/>
                     <SolidColorBrush x:Key="NexusPrimaryInkBrush" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillHoverBrush" Color="#FBF9F3"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillPressedBrush" Color="#E4E1DB"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillDisabledBrush" Color="#14FFFFFF"/>
+                    <SolidColorBrush x:Key="NexusPrimaryInkDisabledBrush" Color="#66F2EFE6"/>
 
                     <!-- Buttons: almost flat, hairline border -->
                     <SolidColorBrush x:Key="ButtonBackground" Color="#08FFFFFF"/>
@@ -260,6 +330,10 @@
                     <SolidColorBrush x:Key="AccentButtonBorderBrushDisabled" Color="#00000000"/>
                     <SolidColorBrush x:Key="NexusPrimaryFillBrush" Color="#0E0F0E"/>
                     <SolidColorBrush x:Key="NexusPrimaryInkBrush" Color="#F2EFE6"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillHoverBrush" Color="#262826"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillPressedBrush" Color="#000000"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillDisabledBrush" Color="#0F000000"/>
+                    <SolidColorBrush x:Key="NexusPrimaryInkDisabledBrush" Color="#71717A"/>
                     <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#9A6A18"/>
                     <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#A87A26"/>
                     <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#8A5F12"/>
@@ -301,6 +375,12 @@
                     <SolidColorBrush x:Key="ExpanderContentBackground" Color="#00000000"/>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="HighContrast">
+                    <SolidColorBrush x:Key="NexusPrimaryFillBrush" Color="{ThemeResource SystemColorHighlightColor}"/>
+                    <SolidColorBrush x:Key="NexusPrimaryInkBrush" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillHoverBrush" Color="{ThemeResource SystemColorHighlightColor}"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillPressedBrush" Color="{ThemeResource SystemColorHighlightColor}"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillDisabledBrush" Color="{ThemeResource SystemColorWindowColor}"/>
+                    <SolidColorBrush x:Key="NexusPrimaryInkDisabledBrush" Color="{ThemeResource SystemColorGrayTextColor}"/>
                     <SolidColorBrush x:Key="NexusSkeletonBrush" Color="{ThemeResource SystemColorGrayTextColor}"/>
                     <StaticResource x:Key="NexusSkeletonHighlightColor" ResourceKey="SystemColorWindowColor"/>
                     <SolidColorBrush x:Key="NexusDangerBrush" Color="{ThemeResource SystemColorWindowTextColor}"/>

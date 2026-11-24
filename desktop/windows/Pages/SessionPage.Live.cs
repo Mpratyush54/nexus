@@ -149,7 +149,7 @@ public sealed partial class SessionPage
                 if (root.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object)
                     turn?.TrySetResult(new NxResponse(true, null, result.Clone()));
                 else
-                    turn?.TrySetResult(new NxResponse(false, NxJson.Text(root, "error") is { Length: > 0 } e ? e : "The reply could not be saved.", null));
+                    turn?.TrySetResult(new NxResponse(false, NxJson.Text(root, "error") is { Length: > 0 } e ? AppDiagnostics.Friendly("live", e) : "The reply could not be saved.", null));
                 return true;
             }
             var kind = NxJson.Text(root, "kind");
@@ -204,6 +204,7 @@ public sealed partial class SessionPage
                     break;
                 case "status":
                 case "error":
+                    if (kind == "error" && text.Length > 0) text = AppDiagnostics.Friendly("live", text);
                     if (text.Length > 0) SetComposerStatus(text);
                     if (kind == "error" && text.Length > 0) _liveLastError = text;
                     break;

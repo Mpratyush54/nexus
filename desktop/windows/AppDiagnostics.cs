@@ -107,6 +107,19 @@ internal static partial class AppDiagnostics
 
     /// Logs a failed nx_call (method and the error, never the arguments) and
     /// remembers its request ID. The same failure is logged once a minute.
+    /// <summary>
+    /// A message safe to show for raw engine/agent error text: plain words
+    /// with a reference id; the raw text is logged under that id.
+    /// </summary>
+    public static string Friendly(string component, string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        if (NxErrors.IsUnreachable(raw)) return NxErrors.UnreachableMessage + " (ref " + Connectivity.NoteUnreachable(component, raw) + ")";
+        var (message, reference) = NxErrors.Friendly(raw);
+        if (reference.Length > 0) DiagLog.Warn(component, $"{raw} [ref {reference}]");
+        return message;
+    }
+
     public static void NoteCallFailure(string method, string? error)
     {
         var text = error ?? "unknown error";

@@ -154,13 +154,13 @@
                     <Button x:Name="FooterHome" AutomationProperties.Name="Home" Tag="home" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Home" Click="FooterNav_Click">
                         <FontIcon Glyph="&#xE80F;" FontSize="14" Opacity="0.7"/>
                     </Button>
-                    <Button x:Name="FooterShared" AutomationProperties.Name="Shared with you" Tag="teleport" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Shared with you" Click="FooterNav_Click">
+                    <Button x:Name="FooterShared" AutomationProperties.Name="Chats sent to you" Tag="teleport" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Chats sent to you" Click="FooterNav_Click">
                         <Grid>
-                            <FontIcon Glyph="&#xE8B7;" FontSize="14" Opacity="0.7"/>
+                            <FontIcon Glyph="&#xE724;" FontSize="14" Opacity="0.7"/>
                             <Ellipse x:Name="FooterSharedDot" Width="6" Height="6" Fill="{ThemeResource AccentFillColorDefaultBrush}" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-2,-3,0" Visibility="Collapsed"/>
                         </Grid>
                     </Button>
-                    <Button x:Name="FooterAgents" AutomationProperties.Name="Agents" Tag="agentsetup" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Agents: skills, sub-agents, MCP servers" Click="FooterNav_Click">
+                    <Button x:Name="FooterAgents" AutomationProperties.Name="Agents" Tag="agentsetup" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Agents: skills, sub-agents and tools" Click="FooterNav_Click">
                         <FontIcon Glyph="&#xE99A;" FontSize="14" Opacity="0.7"/>
                     </Button>
                     <Button x:Name="FooterMemory" AutomationProperties.Name="Memory" Tag="memory" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Memory" Click="FooterNav_Click">
@@ -175,8 +175,8 @@
                 <NavigationViewItem x:Name="HomeItem" Content="Home" Tag="home" Visibility="Collapsed">
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;"/></NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="SharedItem" Content="Shared" Tag="teleport" Visibility="Collapsed">
-                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE8B7;"/></NavigationViewItem.Icon>
+                <NavigationViewItem x:Name="SharedItem" Content="Chats sent to you" Tag="teleport" Visibility="Collapsed">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE724;"/></NavigationViewItem.Icon>
                     <NavigationViewItem.InfoBadge>
                         <InfoBadge x:Name="TeleportBadge" Value="0"/>
                     </NavigationViewItem.InfoBadge>
@@ -213,7 +213,7 @@
                 <MenuFlyout>
                     <MenuFlyoutItem Text="Open" Command="{x:Bind TrayOpenCommand}"/>
                     <MenuFlyoutItem x:Name="PauseItem" Text="Pause capture" Command="{x:Bind TrayPauseCommand}"/>
-                    <MenuFlyoutItem Text="Shared with you" Command="{x:Bind TrayTeleportCommand}"/>
+                    <MenuFlyoutItem Text="Chats sent to you" Command="{x:Bind TrayTeleportCommand}"/>
                     <MenuFlyoutItem Text="Report a problem…" Command="{x:Bind TrayReportCommand}"/>
                     <MenuFlyoutSeparator/>
                     <MenuFlyoutItem Text="Quit" Command="{x:Bind TrayQuitCommand}"/>

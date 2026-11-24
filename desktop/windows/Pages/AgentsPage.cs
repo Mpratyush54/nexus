@@ -101,7 +101,7 @@ public sealed class AgentsPage : NexusPage
         var agents = NxJson.Items(response.Result).ToList();
         var captureChip = capturePaused ? "Capture paused" :
             captureRunning ? "Capture active" : "Capture idle";
-        _summary.Text = $"{agents.Count} harnesses with sessions · {ShellProjectLabel()} · {captureChip}";
+        _summary.Text = $"{Nexus.Core.FriendlyTime.Count(agents.Count, "agent")} with chats · {ShellProjectLabel()} · {captureChip}";
 
         if (agents.Count == 0)
         {

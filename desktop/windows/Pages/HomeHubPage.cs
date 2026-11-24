@@ -70,7 +70,9 @@ public sealed class HomeHubPage : NexusPage
         };
         _root.SizeChanged += (_, _) => UpdateSegmentHostHeight();
         _header.SizeChanged += (_, _) => UpdateSegmentHostHeight();
-        ShellState.Changed += (_, _) => DispatcherQueue?.TryEnqueue(UpdateProjectChip);
+        void ShellChanged(object? _, EventArgs __) => DispatcherQueue?.TryEnqueue(UpdateProjectChip);
+        Loaded += (_, _) => ShellState.Changed += ShellChanged;
+        Unloaded += (_, _) => ShellState.Changed -= ShellChanged;
     }
 
     private void UpdateProjectChip()

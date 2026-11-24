@@ -77,9 +77,15 @@ public sealed partial class SessionPage : NexusPage
     private readonly TextBox _prompt = new() { PlaceholderText = "Ask anything…", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 68, MaxHeight = 160 };
     private readonly Button _sendHere = new() { Content = "Send ↗" };
     private readonly Button _cancelHere = new() { Content = "Stop", Visibility = Visibility.Collapsed };
-    private readonly Button _attachImage = new() { Padding = new Thickness(8), MinWidth = 36, MinHeight = 36 };
-    private readonly ComboBox _harness = new() { MinWidth = 128, MaxWidth = 160, PlaceholderText = "Harness" };
-    private readonly ComboBox _model = new() { MinWidth = 150, MaxWidth = 260, PlaceholderText = "Default model", IsEditable = true };
+    private readonly Button _attachImage = Named(new Button { Padding = new Thickness(8), MinWidth = 36, MinHeight = 36 }, "Attach an image");
+
+    private static T Named<T>(T element, string name) where T : DependencyObject
+    {
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(element, name);
+        return element;
+    }
+    private readonly ComboBox _harness = Named(new ComboBox { MinWidth = 128, MaxWidth = 160, PlaceholderText = "Agent" }, "Agent");
+    private readonly ComboBox _model = Named(new ComboBox { MinWidth = 150, MaxWidth = 260, PlaceholderText = "Default model", IsEditable = true }, "Model");
     private string _modelTip = "";
     private readonly Dictionary<string, string> _modelByHarness = new(StringComparer.OrdinalIgnoreCase);
     private string _lastHarness = "";
@@ -257,6 +263,7 @@ public sealed partial class SessionPage : NexusPage
         composerFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         composerFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetColumn(_harness, 3);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_access, "Permission");
         var modelPicker = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3, Children = { _model, _refreshModels, _access } };
         ToolTipService.SetToolTip(_access, "Ask before changes: approve each file edit and command.\nAuto-accept edits: file edits run without asking; commands still ask.");
         _harness.SelectionChanged += (_, _) => _access.Visibility = SelectedHarness() == "claude" ? Visibility.Visible : Visibility.Collapsed;
@@ -684,7 +691,7 @@ public sealed partial class SessionPage : NexusPage
     // Recently opened chats, kept so a chat whose page left PageCache still
     // paints at once; a quiet refresh follows and re-renders only on change.
     private sealed record SessionSnapshot(NxResponse Session, NxResponse Latest, NxResponse Continuations, NxResponse Ops, NxResponse Forks);
-    private const int MaxSnapshots = 24;
+    private const int MaxSnapshots = 8;
     private static readonly Dictionary<string, SessionSnapshot> s_snapshots = new(StringComparer.OrdinalIgnoreCase);
     private static readonly LinkedList<string> s_snapshotOrder = new();
     private static NxResponse? s_projects;
@@ -843,6 +850,13 @@ public sealed partial class SessionPage : NexusPage
         if (_subagentTitlePending.Length > 0 && _subagentTitlePending == _id) _ = NameSubagentChatAsync(_id, _nativeID);
     }
 
+    private static bool LooksLocal(string path)
+    {
+        if (path.Length == 0 || path.StartsWith("//", StringComparison.Ordinal) || path.StartsWith(@"\\", StringComparison.Ordinal)) return false;
+        try { return System.IO.Path.IsPathRooted(path) && System.IO.Directory.Exists(path); }
+        catch { return false; }
+    }
+
     private void ApplySessionHeader(string sessionId, NxResponse session, JsonElement? projects, bool quiet)
     {
         _meta.Children.Clear();
@@ -852,7 +866,12 @@ public sealed partial class SessionPage : NexusPage
             _agent = NxJson.Text(body, "agent", "harness");
             _nativeID = NxJson.Text(body, "native_id");
             _workspaceHint = NxJson.Text(body, "workspace_root_hint");
-            if (!quiet || _workspace.Text.Trim().Length == 0) _workspace.Text = _workspaceHint;
+            // The chat's folder on the computer it was captured on: shown
+            // only when it exists here. Another machine's path means nothing
+            // on this one; the project's local folder is found instead
+            // (ProjectFolders, after load).
+            var localHint = LooksLocal(_workspaceHint) ? _workspaceHint : "";
+            if (!quiet || _workspace.Text.Trim().Length == 0) _workspace.Text = localHint;
             var workspace = NxJson.Text(body, "workspace_root_hint", "workspace_root", "workspace", "cwd");
             _projectID = ProjectScope.SessionProjectId(
                 NxJson.Text(body, "project_id"),
@@ -1209,7 +1228,7 @@ public sealed partial class SessionPage : NexusPage
     private static readonly SemaphoreSlim s_forwardGate = new(1, 1);
     private const int ForwardWalkPageSize = 200;
     private const int MaxForwardWalkPages = 250;
-    private const int MaxForwardWalks = 6;
+    private const int MaxForwardWalks = 2;
 
     private static long TurnIdx(JsonElement turn) => long.TryParse(NxJson.Text(turn, "idx"), out var idx) ? idx : 0;
 
@@ -1618,7 +1637,7 @@ public sealed partial class SessionPage : NexusPage
         var now = DateTimeOffset.Now;
         var span = now - local;
         if (span.TotalMinutes < 1) return "just now";
-        if (span.TotalMinutes < 60) return $"{(int)span.TotalMinutes}m ago";
+        if (span.TotalMinutes < 60) return Nexus.Core.FriendlyTime.Relative(when);
         if (span.TotalHours < 24 && local.Date == now.Date) return local.ToString("HH:mm");
         if (local.Year == now.Year) return local.ToString("MMM d");
         return local.ToString("MMM d, yyyy");
@@ -2865,6 +2884,24 @@ public sealed partial class SessionPage : NexusPage
         _attachImage.IsEnabled = _sendHere.IsEnabled && selected is "opencode" or "codex";
         _prompt.IsEnabled = _sessionLoaded && !_legacy;
         _prompt.IsReadOnly = false;
+        // Offline: the reply could not be saved, so the composer waits
+        // (the draft stays) and says why in one calm line.
+        var offline = ShellState.Current.Offline;
+        if (offline)
+        {
+            _sendHere.IsEnabled = false;
+            _attachImage.IsEnabled = false;
+            _prompt.IsEnabled = false;
+            SetComposerStatus("Sending is paused until Nexus reconnects. Your draft is kept.");
+            _offlineNoticeShown = true;
+        }
+        else if (_offlineNoticeShown)
+        {
+            _offlineNoticeShown = false;
+            SetComposerStatus("");
+        }
+        _harness.IsEnabled = !offline;
+        _model.IsEnabled = !offline;
         ToolTipService.SetToolTip(_sendHere, _legacy ? "Archived snapshots are read-only" : !System.IO.Directory.Exists(_workspace.Text.Trim()) ? "Choose a local project folder first" : "Send to " + selected + " using this project's context");
         ToolTipService.SetToolTip(_resume, _legacy ? "Archived snapshots cannot resume natively" : _nativeID.Length == 0 ? "No native session ID was captured" : "Copies a command for an installed local agent; it does not open a terminal");
         ToolTipService.SetToolTip(_teleport, _legacy ? "Archived snapshots cannot be teleported" : !_hasTransferableVersion ? "A complete or transcript-only version is required" : _workspaceHint.Length == 0 ? "This chat has no mapped workspace to package code from" : null);
@@ -3239,7 +3276,7 @@ public sealed partial class SessionPage : NexusPage
             activityView.View.IsExpanded = activityView.Count > 0;
             if (_prompt.Text.Length == 0) _prompt.Text = prompt;
             SetComposerStatus(response.Error ?? "The agent did not return a reply.");
-            if ((response.Error ?? "").Contains("model", StringComparison.OrdinalIgnoreCase)) _model.Focus(FocusState.Programmatic);
+            if ((response.RawError ?? "").Contains("model", StringComparison.OrdinalIgnoreCase)) _model.Focus(FocusState.Programmatic);
             return;
         }
         var answer = NxJson.Text(result, "text");
@@ -3429,7 +3466,9 @@ public sealed partial class SessionPage : NexusPage
         catch (JsonException) { }
     }
 
-    private void HandleShellChanged(object? sender, EventArgs e) => UpdateActions();
+    private bool _offlineNoticeShown;
+
+    private void HandleShellChanged(object? sender, EventArgs e) => DispatcherQueue?.TryEnqueue(UpdateActions);
 
     private void SetComposerStatus(string text)
     {

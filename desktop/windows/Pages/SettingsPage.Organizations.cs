@@ -62,6 +62,8 @@ public sealed partial class SettingsPage
         return button;
     }
 
+    private string _orgUserName = "";
+
     private string SelectedOrganization => (_orgChoice.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
 
     private async Task RefreshOrganizationsAsync()
@@ -85,6 +87,7 @@ public sealed partial class SettingsPage
                 return;
             }
             var user = NxJson.Text(account, "user_id");
+            _orgUserName = NxJson.Text(account, "username");
             if (_orgUser != user) _createdInviteCodes.Clear();
             _orgUser = user;
             var response = await Call(NxMethods.OrgsList);
@@ -108,6 +111,13 @@ public sealed partial class SettingsPage
         if (SelectedOrganization.Length > 0) await LoadOrganizationAsync();
     }
 
+    private static string RoleLabel(string role) => role.ToUpperInvariant() switch
+    {
+        "OWNER" => "Owner",
+        "ADMIN" => "Admin",
+        _ => "Member"
+    };
+
     private async Task LoadOrganizationAsync()
     {
         var orgID = SelectedOrganization;
@@ -123,11 +133,29 @@ public sealed partial class SettingsPage
             return;
         }
         var members = detail.TryGetProperty("members", out var list) ? NxJson.Items(list).ToList() : new List<JsonElement>();
+        // Older servers list members by id only. Names then come from the
+        // sharing recipients of an organization project (the same people,
+        // named), and your own from your account.
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (members.Any(m => NxJson.Text(m, "name") is var n && (n.Length == 0 || n == NxJson.Text(m, "user_id"))))
+        {
+            var orgProject = detail.TryGetProperty("projects", out var orgProjects) ? NxJson.Items(orgProjects).Select(p => NxJson.Text(p, "id")).FirstOrDefault(id => id.Length > 0) ?? "" : "";
+            if (orgProject.Length > 0)
+            {
+                var people = await Call(NxMethods.SharingRecipients, new { project_id = orgProject });
+                if (request != _orgRequest) return;
+                if (people.Ok && people.Result is { } peopleBody && peopleBody.TryGetProperty("people", out var personList))
+                    foreach (var person in NxJson.Items(personList))
+                        if (NxJson.Text(person, "name") is { Length: > 0 } personName && personName != NxJson.Text(person, "user_id"))
+                            names[NxJson.Text(person, "user_id")] = personName;
+            }
+            if (_orgUserName.Length > 0 && _orgUser.Length > 0) names[_orgUser] = _orgUserName;
+        }
         var ownRole = members.Where(m => NxJson.Text(m, "user_id") == _orgUser)
             .Select(m => NxJson.Text(m, "role")).FirstOrDefault() ?? "MEMBER";
         var owner = ownRole == "OWNER";
         var manages = owner || ownRole == "ADMIN";
-        _orgStatus.Text = $"{members.Count} {(members.Count == 1 ? "member" : "members")} · Your role: {ownRole.ToLowerInvariant()}";
+        _orgStatus.Text = $"{Nexus.Core.FriendlyTime.Count(members.Count, "member")} · You are {RoleLabel(ownRole).ToLowerInvariant()}" + (_orgUser.Length == 0 ? " (sign in again to confirm your role)" : "");
         _orgDetails.Children.Add(GroupHeader("Members", 24));
         _orgDetails.Children.Add(SettingRow(
             RowText("Private chats stay private", "Organization membership does not automatically reveal private chats. Share a chat with the project team or named people to grant access."),
@@ -136,6 +164,7 @@ public sealed partial class SettingsPage
         {
             var userID = NxJson.Text(member, "user_id");
             var name = NxJson.Text(member, "name");
+            if (name.Length == 0 || name == userID) name = names.GetValueOrDefault(userID, "");
             if (name.Length == 0) name = "Member";
             if (userID == _orgUser) name += " (you)";
             var role = NxJson.Text(member, "role");
@@ -149,7 +178,7 @@ public sealed partial class SettingsPage
                 Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(remove, "Remove " + label);
                 actions = Row(change, remove);
             }
-            _orgDetails.Children.Add(SettingRow(RowText(name, role.ToLowerInvariant()), actions));
+            _orgDetails.Children.Add(SettingRow(RowText(name, RoleLabel(role)), actions));
         }
         if (detail.TryGetProperty("projects", out var projects))
         {

@@ -229,6 +229,7 @@ internal static class FileRefs
             catch (IOException) { }
             catch (UnauthorizedAccessException) { }
         }
+        if (SearchCache.Count >= 256) SearchCache.Clear();
         SearchCache[key] = (DateTime.UtcNow, matches);
         return Rank(matches, relativePath);
     }

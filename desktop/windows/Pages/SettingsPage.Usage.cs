@@ -47,6 +47,7 @@ public sealed partial class SettingsPage
         var response = await App.Core.CallAsync(NxMethods.ProjectsList);
         await UiThread.Resume(DispatcherQueue);
         _usageProject.Items.Clear();
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_usageProject, "Usage for project");
         _usageProject.Items.Add(new ComboBoxItem { Content = "All projects", Tag = "" });
         if (response.Ok)
             foreach (var project in NxJson.Items(response.Result))

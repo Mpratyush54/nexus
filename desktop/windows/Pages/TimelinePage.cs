@@ -614,7 +614,7 @@ public sealed class TimelinePage : NexusPage
         if (agent.Length > 0) metaParts.Add(agent);
         if (project.Length > 0) metaParts.Add(project);
         if (machine.Length > 0) metaParts.Add(machine);
-        if (turns.Length > 0 && int.TryParse(turns, out var turnN) && turnN > 0) metaParts.Add($"{turnN} turns");
+        if (turns.Length > 0 && int.TryParse(turns, out var turnN) && turnN > 0) metaParts.Add(Nexus.Core.FriendlyTime.Count(turnN, "message"));
         else if (turns.Length > 0) metaParts.Add(turns + " turns");
         if (versionState.Equals("transcript_only", StringComparison.OrdinalIgnoreCase)) metaParts.Add("transcript only");
 
@@ -709,7 +709,7 @@ public sealed class TimelinePage : NexusPage
         var local = dt.ToLocalTime();
         var delta = DateTime.Now - local;
         if (delta.TotalMinutes < 1) return "Just now";
-        if (delta.TotalMinutes < 60) return $"{(int)delta.TotalMinutes}m ago";
+        if (delta.TotalMinutes < 60) return Nexus.Core.FriendlyTime.Relative(new DateTimeOffset(dt));
         if (delta.TotalHours < 24 && local.Date == DateTime.Now.Date) return local.ToString("h:mm tt", CultureInfo.CurrentCulture);
         if (delta.TotalDays < 7) return local.ToString("ddd h:mm tt", CultureInfo.CurrentCulture);
         return local.ToString("MMM d, h:mm tt", CultureInfo.CurrentCulture);

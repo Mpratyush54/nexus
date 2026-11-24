@@ -8,7 +8,7 @@ namespace Nexus.Pages;
 
 public sealed partial class SessionPage
 {
-    private readonly Button _refreshModels = new() { Content = new FontIcon { Glyph = "\uE72C", FontSize = 13 }, MinWidth = 30, MinHeight = 30, Padding = new Thickness(4), Visibility = Visibility.Collapsed };
+    private readonly Button _refreshModels = Named(new Button { Content = new FontIcon { Glyph = "\uE72C", FontSize = 13 }, MinWidth = 30, MinHeight = 30, Padding = new Thickness(4), Visibility = Visibility.Collapsed }, "Refresh the model list");
     // Shared by every chat page (UI thread only) so switching chats shows the
     // last list instantly. The core also caches per harness on disk (24h).
     private static readonly Dictionary<string, ModelPickerCatalog> _modelCatalogs = new(StringComparer.OrdinalIgnoreCase);

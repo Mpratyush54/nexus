@@ -28,7 +28,7 @@ public sealed partial class MemoryPage
     private readonly StackPanel _briefSources = new() { Orientation = Orientation.Horizontal, Spacing = 10 };
     private readonly TextBlock _briefUpdated = new() { FontSize = 12, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center };
     private readonly TextBlock _briefError = new() { FontSize = 12, TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
-    private readonly Button _briefRefresh = new() { Content = "Refresh", MinHeight = 28, Padding = new Thickness(10, 2, 10, 3), FontSize = 12 };
+    private readonly Button _briefRefresh = new() { Content = "Rebuild", MinHeight = 28, Padding = new Thickness(10, 2, 10, 3), FontSize = 12 };
     private string _briefProjectId = "";
     private int _briefVersion;
     private readonly Dictionary<string, Task<string>> _chatTitles = new(StringComparer.Ordinal);
@@ -80,13 +80,13 @@ public sealed partial class MemoryPage
         {
             // The brief route ships separately from this app: a server
             // without it (404/405) or no connection simply hides the card.
-            if (IsMissingRoute(response.Error) || ShellState.Current.Offline)
+            if (IsMissingRoute(response.RawError) || NxErrors.IsUnreachable(response.RawError) || ShellState.Current.Offline)
             {
                 _briefCard.Visibility = Visibility.Collapsed;
                 return;
             }
             RenderBrief(null);
-            ShowBriefError("Couldn't load the project brief: " + (response.Error ?? "request failed"));
+            ShowBriefError("Couldn't load the project brief. " + (response.Error ?? ""));
             return;
         }
         RenderBrief(response.Result);
@@ -97,16 +97,16 @@ public sealed partial class MemoryPage
         var projectId = ShellProjectId();
         if (projectId.Length == 0) return;
         _briefRefresh.IsEnabled = false;
-        _briefRefresh.Content = "Refreshing…";
+        _briefRefresh.Content = "Rebuilding…";
         _briefError.Visibility = Visibility.Collapsed;
         var version = ++_briefVersion;
         var response = await Call(NxMethods.ProjectsBriefRefresh, new { project_id = projectId });
         _briefRefresh.IsEnabled = true;
-        _briefRefresh.Content = "Refresh";
+        _briefRefresh.Content = "Rebuild";
         if (version != _briefVersion) return;
         if (!response.Ok)
         {
-            ShowBriefError(FriendlyBriefError(response.Error));
+            ShowBriefError(FriendlyBriefError(response));
             return;
         }
         RenderBrief(response.Result);
@@ -173,9 +173,9 @@ public sealed partial class MemoryPage
                e.Contains("method not allowed", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string FriendlyBriefError(string? error)
+    private static string FriendlyBriefError(NxResponse response)
     {
-        var e = error ?? "";
+        var e = response.RawError ?? "";
         if (e.Contains("owner or admin", StringComparison.OrdinalIgnoreCase) || e.Contains("403", StringComparison.Ordinal) || e.Contains("forbidden", StringComparison.OrdinalIgnoreCase))
             return "Only project owners and admins can refresh the brief.";
         if (e.Contains("no project memories", StringComparison.OrdinalIgnoreCase))
@@ -186,7 +186,9 @@ public sealed partial class MemoryPage
             return "This server doesn't support project briefs yet.";
         if (ShellState.Current.Offline)
             return "Refreshing the brief needs a connection.";
-        return "Couldn't refresh the brief: " + (e.Length > 0 ? e : "request failed");
+        if (NxErrors.IsUnreachable(e))
+            return "Refreshing the brief needs a connection.";
+        return "Couldn't refresh the brief. " + (response.Error ?? "");
     }
 
     // ── Card pieces ──────────────────────────────────────────────────────
@@ -250,20 +252,7 @@ public sealed partial class MemoryPage
         return count is { Length: > 0 } && count != "0" ? $"Last used {used} · {count} uses" : $"Last used {used}";
     }
 
-    internal static string FriendlyDate(string raw)
-    {
-        if (!DateTimeOffset.TryParse(raw, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at) || at.Year < 2000)
-        {
-            return "";
-        }
-        var local = at.ToLocalTime();
-        var age = DateTimeOffset.Now - local;
-        if (age.TotalMinutes < 1) return "just now";
-        if (age.TotalHours < 1) return $"{(int)age.TotalMinutes} min ago";
-        if (age.TotalDays < 1) return $"{(int)age.TotalHours} h ago";
-        if (age.TotalDays < 7) return $"{(int)age.TotalDays} d ago";
-        return local.ToString(local.Year == DateTimeOffset.Now.Year ? "MMM d" : "MMM d, yyyy", CultureInfo.CurrentCulture);
-    }
+    internal static string FriendlyDate(string raw) => Nexus.Core.FriendlyTime.Relative(raw);
 
     private static string SourceSessionId(JsonElement item)
     {
@@ -492,7 +481,7 @@ public sealed partial class MemoryPage
                 var response = await Call(NxMethods.MemoryUpdate, body);
                 if (!response.Ok)
                 {
-                    error.Text = FriendlyEditError(response.Error);
+                    error.Text = FriendlyEditError(response);
                     error.Visibility = Visibility.Visible;
                     args.Cancel = true;
                     return;
@@ -510,16 +499,16 @@ public sealed partial class MemoryPage
         }
     }
 
-    private static string FriendlyEditError(string? error)
+    private static string FriendlyEditError(NxResponse response)
     {
-        var e = error ?? "";
+        var e = response.RawError ?? "";
         if (e.Contains("outside 20-2000", StringComparison.OrdinalIgnoreCase))
             return "A memory needs between 20 and 2,000 characters.";
         if (e.Contains("403", StringComparison.Ordinal) || e.Contains("forbidden", StringComparison.OrdinalIgnoreCase) || e.Contains("permission", StringComparison.OrdinalIgnoreCase))
             return "You don't have permission to edit this memory.";
         if (ShellState.Current.Offline)
             return "Editing needs a connection.";
-        return e.Length > 0 ? e : "Couldn't save this memory.";
+        return response.Error is { Length: > 0 } shown ? shown : "Couldn't save this memory.";
     }
 
     // ── History ──────────────────────────────────────────────────────────

@@ -73,6 +73,7 @@ public sealed partial class MainWindow : Window
         _projectCompactFlyout.Opening += (_, _) => RebuildCompactProjectFlyout();
         // The collapsed rail opens the same project switcher as the sidebar.
         ProjectCompactButton.Click += (_, _) => _projectSwitcher.Open(ProjectCompactButton);
+        DecorateFooter();
         _projectSwitcher = new ProjectSwitcher(SwitcherProjects, () => _projectFilter, SetProjectFilter, ChatCountFor);
         ProjectSwitcherHost.Content = _projectSwitcher;
         ShellState.Changed += (_, _) => DispatcherQueue.TryEnqueue(_projectSwitcher.Refresh);
@@ -109,6 +110,15 @@ public sealed partial class MainWindow : Window
         App.Core.Subscribe(DispatcherQueue, OnCoreEvent);
         _ = App.Core.CallAsync(NxMethods.EventsSubscribe);
         EnsureLoginStartDefault();
+        // Names for any control built without one (icon buttons, rows with
+        // panel content), once layout settles after a change.
+        _a11yTimer = DispatcherQueue.CreateTimer();
+        _a11yTimer.Interval = TimeSpan.FromMilliseconds(900);
+        _a11yTimer.IsRepeating = false;
+        _a11yTimer.Tick += (_, _) => AccessibleNames.Fill(Content);
+        RootGrid.LayoutUpdated += (_, _) => { if (!_a11yTimer.IsRunning) _a11yTimer.Start(); };
+        Connectivity.Changed += () => DispatcherQueue.TryEnqueue(ApplyConnectivity);
+        Connectivity.Start();
         _ = RefreshBannerAsync();
         _ = RefreshInboxBadgeAsync();
         Activated += async (_, _) => await EnsureShellInitializedAsync();
@@ -123,6 +133,7 @@ public sealed partial class MainWindow : Window
     }
 
     private bool _crashOfferDone;
+    private readonly DispatcherQueueTimer _a11yTimer;
 
     // A live theme switch: XAML-bound resources follow the root's theme by
     // themselves; everything built in code is rebuilt with brushes of the
@@ -130,11 +141,11 @@ public sealed partial class MainWindow : Window
     private void RebuildForTheme()
     {
         if (SystemBackdrop is null && _setup is null) RootGrid.Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
+        DiagLog.Info("theme", $"rebuilding for {(ThemeService.EffectiveIsDark ? "dark" : "light")}");
+        // Rows are rebuilt from scratch: the repeater recycles the old ones
+        // (through ChatRowFactory) and asks for new ones, which the empty
+        // row cache builds with the new theme's brushes.
         _chatRows.Clear();
-        _shownChatRows.Clear();
-        _liveChatRows.Clear();
-        ChatList.ItemTemplate = null;
-        ChatList.ItemsSource = null;
         RenderChats();
         _projectSwitcher.Refresh();
         _setup?.ThemeChanged();
@@ -202,19 +213,16 @@ public sealed partial class MainWindow : Window
 
     private SetupWizardPage? _setup;
 
-    // The guide covers the whole window on a Mica (BaseAlt) backdrop. When it
-    // closes the shell gets back its own backdrop (Mica behind the sidebar,
-    // solid reading canvas).
+    // The guide covers the whole window on the app's own canvas.
     public void ShowSetup()
     {
         if (_setup is null && Content is Grid root)
         {
+            // The guide paints the same ink canvas as the app (its own
+            // background), so finishing it doesn't jump from a tinted
+            // backdrop to the shell's colours.
             _setup = new SetupWizardPage(FinishSetup);
             Grid.SetRowSpan(_setup, 2);
-            _shellBackground = root.Background;
-            _shellBackdrop = SystemBackdrop;
-            root.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
-            SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.BaseAlt };
             Nav.Visibility = Visibility.Collapsed;
             OfflineBar.Visibility = Visibility.Collapsed;
             root.Children.Add(_setup);
@@ -222,21 +230,14 @@ public sealed partial class MainWindow : Window
         if (AppWindow.IsVisible) Activate();
     }
 
-    private Microsoft.UI.Xaml.Media.Brush? _shellBackground;
-    private Microsoft.UI.Xaml.Media.SystemBackdrop? _shellBackdrop;
 
     private void FinishSetup()
     {
-        if (Content is Grid root && _setup is not null)
-        {
-            root.Children.Remove(_setup);
-            root.Background = _shellBackground;
-        }
+        if (Content is Grid root && _setup is not null) root.Children.Remove(_setup);
         _setup = null;
-        SystemBackdrop = _shellBackdrop;
-        _shellBackdrop = null;
         Nav.Visibility = Visibility.Visible;
         OfflineBar.Visibility = Visibility.Visible;
+        ApplyConnectivity();
         // The shell rises in as the guide fades out.
         ContentFrame.Transitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection
         {
@@ -491,14 +492,15 @@ public sealed partial class MainWindow : Window
         FooterIcons.Orientation = expanded ? Orientation.Horizontal : Orientation.Vertical;
         FooterIcons.HorizontalAlignment = HorizontalAlignment.Left;
         FooterIcons.Width = expanded ? double.NaN : railWidth;
-        FooterIcons.Spacing = expanded ? 2 : 8;
-        FooterIcons.Margin = expanded ? new Thickness(12, 6, 12, 10) : new Thickness(1, 6, 0, 10);
+        FooterIcons.Spacing = expanded ? 0 : 8;
+        FooterIcons.Margin = expanded ? new Thickness(8, 4, 8, 8) : new Thickness(1, 6, 0, 10);
         foreach (var child in FooterIcons.Children)
         {
             if (child is not Button button) continue;
-            button.Width = expanded ? double.NaN : 36;
-            button.Height = expanded ? double.NaN : 36;
-            button.Padding = expanded ? new Thickness(8) : new Thickness(0);
+            if (_footerParts.TryGetValue(button, out var parts)) parts.Label.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
+            button.Width = expanded ? 51 : 36;
+            button.Height = expanded ? double.NaN : 40;
+            button.Padding = expanded ? new Thickness(2, 6, 2, 2) : new Thickness(0, 4, 0, 0);
             if (expanded) button.ClearValue(Control.CornerRadiusProperty);
             else button.CornerRadius = new CornerRadius(6);
             button.HorizontalAlignment = HorizontalAlignment.Center;
@@ -513,6 +515,36 @@ public sealed partial class MainWindow : Window
         Nav.IsPaneOpen = true;
         ApplyPaneProjectLayout(true);
         DispatcherQueue.TryEnqueue(() => ChatSearch.Focus(FocusState.Programmatic));
+    }
+
+    // Footer destinations: icon over a short label while the sidebar is
+    // open (icons only in the rail, where the tooltip names them), and a
+    // gold bar under the page you are on.
+    private readonly Dictionary<Button, (TextBlock Label, Border Marker, FrameworkElement Icon)> _footerParts = new();
+
+    private static readonly Dictionary<string, string> FooterLabels = new()
+    {
+        ["home"] = "Home", ["teleport"] = "Inbox", ["agentsetup"] = "Agents", ["memory"] = "Memory", ["settings"] = "Settings"
+    };
+
+    private void DecorateFooter()
+    {
+        foreach (var child in FooterIcons.Children)
+        {
+            if (child is not Button { Tag: string tag, Content: FrameworkElement icon } button || _footerParts.ContainsKey(button)) continue;
+            var label = new TextBlock { Text = FooterLabels.GetValueOrDefault(tag, tag), FontSize = 10.5, Opacity = 0.75, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 3, 0, 0) };
+            var marker = new Border { Height = 2, Width = 18, CornerRadius = new CornerRadius(1), Margin = new Thickness(0, 3, 0, 0), HorizontalAlignment = HorizontalAlignment.Center, Background = NexusPalette.Accent, Opacity = 0 };
+            button.Content = null;
+            var stack = new StackPanel { HorizontalAlignment = HorizontalAlignment.Center };
+            icon.HorizontalAlignment = HorizontalAlignment.Center;
+            stack.Children.Add(icon);
+            stack.Children.Add(label);
+            stack.Children.Add(marker);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAccessibilityView(label, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+            button.Content = stack;
+            _footerParts[button] = (label, marker, icon);
+        }
+        FooterIcons.Spacing = 0;
     }
 
     // Selected indicator for the footer / rail destinations.
@@ -531,7 +563,16 @@ public sealed partial class MainWindow : Window
         foreach (var child in FooterIcons.Children)
         {
             if (child is not Button { Tag: string buttonTag } button) continue;
-            button.Background = buttonTag == tag ? NexusPalette.UserFill : TransparentRow;
+            var selected = buttonTag == tag;
+            button.Background = TransparentRow;
+            if (_footerParts.TryGetValue(button, out var parts))
+            {
+                parts.Marker.Background = NexusPalette.Accent;
+                parts.Marker.Opacity = selected ? 1 : 0;
+                parts.Label.Opacity = selected ? 1 : 0.7;
+                parts.Label.FontWeight = selected ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
+            }
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetItemStatus(button, selected ? "Current page" : "");
         }
     }
 
@@ -827,7 +868,10 @@ public sealed partial class MainWindow : Window
             System.Diagnostics.Trace.WriteLine($"[perf] chats: server answer {watch.ElapsedMilliseconds} ms (ok={response.Ok})");
             if (!response.Ok)
             {
-                _chatStatus = response.Error ?? "Could not load chats.";
+                // Unreachable: the banner says so once; the list keeps what it has.
+                _chatStatus = NxErrors.IsUnreachable(response.RawError)
+                    ? (_chatEntries.Count > 0 ? "" : "Your chats appear here when Nexus reconnects.")
+                    : response.Error ?? "Could not load chats.";
                 RenderChats();
                 return;
             }
@@ -1049,7 +1093,7 @@ public sealed partial class MainWindow : Window
         var key = (entry, _renderShowMatch);
         if (!_chatRows.TryGetValue(key, out var row) || _liveChatRows.Contains(row.Button))
         {
-            if (_chatRows.Count > 1500) _chatRows.Clear();
+            if (_chatRows.Count > 300) _chatRows.Clear();
             row = ChatRow(entry, _renderShowMatch);
             _chatRows[key] = row;
             if (_entranceBudget > 0) Motion.FadeIn(row.Button, 6, (12 - _entranceBudget--) * 22, TimeSpan.FromMilliseconds(200));
@@ -1626,7 +1670,7 @@ public sealed partial class MainWindow : Window
             content.Children.Add(new TextBlock { Text = $"A browser signed in to your Nexus account requested {NxJson.Text(body, "agent")} on this device.", TextWrapping = TextWrapping.Wrap });
             content.Children.Add(new TextBlock { Text = NxJson.Text(body, "workspace"), TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true });
             var model = NxJson.Text(body, "model");
-            content.Children.Add(new TextBlock { Text = "Model: " + (model.Length > 0 ? model : "Harness default"), TextWrapping = TextWrapping.Wrap });
+            content.Children.Add(new TextBlock { Text = "Model: " + (model.Length > 0 ? model : "the agent's default"), TextWrapping = TextWrapping.Wrap });
             content.Children.Add(new ScrollViewer { MaxHeight = 240, Content = new TextBlock { Text = prompt, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } });
             content.Children.Add(new TextBlock { Text = "Allowing this turn lets the agent read and modify this workspace using its installed permissions. Approval applies only to this message.", TextWrapping = TextWrapping.Wrap });
             _desktopApproval = new ContentDialog { Title = "Allow browser request?", Content = content, PrimaryButtonText = "Allow this turn", CloseButtonText = "Decline", DefaultButton = ContentDialogButton.Close, XamlRoot = Content.XamlRoot };
@@ -1649,7 +1693,8 @@ public sealed partial class MainWindow : Window
         TeleportBadge.Value = count;
         TeleportBadge.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
         FooterSharedDot.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        ToolTipService.SetToolTip(FooterShared, count > 0 ? $"Shared with you · {count} new" : "Shared with you");
+        ToolTipService.SetToolTip(FooterShared, count > 0 ? $"Chats sent to you · {count} new" : "Chats sent to you");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(FooterShared, count > 0 ? $"Chats sent to you, {count} new" : "Chats sent to you");
     }
 
     private async Task RefreshInboxBadgeAsync()
@@ -1674,18 +1719,12 @@ public sealed partial class MainWindow : Window
 
     public async Task RefreshBannerAsync()
     {
-        // Independent checks run together (they were three round trips in a row).
         var netTask = App.Core.CallAsync(NxMethods.NetStatus);
         var uploadsTask = App.Core.CallAsync(NxMethods.UploadsStatus);
-        var timelineTask = App.Core.CallAsync(NxMethods.TimelineList, new { limit = 1 });
-        await Task.WhenAll(netTask, uploadsTask, timelineTask);
-        var net = netTask.Result; var uploads = uploadsTask.Result; var timeline = timelineTask.Result;
+        await Task.WhenAll(netTask, uploadsTask);
+        var net = netTask.Result; var uploads = uploadsTask.Result;
         await UiThread.Resume(DispatcherQueue);
-        var online = true;
-        if (net.Ok && net.Result is { } netBody && netBody.TryGetProperty("online", out var flag))
-        {
-            online = flag.ValueKind == JsonValueKind.True;
-        }
+        _networkDown = net.Ok && net.Result is { } netBody && netBody.TryGetProperty("online", out var flag) && flag.ValueKind == JsonValueKind.False;
         var pending = 0;
         if (uploads.Ok && uploads.Result is { } uploadBody &&
             uploadBody.TryGetProperty("pending", out var pendingEl) &&
@@ -1693,15 +1732,57 @@ public sealed partial class MainWindow : Window
         {
             pending = parsed;
         }
-        var timelineOffline = timeline.Error?.Contains("offline", StringComparison.OrdinalIgnoreCase) == true;
-        var offline = !online || timelineOffline;
         State.PendingUploads = pending;
+        ApplyConnectivity();
+    }
+
+    private bool _networkDown;
+    private bool _wasOffline;
+    private Button? _retryNow;
+
+    // One offline presentation for the whole app: the banner on top, plus
+    // pages that disable what needs the server. It comes from failed calls
+    // and a /healthz probe (Connectivity), not just Windows' network state,
+    // and clears by itself when the server answers again.
+    private void ApplyConnectivity()
+    {
+        var offline = _networkDown || Connectivity.Offline;
+        var pending = State.PendingUploads;
+        var waiting = pending > 0 ? $" {pending} item{(pending == 1 ? "" : "s")} will upload then." : "";
+        State.Banner = !offline ? ""
+            : _networkDown ? "You're offline. Your chats on this computer are still here; Nexus reconnects when you're back." + waiting
+            : $"Can't reach the Nexus server{(Connectivity.Host.Length > 0 ? " (" + Connectivity.Host + ")" : "")}. Nexus keeps trying and reconnects by itself." + waiting;
         State.Offline = offline;
-        State.Banner = offline
-            ? "You're offline. Showing saved chats; editing waits until you're back." + (pending > 0 ? $" {pending} item{(pending == 1 ? "" : "s")} will upload then." : "")
-            : "";
-        OfflineBar.IsOpen = offline;
+        OfflineBar.Severity = InfoBarSeverity.Informational;
+        OfflineBar.Title = offline ? "Offline" : "";
         OfflineBar.Message = State.Banner;
+        if (_retryNow is null)
+        {
+            _retryNow = new Button { Content = "Try now" };
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_retryNow, "Try to reconnect now");
+            _retryNow.Click += (_, _) => { Connectivity.ProbeNow(); _ = RefreshBannerAsync(); };
+            OfflineBar.ActionButton = _retryNow;
+        }
+        OfflineBar.IsOpen = offline && _setup is null;
+        if (_wasOffline && !offline) OnReconnected();
+        _wasOffline = offline;
+    }
+
+    // Back online: reload what is on screen so nothing keeps showing the
+    // "can't reach" state.
+    private void OnReconnected()
+    {
+        DiagLog.Info("net", "reconnected; refreshing the visible page");
+        _chatStatus = "";
+        _chatCache.Clear();
+        if (ProjectSelector.Items.Count == 0) _ = BootstrapProjectsAsync();
+        _ = LoadChatsAsync(force: true);
+        _ = RefreshInboxBadgeAsync();
+        if (ContentFrame.Content is NexusPage page)
+        {
+            var parameter = page is SessionPage session ? session.SessionId : null;
+            page.Enter(parameter);
+        }
     }
 
     private static void EnsureLoginStartDefault()

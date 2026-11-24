@@ -77,8 +77,8 @@ public sealed class DashboardPage : NexusPage
         };
         WatchShellProject(() => LoadAsync());
         void FilterChanged(object? _, EventArgs __) { ApplyHeader(); _ = LoadActivityAsync(_version, ShellProjectId(), null); }
-        void ShellChanged(object? _, EventArgs __) => DispatcherQueue.TryEnqueue(ApplyHeader);
-        Loaded += (_, _) => { ShellState.ChatFilterChanged += FilterChanged; ShellState.Changed += ShellChanged; ApplyHeader(); };
+        void ShellChanged(object? _, EventArgs __) => DispatcherQueue.TryEnqueue(() => { ApplyHeader(); ApplyOffline(); });
+        Loaded += (_, _) => { ShellState.ChatFilterChanged += FilterChanged; ShellState.Changed += ShellChanged; ApplyHeader(); ApplyOffline(); };
         Unloaded += (_, _) => { ShellState.ChatFilterChanged -= FilterChanged; ShellState.Changed -= ShellChanged; };
     }
 
@@ -222,6 +222,20 @@ public sealed class DashboardPage : NexusPage
         }
     }
 
+    private bool _offlineShown;
+
+    // Offline: starting a chat needs the server, so the composer waits with
+    // one calm line (the typed prompt is kept) and comes back by itself.
+    private void ApplyOffline()
+    {
+        var offline = ShellState.Current.Offline;
+        _startSend.IsEnabled = !offline;
+        _startPrompt.IsEnabled = !offline;
+        _startAgent.IsEnabled = !offline;
+        if (offline) { StartStatus("Starting chats is paused until Nexus reconnects. What you typed is kept."); _offlineShown = true; }
+        else if (_offlineShown) { _offlineShown = false; StartStatus(""); }
+    }
+
     private void StartStatus(string text)
     {
         _startStatus.Text = text;
@@ -258,7 +272,7 @@ public sealed class DashboardPage : NexusPage
             MainWindow.Current?.OpenSession(id);
             MainWindow.Current?.RefreshChats();
         }
-        finally { _startSend.IsEnabled = true; }
+        finally { _startSend.IsEnabled = !ShellState.Current.Offline; }
     }
 
     private void ShowMetricsLoading()
@@ -298,11 +312,12 @@ public sealed class DashboardPage : NexusPage
         }
         long Sum(string key) => metrics.Sum(m => long.TryParse(NxJson.Text(m, key), out var n) ? n : 0);
         long Max(string key) => metrics.Max(m => long.TryParse(NxJson.Text(m, key), out var n) ? n : 0);
+        var memories = Sum("memories"); var online = Max("online");
         var stats = new (long Value, string Label, string Tip, Brush Tone)[]
         {
-            (Sum("memories"), "Memories", "Decisions and facts Nexus keeps for your agents", NexusPalette.Accent),
+            (memories, memories == 1 ? "Memory" : "Memories", "Decisions and facts Nexus keeps for your agents", NexusPalette.Accent),
             (Sum("proposed"), "To review", "Suggested memories waiting for your OK (Memory page)", NexusPalette.Amber),
-            (Max("online"), "Devices online", "Computers signed in to Nexus right now", NexusTokens.Brush("TextFillColorPrimaryBrush", Microsoft.UI.Colors.White))
+            (online, online == 1 ? "Device online" : "Devices online", "Computers signed in to Nexus right now", NexusTokens.Brush("TextFillColorPrimaryBrush", Microsoft.UI.Colors.White))
         };
         for (var i = 0; i < stats.Length; i++)
         {

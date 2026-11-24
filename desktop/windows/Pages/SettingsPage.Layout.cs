@@ -339,14 +339,5 @@ public sealed partial class SettingsPage
         Notify($"Open {label} from the sidebar.", true);
     }
 
-    private static string FriendlyWhen(string raw)
-    {
-        if (!DateTimeOffset.TryParse(raw, out var when) || when.Year <= 1) return "";
-        var local = when.ToLocalTime();
-        var age = DateTimeOffset.Now - local;
-        if (age < TimeSpan.FromMinutes(1)) return "just now";
-        if (age < TimeSpan.FromHours(1)) return $"{(int)age.TotalMinutes} min ago";
-        if (age < TimeSpan.FromDays(1)) return $"{(int)age.TotalHours} h ago";
-        return local.ToString(local.Year == DateTimeOffset.Now.Year ? "MMM d" : "MMM d, yyyy");
-    }
+    private static string FriendlyWhen(string raw) => Nexus.Core.FriendlyTime.Relative(raw);
 }

@@ -18,10 +18,14 @@ public sealed partial class MemoryPage : NexusPage
         ("organization", "Team", false),
         ("project", "This project", false),
         ("personal", "Only me", false),
-        ("session", "One chat", true),
-        ("ephemeral", "Temporary", true)
+        ("session", "A single chat", true),
+        ("ephemeral", "Short-lived", true)
     ];
-    private readonly DropDownButton _moreScopes = new() { MinHeight = 32, Padding = new Thickness(12, 4, 10, 4) };
+    // One filter row: search, who it's for, topic and tag pickers, review, refresh.
+    private readonly ComboBox _scopePicker = new() { MinWidth = 150, MinHeight = 32 };
+    private readonly ComboBox _topicPicker = new() { MinWidth = 140, MinHeight = 32, Visibility = Visibility.Collapsed };
+    private readonly ComboBox _tagPicker = new() { MinWidth = 120, MinHeight = 32, Visibility = Visibility.Collapsed };
+    private bool _pickerSync;
 
     private const int PageSize = 20;
     private const int FetchBatchSize = 50;
@@ -31,7 +35,6 @@ public sealed partial class MemoryPage : NexusPage
         PlaceholderText = "Search memories",
         HorizontalAlignment = HorizontalAlignment.Stretch
     };
-    private readonly StackPanel _scopeBar = new() { Orientation = Orientation.Horizontal, Spacing = 4 };
     private readonly StackPanel _categoryBar = new() { Orientation = Orientation.Horizontal, Spacing = 6 };
     private readonly StackPanel _cards = new() { Spacing = 10, HorizontalAlignment = HorizontalAlignment.Stretch };
     private readonly StackPanel _detail = new() { Spacing = 10 };
@@ -41,7 +44,6 @@ public sealed partial class MemoryPage : NexusPage
     private readonly Button _nextPage = new() { Content = "Next", MinWidth = 96, IsEnabled = false };
     private readonly TextBlock _pageInfo = new() { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.85, TextWrapping = TextWrapping.Wrap };
     private readonly Grid _split;
-    private readonly Dictionary<string, ToggleButton> _scopeButtons = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, JsonElement> _itemsById = new(StringComparer.Ordinal);
 
     private readonly List<int> _pageOffsets = [0];
@@ -96,11 +98,24 @@ public sealed partial class MemoryPage : NexusPage
 
         var searchRow = new Grid { ColumnSpacing = 8 };
         searchRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        searchRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        for (var c = 0; c < 5; c++) searchRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetColumn(_query, 0);
-        Grid.SetColumn(refresh, 1);
+        Grid.SetColumn(_scopePicker, 1);
+        Grid.SetColumn(_topicPicker, 2);
+        Grid.SetColumn(_tagPicker, 3);
+        Grid.SetColumn(_categoryBar, 4);
+        Grid.SetColumn(refresh, 5);
         searchRow.Children.Add(_query);
+        searchRow.Children.Add(_scopePicker);
+        searchRow.Children.Add(_topicPicker);
+        searchRow.Children.Add(_tagPicker);
+        searchRow.Children.Add(_categoryBar);
         searchRow.Children.Add(refresh);
+        _categoryBar.VerticalAlignment = VerticalAlignment.Center;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_scopePicker, "Who the memories are for");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_topicPicker, "Topic");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_tagPicker, "Tag");
+        ToolTipService.SetToolTip(_scopePicker, "Who the memories are for");
 
         var pagerBar = new Grid { ColumnSpacing = 8 };
         pagerBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -139,18 +154,12 @@ public sealed partial class MemoryPage : NexusPage
         var list = new Grid { RowSpacing = 16 };
         list.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         list.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        list.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        list.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         list.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         Grid.SetRow(_briefCard, 0);
-        Grid.SetRow(_scopeBar, 1);
-        Grid.SetRow(searchRow, 2);
-        Grid.SetRow(_categoryBar, 3);
-        Grid.SetRow(_split, 4);
+        Grid.SetRow(searchRow, 1);
+        Grid.SetRow(_split, 2);
         list.Children.Add(_briefCard);
-        list.Children.Add(_scopeBar);
         list.Children.Add(searchRow);
-        list.Children.Add(_categoryBar);
         list.Children.Add(_split);
 
         var root = new Grid { Padding = NexusTokens.PagePadding, RowSpacing = 16 };
@@ -176,57 +185,39 @@ public sealed partial class MemoryPage : NexusPage
 
     private void BuildScopeBar()
     {
-        _scopeBar.Children.Clear();
-        _scopeButtons.Clear();
-        var more = new MenuFlyout();
+        _scopePicker.Items.Clear();
         foreach (var (id, label, advanced) in Scopes)
         {
-            if (advanced)
-            {
-                var item = new MenuFlyoutItem { Text = label, Tag = id };
-                ToolTipService.SetToolTip(item, id == "session" ? "Memories kept for a single chat" : "Short-lived notes that expire");
-                item.Click += (_, _) => SetActiveScope(id, reload: true);
-                more.Items.Add(item);
-                continue;
-            }
-            var button = new ToggleButton
-            {
-                Content = label,
-                MinHeight = 32,
-                Padding = new Thickness(12, 4, 12, 4),
-                Tag = id
-            };
-            button.Click += ScopeButton_Click;
-            _scopeButtons[id] = button;
-            _scopeBar.Children.Add(button);
+            var item = new ComboBoxItem { Content = label, Tag = id };
+            if (advanced) ToolTipService.SetToolTip(item, id == "session" ? "Memories kept for a single chat" : "Short-lived notes that expire");
+            _scopePicker.Items.Add(item);
         }
-        _moreScopes.Content = "More";
-        _moreScopes.Flyout = more;
-        ToolTipService.SetToolTip(_moreScopes, "Less common kinds of memory");
-        _scopeBar.Children.Add(_moreScopes);
-        SetActiveScope("all", reload: false);
-    }
-
-    private void ScopeButton_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is ToggleButton button && button.Tag is string id)
+        _scopePicker.SelectionChanged += (_, _) =>
         {
+            if (_pickerSync || _scopePicker.SelectedItem is not ComboBoxItem { Tag: string id }) return;
             SetActiveScope(id, reload: true);
-        }
+        };
+        _topicPicker.SelectionChanged += async (_, _) =>
+        {
+            if (_pickerSync || _topicPicker.SelectedItem is not ComboBoxItem item) return;
+            _categoryFilter = item.Tag as string;
+            await LoadPageAsync(reset: true);
+        };
+        _tagPicker.SelectionChanged += async (_, _) =>
+        {
+            if (_pickerSync || _tagPicker.SelectedItem is not ComboBoxItem item) return;
+            _tagFilter = item.Tag as string;
+            await LoadPageAsync(reset: true);
+        };
+        SetActiveScope("all", reload: false);
     }
 
     private void SetActiveScope(string id, bool reload)
     {
         _activeScope = id;
-        foreach (var (scopeId, button) in _scopeButtons)
-        {
-            button.IsChecked = string.Equals(scopeId, id, StringComparison.OrdinalIgnoreCase);
-        }
-        // An advanced scope shows on the "More" button while it is active.
-        var advanced = Scopes.FirstOrDefault(s => s.Advanced && string.Equals(s.Id, id, StringComparison.OrdinalIgnoreCase));
-        _moreScopes.Content = advanced.Label ?? "More";
-        if (advanced.Label is null) _moreScopes.ClearValue(Control.BackgroundProperty);
-        else _moreScopes.Background = NexusPalette.AccentFill;
+        _pickerSync = true;
+        try { _scopePicker.SelectedItem = _scopePicker.Items.OfType<ComboBoxItem>().FirstOrDefault(i => string.Equals(i.Tag as string, id, StringComparison.OrdinalIgnoreCase)); }
+        finally { _pickerSync = false; }
         ShellState.Current.MemoryScope = id;
         if (reload)
         {
@@ -521,7 +512,30 @@ public sealed partial class MemoryPage : NexusPage
         {
             return false;
         }
+        // The project brief has its own card above the list; showing its
+        // memory again as "project/brief" said the same thing twice.
+        if (NxJson.Text(item, "key").Equals("project/brief", StringComparison.OrdinalIgnoreCase) && _query.Text.Trim().Length == 0)
+        {
+            return false;
+        }
         return PassesTagFilter(item);
+    }
+
+    // Who a memory is for, in the same words as the filter ("Team", not "organization").
+    private static string LevelLabel(string level) =>
+        Scopes.FirstOrDefault(s => s.Id != "all" && string.Equals(s.Id, level, StringComparison.OrdinalIgnoreCase)).Label ?? level;
+
+    // Memory keys are slugs ("webhooks/signature-tolerance"); show them as
+    // words ("Webhooks: signature tolerance").
+    internal static string HumanKey(string key)
+    {
+        var parts = key.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(p => p.Replace('-', ' ').Replace('_', ' ')).ToList();
+        if (parts.Count == 0) return key;
+        if (parts.Count == 1 && parts[0] == "brief") return "Project brief";
+        if (parts.Count == 2 && parts[0] == "project" && parts[1] == "brief") return "Project brief";
+        var head = char.ToUpperInvariant(parts[0][0]) + parts[0][1..];
+        return parts.Count == 1 ? head : head + ": " + string.Join(" · ", parts.Skip(1));
     }
 
     private UIElement BuildMemoryCard(JsonElement item, string id)
@@ -536,12 +550,12 @@ public sealed partial class MemoryPage : NexusPage
         // otherwise show "# Project brief ## Key dec…". The detail pane
         // renders the markdown.
         var plain = MarkdownText.Plain(text);
-        var title = key.Length > 0 ? key : (plain.Length > 0 ? Truncate(plain, 120) : id);
+        var title = key.Length > 0 ? HumanKey(key) : (plain.Length > 0 ? Truncate(plain, 120) : id);
         var preview = plain.Length > 0 && key.Length > 0 ? Truncate(plain, 160) : "";
 
         var meta = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         if (proposed) meta.Children.Add(AccentChip("Not reviewed", NexusPalette.Amber));
-        if (level.Length > 0) meta.Children.Add(Chip(level));
+        if (level.Length > 0) meta.Children.Add(Chip(LevelLabel(level)));
         if (category.Length > 0) meta.Children.Add(Chip(category));
         if (status.Length > 0) meta.Children.Add(Chip(status));
         if (DatesLine(item) is { Length: > 0 } dates) meta.Children.Add(Chip(dates));
@@ -615,7 +629,7 @@ public sealed partial class MemoryPage : NexusPage
         }
         var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         if (proposed) chips.Children.Add(AccentChip("Not reviewed", NexusPalette.Amber));
-        if (level.Length > 0) chips.Children.Add(Chip(level));
+        if (level.Length > 0) chips.Children.Add(Chip(LevelLabel(level)));
         if (status.Length > 0) chips.Children.Add(Chip(status));
         _detail.Children.Add(chips);
         if (StaleBadge(item) is { } stale) _detail.Children.Add(stale);
@@ -666,13 +680,16 @@ public sealed partial class MemoryPage : NexusPage
         var categories = new HashSet<string>(_seenCategories, StringComparer.OrdinalIgnoreCase);
         if (_categoryFilter is { Length: > 0 } active) categories.Add(active);
         var ordered = categories.OrderBy(c => c, StringComparer.OrdinalIgnoreCase).ToList();
-        if (ordered.Count == 0) { AddTagPills(); return; }
-        _categoryBar.Children.Add(new TextBlock { Text = "Topic", FontSize = 12, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 2, 0) });
-        _categoryBar.Children.Add(CategoryPill("All", null));
-        foreach (var cat in ordered)
+        _pickerSync = true;
+        try
         {
-            _categoryBar.Children.Add(CategoryPill(FormatCategory(cat), cat));
+            _topicPicker.Items.Clear();
+            _topicPicker.Items.Add(new ComboBoxItem { Content = "Any topic", Tag = null });
+            foreach (var cat in ordered) _topicPicker.Items.Add(new ComboBoxItem { Content = FormatCategory(cat), Tag = cat });
+            _topicPicker.SelectedItem = _topicPicker.Items.OfType<ComboBoxItem>().FirstOrDefault(i => string.Equals(i.Tag as string, _categoryFilter, StringComparison.OrdinalIgnoreCase)) ?? _topicPicker.Items[0];
+            _topicPicker.Visibility = ordered.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
+        finally { _pickerSync = false; }
         AddTagPills();
     }
 

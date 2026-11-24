@@ -94,9 +94,13 @@ public sealed partial class SettingsPage
         }
         catch (Exception ex)
         {
-            Nexus.Core.Diagnostics.DiagLog.Warn("update", "update check failed", ex);
+            // A feed that is down or not published yet (HTTP 403/404) is
+            // not something the person can fix: one calm line, details in
+            // the log under a reference id.
+            var reference = NxErrors.NewRef();
+            Nexus.Core.Diagnostics.DiagLog.Warn("update", $"update check failed (ref {reference})", ex);
             await UiThread.Resume(DispatcherQueue);
-            _updateStatus.Text = "Could not check for updates: " + ex.Message;
+            _updateStatus.Text = $"Couldn't check for updates right now. Nexus tries again on its own later. (ref {reference})";
         }
         finally
         {
@@ -139,7 +143,7 @@ public sealed partial class SettingsPage
         _tokens.Children.Clear();
         if (!response.Ok)
         {
-            var unsupported = (response.Error ?? "").Contains("unknown nx_call method", StringComparison.OrdinalIgnoreCase);
+            var unsupported = NxErrors.IsUnsupported(response.RawError);
             _tokens.Children.Add(NoteRow(unsupported
                 ? "Listing and revoking agent tokens needs a newer Nexus core. Uninstalling Nexus from an agent removes its config entry; its token stays valid until revoked."
                 : response.Error ?? "Tokens are unavailable."));
@@ -173,7 +177,7 @@ public sealed partial class SettingsPage
             var label = name;
             revoke.Click += async (_, _) =>
             {
-                if (!await ConfirmOrgAsync("Revoke this token?", $"{label} stops working immediately. An agent using it loses access to Nexus memory until you reinstall Nexus into it.", "Revoke")) return;
+                if (!await ConfirmOrgAsync("Revoke this token?", $"{label} stops working immediately. An agent using it loses access to Nexus memory until you connect Nexus to it again.", "Revoke")) return;
                 revoke.IsEnabled = false;
                 var result = await Call(TokensRevokeMethod, new { token_id = id });
                 Notify(result.Ok ? "Token revoked." : result.Error ?? "Could not revoke token.", !result.Ok);
@@ -192,18 +196,18 @@ public sealed partial class SettingsPage
 
     private UIElement BuildAgentsSection()
     {
-        var install = new Button { Content = "Install in all agents…" };
+        var install = new Button { Content = "Connect Nexus to your agents" };
         if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style) install.Style = style;
-        AutomationProperties.SetName(install, "Install Nexus into all agents (opens the Agents page)");
+        AutomationProperties.SetName(install, "Connect Nexus to your agents (opens the Agents page)");
         install.Click += (_, _) => OpenShellDestination("FooterAgents", "Agents");
         var open = new Button { Content = "Open Agents" };
         open.Click += (_, _) => OpenShellDestination("FooterAgents", "Agents");
-        var mcp = SettingsGroup("Nexus MCP",
+        var mcp = SettingsGroup("Connected agents",
             SettingRow(RowText("Nexus memory server", _mcpStatus), install),
-            SettingRow(RowText("Skills, sub-agents and MCP servers", "See each agent's setup and share it between agents on the Agents page."), open));
-        var web = SettingsGroup("Browser-to-desktop execution",
+            SettingRow(RowText("Skills, sub-agents and tools", "See each agent's setup and share it between agents on the Agents page."), open));
+        var web = SettingsGroup("Run agents from the browser",
             SettingRow(RowText("Allow requests from Nexus Web",
-                "Off by default. Your browser uses your signed-in account over HTTPS, not a local execution port. Each message requires approval here and can use only an approved, mapped workspace. Turning this off cancels remote work."),
+                "Off by default. When on, you can start an agent on this computer from Nexus in your browser. Nexus asks you here before every message, and only folders you chose can be used. Turning this off stops any work started that way."),
                 _browserExecution, _browserExecutionStatus));
         return new StackPanel { Children = { mcp, web } };
     }
@@ -373,8 +377,9 @@ public sealed partial class SettingsPage
             var online = NxJson.Text(status, "online") == "true";
             _connection.Text = online ? "Connected to your cloud account." : "Cloud sync is offline. Sign in or check your connection.";
             var capture = status.TryGetProperty("capture", out var c) ? c : default;
-            var parts = new List<string> { online ? "Online" : "Offline", $"{NxJson.Text(status, "pending_uploads")} pending uploads" };
-            if (capture.ValueKind == JsonValueKind.Object) parts.Add(NxJson.Text(capture, "paused") == "true" ? "capture paused" : "capture running");
+            var pending = long.TryParse(NxJson.Text(status, "pending_uploads"), out var waiting) ? waiting : 0;
+            var parts = new List<string> { online ? "Online" : "Offline", pending == 0 ? "nothing waiting to upload" : Nexus.Core.FriendlyTime.Count(pending, "item") + " waiting to upload" };
+            if (capture.ValueKind == JsonValueKind.Object) parts.Add(CaptureSummary(capture));
             if (NxJson.Text(status, "workspace_root") is { Length: > 0 } root) parts.Add(root);
             _diagnostics.Text = string.Join(" · ", parts);
             _diagnosticsJson = JsonSerializer.Serialize(status, new JsonSerializerOptions { WriteIndented = true });

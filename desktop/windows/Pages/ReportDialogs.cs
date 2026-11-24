@@ -2,6 +2,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
+using Nexus.Core;
 using Nexus.Core.Diagnostics;
 using Windows.ApplicationModel.DataTransfer;
 
@@ -197,14 +198,21 @@ internal static class ReportDialogs
         else if (outcome.Queued)
         {
             title = "Report saved";
-            body.Children.Add(Para("Nexus couldn't reach the server right now, so the report will be sent automatically when you're back online." +
-                (outcome.Error.Length > 0 ? " (" + outcome.Error + ")" : "")));
+            // Say which it is: a server that has no reports endpoint yet is
+            // not the same as no connection. The raw reason stays in the log.
+            if (outcome.Error.Length > 0) DiagLog.Warn("report", $"report {outcome.ReportId} queued: {outcome.Error}");
+            body.Children.Add(Para(NxErrors.IsUnsupported(outcome.Error) || outcome.Error.Contains("404", StringComparison.Ordinal)
+                ? "Your Nexus server doesn't accept problem reports yet. The report is kept on this computer and is sent once it does."
+                : NxErrors.IsUnreachable(outcome.Error) || Connectivity.Offline
+                ? "Nexus couldn't reach the server right now. The report is kept on this computer and is sent automatically when you're back online."
+                : "The report couldn't be sent right now. It is kept on this computer and Nexus tries again later."));
             body.Children.Add(Para("Report ID:"));
         }
         else
         {
             title = "Couldn't send the report";
-            body.Children.Add(Para(outcome.Error.Length > 0 ? outcome.Error : "The report could not be saved."));
+            if (outcome.Error.Length > 0) DiagLog.Warn("report", $"report {outcome.ReportId} failed: {outcome.Error}");
+            body.Children.Add(Para("The report couldn't be saved. Try again, or open the logs folder and attach the newest file to an email to support."));
         }
         var id = new TextBlock
         {

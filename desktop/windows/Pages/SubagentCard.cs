@@ -139,7 +139,7 @@ internal sealed class SubagentCard : UserControl
             Margin = new Thickness(0, 4, 0, 6)
         };
         AutomationProperties.SetName(_expander, kind + ": " + title);
-        _expander.Expanding += (_, _) => { if (!_bodyLoaded) { _bodyLoaded = true; _ = LoadBodyAsync(); } };
+        _expander.Expanding += (_, _) => { if (!_bodyLoaded) { _bodyLoaded = true; _ = LoadBodyAsync(); } Pages.Reveal.AfterExpand(_expander); };
         Content = _expander;
         // Status needs the local index (cached after the first card) and two
         // small file reads; it never blocks the transcript paint.
@@ -173,13 +173,14 @@ internal sealed class SubagentCard : UserControl
             await UiThread.Resume(DispatcherQueue);
             _chatId = remote.Id;
             _status.Text = remote.Id.Length > 0
-                ? "Captured" + (remote.Turns > 0 ? $" · {remote.Turns} messages" : "") + " · click to see its messages"
-                : "Not captured yet: its transcript is not on this computer";
+                ? "Captured" + (remote.Turns > 0 ? " · " + Nexus.Core.FriendlyTime.Count(remote.Turns, "message") : "") + " · click to see its messages"
+                : "Its steps were done on another computer; the result is in the reply below";
         }
         catch (Exception ex)
         {
             await UiThread.Resume(DispatcherQueue);
-            _status.Text = "Could not read this run: " + ex.Message;
+            Nexus.Core.Diagnostics.DiagLog.Warn("subagent", "could not read a sub-agent run", ex);
+            _status.Text = "Couldn't open this sub-agent's steps right now.";
         }
     }
 
@@ -255,7 +256,7 @@ internal sealed class SubagentCard : UserControl
                 HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch
             });
         if (error.Length > 0) _body.Children.Add(new TextBlock { Text = NxErrors.IsSignedOut(error) ? NxErrors.SignedOutMessage : error, Foreground = NexusPalette.Amber, FontSize = 12, TextWrapping = TextWrapping.Wrap });
-        else if (turns.Count == 0) _body.Children.Add(new TextBlock { Text = "This run's messages are not available here: it was not captured, and its transcript is not on this computer.", Opacity = 0.7, FontSize = 12, TextWrapping = TextWrapping.Wrap });
+        else if (turns.Count == 0) _body.Children.Add(new TextBlock { Text = "This sub-agent ran on another computer, so its step-by-step notes aren't here. What it found is in the chat's reply.", Opacity = 0.7, FontSize = 12, TextWrapping = TextWrapping.Wrap });
         // The task prompt is already shown above; skip it as the first message.
         var shown = turns.Count > 0 && turns[0].Role == "user" && _prompt.Length > 0 ? turns.Skip(1) : turns;
         var list = new StackPanel { Spacing = 6 };

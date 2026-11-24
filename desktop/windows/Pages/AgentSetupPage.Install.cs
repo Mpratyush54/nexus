@@ -106,20 +106,20 @@ public sealed partial class AgentSetupPage
         _ = RefreshAsync();
         if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
 
-        _status.Text = "Installing Nexus into your agents…";
+        _status.Text = "Connecting Nexus to your agents…";
         var done = await Core.CallAsync(InstallAllMethod, InstallArgs(false, share.IsChecked == true, memory.IsChecked == true, projectOnly.IsChecked == true));
         await UiThread.Resume(DispatcherQueue);
         if (!done.Ok || done.Result is not { } report)
         {
-            _status.Text = done.Error ?? "Install failed.";
+            _status.Text = done.Error ?? "Couldn't connect Nexus to your agents.";
             return;
         }
         var panel = new StackPanel { Spacing = 6, MaxWidth = 560 };
         RenderInstallReport(panel, report, false);
-        _status.Text = "Nexus is installed. Restart open agents so they pick up the new MCP server.";
+        _status.Text = "Nexus is connected. Restart any agent that is open so it picks Nexus up.";
         await new ContentDialog
         {
-            XamlRoot = XamlRoot, Title = "Nexus installed",
+            XamlRoot = XamlRoot, Title = "Nexus is connected",
             Content = new ScrollViewer { Content = panel, MaxHeight = 480 },
             CloseButtonText = "Done", DefaultButton = ContentDialogButton.Close
         }.ShowThemedAsync();
@@ -144,8 +144,8 @@ public sealed partial class AgentSetupPage
         var body = new StackPanel { Spacing = 6, MaxWidth = 560 };
         var changes = 0;
         foreach (var plan in plans) changes += RenderInstallReport(body, plan, true, onlyChanges: true);
-        if (changes == 0) body.Children.Add(Small("No agent has the Nexus MCP server configured.", 0.8));
-        else body.Children.Add(Small("Only the Nexus entry is removed; other MCP servers and settings stay. Files are backed up first. Agent tokens stay valid until you revoke them in Settings.", 0.6));
+        if (changes == 0) body.Children.Add(Small("No agent is connected to Nexus.", 0.8));
+        else body.Children.Add(Small("Only Nexus is removed; the agent's other tools and settings stay. Files are backed up first. Agent keys stay valid until you revoke them in Settings.", 0.6));
         var dialog = new ContentDialog
         {
             XamlRoot = XamlRoot, Title = "Disconnect Nexus from your agents",

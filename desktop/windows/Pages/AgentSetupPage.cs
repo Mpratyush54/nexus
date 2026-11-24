@@ -27,8 +27,8 @@ public sealed partial class AgentSetupPage : NexusPage
         ("subagents", "subagent", "Sub-agents", "sub-agents", "No sub-agents."),
         ("skills", "skill", "Skills", "skills", "No skills."),
         ("commands", "command", "Commands", "commands", "No custom commands."),
-        ("mcp_servers", "mcp", "MCP servers", "MCP", "No MCP servers configured."),
-        ("rules", "rules", "Rules & instructions", "rules", "No rules or instruction files."),
+        ("mcp_servers", "mcp", "Tools", "tools", "No tool servers (MCP) set up."),
+        ("rules", "rules", "Rules", "rules", "No rules or instruction files."),
     };
 
     // Agents the share flow (agents.setup.share) can read from and write to.

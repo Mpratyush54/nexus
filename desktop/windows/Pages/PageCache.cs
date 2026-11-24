@@ -5,7 +5,7 @@ namespace Nexus.Pages;
 /// </summary>
 public static class PageCache
 {
-    public const int MaxCachedSessions = 8;
+    public const int MaxCachedSessions = 4;
 
     private static HomeHubPage? _homeHub;
     private static DashboardPage? _dashboard;

@@ -61,7 +61,7 @@ public sealed partial class MemoryPage
             "Tags are saved with the memory, for everyone who can see it.", async tags =>
             {
                 var response = await Call(NxMethods.MemoryUpdate, new Dictionary<string, object?> { ["id"] = id, ["tags"] = TagText.WithUserTags(current, tags) });
-                if (!response.Ok) return FriendlyEditError(response.Error);
+                if (!response.Ok) return FriendlyEditError(response);
                 saved = response.Result;
                 return null;
             });
@@ -76,16 +76,15 @@ public sealed partial class MemoryPage
     {
         var tags = new SortedSet<string>(_seenTags, StringComparer.Ordinal);
         if (_tagFilter is { Length: > 0 } active) tags.Add(active);
-        if (tags.Count == 0) return;
-        _categoryBar.Children.Add(new TextBlock { Text = "Tag", FontSize = 12, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 2, 0) });
-        Button Pill(string label, string? tag)
+        _pickerSync = true;
+        try
         {
-            var button = new Button { Content = label, MinHeight = 28, Padding = new Thickness(10, 2, 10, 3), FontSize = 12 };
-            if (string.Equals(_tagFilter, tag, StringComparison.Ordinal)) MarkActivePill(button);
-            button.Click += async (_, _) => { _tagFilter = tag; await LoadPageAsync(reset: true); };
-            return button;
+            _tagPicker.Items.Clear();
+            _tagPicker.Items.Add(new ComboBoxItem { Content = "Any tag", Tag = null });
+            foreach (var tag in tags.Take(30)) _tagPicker.Items.Add(new ComboBoxItem { Content = "#" + tag, Tag = tag });
+            _tagPicker.SelectedItem = _tagPicker.Items.OfType<ComboBoxItem>().FirstOrDefault(i => string.Equals(i.Tag as string, _tagFilter, StringComparison.Ordinal)) ?? _tagPicker.Items[0];
+            _tagPicker.Visibility = tags.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
-        _categoryBar.Children.Add(Pill("Any", null));
-        foreach (var tag in tags.Take(15)) _categoryBar.Children.Add(Pill("#" + tag, tag));
+        finally { _pickerSync = false; }
     }
 }
