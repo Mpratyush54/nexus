@@ -41,6 +41,8 @@ internal sealed class Existing
 {
     public string Version = "";
     public string Root = "";
+    /// <summary>A pretend installation for the demo modes: never running, never touched.</summary>
+    public bool Simulated;
 
     public static Existing? Find()
     {
@@ -62,7 +64,51 @@ internal sealed class Existing
         return new Existing { Version = version, Root = root };
     }
 
-    public IEnumerable<Process> Running() => InstallEngine.ProcessesUnder(Root);
+    public IEnumerable<Process> Running() => Simulated ? Enumerable.Empty<Process>() : InstallEngine.ProcessesUnder(Root);
+}
+
+/// <summary>Compares release versions such as 0.4.0 and 0.4.0-beta.9 (semver rules).</summary>
+internal static class Versions
+{
+    /// <summary>Negative when a is older than b, 0 when equal, positive when newer; null when either can't be read.</summary>
+    public static int? Compare(string a, string b)
+    {
+        if (!TryParse(a, out var coreA, out var preA) || !TryParse(b, out var coreB, out var preB)) return null;
+        for (var i = 0; i < 3; i++)
+            if (coreA[i] != coreB[i]) return coreA[i].CompareTo(coreB[i]);
+        // A release is newer than any of its pre-releases.
+        if (preA.Length == 0 && preB.Length == 0) return 0;
+        if (preA.Length == 0) return 1;
+        if (preB.Length == 0) return -1;
+        for (var i = 0; i < Math.Min(preA.Length, preB.Length); i++)
+        {
+            var numA = long.TryParse(preA[i], out var na);
+            var numB = long.TryParse(preB[i], out var nb);
+            var c = numA && numB ? na.CompareTo(nb) : numA ? -1 : numB ? 1 : string.CompareOrdinal(preA[i], preB[i]);
+            if (c != 0) return Math.Sign(c);
+        }
+        return Math.Sign(preA.Length.CompareTo(preB.Length));
+    }
+
+    private static bool TryParse(string v, out long[] core, out string[] pre)
+    {
+        core = new long[3];
+        pre = Array.Empty<string>();
+        v = v.Trim().TrimStart('v', 'V');
+        var plus = v.IndexOf('+');
+        if (plus >= 0) v = v.Substring(0, plus);
+        var dash = v.IndexOf('-');
+        if (dash >= 0)
+        {
+            pre = v.Substring(dash + 1).Split('.');
+            v = v.Substring(0, dash);
+        }
+        var parts = v.Split('.');
+        if (parts.Length is < 1 or > 4 || v.Length == 0) return false;
+        for (var i = 0; i < Math.Min(3, parts.Length); i++)
+            if (!long.TryParse(parts[i], out core[i])) return false;
+        return true;
+    }
 }
 
 internal sealed record Progress(double Percent, string Status);
@@ -86,6 +132,14 @@ internal sealed class InstallEngine
     public string LogPath { get; } = Path.Combine(Path.GetTempPath(), "NexusSetup.log");
     public string MainExe => Path.Combine(Root, "current", "Nexus.exe");
     private readonly Payload _payload;
+    private volatile bool _startedWriting;
+
+    /// <summary>
+    /// True once Setup has been started, which is the first step that writes
+    /// to the install folder. Before that, only a temporary copy of Setup
+    /// exists, so a failure leaves the PC exactly as it was.
+    /// </summary>
+    public bool StartedWriting => _startedWriting;
 
     public InstallEngine(string root, Payload payload)
     {
@@ -101,7 +155,19 @@ internal sealed class InstallEngine
         if (!string.Equals(Path.GetFullPath(Root).TrimEnd('\\'), Path.GetFullPath(DefaultRoot).TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
             args += $" --installto \"{Root}\"";
         var psi = new ProcessStartInfo(setup, args) { UseShellExecute = false, CreateNoWindow = true };
-        using var process = Process.Start(psi) ?? throw new InvalidOperationException("Setup could not start.");
+        // Set before the start: if Process.Start throws after Setup began, we
+        // still must not claim nothing changed.
+        _startedWriting = true;
+        Process process;
+        try { process = Process.Start(psi) ?? throw new InvalidOperationException("Setup could not start."); }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            // Setup never ran, so nothing was written; its temporary copy goes too.
+            _startedWriting = false;
+            TryDelete(setup);
+            throw new InstallFailedException("Setup could not start. " + ex.Message, "");
+        }
+        using var owned = process;
         var last = 1.0;
         var status = "Unpacking Nexus…";
         while (!process.HasExited)
