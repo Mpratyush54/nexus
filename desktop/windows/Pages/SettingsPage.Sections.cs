@@ -39,7 +39,65 @@ public sealed partial class SettingsPage
         var startup = SettingsGroup("Startup & window",
             SettingRow(RowText("Start Nexus when I sign in", "Starts Nexus with Windows so capture keeps running in the background."), _loginStart),
             SettingRow(RowText("Closing the window", "Closing hides Nexus to the system tray and capture keeps running. Quit from the tray icon's menu.")));
-        return new StackPanel { Children = { appearance, startup } };
+        var rerun = new Button { Content = "Run setup" };
+        rerun.Click += (_, _) => MainWindow.Current?.ShowSetup();
+        var setup = SettingsGroup("Setup",
+            SettingRow(RowText("Setup guide", "Sign in, connect your agents, choose workspaces and startup options again."), rerun),
+            SettingRow(RowText("Updates", _updateStatus), _updateButton));
+        _updateButton.Click += async (_, _) => await UpdateAsync();
+        RenderUpdateState();
+        return new StackPanel { Children = { appearance, startup, setup } };
+    }
+
+    // ---- General: updates (installed copies only; see UpdateService)
+
+    private readonly TextBlock _updateStatus = new() { FontSize = 12.5, Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
+    private readonly Button _updateButton = new() { Content = "Check for updates" };
+    private bool _updateBusy;
+
+    private void RenderUpdateState()
+    {
+        var updates = UpdateService.Shared;
+        var staged = updates.IsAvailable ? updates.StagedVersion : "";
+        _updateStatus.Text = !updates.IsAvailable
+            ? "Updates are installed by the Nexus installer. This copy was not installed with it, so it does not update itself."
+            : staged.Length > 0 ? $"Version {staged} is ready. Restart Nexus to finish updating."
+            : $"Version {updates.CurrentVersion}. Nexus checks for updates in the background and installs them when it restarts.";
+        _updateButton.Visibility = updates.IsAvailable ? Visibility.Visible : Visibility.Collapsed;
+        _updateButton.Content = staged.Length > 0 ? "Restart to update" : "Check for updates";
+        AutomationProperties.SetName(_updateButton, _updateButton.Content as string ?? "Check for updates");
+    }
+
+    private async Task UpdateAsync()
+    {
+        if (_updateBusy) return;
+        var updates = UpdateService.Shared;
+        if (updates.StagedVersion.Length > 0)
+        {
+            await Task.Run(() => App.Core.Shutdown());
+            updates.ApplyAndRestart();
+            return;
+        }
+        _updateBusy = true;
+        _updateButton.IsEnabled = false;
+        _updateStatus.Text = "Checking for updates…";
+        try
+        {
+            var found = await updates.CheckForUpdatesAsync();
+            await UiThread.Resume(DispatcherQueue);
+            RenderUpdateState();
+            if (found.Length == 0) _updateStatus.Text = $"Version {updates.CurrentVersion} is the latest.";
+        }
+        catch (Exception ex)
+        {
+            await UiThread.Resume(DispatcherQueue);
+            _updateStatus.Text = "Could not check for updates: " + ex.Message;
+        }
+        finally
+        {
+            _updateBusy = false;
+            _updateButton.IsEnabled = true;
+        }
     }
 
     private Task LoadGeneralAsync()

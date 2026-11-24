@@ -84,6 +84,8 @@ public partial class App : Application
         }));
     }
 
+    public static void ClearPendingAuth() => PendingAuthUrl = null;
+
     public static void ClearPending()
     {
         PendingSessionId = null;

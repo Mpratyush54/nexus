@@ -94,6 +94,41 @@ public sealed partial class MainWindow : Window
         _ = RefreshBannerAsync();
         _ = RefreshInboxBadgeAsync();
         Activated += async (_, _) => await EnsureShellInitializedAsync();
+        UpdateService.Shared.CheckInBackground(TimeSpan.FromSeconds(30));
+        if (!AppPrefs.SetupCompleted) ShowSetup();
+    }
+
+    // ---- First-run setup (also reachable from Settings > General)
+
+    private SetupWizardPage? _setup;
+
+    public void ShowSetup()
+    {
+        if (_setup is null)
+        {
+            _setup = new SetupWizardPage(FinishSetup);
+            Nav.IsPaneVisible = false;
+            ContentFrame.Content = _setup;
+        }
+        if (AppWindow.IsVisible) Activate();
+    }
+
+    private void FinishSetup()
+    {
+        _setup = null;
+        Nav.IsPaneVisible = true;
+        ShowDashboard();
+        _ = RefreshBannerAsync();
+        PageCache.Settings.RefreshAccount();
+        _chatCache.Clear();
+        _ = ReloadAfterSetupAsync();
+        ApplyPendingLink();
+    }
+
+    private async Task ReloadAfterSetupAsync()
+    {
+        await BootstrapProjectsAsync();
+        await LoadChatsAsync(force: true);
     }
 
     private async Task EnsureShellInitializedAsync()
@@ -988,6 +1023,8 @@ public sealed partial class MainWindow : Window
 
     private void ShowPage(NexusPage page, object? parameter = null)
     {
+        // Setup owns the window until it is finished or skipped.
+        if (_setup is not null) return;
         if (ReferenceEquals(ContentFrame.Content, page))
         {
             page.Enter(parameter);
@@ -1083,15 +1120,23 @@ public sealed partial class MainWindow : Window
         try
         {
             var authUrl = App.PendingAuthUrl;
-            if (App.PendingSessionId is { Length: > 0 } sessionId)
+            if (_setup is not null)
             {
-                OpenSession(sessionId);
+                // Links to chats wait until setup is done; sign-in does not.
+                App.ClearPendingAuth();
             }
-            else if (App.PendingTeleportId is { Length: > 0 } teleportId)
+            else
             {
-                OpenTeleport(teleportId);
+                if (App.PendingSessionId is { Length: > 0 } sessionId)
+                {
+                    OpenSession(sessionId);
+                }
+                else if (App.PendingTeleportId is { Length: > 0 } teleportId)
+                {
+                    OpenTeleport(teleportId);
+                }
+                App.ClearPending();
             }
-            App.ClearPending();
             if (authUrl is not { Length: > 0 })
             {
                 return;
@@ -1114,6 +1159,7 @@ public sealed partial class MainWindow : Window
                 return;
             }
             await Task.Run(() => App.InitializeCore());
+            _setup?.AccountChanged();
             await RefreshBannerAsync();
             PageCache.Settings.RefreshAccount();
             _chatCache.Clear();

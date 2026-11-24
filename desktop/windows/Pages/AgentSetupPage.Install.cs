@@ -174,7 +174,7 @@ public sealed partial class AgentSetupPage
     }
 
     /// <summary>Renders a per-harness report; returns how many things change.</summary>
-    private static int RenderInstallReport(Panel into, JsonElement result, bool preview, bool onlyChanges = false)
+    internal static int RenderInstallReport(Panel into, JsonElement result, bool preview, bool onlyChanges = false)
     {
         var changes = 0;
         var notInstalled = new List<string>();

@@ -84,6 +84,7 @@ public enum NxMethods {
     public static let authLogout = "auth.logout"
     public static let authStatus = "auth.status"
     public static let authCallback = "auth.callback"
+    public static let authConnect = "auth.connect"
     public static let capturePause = "capture.pause"
     public static let captureResume = "capture.resume"
     public static let captureConfigure = "capture.configure"
