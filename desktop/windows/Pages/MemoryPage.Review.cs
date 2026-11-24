@@ -128,6 +128,9 @@ public sealed partial class MemoryPage
             _briefSources.Visibility = Visibility.Collapsed;
             return;
         }
+        // Source markers like "(session:<uuid>)" are for machines; the
+        // "From chats" links below name the chats.
+        content = System.Text.RegularExpressions.Regex.Replace(content, @"\s*\((?:session|memory|chat):[0-9a-fA-F-]{8,}\)", "");
         var document = SessionPage.FormattedMessage(content);
         document.FontSize = 13;
         _briefContent.Children.Add(document);

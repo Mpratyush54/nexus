@@ -220,6 +220,9 @@ public class NexusPage : Page
         var header = new StackPanel { Spacing = 4 };
         // "Memory & knowledge · central-memory": the page names the project it shows.
         var heading = Line(title, title: true);
+        heading.FontSize = NexusTokens.FontPageTitle;
+        heading.IsTextSelectionEnabled = false;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetHeadingLevel(heading, Microsoft.UI.Xaml.Automation.Peers.AutomationHeadingLevel.Level1);
         var context = new Microsoft.UI.Xaml.Documents.Run { Text = "" };
         heading.Inlines.Clear();
         heading.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = title });
@@ -234,7 +237,10 @@ public class NexusPage : Page
         header.Loaded += (_, _) => { ShellState.Changed += Update; Update(); };
         header.Unloaded += (_, _) => ShellState.Changed -= Update;
         header.Children.Add(heading);
-        header.Children.Add(Muted(subtitle));
+        var sub = Muted(subtitle);
+        sub.FontSize = NexusTokens.FontBody - 0.5;
+        sub.IsTextSelectionEnabled = false;
+        header.Children.Add(sub);
         return header;
     }
 

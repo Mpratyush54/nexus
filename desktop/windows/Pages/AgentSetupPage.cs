@@ -39,7 +39,7 @@ public sealed partial class AgentSetupPage : NexusPage
         Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nexus", "agents-browse.json");
 
     private readonly TextBlock _status = new() { FontSize = 11.5, Opacity = 0.55, TextWrapping = TextWrapping.NoWrap, TextTrimming = TextTrimming.CharacterEllipsis, VerticalAlignment = VerticalAlignment.Center };
-    private readonly TextBox _search = new() { PlaceholderText = "Search every agent: names, descriptions, paths, commands", FontSize = 12.5, MinWidth = 280, MaxWidth = 420 };
+    private readonly TextBox _search = new() { PlaceholderText = "Search skills, sub-agents and tools", FontSize = 12.5, MinWidth = 240, MaxWidth = 380 };
     private readonly StackPanel _agentList = new() { Spacing = 1, Padding = new Thickness(8, 6, 8, 12) };
     private readonly TextBlock _middleTitle = new() { FontSize = 13, FontWeight = FontWeights.SemiBold, Margin = new Thickness(4, 0, 0, 0) };
     private readonly StackPanel _segments = new() { Orientation = Orientation.Horizontal, Spacing = 2 };
@@ -81,9 +81,13 @@ public sealed partial class AgentSetupPage : NexusPage
 
     public AgentSetupPage()
     {
-        var title = new TextBlock { Text = "Agents", FontSize = 18, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center };
-        var refresh = FlatButton("Refresh");
+        var title = NexusTokens.PageTitle("Agents");
+        title.VerticalAlignment = VerticalAlignment.Center;
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_search, "Search agents");
+        // One primary action (connect); refresh and removal live under "More".
+        var refresh = new Button { Content = new FontIcon { Glyph = "\uE72C", FontSize = 14 }, Padding = new Thickness(8), MinWidth = 34, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
         ToolTipService.SetToolTip(refresh, "Scan agent folders again");
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(refresh, "Refresh agents");
         refresh.Click += async (_, _) =>
         {
             _contents.Clear();
@@ -267,8 +271,12 @@ public sealed partial class AgentSetupPage : NexusPage
                 catch { }
             });
         }
-        _status.Text = (_workspace.Length > 0 ? "Project folder: " + _workspace : "User-level setup only (choose a project for project files)") +
-            " · " + _installed.Count + " of " + _agents.Count + " agents installed · scanned " + DateTime.Now.ToString("HH:mm");
+        var connected = _agents.Count(a => Flag(a, "installed") && Flag(a, "nexus_mcp"));
+        _status.Text = _installed.Count == 0 ? "No coding agents found on this computer yet."
+            : connected == _installed.Count ? $"All {_installed.Count} agents on this computer are connected to Nexus."
+            : $"{connected} of {_installed.Count} agents on this computer are connected to Nexus.";
+        ToolTipService.SetToolTip(_status, (_workspace.Length > 0 ? "Project folder: " + _workspace : "Settings for your user account (pick a project to include its folder)") +
+            "\nChecked at " + DateTime.Now.ToString("t"));
         System.Diagnostics.Trace.WriteLine($"[perf] agents: workspace {resolved} ms, browse {browsed - resolved} ms, render {watch.ElapsedMilliseconds - browsed} ms (changed={changed}, {raw.Length / 1024} KB)");
     }
 
@@ -320,13 +328,13 @@ public sealed partial class AgentSetupPage : NexusPage
             if (nexus)
             {
                 state.Children.Add(Tiny("·"));
-                state.Children.Add(new TextBlock { Text = "Nexus MCP", FontSize = 10.5, Foreground = NexusPalette.Accent });
+                state.Children.Add(new TextBlock { Text = "Connected", FontSize = 10.5, Foreground = NexusPalette.Accent });
             }
-            else if (installed) state.Children.Add(Tiny("· no Nexus MCP"));
+            else if (installed) state.Children.Add(Tiny("· Not connected"));
             text.Children.Add(state);
 
             var counts = Sections.Select(s => (s.Short, N: Arr(agent, s.Key).Count())).Where(c => c.N > 0).Select(c => c.N + " " + c.Short).ToList();
-            text.Children.Add(Tiny(counts.Count > 0 ? string.Join(" · ", counts) : "Nothing configured"));
+            text.Children.Add(Tiny(counts.Count > 0 ? string.Join(" · ", counts) : "No skills or tools yet"));
 
             var button = RowButton(text, id == _selectedAgent);
             button.Click += (_, _) =>
@@ -617,7 +625,7 @@ public sealed partial class AgentSetupPage : NexusPage
                 if (ItemKey(_selectedAgent, item) == _selectedItem) { RenderDetail(_selectedAgent, item.Clone()); return; }
         }
         _detail.Children.Clear();
-        _detail.Children.Add(Tiny(_agents.Count == 0 ? "" : "Select an item to see its details and file content.", new Thickness(0, 6, 0, 0)));
+        _detail.Children.Add(Tiny(_agents.Count == 0 ? "" : "Pick an item to see what it does and the file behind it.", new Thickness(0, 6, 0, 0)));
     }
 
     private void RenderDetail(string agent, JsonElement item)

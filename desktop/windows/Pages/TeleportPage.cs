@@ -108,8 +108,8 @@ public sealed class TeleportPage : NexusPage
         if (!_hubChrome)
         {
             var header = new StackPanel { Spacing = 4 };
-            header.Children.Add(new TextBlock { Text = "Shared", FontSize = 28, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
-            header.Children.Add(Muted("Conversations and code sent between teammates. Review a shared chat, then continue it here or restore its code."));
+            header.Children.Add(NexusTokens.PageTitle("Shared with you"));
+            header.Children.Add(NexusTokens.Caption("Chats and code your teammates send you. Review one, then continue it here or bring its code into your folder."));
             Grid.SetRow(header, row++);
             root.Children.Add(header);
         }
@@ -141,18 +141,20 @@ public sealed class TeleportPage : NexusPage
         _preview.Text = "Select a transfer to review its redacted preview.";
         UpdateActions();
         UpdateLayoutMode();
-        _count.Text = "Loading…";
+        _count.Text = "";
+        _list.Children.Clear();
+        _list.Children.Add(Skeleton.Cards(2));
         var response = await Call(method);
         if (version != _loadVersion) return;
         _list.Children.Clear();
         if (!response.Ok)
         {
             _count.Text = "";
-            ShowError(_list, response);
+            _list.Children.Add(StateView.Error("Couldn't load shared chats", response.Error, () => _ = LoadAsync(method, requestedID)));
             return;
         }
         var items = NxJson.Items(response.Result).ToList();
-        _count.Text = items.Count + (items.Count == 1 ? " shared chat" : " shared chats");
+        _count.Text = items.Count == 0 ? "" : items.Count + (items.Count == 1 ? " chat" : " chats");
         if (method == NxMethods.TeleportInbox)
         {
             MainWindow.Current?.SetInboxCount(PendingCount(items, response));
@@ -179,11 +181,9 @@ public sealed class TeleportPage : NexusPage
         }
         if (items.Count == 0)
         {
-            var browse = new Button { Content = "Browse your chats", HorizontalAlignment = HorizontalAlignment.Left };
-            browse.Click += (_, _) => MainWindow.Current?.ShowTimeline();
-            _list.Children.Add(Card(new TextBlock { Text = "↗", FontSize = 32, Opacity = 0.65 },
-                Line(_sent ? "Share your next conversation" : "You're all caught up", title: true),
-                Muted(_sent ? "Open a chat and choose Share → Share chat + code. Pick a teammate by name to send them a copy." : "Chats sent to you will appear here. You can review them before accepting or restoring any code."), browse));
+            _list.Children.Add(_sent
+                ? StateView.Empty("", "Nothing sent yet", "To send a chat, open it and choose Share, then pick a teammate. They get a copy with its code.")
+                : StateView.Empty("", "You're all caught up", "When a teammate sends you a chat, it shows up here. You review it before any code touches your folder."));
         }
     }
 

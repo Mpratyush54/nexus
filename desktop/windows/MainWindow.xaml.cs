@@ -86,10 +86,19 @@ public sealed partial class MainWindow : Window
         ChatTags.Changed += (_, _) => { _chatRows.Clear(); RenderChats(); };
         Tray.ForceCreate();
         Current = this;
-        AppWindow.Resize(new SizeInt32(1240, 820));
+        ResizeForDisplay(1240, 820);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Nexus.ico"));
         ExtendsContentIntoTitleBar = true;
-        // Solid canvas (no Mica): the grey wash made every surface look heavy.
+        // Mica only behind the sidebar (its tint is translucent); the reading
+        // canvas stays solid so content never sits on a grey wash.
+        if (Microsoft.UI.Composition.SystemBackdrops.MicaController.IsSupported())
+            SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base };
+        else
+            RootGrid.Background = (Brush)Application.Current.Resources["NexusCanvasBrush"];
+        ThemeService.Apply(this);
+        ThemeService.Watch(this);
+        ThemeService.Changed += (_, _) => { _chatRows.Clear(); RenderChats(); _projectSwitcher.Refresh(); };
+        Motion.ApplyPageTransitions(ContentFrame);
         AppWindow.Closing += OnClosing;
         TeleportBadge.Visibility = Visibility.Collapsed;
         ContentFrame.Loaded += OnContentFrameLoaded;
@@ -99,7 +108,31 @@ public sealed partial class MainWindow : Window
         _ = RefreshBannerAsync();
         _ = RefreshInboxBadgeAsync();
         Activated += async (_, _) => await EnsureShellInitializedAsync();
+        Nav.Loaded += (_, _) => { if (ContentFrame.Content is DashboardPage home) home.FocusNewChat(); };
     }
+
+    // The first size is in layout pixels (DIPs): on a 150% display a raw
+    // 1240x820 window was only 827x547 DIPs, too small for the sidebar plus a
+    // page. Capped to 90% of the work area.
+    private void ResizeForDisplay(int width, int height)
+    {
+        try
+        {
+            var scale = GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)) / 96.0;
+            if (scale <= 0) scale = 1;
+            var area = DisplayArea.GetFromWindowId(AppWindow.Id, DisplayAreaFallback.Primary).WorkArea;
+            var w = (int)Math.Min(width * scale, area.Width * 0.9);
+            var h = (int)Math.Min(height * scale, area.Height * 0.9);
+            AppWindow.Resize(new SizeInt32(w, h));
+        }
+        catch
+        {
+            AppWindow.Resize(new SizeInt32(width, height));
+        }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
 
     private async Task EnsureShellInitializedAsync()
     {
@@ -468,6 +501,50 @@ public sealed partial class MainWindow : Window
         _projectSwitcher.Refresh();
     }
 
+    private void NewChat_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        NewChatButton_Click(NewChatButton, new RoutedEventArgs());
+    }
+
+    /// Projects in the account (id, name), for pickers outside the sidebar.
+    public IReadOnlyList<(string Id, string Name)> Projects => SwitcherProjects();
+
+    private bool _targetChosen;
+
+    /// Sets where new chats start (Home's project chip) without changing the
+    /// sidebar's "All projects" view.
+    public void ChooseTargetProject(string projectId)
+    {
+        _targetChosen = true;
+        SelectTargetProject(projectId);
+    }
+
+    private void SelectTargetProject(string projectId)
+    {
+        if (projectId.Length == 0 || projectId == ShellState.Current.ProjectId) return;
+        var previous = _shellProjectId;
+        _projectSync = true;
+        try { ShellProjects.SelectProjectId(ProjectSelector, projectId); }
+        finally { _projectSync = false; }
+        _shellProjectId = ShellState.Current.ProjectId;
+        PageCache.InvalidateProject(previous, _shellProjectId);
+        RebuildCompactProjectFlyout();
+        UpdateCompactProjectTooltip();
+        _projectSwitcher.Refresh();
+    }
+
+    // With "All projects", new chats start in the project being worked in
+    // now, not in whatever project last session's prefs restored.
+    private void ApplyDefaultTarget(List<ChatPaneEntry> entries)
+    {
+        if (_targetChosen) return;
+        _targetChosen = true;
+        var known = SwitcherProjects().Select(p => p.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var pick = DefaultProject.Pick(entries.Select(e => e.ProjectId), AppPrefs.Data.ProjectFolders, App.CaptureWorkspaceRoot(), known);
+        SelectTargetProject(pick);
+    }
+
     private void ProjectSwitch_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
@@ -614,6 +691,7 @@ public sealed partial class MainWindow : Window
             _chatEntries.Clear();
             _chatEntries.AddRange(entries);
             RenderChats();
+            if (filter.Length == 0 && query.Length == 0) ApplyDefaultTarget(entries);
             System.Diagnostics.Trace.WriteLine($"[perf] chats: first page {watch.ElapsedMilliseconds} ms, {VisibleChatCount(entries)} visible");
             if (VisibleChatCount(entries) < ChatPageTarget && cursor.Length > 0)
             {
@@ -790,7 +868,7 @@ public sealed partial class MainWindow : Window
         if (_chatStatus.Length > 0)
             items.Add(new ChatListNotice(NxErrors.IsSignedOut(_chatStatus) ? NxErrors.SignedOutMessage : _chatStatus));
         else if (seen.Count == 0)
-            items.Add(new ChatListNotice(_chatRefreshing ? "Loading chats…" : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No matching chats." : "No chats yet. Start one with the pencil above."));
+            items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press Ctrl+N."));
         _chatItems = items;
         ChatList.ItemTemplate ??= new ChatRowFactory(this);
         ChatList.ItemsSource = items;
@@ -807,16 +885,24 @@ public sealed partial class MainWindow : Window
     // Row for one item, reusing the cached row for (entry, showMatch). A
     // cached row still live in the repeater (e.g. kept realized because it
     // has focus) is never handed out twice; a fresh one is built instead.
+    private const string LoadingNotice = "\u0001loading";
+    // The first rows shown after launch rise in, once.
+    private int _entranceBudget = 12;
+
     private UIElement ChatListElement(object? data)
     {
         if (data is not ChatPaneEntry entry)
-            return ChatPaneMessage((data as ChatListNotice)?.Text ?? data?.ToString() ?? "");
+        {
+            var text = (data as ChatListNotice)?.Text ?? data?.ToString() ?? "";
+            return text == LoadingNotice ? Skeleton.ChatRows() : ChatPaneMessage(text);
+        }
         var key = (entry, _renderShowMatch);
         if (!_chatRows.TryGetValue(key, out var row) || _liveChatRows.Contains(row.Button))
         {
             if (_chatRows.Count > 1500) _chatRows.Clear();
             row = ChatRow(entry, _renderShowMatch);
             _chatRows[key] = row;
+            if (_entranceBudget > 0) Motion.FadeIn(row.Button, 6, (12 - _entranceBudget--) * 22, TimeSpan.FromMilliseconds(200));
         }
         if (row.Button.Parent is Panel stale) stale.Children.Remove(row.Button);
         _liveChatRows.Add(row.Button);
@@ -889,6 +975,7 @@ public sealed partial class MainWindow : Window
     private void SetProjectFilter(string projectId)
     {
         _projectFilter = projectId;
+        if (projectId.Length > 0) _targetChosen = true;
         if (projectId.Length > 0 && projectId != ShellState.Current.ProjectId)
         {
             // New chats and Home follow the filtered project, without leaving
@@ -985,8 +1072,13 @@ public sealed partial class MainWindow : Window
         };
         var summary = entry.Summary.Length > 240 ? entry.Summary[..240] + "…" : entry.Summary;
         ToolTipService.SetToolTip(button, entry.Title + (summary.Length > 0 && summary != entry.Title ? "\n\n" + summary : ""));
-        button.Click += (_, _) => OpenSession(entry.Id, ChatSearch.Text.Trim());
+        button.Click += (_, _) =>
+        {
+            Motion.PrepareChatTitle(title);
+            OpenSession(entry.Id, ChatSearch.Text.Trim());
+        };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, entry.Title + (projectName.Length > 0 ? ", " + projectName : ""));
+        Motion.AddPressFeedback(button);
         var rowMenu = new MenuFlyout();
         var editTags = new MenuFlyoutItem { Text = "Tags…", Icon = new FontIcon { Glyph = "\uE8EC" } };
         editTags.Click += async (_, _) => await ChatTags.EditAsync(button.XamlRoot, entry.Id, entry.Title);
@@ -1010,7 +1102,7 @@ public sealed partial class MainWindow : Window
         };
         var hash = 0;
         foreach (var c in name) hash = (hash * 31 + c) & 0x7fffffff;
-        var color = palette[hash % palette.Length];
+        var color = NexusPalette.BadgeInk(palette[hash % palette.Length]);
         return new Border
         {
             Background = new SolidColorBrush(Windows.UI.Color.FromArgb(38, color.R, color.G, color.B)),
@@ -1418,9 +1510,12 @@ public sealed partial class MainWindow : Window
 
     public async Task RefreshBannerAsync()
     {
-        var net = await App.Core.CallAsync(NxMethods.NetStatus);
-        var uploads = await App.Core.CallAsync(NxMethods.UploadsStatus);
-        var timeline = await App.Core.CallAsync(NxMethods.TimelineList);
+        // Independent checks run together (they were three round trips in a row).
+        var netTask = App.Core.CallAsync(NxMethods.NetStatus);
+        var uploadsTask = App.Core.CallAsync(NxMethods.UploadsStatus);
+        var timelineTask = App.Core.CallAsync(NxMethods.TimelineList, new { limit = 1 });
+        await Task.WhenAll(netTask, uploadsTask, timelineTask);
+        var net = netTask.Result; var uploads = uploadsTask.Result; var timeline = timelineTask.Result;
         await UiThread.Resume(DispatcherQueue);
         var online = true;
         if (net.Ok && net.Result is { } netBody && netBody.TryGetProperty("online", out var flag))
@@ -1439,7 +1534,7 @@ public sealed partial class MainWindow : Window
         State.PendingUploads = pending;
         State.Offline = offline;
         State.Banner = offline
-            ? $"Offline: showing cached data, read-only. Capture continues ({pending} items waiting to upload)."
+            ? "You're offline. Showing saved chats; editing waits until you're back." + (pending > 0 ? $" {pending} item{(pending == 1 ? "" : "s")} will upload then." : "")
             : "";
         OfflineBar.IsOpen = offline;
         OfflineBar.Message = State.Banner;

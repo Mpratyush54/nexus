@@ -351,13 +351,13 @@ func TestCloudMethodsUseContractRoutes(t *testing.T) {
 	if _, err := Call(context.Background(), "agents.list", nil, deps); err != nil {
 		t.Fatal(err)
 	}
-	if c.method != "GET" || c.path != "/v1/timeline?limit=100" {
+	if c.method != "GET" || c.path != "/v1/timeline?limit=100&include_subagents=1" {
 		t.Fatalf("agents route = %s %s", c.method, c.path)
 	}
 	if _, err := Call(context.Background(), "agents.list", json.RawMessage(`{"project_id":"p/1"}`), deps); err != nil {
 		t.Fatal(err)
 	}
-	if c.method != "GET" || c.path != "/v1/timeline?limit=100&project_id=p%2F1" {
+	if c.method != "GET" || c.path != "/v1/timeline?limit=100&include_subagents=1&project_id=p%2F1" {
 		t.Fatalf("scoped agents route = %s %s", c.method, c.path)
 	}
 

@@ -17,5 +17,5 @@ internal static class NxErrors
             e.Contains("not signed in", StringComparison.OrdinalIgnoreCase);
     }
 
-    internal const string SignedOutMessage = "The Nexus server did not accept this device's sign-in (it may have expired). Refresh to retry; if it keeps happening, open Settings and sign in again.";
+    internal const string SignedOutMessage = "You're signed out of Nexus on this computer (the sign-in may have expired). Sign in again in Settings > Account.";
 }

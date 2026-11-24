@@ -77,11 +77,11 @@ public sealed partial class MemoryPage
         var tags = new SortedSet<string>(_seenTags, StringComparer.Ordinal);
         if (_tagFilter is { Length: > 0 } active) tags.Add(active);
         if (tags.Count == 0) return;
-        _categoryBar.Children.Add(Muted("Tag:"));
+        _categoryBar.Children.Add(new TextBlock { Text = "Tag", FontSize = 12, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(8, 0, 2, 0) });
         Button Pill(string label, string? tag)
         {
             var button = new Button { Content = label, MinHeight = 28, Padding = new Thickness(10, 2, 10, 3), FontSize = 12 };
-            if (string.Equals(_tagFilter, tag, StringComparison.Ordinal)) button.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(48, 245, 158, 11));
+            if (string.Equals(_tagFilter, tag, StringComparison.Ordinal)) MarkActivePill(button);
             button.Click += async (_, _) => { _tagFilter = tag; await LoadPageAsync(reset: true); };
             return button;
         }

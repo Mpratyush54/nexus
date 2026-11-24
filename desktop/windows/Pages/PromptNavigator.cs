@@ -12,7 +12,11 @@ namespace Nexus.Pages;
 // hundreds of tiny markers can be selected without overlapping buttons.
 internal sealed class PromptNavigator : UserControl
 {
+    // Short chats need no outline: two lone markers beside the messages read
+    // as rendering glitches rather than navigation.
+    internal const int MinPrompts = 3;
     private readonly Canvas _canvas = new() { Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent) };
+    private readonly Border _track = new() { Width = 2, CornerRadius = new CornerRadius(1), IsHitTestVisible = false, Opacity = 0.07 };
     private readonly ToolTip _preview;
     private readonly TextBlock _previewTitle = new() { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, FontSize = 12 };
     private readonly TextBlock _previewText = new() { TextWrapping = TextWrapping.Wrap, MaxLines = 7, TextTrimming = TextTrimming.CharacterEllipsis, FontSize = 13, LineHeight = 20 };
@@ -56,7 +60,7 @@ internal sealed class PromptNavigator : UserControl
         _prompts = prompts;
         _hover = -1;
         _preview.IsOpen = false;
-        Visibility = prompts.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        Visibility = prompts.Count >= MinPrompts ? Visibility.Visible : Visibility.Collapsed;
         Render();
     }
 
@@ -82,9 +86,15 @@ internal sealed class PromptNavigator : UserControl
     private void Render()
     {
         _canvas.Children.Clear(); _markers.Clear();
+        var ink = Application.Current.Resources.TryGetValue("TextFillColorPrimaryBrush", out var resource) && resource is Brush brush ? brush : new SolidColorBrush(Microsoft.UI.Colors.White);
+        // A faint rail ties the markers together so they read as an outline.
+        _track.Background = ink;
+        _track.Height = Math.Max(0, _canvas.ActualHeight - 4);
+        Canvas.SetLeft(_track, 23);
+        Canvas.SetTop(_track, 2);
+        _canvas.Children.Add(_track);
         for (var i = 0; i < _prompts.Count; i++)
         {
-            var ink = Application.Current.Resources.TryGetValue("TextFillColorPrimaryBrush", out var resource) && resource is Brush brush ? brush : new SolidColorBrush(Microsoft.UI.Colors.White);
             var marker = new Border { Height = 2, Width = 8, CornerRadius = new CornerRadius(1), Background = ink, IsHitTestVisible = false };
             Canvas.SetTop(marker, (_canvas.ActualHeight - 4) * (i + 0.5) / _prompts.Count);
             Canvas.SetLeft(marker, 10);
@@ -98,7 +108,7 @@ internal sealed class PromptNavigator : UserControl
         for (var i = 0; i < _markers.Count; i++)
         {
             var selected = _prompts[i].Key == _activeKey;
-            _markers[i].Opacity = i == _hover ? 1 : selected ? 0.85 : 0.25;
+            _markers[i].Opacity = i == _hover ? 1 : selected ? 0.8 : 0.3;
             _markers[i].Width = i == _hover ? 20 : selected ? 14 : 8;
             Canvas.SetLeft(_markers[i], 24 - _markers[i].Width);
         }

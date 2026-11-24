@@ -61,7 +61,9 @@ public sealed partial class SessionPage
         await UiThread.Resume(DispatcherQueue);
         if (version != _subagentListVersion || sessionId != _id) return;
         var count = Math.Max(runs.Count, _subagentCards.Count);
-        if (((StackPanel)_subagentsButton.Content).Children[1] is TextBlock label) label.Text = $"Sub-agents ({count})";
+        // Icon and count keep the header narrow so the chat title has room.
+        if (((StackPanel)_subagentsButton.Content).Children[1] is TextBlock label) label.Text = count.ToString();
+        ToolTipService.SetToolTip(_subagentsButton, count == 1 ? "1 sub-agent ran in this chat" : $"{count} sub-agents ran in this chat");
         AutomationProperties.SetName(_subagentsButton, $"Sub-agents ({count})");
         _subagentsButton.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }

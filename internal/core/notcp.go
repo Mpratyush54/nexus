@@ -3,13 +3,17 @@
 // The default nexuscore / embedded engine must not open a localhost HTTP
 // listener. Outbound HTTPS to the cloud API is fine. Optional escape hatch:
 // set NEXUS_NO_TCP=1 in processes that should refuse Listen (capture
-// foreground stub checks this). There is no build tag that adds a TCP
-// server to nexuscore; do not introduce one.
+// foreground stub checks this). Release builds of nexuscore contain no TCP
+// server. The only exception is the debug-only `nexusdebug` build tag, which
+// adds an opt-in loopback pprof listener (cmd/nexuscore/pprof_debug.go);
+// release builds never set it, and the source scan below skips files that
+// only build with it. Do not add other tags that open a listener.
 package core
 
 import (
 	"fmt"
 	"go/ast"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"os"
@@ -56,9 +60,12 @@ func SourceMentionsTCPListen(roots ...string) ([]string, error) {
 			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
-			f, err := parser.ParseFile(fset, path, nil, 0)
+			f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 			if err != nil {
 				return err
+			}
+			if debugOnly(f) {
+				return nil
 			}
 			ast.Inspect(f, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
@@ -80,6 +87,30 @@ func SourceMentionsTCPListen(roots ...string) ([]string, error) {
 		}
 	}
 	return hits, nil
+}
+
+// DebugBuildTag marks files that only build into debug binaries.
+const DebugBuildTag = "nexusdebug"
+
+// debugOnly reports whether a file's //go:build line excludes it from every
+// build without the debug tag (any other tag set is assumed present).
+func debugOnly(f *ast.File) bool {
+	for _, group := range f.Comments {
+		if group.Pos() >= f.Package {
+			break
+		}
+		for _, c := range group.List {
+			if !constraint.IsGoBuild(c.Text) {
+				continue
+			}
+			expr, err := constraint.Parse(c.Text)
+			if err != nil {
+				return false
+			}
+			return !expr.Eval(func(tag string) bool { return tag != DebugBuildTag })
+		}
+	}
+	return false
 }
 
 func callName(expr ast.Expr) string {
