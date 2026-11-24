@@ -1032,3 +1032,29 @@ dialog.report-dialog::backdrop {
     padding: 18px;
   }
 }
+
+/* Markdown memories (the project brief) when a memory card is expanded. */
+.memory-prose {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-fg-dim);
+  overflow-wrap: anywhere;
+}
+.memory-prose > :first-child { margin-top: 0; }
+.memory-prose > :last-child { margin-bottom: 0; }
+.memory-prose :is(p, ul, ol, pre, table, blockquote) { margin: 8px 0; }
+.memory-prose :is(ul, ol) { padding-left: 20px; }
+.memory-prose ul { list-style: disc; }
+.memory-prose ol { list-style: decimal; }
+.memory-prose li + li { margin-top: 2px; }
+.memory-prose :is(h1, h2, h3, h4) { margin: 16px 0 6px; color: var(--color-fg); font-weight: 600; line-height: 1.35; }
+.memory-prose h1 { font-size: 16px; }
+.memory-prose :is(h2, h3, h4) { font-size: 14px; }
+.memory-prose strong { color: var(--color-fg); font-weight: 600; }
+.memory-prose a { color: var(--color-fg); text-decoration: underline; text-underline-offset: 3px; }
+.memory-prose code { font-family: var(--font-mono); font-size: 0.88em; padding: 1px 4px; border-radius: 4px; background: var(--color-raised); color: var(--color-fg); }
+.memory-prose pre { padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-raised); overflow: auto; }
+.memory-prose pre code { padding: 0; background: transparent; }
+.memory-prose blockquote { padding-left: 12px; border-left: 2px solid var(--color-border-strong); }
+.memory-prose table { display: block; overflow: auto; border-collapse: collapse; font-size: 12.5px; }
+.memory-prose :is(td, th) { padding: 5px 9px; border: 1px solid var(--color-border); }

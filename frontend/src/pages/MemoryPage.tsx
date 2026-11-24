@@ -18,7 +18,9 @@ import {
   Sparkles,
   Terminal,
 } from 'lucide-react'
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState, type ReactNode } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { MemoryEditorSlideOver } from '@/components/MemoryEditorSlideOver'
 import { SharingControlsModal } from '@/components/SharingControlsModal'
 import { VersionHistoryDrawer } from '@/components/VersionHistoryDrawer'
@@ -26,6 +28,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import { Advanced } from '@/components/Advanced'
 import { BranchesPage } from './BranchesPage'
 import { memoryTitle } from '@/lib/plain-language'
+import { looksLikeMarkdown, markdownTitle, stripMarkdown, withoutTitle } from '@/lib/memory-text'
 import { agentName } from '@/lib/harness-message'
 import { PageHeader } from '@/components/PageHeader'
 import { ProjectPicker } from '@/components/ProjectPicker'
@@ -364,7 +367,7 @@ export function MemoryPage() {
               ) : null}
             </>
           ) : (
-            <Button type="button" variant="ghost" size="sm" onClick={() => setMoreFilters(true)}>
+            <Button type="button" variant="ghost" size="md" onClick={() => setMoreFilters(true)}>
               More filters
             </Button>
           )}
@@ -668,6 +671,16 @@ export function MemoryPage() {
   )
 }
 
+const MEMORY_MD = {
+  a: ({ href, children }: { href?: string; children?: ReactNode }) => (
+    <a href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  ),
+  // Memories are text; never fetch images from them.
+  img: ({ alt }: { alt?: string }) => <span>{alt}</span>,
+}
+
 function MemoryCard({
   item,
   onEdit,
@@ -688,10 +701,14 @@ function MemoryCard({
   // Agent ids ("claude") read as product names; a bare "agent" source reads as "an agent".
   const agent = !by ? '' : by === 'agent' ? 'an agent' : /^[a-z-]+$/.test(by) ? agentName(by) : by
   const previewLimit = item.scope === 'episode_summary' ? 420 : 180
-  const preview =
-    item.content.length > previewLimit && !expanded
-      ? `${item.content.slice(0, previewLimit).trimEnd()}…`
-      : item.content
+  // Markdown memories (the project brief) take their "# Heading" as the title,
+  // preview as plain text and render as markdown when expanded.
+  const markdown = looksLikeMarkdown(item.content)
+  const heading = markdown ? markdownTitle(item.content) : ''
+  const body = heading ? withoutTitle(item.content) : item.content
+  const plain = markdown ? stripMarkdown(body) : body
+  const long = plain.length > previewLimit
+  const preview = long && !expanded ? `${plain.slice(0, previewLimit).trimEnd()}…` : plain
 
   const catKey = normalizeItemCategory(item.category)
   const catConfig = CATEGORY_CONFIG[catKey]
@@ -710,7 +727,7 @@ function MemoryCard({
         <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
           <div className="min-w-0 flex-1">
             <h3 className="text-sm font-semibold text-fg">
-              {name.title}
+              {heading || name.title}
               {visibleMemoryStatus(item.status) !== 'active' ? (
                 <span className="ml-2 align-middle">
                   <StatusPill tone="neutral">{visibleMemoryStatus(item.status)}</StatusPill>
@@ -743,10 +760,18 @@ function MemoryCard({
           </div>
         </div>
 
-        <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-fg-dim">{preview}</p>
+        {markdown && expanded ? (
+          <div className="memory-prose mt-2">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={MEMORY_MD}>
+              {body}
+            </ReactMarkdown>
+          </div>
+        ) : (
+          <p className="mt-2 text-sm leading-relaxed text-fg-dim [overflow-wrap:anywhere] whitespace-pre-wrap">{preview}</p>
+        )}
 
         <div className="mt-1 flex flex-wrap gap-3">
-          {item.content.length > previewLimit ? (
+          {long ? (
             <button
               type="button"
               className="text-[11px] font-medium text-amber hover:underline"

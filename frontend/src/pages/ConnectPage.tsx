@@ -232,7 +232,7 @@ export function ConnectPage() {
         <p className="text-[11px] text-muted">
           The status page at <span className="font-mono">127.0.0.1:7272</span> is only on{' '}
           <span className="text-fg">this machine</span> — it shows whether Desktop is signed in and
-          which folder it watches. It is not part of the cloud product UI.
+          which folder it watches. It only opens on the computer running Desktop.
         </p>
       </GlassPanel>
 

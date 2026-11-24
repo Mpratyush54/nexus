@@ -115,7 +115,7 @@ export function AdminPage() {
     return (
       <div className="space-y-4">
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Platform</h1>
-        <p className="text-sm text-fg-dim">Super Admin role required to control the platform.</p>
+        <p className="text-sm text-fg-dim">Only Nexus platform admins can open this page.</p>
       </div>
     )
   }

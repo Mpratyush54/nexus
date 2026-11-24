@@ -25,10 +25,15 @@ export function DesktopInstallPicker({
   const selected = DESKTOP_INSTALL_OPTIONS.find((o) => o.id === os) ?? DESKTOP_INSTALL_OPTIONS[0]
 
   const copy = async () => {
-    await navigator.clipboard.writeText(selected.command)
+    try {
+      await navigator.clipboard.writeText(selected.command)
+    } catch {
+      push({ title: 'Could not copy', detail: 'Select the command and copy it by hand.' })
+      return
+    }
     setCopied(true)
     push({ title: 'Copied', detail: `Paste into ${selected.shell}` })
-    setTimeout(() => setCopied(false), 2000)
+    window.setTimeout(() => setCopied(false), 2000)
   }
 
   return (
@@ -66,9 +71,14 @@ export function DesktopInstallPicker({
       <pre className="overflow-x-auto rounded-lg border border-border bg-base/50 p-3 font-mono text-[11px] leading-relaxed break-all whitespace-pre-wrap text-fg sm:whitespace-pre sm:break-normal">
         {selected.command}
       </pre>
-      <Button type="button" size="sm" onClick={() => void copy()}>
-        {copied ? <Check size={14} /> : <Copy size={14} />}
-        {copied ? 'Copied' : 'Copy install command'}
+      <Button
+        type="button"
+        size="sm"
+        variant={copied ? 'confirm' : 'outline'}
+        onClick={() => void copy()}
+      >
+        {copied ? <Check size={14} aria-hidden /> : <Copy size={14} aria-hidden />}
+        <span aria-live="polite">{copied ? 'Copied to clipboard' : 'Copy install command'}</span>
       </Button>
     </div>
   )

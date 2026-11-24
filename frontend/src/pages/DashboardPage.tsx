@@ -23,6 +23,7 @@ import { readableChatText } from '@/lib/chat-content'
 import { agentName, chatTitle } from '@/lib/harness-message'
 import { isActiveMemory } from '@/lib/memory-status'
 import { memoryTitle } from '@/lib/plain-language'
+import { markdownTitle, stripMarkdown, withoutTitle } from '@/lib/memory-text'
 import { projectLabel } from '@/lib/project-label'
 import { STEER_ROUTE } from '@/lib/navigation'
 import { useAuth } from '@/providers/AuthProvider'
@@ -231,8 +232,8 @@ export function DashboardPage() {
           <ul className="mt-3 divide-y divide-border">
             {recentMemories.map((m) => (
               <li key={m.id} className="py-2.5">
-                <span className="block truncate text-sm text-fg">{memoryTitle(m.key).title}</span>
-                <span className="mt-0.5 line-clamp-2 text-xs text-fg-dim">{readableChatText(m.content).replace(/(^|\s)#{1,6}\s+/g, ' ').trim()}</span>
+                <span className="block truncate text-sm text-fg">{markdownTitle(m.content) || memoryTitle(m.key).title}</span>
+                <span className="mt-0.5 line-clamp-2 text-xs text-fg-dim">{stripMarkdown(withoutTitle(readableChatText(m.content)))}</span>
               </li>
             ))}
             {memories.isLoading ? <li className="py-3 text-sm text-muted">Loading…</li> : null}

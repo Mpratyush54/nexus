@@ -1,6 +1,6 @@
 import { type ButtonHTMLAttributes, type ReactNode, type Ref } from 'react'
 
-type Variant = 'primary' | 'secondary' | 'ghost' | 'danger'
+type Variant = 'primary' | 'secondary' | 'outline' | 'confirm' | 'ghost' | 'danger'
 type Size = 'sm' | 'md' | 'lg'
 
 type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -14,6 +14,10 @@ const variants: Record<Variant, string> = {
   primary: 'bg-accent text-ink hover:opacity-90',
   secondary:
     'bg-transparent text-fg border border-border hover:border-border-strong hover:bg-raised',
+  // A secondary action that must read as clickable on any card (e.g. "Copy install command").
+  outline: 'bg-surface text-fg border border-border-strong hover:bg-raised',
+  // Short-lived "done" state for an outline button (copied, saved).
+  confirm: 'bg-teal-soft text-teal border border-teal/50',
   ghost: 'bg-transparent text-fg-dim hover:text-fg hover:bg-raised',
   danger: 'bg-danger-soft text-danger border border-danger/25 hover:bg-danger/20',
 }

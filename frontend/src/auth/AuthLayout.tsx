@@ -133,12 +133,6 @@ function ProductPanel() {
         </div>
         <MemoryGraph />
         <figure className="au-shot">
-          <div className="au-shot-bar">
-            <i />
-            <i />
-            <i />
-            <span>Nexus for Windows · Memory</span>
-          </div>
           <picture>
             <source type="image/avif" srcSet="/landing/shots/memory-800.avif 800w, /landing/shots/memory-1400.avif 1400w" sizes="50vw" />
             <source type="image/webp" srcSet="/landing/shots/memory-800.webp 800w, /landing/shots/memory-1400.webp 1400w" sizes="50vw" />

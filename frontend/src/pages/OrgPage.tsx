@@ -58,8 +58,8 @@ function Section({
 }) {
   return (
     <GlassPanel className="space-y-4 p-5">
-      <div className="flex flex-wrap items-start justify-between gap-2">
-        <div>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
           <h2 className="text-sm font-medium text-fg">{title}</h2>
           {description ? <p className="mt-0.5 text-xs text-fg-dim">{description}</p> : null}
         </div>

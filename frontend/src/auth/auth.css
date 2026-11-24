@@ -82,7 +82,11 @@
 .au *, .au *::before, .au *::after { box-sizing: border-box; }
 .au :where(h1, h2, h3, p, ul, ol, figure) { margin: 0; padding: 0; }
 .au :where(ul, ol) { list-style: none; }
-.au :where(button, input) { font: inherit; color: inherit; }
+/* In the base layer so app components embedded in .au (onboarding) keep their
+   own utility colours and sizes; the .au-* classes below still win over it. */
+@layer base {
+  .au :where(button, input) { font: inherit; color: inherit; }
+}
 .au :focus-visible { outline: 2px solid var(--au-amber-ink); outline-offset: 3px; border-radius: 6px; }
 .au ::selection { background: var(--au-amber-wash); }
 
@@ -194,25 +198,21 @@
 @keyframes au-halo { 0%, 100% { transform: scale(1); opacity: 0.22; } 50% { transform: scale(1.18); opacity: 0.06; } }
 @keyframes au-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
 
+/* The same frame as the landing shots (site.css .nx-shot-win): rounded,
+   hairline outline, full width visible. Only the bottom fades into the panel. */
 .au-shot {
   position: relative; z-index: 2; flex: none;
-  height: min(40%, 360px);
-  margin: 0 0 0 48px;
-  border-radius: 10px 0 0 0;
+  height: min(42%, 380px);
+  margin: 0 48px;
+  border-radius: 10px 10px 0 0;
   overflow: hidden;
-  border: 1px solid var(--au-win-rule);
-  border-right: 0; border-bottom: 0;
-  background: var(--au-win-2);
+  background: #000;
+  outline: 1px solid rgb(255 255 255 / 0.08); outline-offset: -1px;
   box-shadow: 0 -30px 60px -30px rgb(0 0 0 / 0.7);
+  -webkit-mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 62%, transparent 100%);
 }
-.au-shot-bar {
-  display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px;
-  border-bottom: 1px solid var(--au-win-rule);
-  font: 400 11.5px var(--au-mono); color: var(--au-win-dim);
-}
-.au-shot-bar i { width: 8px; height: 8px; border-radius: 50%; background: #2f3431; display: block; }
-.au-shot-bar span { margin-left: 6px; }
-.au-shot img { display: block; width: 100%; height: auto; min-width: 720px; object-fit: cover; object-position: left top; }
+.au-shot img { display: block; width: 100%; height: auto; max-width: none; }
 
 /* ---------- card / stage content ---------- */
 
