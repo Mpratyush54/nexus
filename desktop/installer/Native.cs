@@ -22,8 +22,17 @@ internal static class Dwm
     public static bool SupportsBackdrop => Environment.OSVersion.Version.Build >= 22621;
 
     /// <summary>Rounded corners + DWM shadow (Windows 11), dark frame, optional acrylic.</summary>
+    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern IntPtr GetWindowLongPtr(IntPtr hwnd, int index);
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] private static extern IntPtr SetWindowLongPtr(IntPtr hwnd, int index, IntPtr value);
+    private const int GWL_STYLE = -16;
+    private const long WS_SYSMENU = 0x80000, WS_MINIMIZEBOX = 0x20000, WS_MAXIMIZEBOX = 0x10000;
+
     public static void Style(IntPtr hwnd, bool acrylic)
     {
+        // No system caption buttons: with the frame extended for acrylic,
+        // DWM would otherwise draw its own close glyph faintly behind ours.
+        var style = GetWindowLongPtr(hwnd, GWL_STYLE).ToInt64();
+        SetWindowLongPtr(hwnd, GWL_STYLE, new IntPtr(style & ~(WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX)));
         var dark = 1;
         DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref dark, sizeof(int));
         var round = DWMWCP_ROUND;
@@ -50,6 +59,21 @@ internal static class ShellLink
             link.SetIconLocation(target, 0);
             ((IPersistFile)link).Save(linkPath, true);
         }
+        finally { Marshal.FinalReleaseComObject(link); }
+    }
+
+    public static string Target(string linkPath)
+    {
+        if (!System.IO.File.Exists(linkPath)) return "";
+        var link = (IShellLinkW)new ShellLinkCoClass();
+        try
+        {
+            ((IPersistFile)link).Load(linkPath, 0);
+            var buffer = new StringBuilder(1024);
+            link.GetPath(buffer, buffer.Capacity, IntPtr.Zero, 0);
+            return buffer.ToString();
+        }
+        catch (COMException) { return ""; }
         finally { Marshal.FinalReleaseComObject(link); }
     }
 

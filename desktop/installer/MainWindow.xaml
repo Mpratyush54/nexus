@@ -188,8 +188,11 @@
             <Border x:Name="HeroHost" HorizontalAlignment="Center" Height="150" ClipToBounds="False"/>
             <TextBlock x:Name="Headline" Text="Nexus" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="34" FontWeight="SemiBold" Foreground="{StaticResource Cream}" HorizontalAlignment="Center" Margin="0,10,0,0"/>
             <TextBlock x:Name="Tagline" Text="Shared memory for your AI agents" FontSize="15.5" Foreground="{StaticResource Muted}" HorizontalAlignment="Center" Margin="0,4,0,0"/>
-            <Border x:Name="ExistingPill" Visibility="Collapsed" HorizontalAlignment="Center" Margin="0,12,0,0" Padding="12,5" CornerRadius="999" Background="#14FFFFFF" BorderBrush="#24E8BB63" BorderThickness="1">
-              <TextBlock x:Name="ExistingText" FontSize="12" Foreground="{StaticResource Cream}"/>
+            <Border x:Name="ExistingPill" Visibility="Collapsed" HorizontalAlignment="Center" Margin="0,14,0,0" Padding="14,6,14,7" CornerRadius="14" Background="#12F2EFE6" BorderBrush="#33E8BB63" BorderThickness="1">
+              <StackPanel Orientation="Horizontal">
+                <Ellipse Width="6" Height="6" Fill="{StaticResource Gold}" VerticalAlignment="Center" Margin="0,1,8,0"/>
+                <TextBlock x:Name="ExistingText" FontSize="12" Foreground="{StaticResource Cream}" VerticalAlignment="Center"/>
+              </StackPanel>
             </Border>
             <Button x:Name="InstallButton" Style="{StaticResource Primary}" Content="Install" Margin="0,22,0,0" HorizontalAlignment="Center" AutomationProperties.Name="Install Nexus"/>
             <Button x:Name="OptionsButton" Style="{StaticResource Link}" HorizontalAlignment="Center" Margin="0,10,0,0" AutomationProperties.Name="Install options">

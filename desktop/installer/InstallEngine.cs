@@ -48,7 +48,18 @@ internal sealed class Existing
         if (key is null) return null;
         var root = key.GetValue("InstallLocation") as string ?? "";
         if (root.Length == 0 || !Directory.Exists(root)) return null;
-        return new Existing { Version = key.GetValue("DisplayVersion") as string ?? "", Root = root };
+        // The version Velopack keeps with the app (full, e.g. 0.4.0-beta.6);
+        // DisplayVersion was written without the prerelease label by old installs.
+        var version = "";
+        try
+        {
+            var manifest = Path.Combine(root, "current", "sq.version");
+            if (File.Exists(manifest)) version = Regex.Match(File.ReadAllText(manifest), "<version>([^<]+)</version>").Groups[1].Value.Trim();
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        if (version.Length == 0) version = key.GetValue("DisplayVersion") as string ?? "";
+        return new Existing { Version = version, Root = root };
     }
 
     public IEnumerable<Process> Running() => InstallEngine.ProcessesUnder(Root);
@@ -107,6 +118,9 @@ internal sealed class InstallEngine
             throw new InstallFailedException(LastLogError() ?? "Setup stopped with an error.", LogPath);
         if (!File.Exists(MainExe))
             throw new InstallFailedException("Setup finished, but Nexus.exe is missing.", LogPath);
+        // The app's install hook also does this; doing it here too covers
+        // installs whose hook could not run.
+        RetireLegacyShortcuts();
         // Velopack writes DisplayVersion without the prerelease label.
         try
         {
@@ -195,6 +209,64 @@ internal sealed class InstallEngine
             catch (Exception) { continue; }
             if (path.StartsWith(root.TrimEnd('\\') + "\\", StringComparison.OrdinalIgnoreCase)) yield return p;
         }
+    }
+
+    // ---- shortcuts from older Nexus setups (same rules as the app's LegacyInstall)
+
+    private static string LegacyBin =>
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nexus", "bin");
+
+    internal static bool IsLegacyTarget(string target, string installRoot)
+    {
+        if (string.IsNullOrWhiteSpace(target)) return false;
+        if (IsUnder(target, installRoot)) return false;
+        if (IsUnder(target, LegacyBin)) return true;
+        var name = Path.GetFileName(target);
+        if (name.StartsWith("nexus-desktop", StringComparison.OrdinalIgnoreCase) || name.StartsWith("nexus-daemon", StringComparison.OrdinalIgnoreCase)) return true;
+        return name.Equals("Nexus.exe", StringComparison.OrdinalIgnoreCase) && !File.Exists(target);
+    }
+
+    private static bool IsUnder(string path, string root)
+    {
+        if (path.Length == 0 || root.Length == 0) return false;
+        try
+        {
+            var dir = Path.GetFullPath(root).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            return Path.GetFullPath(path).StartsWith(dir, StringComparison.OrdinalIgnoreCase);
+        }
+        catch (ArgumentException) { return false; }
+        catch (NotSupportedException) { return false; }
+    }
+
+    private static IEnumerable<string> Links(string dir, string pattern)
+    {
+        try { return Directory.Exists(dir) ? Directory.GetFiles(dir, pattern) : Array.Empty<string>(); }
+        catch (IOException) { return Array.Empty<string>(); }
+        catch (UnauthorizedAccessException) { return Array.Empty<string>(); }
+    }
+
+    public void RetireLegacyShortcuts()
+    {
+        bool Legacy(string link) => IsLegacyTarget(ShellLink.Target(link), Root);
+        void Try(Action a) { try { a(); } catch (IOException) { } catch (UnauthorizedAccessException) { } catch (System.Runtime.InteropServices.COMException) { } }
+
+        foreach (var link in Links(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "*Nexus*.lnk").Where(Legacy))
+        {
+            Try(() => SetStartAtLogin(true));
+            Try(() => File.Delete(link));
+        }
+        var programs = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+        var folder = Path.Combine(programs, "Nexus");
+        foreach (var link in Links(folder, "*.lnk").Concat(Links(programs, "Nexus Desktop.lnk")).Where(Legacy))
+            Try(() => File.Delete(link));
+        Try(() => { if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder); });
+        var hadDesktop = false;
+        foreach (var link in Links(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), "Nexus*.lnk").Where(Legacy))
+        {
+            hadDesktop = true;
+            Try(() => File.Delete(link));
+        }
+        if (hadDesktop) Try(() => SetDesktopShortcut(true));
     }
 
     // ---- options applied after install (same formats the app itself uses)

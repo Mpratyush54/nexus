@@ -154,7 +154,9 @@ public partial class MainWindow : Window
     {
         if (_busy) return;
         _busy = true;
-        CloseButton.IsEnabled = false;
+        // Closing mid-install isn't possible: the button steps aside cleanly.
+        CloseButton.IsHitTestVisible = false;
+        Anim.To(CloseButton, OpacityProperty, 0, 200, 0, Anim.Out);
         _engine = new InstallEngine(_root, _payload);
         _target = _shown = 0;
         Show(Installing);
@@ -183,7 +185,8 @@ public partial class MainWindow : Window
         finally
         {
             _busy = false;
-            CloseButton.IsEnabled = true;
+            CloseButton.IsHitTestVisible = true;
+            Anim.To(CloseButton, OpacityProperty, 1, 260, 0, Anim.Out);
         }
     }
 

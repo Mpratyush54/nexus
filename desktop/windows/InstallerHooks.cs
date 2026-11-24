@@ -31,9 +31,11 @@ public static class InstallerHooks
     private static IDesktopIntegration RealSystem() =>
         OperatingSystem.IsWindows() ? new WindowsDesktopIntegration() : DesktopIntegration.Current;
 
-    private static string InstallRoot =>
-        // ...\NexusDesktop\current\Nexus.exe -> ...\NexusDesktop
-        Path.GetDirectoryName(Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar)) ?? "") ?? "";
+    // AppContext.BaseDirectory is the folder of Nexus.exe (...\NexusDesktop\current\),
+    // so its parent is the install root. (Two levels up would be %LOCALAPPDATA%:
+    // then everything under it, %TEMP% included, looked like "this install".)
+    internal static string InstallRoot =>
+        Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)) ?? "";
 
     private static void AfterInstall()
     {
@@ -91,7 +93,7 @@ internal static class LegacyInstall
 
     public static void Retire(IDesktopIntegration integration)
     {
-        var installRoot = Path.GetDirectoryName(Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar)) ?? "") ?? "";
+        var installRoot = InstallerHooks.InstallRoot;
         bool Legacy(string link) => IsLegacyTarget(ShellLinks.Target(link), installRoot, LegacyBin);
 
         var startup = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
