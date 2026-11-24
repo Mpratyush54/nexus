@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"central-memory/internal/store"
+	"central-memory/internal/usage"
 )
 
 // MirroredTurn is the safe, preview-only part of a harvested turn that is
@@ -30,6 +31,26 @@ type MirroredTurn struct {
 	Role        string
 	TextPreview string
 	ToolCalls   []map[string]any
+	SourceAt    *time.Time
+	// Usage is the token usage recorded with this turn. UsageOnly turns
+	// (Codex token_count, tool-only Claude lines) are not dialogue: they
+	// go to the usage ledger only.
+	Usage     *usage.Entry
+	UsageKey  string
+	UsageOnly bool
+}
+
+// usageBody renders the optional usage object of the turn/usage payloads.
+func usageBody(u usage.Entry, key string) map[string]any {
+	body := map[string]any{"model": u.Model, "input": u.Input, "output": u.Output,
+		"cache_read": u.CacheRead, "cache_write": u.CacheWrite}
+	if u.CostUSD != nil {
+		body["cost_usd"] = *u.CostUSD
+	}
+	if key != "" {
+		body["key"] = key
+	}
+	return body
 }
 
 // mirrorConnection returns a coherent connection snapshot.  The project id
@@ -121,7 +142,10 @@ func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, na
 // immediately.  Indexes are deterministic source positions: a retry that
 // reaches an already-written turn receives 409 and is therefore idempotent.
 func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, nativeID, machineID, workspaceRoot string, turns []MirroredTurn, title ...string) (string, error) {
-	name := "Captured " + normalizeHarness(harness) + " session"
+	// No title in this batch: send none, so the server keeps the name it has
+	// (a placeholder here overwrote a real title on every later batch). The
+	// apps name untitled chats from their first message.
+	name := ""
 	if len(title) > 0 && strings.TrimSpace(title[0]) != "" {
 		name = strings.TrimSpace(title[0])
 	}
@@ -132,6 +156,10 @@ func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, 
 	base, token, _, client, err := s.mirrorConnection()
 	if err != nil {
 		return sessionID, err
+	}
+	turns = s.postUsage(ctx, client, base, token, sessionID, turns)
+	if len(turns) == 0 {
+		return sessionID, nil
 	}
 	// The live database may contain thousands of historical turns. Upload in
 	// bounded chunks; old API builds return 404 and use the single-turn route.
@@ -151,10 +179,14 @@ func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, 
 			if calls == nil {
 				calls = []map[string]any{}
 			}
-			batch = append(batch, map[string]any{
+			body := map[string]any{
 				"idx": turn.Idx, "role": role,
 				"text_preview": turn.TextPreview, "tool_calls": calls,
-			})
+			}
+			if turn.SourceAt != nil {
+				body["source_ts"] = turn.SourceAt
+			}
+			batch = append(batch, body)
 		}
 		status, err := mirrorJSON(ctx, client, http.MethodPost,
 			base+"/v1/agent-sessions/"+url.PathEscape(sessionID)+"/turns/batch",
@@ -179,18 +211,56 @@ func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, 
 		if calls == nil {
 			calls = []map[string]any{}
 		}
+		body := map[string]any{
+			"idx":          turn.Idx,
+			"role":         role,
+			"text_preview": turn.TextPreview,
+			"tool_calls":   calls,
+		}
+		if turn.SourceAt != nil {
+			body["source_ts"] = turn.SourceAt
+		}
 		status, err := mirrorJSON(ctx, client, http.MethodPost,
-			base+"/v1/agent-sessions/"+url.PathEscape(sessionID)+"/turns", token, map[string]any{
-				"idx":          turn.Idx,
-				"role":         role,
-				"text_preview": turn.TextPreview,
-				"tool_calls":   calls,
-			}, nil)
+			base+"/v1/agent-sessions/"+url.PathEscape(sessionID)+"/turns", token, body, nil)
 		if err != nil && status != http.StatusConflict {
 			return sessionID, err
 		}
 	}
 	return sessionID, nil
+}
+
+// postUsage sends every turn's usage to the usage ledger and returns the
+// dialogue turns. Usage travels on its own route rather than inside turn
+// bodies because servers decode turns strictly: an older server would
+// reject the whole turn. Best effort: a server without the route (404/405)
+// or a failed post never blocks the dialogue upload.
+func (s *HTTPMemoryStore) postUsage(ctx context.Context, client *http.Client, base, token, sessionID string, turns []MirroredTurn) []MirroredTurn {
+	dialogue := turns[:0:0]
+	var records []map[string]any
+	for _, turn := range turns {
+		if !turn.UsageOnly {
+			dialogue = append(dialogue, turn)
+		}
+		if turn.Usage == nil {
+			continue
+		}
+		record := usageBody(*turn.Usage, turn.UsageKey)
+		record["idx"] = turn.Idx
+		if turn.SourceAt != nil {
+			record["source_ts"] = turn.SourceAt
+		}
+		records = append(records, record)
+	}
+	for start := 0; start < len(records); start += 200 {
+		end := min(start+200, len(records))
+		_, err := mirrorJSON(ctx, client, http.MethodPost,
+			base+"/v1/agent-sessions/"+url.PathEscape(sessionID)+"/usage",
+			token, map[string]any{"records": records[start:end]}, nil)
+		if err != nil {
+			break
+		}
+	}
+	return dialogue
 }
 
 // PublishAgentSessionVersion commits a transcript-only version.  It uses the

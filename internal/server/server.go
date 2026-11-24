@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	memctx "central-memory/internal/context"
+	"central-memory/internal/desktopbridge"
 	"central-memory/internal/extract"
 	"central-memory/internal/mail"
 	"central-memory/internal/mcp"
@@ -44,10 +46,11 @@ const OfflineThreshold = 90 * time.Second
 // persistence goes through the store.Store interface so the Postgres/RDS
 // implementation can replace MemStore without touching handlers.
 type Server struct {
-	Store store.Store
-	Mux   *http.ServeMux
-	Auth  *Authenticator
-	Log   *log.Logger
+	Desktop desktopbridge.Repository
+	Store   store.Store
+	Mux     *http.ServeMux
+	Auth    *Authenticator
+	Log     *log.Logger
 
 	// Ingest rate-limit gates (issues #93/#100). Lazily initialized so
 	// zero-value Servers in tests still enforce defaults.
@@ -74,6 +77,12 @@ type Server struct {
 
 	// Accounts is the full user store for signup/profile/usage (issue #161).
 	Accounts *store.UserStore
+
+	// Bounded, aggregate-only cache for archived source dates. The key includes
+	// owner/project and snapshot version; no conversation text is retained.
+	activityMu           sync.Mutex
+	activityCache        map[string]cachedLegacyActivity
+	activityCacheEntries int
 
 	// Tokens is the API token store for mint/list/revoke (issue #161).
 	Tokens *store.APITokenStore
@@ -129,6 +138,12 @@ func NewServer(st store.Store) *Server {
 		login:     newRateGate(1, 5),
 		checkouts: make(map[string]string),
 		handoffs:  make(map[string]*handoffRecord),
+	}
+	if pg, ok := st.(*store.PostgresStore); ok {
+		s.Desktop = desktopbridge.NewPostgres(pg.DB())
+	} else if _, ok := st.(*store.MemStore); ok {
+		// Only explicit in-memory development/test stores may lose queued work.
+		s.Desktop = desktopbridge.NewMemory()
 	}
 	s.registerRoutes()
 	return s
@@ -263,7 +278,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	// Trailing garbage after the first value is rejected (issue #154):
 	// Decode stops at the first complete value, so verify EOF follows.
 	var extra any
-	if err := dec.Decode(&extra); err == nil {
+	if err := dec.Decode(&extra); err != io.EOF {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: trailing data after JSON value")
 		return false
 	}

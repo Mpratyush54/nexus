@@ -4,10 +4,11 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:tb="using:H.NotifyIcon"
-    Title="Nexus">
-    <Grid>
+    Title="Nexus Beta">
+    <Grid Background="{ThemeResource NexusCanvasBrush}">
         <Grid.KeyboardAccelerators>
             <KeyboardAccelerator Key="K" Modifiers="Control" Invoked="Search_Invoked"/>
+            <KeyboardAccelerator Key="P" Modifiers="Control" Invoked="ProjectSwitch_Invoked"/>
         </Grid.KeyboardAccelerators>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -21,34 +22,178 @@
         <NavigationView
             x:Name="Nav"
             Grid.Row="1"
-            PaneTitle="Nexus"
+            PaneTitle=""
             PaneDisplayMode="Left"
-            CompactModeThresholdWidth="760"
-            ExpandedModeThresholdWidth="1060"
+            IsTitleBarAutoPaddingEnabled="True"
+            CompactModeThresholdWidth="640"
+            ExpandedModeThresholdWidth="960"
+            OpenPaneLength="296"
+            CompactPaneLength="52"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
+            DisplayModeChanged="Nav_DisplayModeChanged"
+            PaneOpened="Nav_PaneOpened"
+            PaneClosed="Nav_PaneClosed"
+            PaneOpening="Nav_PaneOpening"
+            PaneClosing="Nav_PaneClosing"
             ItemInvoked="Nav_ItemInvoked">
+            <NavigationView.Resources>
+                <SolidColorBrush x:Key="NavigationViewDefaultPaneBackground" Color="{ThemeResource NexusSidebarColor}"/>
+                <SolidColorBrush x:Key="NavigationViewExpandedPaneBackground" Color="{ThemeResource NexusSidebarColor}"/>
+                <SolidColorBrush x:Key="NavigationViewContentBackground" Color="{ThemeResource NexusCanvasColor}"/>
+                <SolidColorBrush x:Key="NavigationViewContentGridBorderBrush" Color="Transparent"/>
+                <Style x:Key="RailButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
+                    <Setter Property="Width" Value="36"/>
+                    <Setter Property="Height" Value="36"/>
+                    <Setter Property="Padding" Value="0"/>
+                    <Setter Property="Background" Value="Transparent"/>
+                    <Setter Property="BorderThickness" Value="0"/>
+                    <Setter Property="CornerRadius" Value="6"/>
+                    <Setter Property="HorizontalAlignment" Value="Center"/>
+                    <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                    <Setter Property="VerticalContentAlignment" Value="Center"/>
+                    <Setter Property="UseSystemFocusVisuals" Value="True"/>
+                </Style>
+            </NavigationView.Resources>
+            <NavigationView.PaneHeader>
+                <Grid x:Name="PaneHeaderRoot" MinHeight="48">
+                    <StackPanel
+                        x:Name="ProjectPaneExpanded"
+                        Margin="12,12,12,12"
+                        Spacing="4">
+                        <TextBlock Text="Nexus" FontSize="14" FontWeight="SemiBold" VerticalAlignment="Center" Margin="2,2,0,0"/>
+                    </StackPanel>
+                </Grid>
+            </NavigationView.PaneHeader>
             <NavigationView.MenuItems>
-                <NavigationViewItem x:Name="TimelineItem" Content="Timeline" Tag="timeline">
+                <NavigationViewItem x:Name="TimelineItem" Content="Chats" Tag="timeline" Visibility="Collapsed">
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xE823;"/></NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem Content="Memory" Tag="memory">
-                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE8F1;"/></NavigationViewItem.Icon>
+            </NavigationView.MenuItems>
+            <NavigationView.PaneCustomContent>
+                <Grid x:Name="PaneBody" HorizontalAlignment="Left">
+                <!-- Collapsed pane: a slim icon rail with the essential
+                     actions (reference: T3 Code). It lives here, not in the
+                     PaneHeader: the header column starts right of the toggle
+                     button, which pushed the rail off-centre. The pane keeps
+                     its open width while clipped, so the rail is left-aligned
+                     with the width of the compact pane (set in code from
+                     CompactPaneLength) and its 36px buttons centre under the
+                     toggle. -->
+                <StackPanel
+                    x:Name="ProjectPaneCompact"
+                    Width="52"
+                    Margin="1,4,0,4"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Top"
+                    Visibility="Collapsed"
+                    Spacing="8">
+                    <Button x:Name="RailNewChatButton" Style="{StaticResource RailButtonStyle}"
+                            ToolTipService.ToolTip="New chat" AutomationProperties.Name="New chat" Click="NewChatButton_Click">
+                        <FontIcon Glyph="&#xE70F;" FontSize="14" Opacity="0.85"/>
+                    </Button>
+                    <Button x:Name="RailSearchButton" Style="{StaticResource RailButtonStyle}"
+                            ToolTipService.ToolTip="Search chats" AutomationProperties.Name="Search chats" Click="RailSearch_Click">
+                        <FontIcon Glyph="&#xE721;" FontSize="14" Opacity="0.7"/>
+                    </Button>
+                    <Button x:Name="ProjectCompactButton" Style="{StaticResource RailButtonStyle}"
+                            ToolTipService.ToolTip="Projects" AutomationProperties.Name="Projects">
+                        <FontIcon Glyph="&#xE8B7;" FontSize="14" Opacity="0.7"/>
+                    </Button>
+                </StackPanel>
+                <!-- Fixed width (OpenPaneLength 296 minus margins): the rows
+                     keep their measured layout across open/close. -->
+                <Grid x:Name="ChatPane" Margin="10,2,10,0" Width="276" HorizontalAlignment="Left" RowSpacing="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <!-- The one project selector (ProjectSwitcher.cs), always on top. -->
+                    <ContentControl x:Name="ProjectSwitcherHost" Grid.Row="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" IsTabStop="False"/>
+                    <!-- Hidden source of truth for the selected project. The
+                         sidebar shows chats from every project; the filter
+                         button narrows it to one (reference: T3 Code). -->
+                    <ComboBox x:Name="ProjectSelector" Visibility="Collapsed" AutomationProperties.Name="Project"/>
+                    <Grid Grid.Row="1" ColumnSpacing="2" Margin="4,0,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <FontIcon Glyph="&#xE721;" FontSize="13" Opacity="0.55" VerticalAlignment="Center"/>
+                        <TextBox x:Name="ChatSearch" Grid.Column="1" PlaceholderText="Search" AutomationProperties.Name="Search chats" TextChanged="ChatSearch_TextChanged"
+                                 Background="Transparent" BorderThickness="0" FontSize="13" Padding="8,5,4,5" MinHeight="30"/>
+                        <Button x:Name="ProjectFilterButton" Grid.Column="2" Background="Transparent" BorderThickness="0" Padding="7" MinWidth="30" MinHeight="30" ToolTipService.ToolTip="Filter by tag" AutomationProperties.Name="Filter chats by tag">
+                            <FontIcon Glyph="&#xE71C;" FontSize="13" Opacity="0.7"/>
+                        </Button>
+                        <Button x:Name="NewChatButton" Grid.Column="3" Background="Transparent" BorderThickness="0" Padding="7" MinWidth="30" MinHeight="30" Click="NewChatButton_Click" ToolTipService.ToolTip="New chat">
+                            <FontIcon Glyph="&#xE70F;" FontSize="13" Opacity="0.85"/>
+                        </Button>
+                    </Grid>
+                    <ScrollViewer x:Name="ChatScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" Padding="0,0,2,4" ViewChanged="ChatScroll_ViewChanged">
+                        <StackPanel Spacing="2">
+                            <TextBlock x:Name="ProjectFilterLabel" FontSize="11.5" Opacity="0.5" Margin="10,0,0,4" Visibility="Collapsed"/>
+                            <!-- Virtualized: only the rows in view are realized
+                                 (elements come from ChatRowFactory in code). -->
+                            <ItemsRepeater x:Name="ChatList">
+                                <ItemsRepeater.Layout>
+                                    <StackLayout Spacing="2"/>
+                                </ItemsRepeater.Layout>
+                            </ItemsRepeater>
+                            <Button x:Name="MoreChatsButton" Content="More chats" HorizontalAlignment="Stretch" Visibility="Collapsed" Click="MoreChatsButton_Click"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+                </Grid>
+            </NavigationView.PaneCustomContent>
+            <NavigationView.PaneFooter>
+                <StackPanel x:Name="FooterIcons" Orientation="Horizontal" Spacing="2" Margin="12,6,12,10">
+                    <Button x:Name="FooterHome" AutomationProperties.Name="Home" Tag="home" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Home" Click="FooterNav_Click">
+                        <FontIcon Glyph="&#xE80F;" FontSize="14" Opacity="0.7"/>
+                    </Button>
+                    <Button x:Name="FooterShared" AutomationProperties.Name="Shared with you" Tag="teleport" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Shared with you" Click="FooterNav_Click">
+                        <Grid>
+                            <FontIcon Glyph="&#xE8B7;" FontSize="14" Opacity="0.7"/>
+                            <Ellipse x:Name="FooterSharedDot" Width="6" Height="6" Fill="#4F6EF7" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-2,-3,0" Visibility="Collapsed"/>
+                        </Grid>
+                    </Button>
+                    <Button x:Name="FooterAgents" AutomationProperties.Name="Agents" Tag="agentsetup" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Agents: skills, sub-agents, MCP servers" Click="FooterNav_Click">
+                        <FontIcon Glyph="&#xE99A;" FontSize="14" Opacity="0.7"/>
+                    </Button>
+                    <Button x:Name="FooterMemory" AutomationProperties.Name="Memory" Tag="memory" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Memory" Click="FooterNav_Click">
+                        <FontIcon Glyph="&#xE8F1;" FontSize="14" Opacity="0.7"/>
+                    </Button>
+                    <Button x:Name="FooterSettings" AutomationProperties.Name="Settings" Tag="settings" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Settings" Click="FooterNav_Click">
+                        <FontIcon Glyph="&#xE713;" FontSize="14" Opacity="0.7"/>
+                    </Button>
+                </StackPanel>
+            </NavigationView.PaneFooter>
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem x:Name="HomeItem" Content="Home" Tag="home" Visibility="Collapsed">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE80F;"/></NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="TeleportItem" Content="Teleport" Tag="teleport">
-                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE8AB;"/></NavigationViewItem.Icon>
+                <NavigationViewItem x:Name="SharedItem" Content="Shared" Tag="teleport" Visibility="Collapsed">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE8B7;"/></NavigationViewItem.Icon>
                     <NavigationViewItem.InfoBadge>
                         <InfoBadge x:Name="TeleportBadge" Value="0"/>
                     </NavigationViewItem.InfoBadge>
                 </NavigationViewItem>
-                <NavigationViewItem Content="Agents" Tag="agents">
-                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE99A;"/></NavigationViewItem.Icon>
+                <NavigationViewItem x:Name="MemoryItem" Content="Memory" Tag="memory" Visibility="Collapsed">
+                    <NavigationViewItem.Icon><FontIcon Glyph="&#xE8F1;"/></NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="SettingsItem" Content="Settings" Tag="settings">
+                <NavigationViewItem x:Name="SettingsItem" Content="Settings" Tag="settings" Visibility="Collapsed">
                     <NavigationViewItem.Icon><FontIcon Glyph="&#xE713;"/></NavigationViewItem.Icon>
                 </NavigationViewItem>
-            </NavigationView.MenuItems>
-            <Frame x:Name="ContentFrame"/>
+            </NavigationView.FooterMenuItems>
+            <Frame
+                x:Name="ContentFrame"
+                Background="{ThemeResource NexusCanvasBrush}"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch"
+                HorizontalContentAlignment="Stretch"
+                VerticalContentAlignment="Stretch"/>
         </NavigationView>
         <tb:TaskbarIcon
             x:Name="Tray"
@@ -61,18 +206,13 @@
             LeftClickCommand="{x:Bind TrayOpenCommand}"
             MenuActivation="RightClick">
             <tb:TaskbarIcon.IconSource>
-                <tb:GeneratedIconSource
-                    Text="N"
-                    Background="#2563EB"
-                    Foreground="White"
-                    FontSize="34"
-                    FontWeight="SemiBold"/>
+                <BitmapImage UriSource="ms-appx:///Assets/Nexus.png"/>
             </tb:TaskbarIcon.IconSource>
             <tb:TaskbarIcon.ContextFlyout>
                 <MenuFlyout>
                     <MenuFlyoutItem Text="Open" Command="{x:Bind TrayOpenCommand}"/>
                     <MenuFlyoutItem x:Name="PauseItem" Text="Pause capture" Command="{x:Bind TrayPauseCommand}"/>
-                    <MenuFlyoutItem Text="Teleport inbox" Command="{x:Bind TrayTeleportCommand}"/>
+                    <MenuFlyoutItem Text="Shared with you" Command="{x:Bind TrayTeleportCommand}"/>
                     <MenuFlyoutSeparator/>
                     <MenuFlyoutItem Text="Quit" Command="{x:Bind TrayQuitCommand}"/>
                 </MenuFlyout>

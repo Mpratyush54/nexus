@@ -3,9 +3,9 @@ package store
 // Tests for versioned RunMigrations (nexus issue #2 review fix):
 //   - filename -> version parsing (pure, no DB)
 //   - pending/skip/idempotency logic (pure, no DB)
-//   - live Postgres integration guarded by DATABASE_URL (skipped in CI
-//     without a database): record-once, skip-on-rerun, backward compat
-//     with pre-existing tables applied without tracking.
+//   - live Postgres integration via TEST_POSTGRES_DSN or the embedded
+//     test database: record-once, skip-on-rerun, backward compat with
+//     pre-existing tables applied without tracking.
 
 import (
 	"context"
@@ -56,14 +56,10 @@ func TestFilterPendingMigrations(t *testing.T) {
 	}
 }
 
-// TestRunMigrationsRecordsAndSkips is an integration test. It runs only
-// when DATABASE_URL is set; otherwise it skips so `go test ./...` stays
-// green without a database.
+// TestRunMigrationsRecordsAndSkips is an integration test against the
+// configured or embedded Postgres test database.
 func TestRunMigrationsRecordsAndSkips(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set; skipping live migration test")
-	}
+	dsn := testPostgresDSN(t)
 	ctx := context.Background()
 
 	dir := t.TempDir()
@@ -89,7 +85,7 @@ ON CONFLICT (id) DO NOTHING;
 
 	s, err := NewPostgresStore(ctx, dsn)
 	if err != nil {
-		t.Skipf("cannot connect to DATABASE_URL: %v", err)
+		t.Skipf("cannot connect to test postgres: %v", err)
 	}
 	defer s.Close()
 

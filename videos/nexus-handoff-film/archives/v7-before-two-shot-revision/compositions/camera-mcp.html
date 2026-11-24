@@ -1,0 +1,17 @@
+<template><style>*{box-sizing:border-box;margin:0}#root{position:absolute;inset:0;overflow:hidden;background:#252525;font-family:Inter,sans-serif}.clip{position:absolute;inset:0}.stage{position:absolute;inset:0;overflow:hidden;mask-image:linear-gradient(to bottom,#000 870px,transparent 930px)}.camera{position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0;will-change:transform}.camera video{position:absolute;left:0;top:0;width:1920px;height:1080px;object-fit:contain}
+#mcp-proof-inner{position:absolute;inset:0;background:#252525;padding:150px 205px;color:#f5f4ef}.eyebrow{font-size:26px;letter-spacing:3px;color:#edbd62}h2{font-family:JetBrains Mono,monospace;font-size:48px;font-weight:500;margin-top:60px}h2 span{color:#b4b7b2}.result{font-size:54px;line-height:1.24;letter-spacing:-1.4px;margin-top:46px;max-width:1510px}.scope{font-size:28px;line-height:1.5;color:#b4b7b2;margin-top:36px}
+</style><div data-hf-id="hf-4ut3" id="root" data-composition-id="camera-mcp" data-duration="15" data-width="1920" data-height="1080">
+<div data-hf-id="hf-nt0f" class="stage" data-layout-allow-overflow><div data-hf-id="hf-olyr" id="mcp-camera" class="camera"><video data-hf-id="hf-xwso" id="mcp-setup-recording" class="clip" src="assets/mcp-ui-demo.mp4" muted playsinline data-start="0" data-duration="5.625" data-media-start="14"></video></div></div>
+<div data-hf-id="hf-midp" id="mcp-proof" class="clip" data-start="5.625" data-duration="9.375" data-track-index="2" data-beat="actual-mcp-response" data-hold><div data-hf-id="hf-y2e1" id="mcp-proof-inner">
+<p data-hf-id="hf-ol2e" class="eyebrow">ACTUAL MCP RESPONSE · SYNTHETIC DEMO</p>
+<h2 data-hf-id="hf-he09">memory_search<span data-hf-id="hf-666z"> → project context</span></h2>
+<p data-hf-id="hf-0zar" class="result">“Preserve the cart until payment is confirmed so customers can recover from a failed checkout without rebuilding their order.”</p>
+<p data-hf-id="hf-hjnq" class="scope">Project: Checkout · Demo workspace<br data-hf-id="hf-x5px">1 memory retrieved · project_knowledge also returned the team review rule.</p>
+</div></div></div><script>const tl=gsap.timeline({paused:true});
+tl.set("#mcp-camera",{x:-420,y:-220,scale:1.45},0);
+tl.to("#mcp-camera",{x:-575,y:-290,scale:1.65,duration:.7,ease:"power2.inOut"},.6);
+// Adapted from registry iris-reveal: one explicit, seek-safe opening over the real setup recording.
+tl.fromTo("#mcp-proof-inner",{clipPath:"circle(0% at 14% 50%)"},{clipPath:"circle(150% at 14% 50%)",duration:.65,ease:"power2.inOut"},5.625);
+tl.fromTo("#mcp-proof .result",{opacity:0,y:20},{opacity:1,y:0,duration:.6,ease:"power4.out"},6.1);
+tl.fromTo("#mcp-proof .scope",{opacity:0},{opacity:1,duration:.3},7.3);
+window.__timelines=window.__timelines||{};window.__timelines["camera-mcp"]=tl;</script></template>

@@ -44,6 +44,18 @@ export function SessionsPage() {
   const [steerPrompt, setSteerPrompt] = useState('')
   const [steerState, setSteerState] = useState<string>('idle')
 
+  const downloadSnapshot = async (sessionId: string) => {
+    try {
+      await sessionsApi.downloadSnapshot(sessionId)
+    } catch (err) {
+      push({
+        title: 'Download failed',
+        detail: err instanceof ApiError ? err.message : 'Unknown error',
+        tone: 'danger',
+      })
+    }
+  }
+
   const onCreate = (e: FormEvent) => {
     e.preventDefault()
     create.mutate(title.trim() || 'Untitled session', {
@@ -396,13 +408,15 @@ export function SessionsPage() {
                           <Copy className="h-3.5 w-3.5" />
                           Copy restore
                         </Button>
-                        <a
-                          className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-2 text-xs text-fg-dim hover:text-fg"
-                          href={sessionsApi.snapshotDownloadURL(s.session_id)}
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="secondary"
+                          onClick={() => void downloadSnapshot(s.session_id)}
                         >
                           <Download className="h-3.5 w-3.5" />
                           Bundle
-                        </a>
+                        </Button>
                       </div>
                     </td>
                   </tr>

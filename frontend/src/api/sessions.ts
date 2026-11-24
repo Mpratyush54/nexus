@@ -1,4 +1,4 @@
-import { apiRequest } from '@/lib/api-client'
+import { apiDownload, apiRequest } from '@/lib/api-client'
 import type { ListResponse } from '@/types/api'
 
 export type Session = {
@@ -80,8 +80,14 @@ export const sessionsApi = {
   listSnapshots(projectId: string) {
     return apiRequest<ListResponse<SessionSnapshotMeta>>(`/projects/${projectId}/snapshots`)
   },
-  snapshotDownloadURL(sessionId: string) {
-    return `/sessions/${sessionId}/snapshot/download`
+  async downloadSnapshot(sessionId: string) {
+    const { blob, filename } = await apiDownload(`/sessions/${sessionId}/snapshot/download`)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = filename
+    a.click()
+    URL.revokeObjectURL(url)
   },
 }
 

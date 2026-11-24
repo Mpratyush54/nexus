@@ -220,7 +220,7 @@ func (s *Server) dispatch(ctx context.Context, req *Request) *Response {
 		if rpcErr != nil {
 			return &Response{JSONRPC: JSONRPCVersion, ID: req.ID, Error: rpcErr}
 		}
-		return okResult(req.ID, result)
+		return okResult(req.ID, toolCallResult(result))
 	default:
 		return errResult(req.ID, ErrMethodNotFound, "method not found: "+req.Method)
 	}
@@ -264,4 +264,34 @@ func (s *Server) Serve(ctx context.Context, r io.Reader, w io.Writer) error {
 		}
 		out.Flush()
 	}
+}
+
+// toolCallResult shapes a tool's data as an MCP CallToolResult. Clients
+// (Claude Code, Codex, Cursor) only read the "content" text blocks; without
+// them a successful call looked empty. The original fields stay alongside so
+// existing callers that read them directly keep working.
+func toolCallResult(result any) any {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return result
+	}
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil || m == nil {
+		m = map[string]any{"value": result}
+	}
+	if blocks, ok := m["content"].([]any); ok && len(blocks) > 0 {
+		return m // already MCP-shaped
+	}
+	text := ""
+	if body, ok := m["content"].(string); ok {
+		text = body // file_read: the file text is what the agent needs
+	} else if ctxXML, ok := m["context"].(string); ok && strings.TrimSpace(ctxXML) != "" {
+		text = ctxXML // memory_search: the ready-made context block
+	} else if pretty, err := json.MarshalIndent(result, "", "  "); err == nil {
+		text = string(pretty)
+	} else {
+		text = string(raw)
+	}
+	m["content"] = []any{map[string]any{"type": "text", "text": text}}
+	return m
 }

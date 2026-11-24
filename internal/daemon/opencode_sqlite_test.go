@@ -37,7 +37,11 @@ func TestOpenCodeSQLiteSeparatesWorkspaceSessionsAndTools(t *testing.T) {
 		{"msg-two", "ses-two", "user"},
 		{"msg-other", "ses-other", "user"},
 	} {
-		if _, err := db.Exec(`INSERT INTO message VALUES(?,?,?)`, row.id, row.sessionID, `{"role":"`+row.role+`"}`); err != nil {
+		data := `{"role":"` + row.role + `"}`
+		if row.id == "msg-one" { // real opencode.db assistant shape
+			data = `{"role":"assistant","modelID":"claude-opus-5","providerID":"anthropic","cost":0.0125,"tokens":{"total":1500,"input":1000,"output":300,"reasoning":20,"cache":{"read":150,"write":30}}}`
+		}
+		if _, err := db.Exec(`INSERT INTO message VALUES(?,?,?)`, row.id, row.sessionID, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -78,6 +82,13 @@ func TestOpenCodeSQLiteSeparatesWorkspaceSessionsAndTools(t *testing.T) {
 	parsed := ParseToolCalls(turnPayload("conversation_turn", "opencode", path, turns[0]), 0)
 	if len(parsed) != 2 || parsed[0].WorkingDirectory != "D:/central-memory" || parsed[1].FilePath == "" {
 		t.Fatalf("OpenCode file/command provenance lost: %+v", parsed)
+	}
+	if u := turns[0].Usage; u == nil || turns[0].UsageKey != "opencode:msg-one" || u.Model != "claude-opus-5" ||
+		u.Input != 1000 || u.Output != 320 || u.CacheRead != 150 || u.CacheWrite != 30 || u.CostUSD == nil || *u.CostUSD != 0.0125 {
+		t.Fatalf("OpenCode usage lost: %+v", turns[0].Usage)
+	}
+	if turns[1].Usage != nil {
+		t.Fatalf("user message has no usage: %+v", turns[1].Usage)
 	}
 	if turns[1].SessionID != "ses-two" {
 		t.Fatalf("second session lost: %+v", turns[1])

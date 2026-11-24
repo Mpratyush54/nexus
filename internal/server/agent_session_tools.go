@@ -39,7 +39,7 @@ func (s *Server) registerAgentSessionToolRoutes() {
 // are omitted. next_cursor is that idx when another page remains.
 func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.PathValue("id"))
-	row, ok := s.requireAgentRead(w, r, sessionID)
+	row, ok := s.requireAgentLive(w, r, sessionID)
 	if !ok {
 		return
 	}
@@ -75,9 +75,39 @@ func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if len(query) > 512 {
+		writeError(w, http.StatusBadRequest, "search query must be at most 512 bytes")
+		return
+	}
+	if query != "" {
+		matches := make([]store.SessionTurn, 0)
+		for _, turn := range turns {
+			if strings.Contains(strings.ToLower(turn.TextPreview), query) || strings.Contains(strings.ToLower(string(turn.ToolCalls)), query) {
+				matches = append(matches, turn)
+			}
+		}
+		turns = matches
+	}
 	items, next := pageSessionTurns(turns, after, limit)
+	if direction := r.URL.Query().Get("direction"); direction == "backward" {
+		items, next = pageSessionTurnsBefore(turns, after, limit)
+	} else if direction != "" && direction != "forward" {
+		writeError(w, 400, "direction must be forward or backward")
+		return
+	}
+	// Some historical indexes exceed JavaScript's exact-integer range. Keep
+	// the native numeric field compatible, but expose a lossless browser key.
+	type browserTurn struct {
+		store.SessionTurn
+		CursorIndex string `json:"cursor_idx"`
+	}
+	browserItems := make([]browserTurn, 0, len(items))
+	for _, turn := range items {
+		browserItems = append(browserItems, browserTurn{SessionTurn: turn, CursorIndex: strconv.Itoa(turn.Idx)})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":       items,
+		"items":       browserItems,
 		"next_cursor": next,
 	})
 }
@@ -111,12 +141,44 @@ func pageSessionTurns(turns []store.SessionTurn, after *int, limit int) ([]store
 	return page, next
 }
 
+// Backward pages display the newest messages first without losing native index
+// ordering within a page. The cursor is an exclusive upper bound.
+func pageSessionTurnsBefore(turns []store.SessionTurn, before *int, limit int) ([]store.SessionTurn, string) {
+	filtered := make([]store.SessionTurn, 0, len(turns))
+	for _, turn := range turns {
+		if before == nil || turn.Idx < *before {
+			filtered = append(filtered, turn)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].Idx < filtered[j].Idx })
+	next := ""
+	if len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+		next = strconv.Itoa(filtered[0].Idx)
+	}
+	return filtered, next
+}
+
 // handleAgentSessionSummary returns the summary for a session the caller
 // can read. Owner and grantee pass; project or org admin does not.
 func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Request) {
 	row, ok := s.requireAgentRead(w, r, strings.TrimSpace(r.PathValue("id")))
 	if !ok {
 		return
+	}
+	if row.LineageKind != "legacy_snapshot" {
+		cs, _ := s.agentCloud()
+		live, err := cs.CanReadAgentSessionLive(r.Context(), authSubject(r), row.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not check live access")
+			return
+		}
+		if !live {
+			// Stored and extracted summaries may describe turns created after
+			// the shared version. They are live content, not pinned metadata.
+			writeJSON(w, http.StatusOK, map[string]any{"summary": "", "version_limited": true})
+			return
+		}
 	}
 	summary := strings.TrimSpace(row.Summary)
 	if row.LineageKind == "legacy_snapshot" && summary == "Archived snapshot" {
@@ -145,8 +207,10 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 		if row.LineageKind == "legacy_snapshot" {
 			turns = s.legacySnapshotTurns(r, row)
 		} else if cs, ok := s.agentCloud(); ok {
-			if found, err := cs.ListSessionTurns(r.Context(), row.ID); err == nil {
-				turns = found
+			if live, err := cs.CanReadAgentSessionLive(r.Context(), authSubject(r), row.ID); err == nil && live {
+				if found, err := cs.ListSessionTurns(r.Context(), row.ID); err == nil {
+					turns = found
+				}
 			}
 		}
 		summary = capturedTurnOverview(turns)

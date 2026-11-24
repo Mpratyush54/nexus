@@ -1,4 +1,8 @@
 @import 'tailwindcss';
+@import './conversation.css';
+
+.nexus-brand { display: inline-flex; align-items: center; gap: 9px; font-size: 18px; font-weight: 650; letter-spacing: -.045em; color: #f4f1e9; }
+.nexus-brand img { flex: none; object-fit: contain; }
 
 @theme {
   --color-base: #0a0a0a;

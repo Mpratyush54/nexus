@@ -261,3 +261,61 @@ func TestTimelinePagesAcrossNewAndLegacySessions(t *testing.T) {
 		t.Fatalf("paged timeline has %d sessions, want 5: %+v", len(seen), seen)
 	}
 }
+
+// A conversation captured once as an old snapshot and again as a session is
+// one chat in the list, not two.
+func TestTimelineListsSnapshotAndSessionOfOneConversationOnce(t *testing.T) {
+	s := newTestServer()
+	mem := s.Store.(*store.MemStore)
+	ctx := t.Context()
+	project, err := mem.ResolveProject(ctx, "", "", "one-conversation")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mem.ClaimProject(ctx, project.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.UpsertSessionSnapshot(ctx, &store.SessionSnapshot{
+		SessionID: "native-1", ProjectID: project.ID, OwnerUserID: "owner",
+		Harness: "claude", ConversationID: "native-1", TurnCount: 9,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mem.UpsertSessionSnapshot(ctx, &store.SessionSnapshot{
+		SessionID: "native-2", ProjectID: project.ID, OwnerUserID: "owner",
+		Harness: "claude", ConversationID: "native-2", TurnCount: 4,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	modern, err := mem.UpsertAgentSession(ctx, &store.AgentSession{
+		ProjectID: project.ID, OwnerUserID: "owner", Harness: "claude", NativeID: "native-1", OriginMachineID: "pc",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := loginAs(t, s, "owner")
+	// limit=1 puts the modern session and the snapshot on different pages.
+	ids := map[string]int{}
+	cursor := ""
+	for page := 0; page < 5; page++ {
+		path := "/v1/timeline?limit=1&project_id=" + url.QueryEscape(project.ID)
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		rec := doJSON(t, s, http.MethodGet, path, token, nil)
+		var body struct {
+			Items []store.TimelineItem `json:"items"`
+			Next  string               `json:"next_cursor"`
+		}
+		decodeBody(t, rec, &body)
+		for _, it := range body.Items {
+			ids[it.SessionID]++
+		}
+		if cursor = body.Next; cursor == "" {
+			break
+		}
+	}
+	if ids["native-1"] != 0 || ids[modern.ID] != 1 || ids["native-2"] != 1 {
+		t.Fatalf("timeline sessions = %v; want the modern session once, its snapshot hidden, the other snapshot kept", ids)
+	}
+}

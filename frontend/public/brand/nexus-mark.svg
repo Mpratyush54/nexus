@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <title>Nexus — shared context</title>
+  <path d="M14 47V20a6 6 0 0 1 6-6h5l25 33" stroke="#F4F1E9" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M50 17v27a6 6 0 0 1-6 6h-5L14 17" stroke="#E8BB67" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="m25 32 8 10" stroke="#F4F1E9" stroke-width="8" stroke-linecap="round"/>
+</svg>

@@ -6,8 +6,8 @@ import { useToast } from '@/components/ui/Toast'
 import { useUpdateMemory } from '@/hooks/useMemory'
 import { ApiError, type MemoryItem } from '@/types/api'
 
-const LEVELS = ['session', 'project', 'user', 'org'] as const
-const SCOPES = ['private', 'shared', 'project', 'public'] as const
+const LEVELS = ['session', 'project', 'personal', 'organization'] as const
+const SCOPES = ['fact', 'preference', 'decision', 'constraint', 'pattern', 'episode_summary'] as const
 
 type Props = {
   item: MemoryItem | null
@@ -32,7 +32,7 @@ export function MemoryEditorSlideOver({
   const [content, setContent] = useState('')
   const [tagsRaw, setTagsRaw] = useState('')
   const [level, setLevel] = useState('project')
-  const [scope, setScope] = useState('project')
+  const [scope, setScope] = useState('fact')
 
   useEffect(() => {
     if (!item) return
@@ -40,7 +40,7 @@ export function MemoryEditorSlideOver({
     setContent(item.content)
     setTagsRaw((item.tags ?? []).join(', '))
     setLevel(item.level || 'project')
-    setScope(item.scope || 'project')
+    setScope(item.scope || 'fact')
   }, [item])
 
   useEffect(() => {

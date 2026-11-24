@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"central-memory/internal/usage"
+
 	_ "modernc.org/sqlite"
 )
 
@@ -89,6 +91,9 @@ func readOpenCodeTurns(dbPath, workspace, wantedSession string, since time.Time,
 	var firstReadError error
 	skipped := 0
 	for _, session := range sessions {
+		if IsNexusOwnedSession(session.id) {
+			continue // saved by Nexus itself; this would be a duplicate
+		}
 		// The part_session_idx index isolates bad pages in a damaged global DB.
 		// One broken session must not suppress all the other workspaces/chats.
 		parts, err := db.QueryContext(ctx, `SELECT p.id, p.message_id, m.data, p.data, p.time_created
@@ -117,7 +122,18 @@ func readOpenCodeTurns(dbPath, workspace, wantedSession string, since time.Time,
 				continue
 			}
 			var header struct {
-				Role string `json:"role"`
+				Role    string   `json:"role"`
+				ModelID string   `json:"modelID"`
+				Cost    *float64 `json:"cost"`
+				Tokens  *struct {
+					Input     int64 `json:"input"`
+					Output    int64 `json:"output"`
+					Reasoning int64 `json:"reasoning"`
+					Cache     struct {
+						Read  int64 `json:"read"`
+						Write int64 `json:"write"`
+					} `json:"cache"`
+				} `json:"tokens"`
 			}
 			var part struct {
 				Type  string `json:"type"`
@@ -136,6 +152,20 @@ func readOpenCodeTurns(dbPath, workspace, wantedSession string, since time.Time,
 					Speaker: normalizeSpeaker(header.Role), SessionID: session.id,
 					SessionTitle: redact(session.title), SourcePosition: openCodePosition(created, messageID),
 				}, at: created}
+				if header.Tokens != nil && header.Role == "assistant" {
+					// OpenCode reports input without cached tokens, like Anthropic.
+					u := usage.Entry{Model: header.ModelID, Input: header.Tokens.Input,
+						Output:    header.Tokens.Output + header.Tokens.Reasoning,
+						CacheRead: header.Tokens.Cache.Read, CacheWrite: header.Tokens.Cache.Write}
+					// Free models report cost 0; treat that as "not reported"
+					// so a known model can still be estimated.
+					if header.Cost != nil && *header.Cost > 0 {
+						u.CostUSD = header.Cost
+					}
+					if !u.Empty() {
+						entry.turn.Usage, entry.turn.UsageKey = &u, "opencode:"+messageID
+					}
+				}
 				byMessage[messageID] = entry
 			}
 			if created < entry.at {
