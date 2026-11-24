@@ -36,6 +36,6 @@
 
   <ItemGroup>
     <Compile Include="..\..\bindings\csharp\NxMethods.g.cs" Link="Core\NxMethods.g.cs" />
-    <Content Include="Assets\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets\**" Exclude="Assets\InstallerSplash.gif" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -41,9 +41,16 @@ public sealed class SetupWizardPage : NexusPage
 
     // chrome
     private readonly TextBlock _counter = new() { FontSize = 12, Foreground = NexusPalette.Muted };
-    private readonly ProgressBar _progress = new() { Minimum = 0, Maximum = Steps.Length - 1, Height = 3, Margin = new Thickness(0, 8, 0, 0) };
-    private readonly TextBlock _title = new() { FontSize = 24, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
-    private readonly TextBlock _subtitle = new() { FontSize = 13.5, Foreground = NexusPalette.Muted, TextWrapping = TextWrapping.Wrap };
+    // Step indicator: one segment + label per step; the current segment fills.
+    private readonly Grid _rail = new() { ColumnSpacing = 6, Margin = new Thickness(0, 12, 0, 0) };
+    private readonly List<Border> _railFill = new();
+    private readonly List<TextBlock> _railLabels = new();
+    private int _railShown = -1;
+    private readonly StackPanel _titles = new() { Spacing = 8, Margin = new Thickness(0, 28, 0, 22) };
+    private readonly TextBlock _title = new() { FontSize = 30, FontFamily = new FontFamily("Segoe UI Variable Display, Segoe UI"), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+    private readonly TextBlock _subtitle = new() { FontSize = 14, Foreground = NexusPalette.Muted, TextWrapping = TextWrapping.Wrap, LineHeight = 21 };
+    private static readonly SolidColorBrush Gold = new(Windows.UI.Color.FromArgb(255, 232, 187, 99));
+    private Action? _playDone;
     private readonly ContentControl _body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch };
     private readonly ScrollViewer _scroller = new() { HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
     private readonly Button _back = new() { Content = "Back", MinWidth = 88, AccessKey = "B" };
@@ -89,12 +96,13 @@ public sealed class SetupWizardPage : NexusPage
     public SetupWizardPage(Action finished)
     {
         _finished = finished;
-        Background = (Brush)Application.Current.Resources["NexusCanvasBrush"];
+        // Transparent: the window shows Mica behind the setup guide.
+        Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style) _next.Style = style;
         foreach (var live in new[] { _connectResult, _accountState, _agentState, _workspaceState })
             AutomationProperties.SetLiveSetting(live, AutomationLiveSetting.Polite);
         AutomationProperties.SetHeadingLevel(_title, AutomationHeadingLevel.Level1);
-        AutomationProperties.SetName(_progress, "Setup progress");
+        AutomationProperties.SetName(_rail, "Setup progress");
         AutomationProperties.SetName(_skipAll, "Skip setup and open Nexus");
         _server.Text = ProductionServer;
         _back.Click += (_, _) => Go(_index - 1);
@@ -134,9 +142,9 @@ public sealed class SetupWizardPage : NexusPage
         brand.Children.Add(new TextBlock { Text = "Nexus setup", FontSize = 13, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
         header.Children.Add(brand);
         header.Children.Add(_counter);
-        header.Children.Add(_progress);
+        header.Children.Add(BuildRail());
 
-        var titles = new StackPanel { Spacing = 6, Margin = new Thickness(0, 22, 0, 18) };
+        var titles = _titles;
         titles.Children.Add(_title);
         titles.Children.Add(_subtitle);
 
@@ -152,7 +160,13 @@ public sealed class SetupWizardPage : NexusPage
         Grid.SetColumn(_skip, 2); footer.Children.Add(_skip);
         Grid.SetColumn(_next, 3); footer.Children.Add(_next);
 
-        var column = new Grid { MaxWidth = 680, Padding = new Thickness(32, 24, 32, 24), HorizontalAlignment = HorizontalAlignment.Stretch };
+        var column = new Grid { MaxWidth = 720, Padding = new Thickness(40, 36, 40, 28), HorizontalAlignment = HorizontalAlignment.Stretch };
+        // Window entrance: the whole guide rises in once (theme animation,
+        // so it follows the system animation setting by itself).
+        column.Transitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection
+        {
+            new Microsoft.UI.Xaml.Media.Animation.EntranceThemeTransition { FromVerticalOffset = 48 }
+        };
         column.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         column.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         column.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
@@ -162,6 +176,53 @@ public sealed class SetupWizardPage : NexusPage
         Grid.SetRow(_scroller, 2); column.Children.Add(_scroller);
         Grid.SetRow(footer, 3); column.Children.Add(footer);
         return column;
+    }
+
+    private UIElement BuildRail()
+    {
+        for (var i = 0; i < Steps.Length; i++)
+        {
+            _rail.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var fill = new Border { Background = NexusPalette.Accent, CornerRadius = new CornerRadius(2), Height = 4 };
+            var track = new Border { Background = NexusPalette.Hairline, CornerRadius = new CornerRadius(2), Height = 4, Child = fill };
+            var label = new TextBlock { Text = Steps[i].Name, FontSize = 11.5, Foreground = NexusPalette.Muted, Margin = new Thickness(0, 7, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis };
+            var cell = new StackPanel();
+            cell.Children.Add(track);
+            cell.Children.Add(label);
+            Grid.SetColumn(cell, i);
+            _rail.Children.Add(cell);
+            _railFill.Add(fill);
+            _railLabels.Add(label);
+            Motion.FillX(fill, 0, 0);
+        }
+        return _rail;
+    }
+
+    private void UpdateRail()
+    {
+        for (var i = 0; i < Steps.Length; i++)
+        {
+            var target = i <= _index ? 1f : 0f;
+            var was = i <= _railShown ? 1f : 0f;
+            // Only the newly reached (or left) segment animates.
+            Motion.FillX(_railFill[i], i == _index && i > _railShown ? 0f : was, target);
+            _railLabels[i].FontWeight = i == _index ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
+            _railLabels[i].Foreground = i == _index ? (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"] : NexusPalette.Muted;
+        }
+        _railShown = _index;
+        AutomationProperties.SetName(_rail, $"Setup progress, step {_index + 1} of {Steps.Length}, {Steps[_index].Name}");
+    }
+
+    // Each step's content cascades in from the direction of travel.
+    private static void Cascade(UIElement view, bool forward)
+    {
+        if (view is not Panel panel) { Motion.FadeSlideIn(view, 0, forward ? 28 : -28, 0); return; }
+        var delay = 0;
+        foreach (var child in panel.Children.Take(10))
+        {
+            Motion.FadeSlideIn(child, delay, forward ? 28 : -28, 0, 460);
+            delay += 45;
+        }
     }
 
     private void AddAccelerator(Windows.System.VirtualKey key, Action action)
@@ -175,12 +236,12 @@ public sealed class SetupWizardPage : NexusPage
 
     private void Go(int index)
     {
+        var forward = index >= _index;
         _index = Math.Clamp(index, 0, Steps.Length - 1);
         var step = Current;
         if (step != Step.Connect) StopAuthPoll();
         _counter.Text = $"Step {_index + 1} of {Steps.Length} · {Steps[_index].Name}";
-        _progress.Value = _index;
-        AutomationProperties.SetName(_progress, $"Setup progress, step {_index + 1} of {Steps.Length}");
+        UpdateRail();
         (_title.Text, _subtitle.Text) = step switch
         {
             Step.Welcome => ("Welcome to Nexus", "Nexus keeps a shared memory of your coding agents' work, so any agent can pick up where another left off."),
@@ -198,6 +259,8 @@ public sealed class SetupWizardPage : NexusPage
             _views[step] = view;
         }
         _body.Content = view;
+        Motion.FadeSlideIn(_titles, 0, forward ? 20 : -20, 0, 380);
+        Cascade(view, forward);
         _scroller.ChangeView(null, 0, null, true);
         UpdateButtons();
         _ = OnStepShownAsync(step);
@@ -251,10 +314,12 @@ public sealed class SetupWizardPage : NexusPage
         Go(_index + 1);
     }
 
-    private void Finish()
+    private async void Finish()
     {
         StopAuthPoll();
         AppPrefs.SetupCompleted = true;
+        _next.IsEnabled = false;
+        await Motion.FadeOutAsync(this, 280);
         _finished();
     }
 
@@ -264,9 +329,22 @@ public sealed class SetupWizardPage : NexusPage
         Step.Agents => LoadAgentsAsync(),
         Step.Workspaces => LoadWorkspacesAsync(),
         Step.Startup => Task.Run(SyncStartup),
-        Step.Done => Task.CompletedTask,
+        Step.Done => PlayDoneAsync(),
+        Step.Welcome => PlayWelcomeAsync(),
         _ => Task.CompletedTask
     };
+
+    private Task PlayDoneAsync()
+    {
+        _playDone?.Invoke();
+        return Task.CompletedTask;
+    }
+
+    private Task PlayWelcomeAsync()
+    {
+        _playWelcome?.Invoke();
+        return Task.CompletedTask;
+    }
 
     private UIElement BuildStep(Step step) => step switch
     {
@@ -281,9 +359,73 @@ public sealed class SetupWizardPage : NexusPage
 
     // ---- Welcome
 
-    private static UIElement BuildWelcome()
+    private Action? _playWelcome;
+
+    // The Nexus mark inside a slowly orbiting ring of memory-graph nodes
+    // (same motif as the installer splash).
+    private UIElement Hero()
     {
-        var panel = new StackPanel { Spacing = 14 };
+        const double box = 168, radius = 70;
+        var host = new Grid { Width = box, Height = box, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(-14, -10, 0, 4) };
+        AutomationProperties.SetAccessibilityView(host, AccessibilityView.Raw);
+        var orbit = new Canvas { Width = box, Height = box };
+        orbit.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse
+        {
+            Width = radius * 2, Height = radius * 2, Stroke = NexusPalette.Hairline, StrokeThickness = 1,
+            Margin = new Thickness(box / 2 - radius, box / 2 - radius, 0, 0)
+        });
+        var dots = new List<UIElement>();
+        for (var i = 0; i < 7; i++)
+        {
+            var a = i * Math.PI * 2 / 7 + 0.4;
+            var size = i % 3 == 0 ? 9.0 : 6.0;
+            var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
+            {
+                Width = size, Height = size,
+                Fill = i % 3 == 0 ? Gold : (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"]
+            };
+            Canvas.SetLeft(dot, box / 2 + Math.Cos(a) * radius - size / 2);
+            Canvas.SetTop(dot, box / 2 + Math.Sin(a) * radius - size / 2);
+            orbit.Children.Add(dot);
+            dots.Add(dot);
+        }
+        host.Children.Add(orbit);
+        var glow = new Microsoft.UI.Xaml.Shapes.Ellipse
+        {
+            Width = 92, Height = 92, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
+            Fill = new RadialGradientBrush
+            {
+                GradientStops =
+                {
+                    new GradientStop { Color = Windows.UI.Color.FromArgb(90, 232, 187, 99), Offset = 0 },
+                    new GradientStop { Color = Windows.UI.Color.FromArgb(0, 232, 187, 99), Offset = 1 }
+                }
+            }
+        };
+        host.Children.Add(glow);
+        var logo = new Image { Source = new BitmapImage(new Uri("ms-appx:///Assets/Nexus.png")), Width = 76, Height = 76 };
+        var logoBox = new Border { Child = logo, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center };
+        host.Children.Add(logoBox);
+        _playWelcome = () =>
+        {
+            Motion.PopIn(logoBox, 120, 0.55f, 640);
+            Motion.Breathe(logo, 0.04f, 3200, 900);
+            Motion.PopIn(glow, 260, 0.3f, 900);
+            Motion.Spin(orbit, 36000);
+            var delay = 300;
+            foreach (var dot in dots)
+            {
+                Motion.PopIn(dot, delay, 0f, 420);
+                delay += 70;
+            }
+        };
+        return host;
+    }
+
+    private UIElement BuildWelcome()
+    {
+        var panel = new StackPanel { Spacing = 18 };
+        panel.Children.Add(Hero());
         panel.Children.Add(Point("", "Shared memory", "Decisions, fixes and context from every session become memory your agents can search."));
         panel.Children.Add(Point("", "All your chats in one place", "Claude Code, Codex, Cursor and other agents' sessions on one timeline. Continue any of them in another agent."));
         panel.Children.Add(Point("", "You choose what is captured", "Nothing is monitored until you pick folders and allow it. You can pause any time."));
@@ -450,7 +592,13 @@ public sealed class SetupWizardPage : NexusPage
 
     private async Task LoadAgentsAsync()
     {
-        if (_agentRows.Children.Count == 0) _agentRows.Children.Add(Para("Looking for coding agents…", 0.6, 12.5));
+        if (_agentRows.Children.Count == 0)
+        {
+            var looking = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, Padding = new Thickness(0, 8, 0, 8) };
+            looking.Children.Add(new ProgressRing { IsActive = true, Width = 16, Height = 16 });
+            looking.Children.Add(Para("Looking for coding agents on this computer…", 0.7, 12.5));
+            _agentRows.Children.Add(looking);
+        }
         var response = await Call("agents.setup.browse", new { workspace = "" });
         _agentRows.Children.Clear();
         if (!response.Ok || response.Result is not { } inventory)
@@ -471,18 +619,30 @@ public sealed class SetupWizardPage : NexusPage
             var connected = NxJson.Text(agent, "nexus_mcp") == "true";
             if (connected) _agentsConnected++;
             var version = NxJson.Text(agent, "version");
-            var row = new Grid { Padding = new Thickness(0, 8, 0, 8), ColumnSpacing = 12 };
+            var row = new Grid { Padding = new Thickness(0, 9, 0, 9), ColumnSpacing = 12 };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var check = new Border
+            {
+                Width = 20, Height = 20, CornerRadius = new CornerRadius(10),
+                Background = connected ? NexusPalette.Accent : NexusPalette.AccentFill,
+                Child = new FontIcon { Glyph = "\uE73E", FontSize = 10, Foreground = connected ? (Brush)Application.Current.Resources["TextOnAccentFillColorPrimaryBrush"] : Gold }
+            };
+            row.Children.Add(check);
             var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            Grid.SetColumn(label, 1);
             label.Children.Add(new TextBlock { Text = name, FontWeight = Microsoft.UI.Text.FontWeights.Medium });
             if (version.Length > 0) label.Children.Add(new TextBlock { Text = version, FontSize = 11.5, Foreground = NexusPalette.Muted, VerticalAlignment = VerticalAlignment.Center });
             row.Children.Add(label);
             var state = new TextBlock { Text = connected ? "Connected to Nexus" : "Not connected", FontSize = 12, Foreground = connected ? NexusPalette.Accent : NexusPalette.Muted, VerticalAlignment = VerticalAlignment.Center };
-            Grid.SetColumn(state, 1);
+            Grid.SetColumn(state, 2);
             row.Children.Add(state);
-            AutomationProperties.SetName(row, $"{name} {version}, {state.Text}");
+            AutomationProperties.SetName(row, $"{name} {version}, found, {state.Text}");
             _agentRows.Children.Add(row);
+            // Live detection: each agent slides in, then its check pops.
+            Motion.FadeSlideIn(row, _agentsInstalled * 90, 0, 10, 380);
+            Motion.PopIn(check, _agentsInstalled * 90 + 200, 0.2f, 480);
         }
         if (_agentsInstalled == 0)
             _agentRows.Children.Add(Para("No supported coding agents found yet. Install Claude Code, Codex, Cursor or another supported agent, then open Settings > Agents.", 0.75, 12.5));
@@ -650,9 +810,60 @@ public sealed class SetupWizardPage : NexusPage
 
     // ---- Done
 
+    // A small memory graph blooms out from a check mark.
+    private UIElement Bloom()
+    {
+        const double w = 300, h = 150;
+        var canvas = new Canvas { Width = w, Height = h, HorizontalAlignment = HorizontalAlignment.Left, Margin = new Thickness(0, -6, 0, 6) };
+        AutomationProperties.SetAccessibilityView(canvas, AccessibilityView.Raw);
+        var graph = new Canvas { Width = w, Height = h };
+        canvas.Children.Add(graph);
+        var rng = new Random(7);
+        var parts = new List<(UIElement Element, double Dx, double Dy, int Delay)>();
+        var lines = new List<UIElement>();
+        const int count = 16;
+        for (var i = 0; i < count; i++)
+        {
+            var a = i * Math.PI * 2 / count + rng.NextDouble() * 0.25;
+            var r = 44 + rng.NextDouble() * 58;
+            var x = w / 2 + Math.Cos(a) * r * 1.35;
+            var y = h / 2 + Math.Sin(a) * r * 0.62;
+            var line = new Microsoft.UI.Xaml.Shapes.Line { X1 = w / 2, Y1 = h / 2, X2 = x, Y2 = y, Stroke = NexusPalette.Hairline, StrokeThickness = 1 };
+            graph.Children.Add(line);
+            lines.Add(line);
+            var size = 4 + rng.NextDouble() * 6;
+            var node = new Microsoft.UI.Xaml.Shapes.Ellipse
+            {
+                Width = size, Height = size,
+                Fill = i % 4 == 0 ? Gold : i % 4 == 1 ? NexusPalette.Accent : (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"]
+            };
+            Canvas.SetLeft(node, x - size / 2);
+            Canvas.SetTop(node, y - size / 2);
+            graph.Children.Add(node);
+            parts.Add((node, w / 2 - x, h / 2 - y, 220 + (int)(r * 4)));
+        }
+        var badge = new Border
+        {
+            Width = 52, Height = 52, CornerRadius = new CornerRadius(26), Background = NexusPalette.Accent,
+            Child = new FontIcon { Glyph = "\uE73E", FontSize = 22, Foreground = (Brush)Application.Current.Resources["TextOnAccentFillColorPrimaryBrush"] }
+        };
+        Canvas.SetLeft(badge, w / 2 - 26);
+        Canvas.SetTop(badge, h / 2 - 26);
+        canvas.Children.Add(badge);
+        _playDone = () =>
+        {
+            Motion.PopIn(badge, 80, 0.3f, 620);
+            foreach (var line in lines) Motion.FadeSlideIn(line, 260, 0, 0, 900);
+            foreach (var (element, dx, dy, delay) in parts) Motion.FadeSlideIn(element, delay, (float)dx, (float)dy, 820);
+            Motion.Spin(graph, 90000);
+        };
+        return canvas;
+    }
+
     private UIElement BuildDone()
     {
         var panel = new StackPanel { Spacing = 12 };
+        panel.Children.Add(Bloom());
         bool login;
         try { login = DesktopIntegration.Current.StartsAtLogin; } catch { login = false; }
         panel.Children.Add(Summary(_signedIn, "Account",
@@ -673,7 +884,11 @@ public sealed class SetupWizardPage : NexusPage
         var grid = new Grid { ColumnSpacing = 14 };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        grid.Children.Add(new FontIcon { Glyph = glyph, FontSize = 16, Foreground = NexusPalette.Accent, VerticalAlignment = VerticalAlignment.Top, Margin = new Thickness(0, 2, 0, 0) });
+        grid.Children.Add(new Border
+        {
+            Width = 34, Height = 34, CornerRadius = new CornerRadius(9), Background = NexusPalette.AccentFill, VerticalAlignment = VerticalAlignment.Top,
+            Child = new FontIcon { Glyph = glyph, FontSize = 15, Foreground = Gold }
+        });
         var text2 = new StackPanel { Spacing = 2 };
         text2.Children.Add(new TextBlock { Text = title, FontWeight = Microsoft.UI.Text.FontWeights.Medium, TextWrapping = TextWrapping.Wrap });
         text2.Children.Add(new TextBlock { Text = text, Foreground = NexusPalette.Muted, TextWrapping = TextWrapping.Wrap, FontSize = 12.5 });

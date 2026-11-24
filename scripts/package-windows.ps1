@@ -147,6 +147,10 @@ $pack = @(
   "--packAuthors", "Nexus",
   "--icon", (Join-Path $win "Assets\Nexus.ico"),
   "--shortcuts", "StartMenuRoot",
+  # Branded animated splash (scripts/render-splash.py). Velopack's stock
+  # progress bar is hidden; the GIF carries its own shimmer.
+  "--splashImage", (Join-Path $win "Assets\InstallerSplash.gif"),
+  "--splashProgressColor", "none",
   "--runtime", "win-x64",
   "--channel", $Channel,
   "--outputDir", $releases

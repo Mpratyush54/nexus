@@ -102,21 +102,43 @@ public sealed partial class MainWindow : Window
 
     private SetupWizardPage? _setup;
 
+    // The guide covers the whole window on a Mica backdrop. The shell keeps
+    // its solid canvas (no Mica) once setup is done.
     public void ShowSetup()
     {
-        if (_setup is null)
+        if (_setup is null && Content is Grid root)
         {
             _setup = new SetupWizardPage(FinishSetup);
-            Nav.IsPaneVisible = false;
-            ContentFrame.Content = _setup;
+            Grid.SetRowSpan(_setup, 2);
+            _shellBackground = root.Background;
+            root.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
+            SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.BaseAlt };
+            Nav.Visibility = Visibility.Collapsed;
+            OfflineBar.Visibility = Visibility.Collapsed;
+            root.Children.Add(_setup);
         }
         if (AppWindow.IsVisible) Activate();
     }
 
+    private Microsoft.UI.Xaml.Media.Brush? _shellBackground;
+
     private void FinishSetup()
     {
+        if (Content is Grid root && _setup is not null)
+        {
+            root.Children.Remove(_setup);
+            root.Background = _shellBackground;
+        }
         _setup = null;
-        Nav.IsPaneVisible = true;
+        SystemBackdrop = null;
+        Nav.Visibility = Visibility.Visible;
+        OfflineBar.Visibility = Visibility.Visible;
+        // The shell rises in as the guide fades out.
+        ContentFrame.Transitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection
+        {
+            new Microsoft.UI.Xaml.Media.Animation.EntranceThemeTransition { FromVerticalOffset = 24 }
+        };
+        Nexus.Pages.Motion.FadeSlideIn(Nav, 0, 0, 16, 520);
         ShowDashboard();
         _ = RefreshBannerAsync();
         PageCache.Settings.RefreshAccount();
