@@ -832,6 +832,7 @@ public sealed partial class SessionPage : NexusPage
         }
         catch (Exception ex)
         {
+            Nexus.Core.Diagnostics.DiagLog.Error("page", "chat render failed", ex);
             _chat.Children.Clear();
             _chat.Children.Add(Line("Could not render this conversation: " + ex.Message));
         }
@@ -1026,7 +1027,7 @@ public sealed partial class SessionPage : NexusPage
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Trace.WriteLine($"[perf] session {sessionId}: background load failed: {ex.Message}");
+            Nexus.Core.Diagnostics.DiagLog.Warn("page", "chat history background load failed", ex);
         }
     }
 
@@ -1287,6 +1288,7 @@ public sealed partial class SessionPage : NexusPage
             }
             catch (Exception ex)
             {
+                Nexus.Core.Diagnostics.DiagLog.Error("page", "earlier turns render failed", ex);
                 _chat.Children.Insert(ChatContentInsertIndex(), Line("Could not render earlier turns: " + ex.Message));
             }
             if (_olderCursor.Length == 0) DiscardUnshownCommands();
@@ -1335,6 +1337,7 @@ public sealed partial class SessionPage : NexusPage
             }
             catch (Exception ex)
             {
+                Nexus.Core.Diagnostics.DiagLog.Error("page", "earlier turns render failed", ex);
                 _earlierPageIndex++;
                 _chat.Children.Insert(ChatContentInsertIndex(), Line("Could not render earlier turns: " + ex.Message));
             }

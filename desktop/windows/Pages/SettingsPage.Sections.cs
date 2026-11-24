@@ -94,6 +94,7 @@ public sealed partial class SettingsPage
         }
         catch (Exception ex)
         {
+            Nexus.Core.Diagnostics.DiagLog.Warn("update", "update check failed", ex);
             await UiThread.Resume(DispatcherQueue);
             _updateStatus.Text = "Could not check for updates: " + ex.Message;
         }

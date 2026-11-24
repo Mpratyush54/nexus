@@ -8,7 +8,7 @@
         UseLayoutRounding="True" SnapsToDevicePixels="True">
   <Window.Resources>
     <SolidColorBrush x:Key="Cream" Color="#F2EFE6"/>
-    <SolidColorBrush x:Key="Gold" Color="#E8BB63"/>
+    <SolidColorBrush x:Key="Gold" Color="#E8BB67"/>
     <SolidColorBrush x:Key="Muted" Color="#9A978E"/>
     <SolidColorBrush x:Key="Faint" Color="#6E6C66"/>
     <SolidColorBrush x:Key="Hair" Color="#1FFFFFFF"/>
@@ -27,11 +27,11 @@
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Grid>
-              <Border x:Name="Halo" CornerRadius="14" Margin="-3" BorderBrush="#E8BB63" BorderThickness="2" Opacity="0"/>
+              <Border x:Name="Halo" CornerRadius="14" Margin="-3" BorderBrush="#E8BB67" BorderThickness="2" Opacity="0"/>
               <Border x:Name="Face" CornerRadius="11">
                 <Border.Background><SolidColorBrush Color="#F2EFE6"/></Border.Background>
                 <Border.Effect>
-                  <DropShadowEffect Color="#E8BB63" BlurRadius="24" ShadowDepth="0" Opacity="0.0"/>
+                  <DropShadowEffect Color="#E8BB67" BlurRadius="24" ShadowDepth="0" Opacity="0.0"/>
                 </Border.Effect>
                 <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="28,0"/>
               </Border>
@@ -85,7 +85,7 @@
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="#F2EFE6"/></Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="B" Property="BorderBrush" Value="#E8BB63"/></Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="B" Property="BorderBrush" Value="#E8BB67"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -135,8 +135,8 @@
             </StackPanel>
             <ControlTemplate.Triggers>
               <Trigger Property="IsChecked" Value="True">
-                <Setter TargetName="Box" Property="Background" Value="#E8BB63"/>
-                <Setter TargetName="Box" Property="BorderBrush" Value="#E8BB63"/>
+                <Setter TargetName="Box" Property="Background" Value="#E8BB67"/>
+                <Setter TargetName="Box" Property="BorderBrush" Value="#E8BB67"/>
                 <Setter TargetName="Tick" Property="Opacity" Value="1"/>
               </Trigger>
               <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Box" Property="BorderBrush" Value="#F5D79A"/></Trigger>
@@ -153,7 +153,7 @@
       <Rectangle x:Name="Tint" Fill="#E00E0F0E"/>
       <Ellipse Width="520" Height="420" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="-200,-220,0,0" IsHitTestVisible="False">
         <Ellipse.Fill>
-          <RadialGradientBrush><GradientStop Color="#30E8BB63" Offset="0"/><GradientStop Color="#00E8BB63" Offset="1"/></RadialGradientBrush>
+          <RadialGradientBrush><GradientStop Color="#30E8BB67" Offset="0"/><GradientStop Color="#00E8BB67" Offset="1"/></RadialGradientBrush>
         </Ellipse.Fill>
       </Ellipse>
       <Ellipse Width="560" Height="460" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-260,-280" IsHitTestVisible="False">
@@ -188,7 +188,7 @@
             <Border x:Name="HeroHost" HorizontalAlignment="Center" Height="150" ClipToBounds="False"/>
             <TextBlock x:Name="Headline" Text="Nexus" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="34" FontWeight="SemiBold" Foreground="{StaticResource Cream}" HorizontalAlignment="Center" Margin="0,10,0,0"/>
             <TextBlock x:Name="Tagline" Text="Shared memory for your AI agents" FontSize="15.5" Foreground="{StaticResource Muted}" HorizontalAlignment="Center" Margin="0,4,0,0"/>
-            <Border x:Name="ExistingPill" Visibility="Collapsed" HorizontalAlignment="Center" Margin="0,14,0,0" Padding="14,6,14,7" CornerRadius="14" Background="#12F2EFE6" BorderBrush="#33E8BB63" BorderThickness="1">
+            <Border x:Name="ExistingPill" Visibility="Collapsed" HorizontalAlignment="Center" Margin="0,14,0,0" Padding="14,6,14,7" CornerRadius="14" Background="#12F2EFE6" BorderBrush="#33E8BB67" BorderThickness="1">
               <StackPanel Orientation="Horizontal">
                 <Ellipse Width="6" Height="6" Fill="{StaticResource Gold}" VerticalAlignment="Center" Margin="0,1,8,0"/>
                 <TextBlock x:Name="ExistingText" FontSize="12" Foreground="{StaticResource Cream}" VerticalAlignment="Center"/>
@@ -244,7 +244,7 @@
           <!-- Errors: friendly, with retry. -->
           <Grid x:Name="Failed" Visibility="Collapsed">
             <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center" Width="440" Margin="0,-14,0,0">
-              <Border Width="56" Height="56" CornerRadius="28" Background="#26E8BB63" HorizontalAlignment="Center">
+              <Border Width="56" Height="56" CornerRadius="28" Background="#26E8BB67" HorizontalAlignment="Center">
                 <TextBlock Text="&#xE7BA;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{StaticResource Gold}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
               </Border>
               <TextBlock Text="Nexus couldn't be installed" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="24" FontWeight="SemiBold" Foreground="{StaticResource Cream}" HorizontalAlignment="Center" Margin="0,18,0,0"/>

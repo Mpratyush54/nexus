@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"central-memory/internal/diagnostics"
 )
 
 // HTTPCloud is the native engine's direct authenticated cloud transport. It
@@ -57,7 +60,14 @@ func (c *HTTPCloud) Do(ctx context.Context, method, path string, body []byte) ([
 		return nil, fmt.Errorf("cloud: response too large for %s", path)
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, newCloudError(resp.StatusCode, resp.Status, raw)
+		cerr := newCloudError(resp.StatusCode, resp.Status, raw)
+		cerr.RequestID = diagnostics.ResponseRequestID(resp.Header, raw)
+		logPath := path
+		if i := strings.IndexAny(logPath, "?#"); i >= 0 {
+			logPath = logPath[:i] // queries can carry search text
+		}
+		log.Printf("WARN cloud: %s %s -> %d ref=%s: %s", method, logPath, resp.StatusCode, orDash(cerr.RequestID), cerr.Msg)
+		return nil, cerr
 	}
 	return raw, nil
 }
@@ -120,12 +130,29 @@ func cloudClient(timeout time.Duration) *http.Client {
 // CloudError is a non-2xx answer from the cloud API. Its message is the
 // server's human sentence ("plan limit reached: ...") rather than the raw
 // JSON body, because apps show it to people as-is.
+//
+// RequestID is the server's X-Request-ID / error.request_id. It is shown as
+// "(ref ABC123)" so a person can quote it and support can find the
+// matching server log line.
 type CloudError struct {
-	Status int
-	Msg    string
+	Status    int
+	Msg       string
+	RequestID string
 }
 
-func (e *CloudError) Error() string { return e.Msg }
+func (e *CloudError) Error() string {
+	if e.RequestID != "" {
+		return e.Msg + " (ref " + e.RequestID + ")"
+	}
+	return e.Msg
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
 
 func newCloudError(code int, status string, raw []byte) *CloudError {
 	body := strings.TrimSpace(string(raw))

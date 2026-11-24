@@ -35,6 +35,7 @@ import (
 	"central-memory/internal/continuex"
 	"central-memory/internal/core"
 	"central-memory/internal/daemon"
+	"central-memory/internal/diagnostics"
 )
 
 // liveStarters maps agents that have a live driver. Others keep using
@@ -200,7 +201,7 @@ func startLive(sessionID, projectID, agent, workspace, resumeID, model, permissi
 	entry := &liveEntry{id: newLiveID(), sessionID: sessionID, projectID: projectID, agent: agent, workspace: abs, session: session, cancel: cancel, resumeID: strings.TrimSpace(resumeID)}
 	entry.markOwned(session.NativeID())
 	liveSessions.Store(entry.id, entry)
-	go pumpLive(entry)
+	diagnostics.Go("live", func() { pumpLive(entry) })
 	return map[string]any{"live_id": entry.id, "agent": agent}, nil
 }
 

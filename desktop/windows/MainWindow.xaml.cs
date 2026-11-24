@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Media;
 using Nexus.Core;
+using Nexus.Core.Diagnostics;
 using Nexus.Pages;
 using Windows.Graphics;
 
@@ -28,7 +29,6 @@ public sealed partial class MainWindow : Window
     private MenuFlyout? _projectCompactFlyout;
     private readonly List<ChatPaneEntry> _chatEntries = new();
     private string _chatStatus = "";
-    private bool _selectedProjectCollapsed;
     // "" = chats from every project (reference: T3 Code); otherwise one project id.
     private string _projectFilter = "";
     private string _chatCursor = "";
@@ -58,6 +58,7 @@ public sealed partial class MainWindow : Window
     public IAsyncRelayCommand TrayPauseCommand { get; }
     public IRelayCommand TrayTeleportCommand { get; }
     public IAsyncRelayCommand TrayQuitCommand { get; }
+    public IRelayCommand TrayReportCommand { get; }
 
     public MainWindow()
     {
@@ -65,6 +66,7 @@ public sealed partial class MainWindow : Window
         TrayPauseCommand = new AsyncRelayCommand(PauseCaptureAsync);
         TrayTeleportCommand = new RelayCommand(() => { RestoreWindow(); OpenTeleport(); });
         TrayQuitCommand = new AsyncRelayCommand(QuitAsync);
+        TrayReportCommand = new RelayCommand(() => { RestoreWindow(); ShowReportProblem(); });
         InitializeComponent();
         ProjectSelector.SelectionChanged += ProjectSelector_SelectionChanged;
         _projectCompactFlyout = new MenuFlyout();
@@ -113,7 +115,28 @@ public sealed partial class MainWindow : Window
         _ = Task.Run(UpdateService.Shared.SyncDisplayVersion);
         if (!AppPrefs.SetupCompleted) ShowSetup();
         else DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ShowUpdatedToast);
+        // A crash in an earlier run left a report: ask once the window is up
+        // (not over the setup guide, not while hidden in the tray).
+        Activated += (_, _) => DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, OfferCrashReports);
     }
+
+    private bool _crashOfferDone;
+
+    private void OfferCrashReports()
+    {
+        if (_crashOfferDone || _setup is not null || !AppWindow.IsVisible || Content?.XamlRoot is null) return;
+        _crashOfferDone = true;
+        _ = ReportDialogs.OfferHeldReportsAsync(Content.XamlRoot);
+    }
+
+    /// Settings and the tray menu: "Report a problem".
+    public void ShowReportProblem()
+    {
+        if (Content?.XamlRoot is { } root) _ = ReportDialogs.ShowReportProblemAsync(root);
+    }
+
+    /// Opens the sidebar's project switcher from a page (Memory's project chip).
+    public void OpenProjectSwitcher(FrameworkElement? anchor) => _projectSwitcher.Open(anchor);
 
     // After a background update is applied: a quiet toast, once per version.
     private void ShowUpdatedToast()
@@ -240,6 +263,7 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             _shellInitialized = false;
+            DiagLog.Error("startup", "shell initialisation failed", ex);
             if (_chatEntries.Count == 0)
             {
                 _chatStatus = "Could not finish loading the shell. Retrying next time the window is activated. " + ex.Message;
@@ -1289,6 +1313,7 @@ public sealed partial class MainWindow : Window
         }
         page.Enter(parameter);
         ContentFrame.Content = page;
+        AppDiagnostics.CurrentView = page.GetType().Name.Replace("Page", "").ToLowerInvariant();
         UpdateFooterSelection();
     }
 
@@ -1478,6 +1503,7 @@ public sealed partial class MainWindow : Window
     {
         if (_quitting) return;
         _quitting = true;
+        DiagLog.Info("shutdown", "quit requested");
         // Never block WinUI's dispatcher in native shutdown. The tray creates
         // its own hidden windows; destroying the visible AppWindow alone is
         // not a process-exit guarantee, and exceptions used to be swallowed.
@@ -1492,8 +1518,8 @@ public sealed partial class MainWindow : Window
         try
         {
             _chatSearchTimer?.Stop();
-            try { Tray.Dispose(); } catch { }
-            try { SingleInstance.Stop(); } catch { }
+            try { Tray.Dispose(); } catch (Exception ex) { DiagLog.Warn("shutdown", "tray dispose failed", ex); }
+            try { SingleInstance.Stop(); } catch (Exception ex) { DiagLog.Warn("shutdown", "single-instance stop failed", ex); }
         }
         finally { uiCleaned.TrySetResult(); }
         await shutdown;
@@ -1574,8 +1600,9 @@ public sealed partial class MainWindow : Window
             var answer = await _desktopApproval.ShowAsync();
             await App.Core.CallAsync("desktop.execution.approve", new { request_id = id, approved = answer == ContentDialogResult.Primary });
         }
-        catch
+        catch (Exception ex)
         {
+            DiagLog.Warn("execution", "browser approval dialog failed; declining", ex);
             // A competing native dialog must decline promptly, not leave a
             // hidden browser request waiting for the full approval timeout.
             if (requestId.Length > 0)

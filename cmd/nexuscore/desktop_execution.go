@@ -14,6 +14,7 @@ import (
 	"central-memory/internal/core"
 	"central-memory/internal/desktopbridge"
 	"central-memory/internal/desktopworker"
+	"central-memory/internal/diagnostics"
 )
 
 var desktopExecution struct {
@@ -72,7 +73,7 @@ func startDesktopExecution() {
 			desktopExecution.Unlock()
 		},
 	}
-	go func() { defer close(done); w.Run(ctx) }()
+	go func() { defer close(done); defer diagnostics.Guard("desktop-execution")(); w.Run(ctx) }()
 }
 func desktopProjectRoots() map[string]string {
 	saved, e := config.LoadFile()

@@ -14,6 +14,9 @@ public partial class App : Application
 
     public App()
     {
+        // Logging and the AppDomain/TaskScheduler crash hooks come first, so
+        // anything that fails from here on leaves a trace.
+        AppDiagnostics.Init();
         InitializeComponent();
         UnhandledException += OnUnhandledException;
         // The theme must be chosen before the first window exists.
@@ -23,17 +26,8 @@ public partial class App : Application
 
     private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
     {
-        try
-        {
-            var root = ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData);
-            var directory = Path.Combine(root, "Nexus");
-            Directory.CreateDirectory(directory);
-            File.WriteAllText(Path.Combine(directory, "last-error.log"),
-                DateTimeOffset.Now.ToString("O") + Environment.NewLine + e.Exception);
-        }
-        catch
-        {
-        }
+        // Written synchronously: the next launch offers to send it.
+        AppDiagnostics.RecordCrash(Nexus.Core.Diagnostics.ProblemReport.KindCrash, e.Exception, "Application.UnhandledException");
         if (_window is not null)
         {
             e.Handled = true;
@@ -48,6 +42,7 @@ public partial class App : Application
         var argv = Environment.GetCommandLineArgs();
         if (!SingleInstance.ClaimOrForward(argv))
         {
+            Nexus.Core.Diagnostics.DiagLog.Info("startup", "another Nexus is running; handed the launch to it");
             Environment.Exit(0);
             return;
         }
@@ -70,8 +65,10 @@ public partial class App : Application
         AppPrefs.Load();
         AppPrefs.ApplyToShell(ShellState.Current);
 
-        InitializeCore();
+        if (!InitializeCore())
+            Nexus.Core.Diagnostics.DiagLog.Error("startup", "nx_init failed; the engine is not running");
         var window = new MainWindow();
+        Nexus.Core.Diagnostics.DiagLog.Info("startup", background ? "window created (hidden: --background)" : "window created");
         _window = window;
         SingleInstance.Listen(payload =>
             window.DispatcherQueue.TryEnqueue(() => window.HandleRemote(payload)));
@@ -85,14 +82,25 @@ public partial class App : Application
 
     public static bool InitializeCore()
     {
-        return Core.Init(JsonSerializer.Serialize(new
+        try
         {
-            online = true,
-            // An explicit workspace is safest. During development, accepting
-            // the current directory only when it is a git worktree keeps an
-            // installed Nexus.exe from accidentally harvesting its own files.
-            workspace_root = CaptureWorkspaceRoot()
-        }));
+            return Core.Init(JsonSerializer.Serialize(new
+            {
+                online = true,
+                // An explicit workspace is safest. During development, accepting
+                // the current directory only when it is a git worktree keeps an
+                // installed Nexus.exe from accidentally harvesting its own files.
+                workspace_root = CaptureWorkspaceRoot(),
+                // The core logs to logs\core-*.log here and uploads reports\pending.
+                diagnostics_dir = AppDiagnostics.BaseDir,
+                app_version = AppDiagnostics.Version,
+            }));
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
+        {
+            Nexus.Core.Diagnostics.DiagLog.Error("startup", "could not load nexuscore.dll", ex);
+            throw;
+        }
     }
 
     public static void ClearPendingAuth() => PendingAuthUrl = null;

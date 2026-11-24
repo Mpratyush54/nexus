@@ -13,7 +13,7 @@ internal static class Brand
 {
     public static readonly Color Ink = Color.FromRgb(0x0E, 0x0F, 0x0E);
     public static readonly Color Cream = Color.FromRgb(0xF2, 0xEF, 0xE6);
-    public static readonly Color Gold = Color.FromRgb(0xE8, 0xBB, 0x63);
+    public static readonly Color Gold = Color.FromRgb(0xE8, 0xBB, 0x67);
     public static readonly Color Muted = Color.FromRgb(0x9A, 0x97, 0x8E);
     public static readonly Color Indigo = Color.FromRgb(0x8E, 0xA2, 0xFF);
     public static SolidColorBrush Brush(Color c, byte a = 255) { var b = new SolidColorBrush(Color.FromArgb(a, c.R, c.G, c.B)); b.Freeze(); return b; }

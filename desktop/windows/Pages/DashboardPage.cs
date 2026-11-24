@@ -195,10 +195,10 @@ public sealed class DashboardPage : NexusPage
     {
         var ready = _startPrompt.Text.Trim().Length > 0;
         _startSend.Background = ready
-            ? NexusTokens.Brush("AccentFillColorDefaultBrush", Windows.UI.Color.FromArgb(255, 0x4F, 0x6E, 0xF7))
+            ? NexusTokens.Brush("AccentFillColorDefaultBrush", NexusTokens.BrandGold)
             : NexusTokens.Brush("NexusUserFillBrush", Windows.UI.Color.FromArgb(255, 0x33, 0x33, 0x33));
         _startSend.Foreground = ready
-            ? new SolidColorBrush(Microsoft.UI.Colors.White)
+            ? NexusTokens.Brush("TextOnAccentFillColorPrimaryBrush", NexusTokens.BrandInk)
             : NexusTokens.Brush("TextFillColorSecondaryBrush", Windows.UI.Color.FromArgb(255, 0xA3, 0xA3, 0xA3));
     }
 

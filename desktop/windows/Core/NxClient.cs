@@ -58,15 +58,27 @@ public sealed class NxClient
         {
             if (ptr == 0)
             {
+                AppDiagnostics.NoteCallFailure(method, "empty core response");
                 return new NxResponse(false, "empty core response", null);
             }
             var text = System.Runtime.InteropServices.Marshal.PtrToStringUTF8(ptr) ?? "";
-            using var doc = JsonDocument.Parse(text);
-            var root = doc.RootElement;
-            var ok = root.TryGetProperty("ok", out var okEl) && okEl.ValueKind == JsonValueKind.True;
-            string? error = root.TryGetProperty("error", out var err) ? err.GetString() : null;
-            JsonElement? result = root.TryGetProperty("result", out var value) ? value.Clone() : null;
-            return new NxResponse(ok, error, result);
+            JsonDocument doc;
+            try { doc = JsonDocument.Parse(text); }
+            catch (JsonException ex)
+            {
+                Diagnostics.DiagLog.Error("nx", $"{method}: unreadable core response", ex);
+                return new NxResponse(false, "Nexus's engine sent an unreadable response.", null);
+            }
+            using (doc)
+            {
+                var root = doc.RootElement;
+                var ok = root.TryGetProperty("ok", out var okEl) && okEl.ValueKind == JsonValueKind.True;
+                string? error = root.TryGetProperty("error", out var err) ? err.GetString() : null;
+                JsonElement? result = root.TryGetProperty("result", out var value) ? value.Clone() : null;
+                // Method and error only: arguments may hold chat text.
+                if (!ok) AppDiagnostics.NoteCallFailure(method, error);
+                return new NxResponse(ok, error, result);
+            }
         }
         finally
         {

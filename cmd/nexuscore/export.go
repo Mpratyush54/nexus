@@ -12,10 +12,12 @@ import "C"
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +27,7 @@ import (
 	"central-memory/internal/continuex"
 	"central-memory/internal/core"
 	"central-memory/internal/daemon"
+	"central-memory/internal/diagnostics"
 	"central-memory/internal/platform"
 )
 
@@ -82,7 +85,8 @@ func nx_init(configJSON *C.char) (rc C.int) {
 	captureConfigureMu.Lock()
 	defer captureConfigureMu.Unlock()
 	defer func() {
-		if recover() != nil {
+		if v := recover(); v != nil {
+			diagnostics.RecordPanic("nx_init", v, debug.Stack())
 			rc = 1
 		}
 	}()
@@ -93,10 +97,15 @@ func nx_init(configJSON *C.char) (rc C.int) {
 		ServerToken   string `json:"server_token"`
 		UserID        string `json:"user_id"`
 		ProjectID     string `json:"project_id"`
+		// Where logs/ and reports/ live (the desktop's profile-aware
+		// LOCALAPPDATA Nexus folder) and the desktop's version for log headers.
+		DiagnosticsDir string `json:"diagnostics_dir"`
+		AppVersion     string `json:"app_version"`
 	}
 	if configJSON != nil {
 		_ = json.Unmarshal([]byte(C.GoString(configJSON)), &cfg)
 	}
+	setupDiagnostics(cfg.DiagnosticsDir, cfg.AppVersion)
 	// A Finder-launched macOS app has launchd's bare PATH; without this
 	// every agent CLI looks uninstalled. No-op on other systems.
 	platform.AugmentGUIPath()
@@ -260,6 +269,7 @@ func startEmbeddedCapture(cfg embeddedCaptureConfig) {
 	nxState.mu.Unlock()
 	go func() {
 		defer close(done)
+		defer diagnostics.Guard("capture")()
 		var others sync.WaitGroup
 		for index, extra := range cfg.roots {
 			if index == 0 {
@@ -268,6 +278,7 @@ func startEmbeddedCapture(cfg embeddedCaptureConfig) {
 			others.Add(1)
 			go func(extraRoot string) {
 				defer others.Done()
+				defer diagnostics.Guard("capture " + filepath.Base(extraRoot))()
 				runAdditionalCapture(ctx, cfg, extraRoot)
 			}(extra)
 		}
@@ -315,7 +326,7 @@ func runCaptureRuntime(ctx context.Context, cfg embeddedCaptureConfig, root stri
 			} else {
 				runtime.SetServerProjectID(id)
 				setCaptureConnection(cfg.generation, root, "", id)
-				go d.StartHeartbeat(ctx, d.ServerURL, daemon.HeartbeatInterval)
+				diagnostics.Go("heartbeat", func() { d.StartHeartbeat(ctx, d.ServerURL, daemon.HeartbeatInterval) })
 				break
 			}
 			select {
@@ -592,18 +603,29 @@ func stopEmbeddedCapture() {
 
 //export nx_call
 func nx_call(method, request *C.char) (out *C.char) {
+	name := ""
 	defer func() {
-		if recover() != nil {
-			out = C.CString(`{"ok":false,"error":"core panic"}`)
+		if v := recover(); v != nil {
+			// The app stays up; the panic is logged with its stack and held
+			// as a crash report the desktop offers to send.
+			id := diagnostics.RecordPanic("nx_call "+name, v, debug.Stack())
+			msg := "Nexus hit an internal error"
+			if id != "" {
+				msg += " (report " + id + ")"
+			}
+			out = C.CString(string(core.MarshalResult(nil, errors.New(msg))))
 		}
 	}()
-	name := ""
 	if method != nil {
 		name = C.GoString(method)
 	}
 	var args json.RawMessage
 	if request != nil {
 		args = json.RawMessage(C.GoString(request))
+	}
+	if strings.HasPrefix(name, "diagnostics.reports.") {
+		result, err := diagnosticsReportsCall(name, args)
+		return C.CString(string(core.MarshalResult(result, err)))
 	}
 	if strings.HasPrefix(name, "desktop.execution.") {
 		result, err := desktopExecutionCall(name, args)

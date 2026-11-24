@@ -33,5 +33,9 @@
     <Compile Include="../windows/Core/NodeSprite.cs" Link="NodeSprite.cs" />
     <Compile Include="../windows/Core/DefaultProject.cs" Link="DefaultProject.cs" />
     <Compile Include="../windows/Core/ProfilePaths.cs" Link="ProfilePaths.cs" />
+    <Compile Include="../windows/Core/Diagnostics/Redactor.cs" Link="Diagnostics/Redactor.cs" />
+    <Compile Include="../windows/Core/Diagnostics/DiagLog.cs" Link="Diagnostics/DiagLog.cs" />
+    <Compile Include="../windows/Core/Diagnostics/ProblemReport.cs" Link="Diagnostics/ProblemReport.cs" />
+    <Compile Include="../windows/Core/MarkdownText.cs" Link="MarkdownText.cs" />
   </ItemGroup>
 </Project>

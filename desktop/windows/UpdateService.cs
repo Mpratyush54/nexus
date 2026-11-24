@@ -28,8 +28,9 @@ public sealed class UpdateService
             var feed = Environment.GetEnvironmentVariable("NEXUS_UPDATE_URL");
             _manager = new UpdateManager(string.IsNullOrWhiteSpace(feed) ? DefaultFeed : feed.Trim());
         }
-        catch (Exception)
+        catch (Exception ex)
         {
+            Nexus.Core.Diagnostics.DiagLog.Warn("update", "update manager unavailable", ex);
             _manager = null;
         }
     }
@@ -66,7 +67,7 @@ public sealed class UpdateService
             }
             catch (Exception ex)
             {
-                System.Diagnostics.Trace.WriteLine("[update] background check failed: " + ex.Message);
+                Nexus.Core.Diagnostics.DiagLog.Warn("update", "background update check failed", ex);
             }
         });
     }

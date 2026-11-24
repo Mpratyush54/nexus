@@ -532,8 +532,12 @@ public sealed partial class MemoryPage : NexusPage
         var proposed = IsProposed(item);
         var status = proposed ? "" : NxJson.PublicStatus(NxJson.Text(item, "status"));
         var category = FormatCategory(NxJson.Text(item, "category"));
-        var title = key.Length > 0 ? key : (text.Length > 0 ? Truncate(text, 120) : id);
-        var preview = text.Length > 0 && key.Length > 0 ? Truncate(text, 160) : "";
+        // Cards preview one plain line: a brief stored as markdown would
+        // otherwise show "# Project brief ## Key dec…". The detail pane
+        // renders the markdown.
+        var plain = MarkdownText.Plain(text);
+        var title = key.Length > 0 ? key : (plain.Length > 0 ? Truncate(plain, 120) : id);
+        var preview = plain.Length > 0 && key.Length > 0 ? Truncate(plain, 160) : "";
 
         var meta = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         if (proposed) meta.Children.Add(AccentChip("Not reviewed", NexusPalette.Amber));
@@ -562,7 +566,7 @@ public sealed partial class MemoryPage : NexusPage
         };
         if (string.Equals(_selectedId, id, StringComparison.Ordinal))
         {
-            border.BorderBrush = new SolidColorBrush(Windows.UI.Color.FromArgb(180, 245, 158, 11));
+            border.BorderBrush = NexusPalette.Accent;
         }
         return border;
     }
@@ -574,7 +578,7 @@ public sealed partial class MemoryPage : NexusPage
         {
             var selected = string.Equals(child.Tag as string, id, StringComparison.Ordinal);
             child.BorderBrush = selected
-                ? new SolidColorBrush(Windows.UI.Color.FromArgb(180, 245, 158, 11))
+                ? NexusPalette.Accent
                 : ResourceBrush("CardStrokeColorDefaultBrush", Windows.UI.Color.FromArgb(60, 255, 255, 255));
         }
         if (!_itemsById.TryGetValue(id, out var item))
@@ -599,7 +603,16 @@ public sealed partial class MemoryPage : NexusPage
 
         _detail.Children.Add(SectionHeader("Detail"));
         if (key.Length > 0) _detail.Children.Add(Monospace(key));
-        _detail.Children.Add(Line(text.Length > 0 ? text : key, title: true));
+        if (MarkdownText.LooksLikeMarkdown(text))
+        {
+            var document = SessionPage.FormattedMessage(text);
+            document.FontSize = 13;
+            _detail.Children.Add(document);
+        }
+        else
+        {
+            _detail.Children.Add(Line(text.Length > 0 ? text : key, title: true));
+        }
         var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         if (proposed) chips.Children.Add(AccentChip("Not reviewed", NexusPalette.Amber));
         if (level.Length > 0) chips.Children.Add(Chip(level));

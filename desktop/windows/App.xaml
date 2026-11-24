@@ -59,24 +59,38 @@
                 <!-- Dark: true-black canvas, surfaces lifted ~3%, hairline white
                      borders, white-alpha hover/selection; no grey fills. -->
                 <ResourceDictionary x:Key="Dark">
-                    <Color x:Key="SystemAccentColor">#4F6EF7</Color>
-                    <Color x:Key="SystemAccentColorLight1">#6A84F8</Color>
-                    <Color x:Key="SystemAccentColorLight2">#4F6EF7</Color>
-                    <Color x:Key="SystemAccentColorLight3">#8EA2FF</Color>
-                    <Color x:Key="SystemAccentColorDark1">#4560DB</Color>
-                    <Color x:Key="SystemAccentColorDark2">#3A50BC</Color>
-                    <Color x:Key="SystemAccentColorDark3">#2E3F96</Color>
-                    <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#4F6EF7"/>
-                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#5D7AF8"/>
-                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#4560DB"/>
-                    <SolidColorBrush x:Key="ToggleButtonForegroundChecked" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed" Color="#E5E5E5"/>
-                    <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#4F6EF7"/>
-                    <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#5D7AF8"/>
-                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="#FFFFFF"/>
+                    <!-- Brand gold on ink, as in the logo, landing page, portal
+                         and installer. Controls take the fill from
+                         SystemAccentColorLight2 (#E8BB67) with dark text on it
+                         (11.7:1); accent text uses Light3 (#F5D79A, 15:1 on
+                         the black canvas). The brushes below mirror that, with
+                         the brand ink #0E0F0E as text on gold. -->
+                    <SolidColorBrush x:Key="TextOnAccentFillColorSecondaryBrush" Color="#2A2A26"/>
+                    <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="#E8BB67"/>
+                    <SolidColorBrush x:Key="AccentTextFillColorSecondaryBrush" Color="#F0CE8D"/>
+                    <SolidColorBrush x:Key="AccentTextFillColorTertiaryBrush" Color="#D9A752"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="#D9A752"/>
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="#0E0F0E"/>
+                    <Color x:Key="SystemAccentColor">#E8BB67</Color>
+                    <Color x:Key="SystemAccentColorLight1">#F0CE8D</Color>
+                    <Color x:Key="SystemAccentColorLight2">#E8BB67</Color>
+                    <Color x:Key="SystemAccentColorLight3">#F5D79A</Color>
+                    <Color x:Key="SystemAccentColorDark1">#D9A752</Color>
+                    <Color x:Key="SystemAccentColorDark2">#B8862E</Color>
+                    <Color x:Key="SystemAccentColorDark3">#8A5F12</Color>
+                    <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#E8BB67"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#F0CE8D"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#D9A752"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundChecked" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#E8BB67"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#F0CE8D"/>
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="#0E0F0E"/>
                     <SolidColorBrush x:Key="NexusSkeletonBrush" Color="#14FFFFFF"/>
                     <Color x:Key="NexusSkeletonHighlightColor">#24FFFFFF</Color>
                     <SolidColorBrush x:Key="NexusDangerBrush" Color="#F28B8B"/>
@@ -88,7 +102,7 @@
                     <SolidColorBrush x:Key="NexusSurfaceBrush" Color="#141414"/>
                     <SolidColorBrush x:Key="NexusHairlineBrush" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="NexusMutedTextBrush" Color="#A3A3A3"/>
-                    <SolidColorBrush x:Key="NexusAccentBrush" Color="#8EA2FF"/>
+                    <SolidColorBrush x:Key="NexusAccentBrush" Color="#E8BB67"/>
                     <SolidColorBrush x:Key="NexusTealBrush" Color="#A3A3A3"/>
                     <SolidColorBrush x:Key="NexusAmberBrush" Color="#FBBF24"/>
                     <SolidColorBrush x:Key="NexusUserFillBrush" Color="#1A1A1A"/>
@@ -112,14 +126,14 @@
                     <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="#00000000"/>
                     <SolidColorBrush x:Key="SolidBackgroundFillColorBaseBrush" Color="#000000"/>
 
-                    <!-- Accent (T3 primary, oklch(0.571 0.21 264)) -->
-                    <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#4F6EF7"/>
-                    <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#5D7AF8"/>
-                    <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#4560DB"/>
-                    <SolidColorBrush x:Key="AccentButtonBackground" Color="#4F6EF7"/>
-                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#5D7AF8"/>
-                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#4560DB"/>
-                    <SolidColorBrush x:Key="AccentButtonForeground" Color="#FFFFFF"/>
+                    <!-- Accent: brand gold, ink text on it -->
+                    <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#E8BB67"/>
+                    <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#F0CE8D"/>
+                    <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#D9A752"/>
+                    <SolidColorBrush x:Key="AccentButtonBackground" Color="#E8BB67"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#F0CE8D"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#D9A752"/>
+                    <SolidColorBrush x:Key="AccentButtonForeground" Color="#0E0F0E"/>
                     <SolidColorBrush x:Key="AccentButtonBorderBrush" Color="#00000000"/>
 
                     <!-- Buttons: almost flat, hairline border -->
@@ -193,30 +207,47 @@
                     <SolidColorBrush x:Key="ContentDialogBackground" Color="#0F0F0F"/>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
-                    <Color x:Key="SystemAccentColor">#3B5BDB</Color>
-                    <Color x:Key="SystemAccentColorLight1">#4F6EF7</Color>
-                    <Color x:Key="SystemAccentColorLight2">#6A84F8</Color>
-                    <Color x:Key="SystemAccentColorLight3">#8EA2FF</Color>
-                    <Color x:Key="SystemAccentColorDark1">#3B5BDB</Color>
-                    <Color x:Key="SystemAccentColorDark2">#3149B8</Color>
-                    <Color x:Key="SystemAccentColorDark3">#263A94</Color>
+                    <!-- Brand gold deepened for white (WCAG AA). WinUI's control
+                         styles take the accent from SystemAccentColorDark1 and
+                         always put white text on it in the light theme, so the
+                         fill is #9A6A18: white text 4.7:1, and 4.7:1 against
+                         the white page for toggles and indicators. Gold text
+                         and icons use #8A5F12 (5.6:1). The brushes below
+                         mirror that for code-built UI. -->
+                    <SolidColorBrush x:Key="TextOnAccentFillColorSecondaryBrush" Color="#F2EFE6"/>
+                    <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="#8A5F12"/>
+                    <SolidColorBrush x:Key="AccentTextFillColorSecondaryBrush" Color="#6E4B0E"/>
+                    <SolidColorBrush x:Key="AccentTextFillColorTertiaryBrush" Color="#9A6A18"/>
+                    <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#A87A26"/>
+                    <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#8A5F12"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="#8A5F12"/>
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOn" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPointerOver" Color="#FFFFFF"/>
+                    <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="#FFFFFF"/>
+                    <Color x:Key="SystemAccentColor">#B8862E</Color>
+                    <Color x:Key="SystemAccentColorLight1">#C4923A</Color>
+                    <Color x:Key="SystemAccentColorLight2">#D9A752</Color>
+                    <Color x:Key="SystemAccentColorLight3">#E8BB67</Color>
+                    <Color x:Key="SystemAccentColorDark1">#9A6A18</Color>
+                    <Color x:Key="SystemAccentColorDark2">#8A5F12</Color>
+                    <Color x:Key="SystemAccentColorDark3">#6E4B0E</Color>
                     <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#3B5BDB"/>
-                    <SolidColorBrush x:Key="AccentButtonBackground" Color="#3B5BDB"/>
-                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#4F6EF7"/>
-                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#3149B8"/>
+                    <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#9A6A18"/>
+                    <SolidColorBrush x:Key="AccentButtonBackground" Color="#9A6A18"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#A87A26"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#8A5F12"/>
                     <SolidColorBrush x:Key="AccentButtonForeground" Color="#FFFFFF"/>
                     <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#F4F4F5"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#F2EFE6"/>
                     <SolidColorBrush x:Key="AccentButtonBorderBrush" Color="#00000000"/>
-                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#3B5BDB"/>
-                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#4F6EF7"/>
-                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#3149B8"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#9A6A18"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#A87A26"/>
+                    <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#8A5F12"/>
                     <SolidColorBrush x:Key="ToggleButtonForegroundChecked" Color="#FFFFFF"/>
                     <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPointerOver" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed" Color="#F4F4F5"/>
-                    <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#3B5BDB"/>
-                    <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#4F6EF7"/>
+                    <SolidColorBrush x:Key="ToggleButtonForegroundCheckedPressed" Color="#F2EFE6"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOn" Color="#9A6A18"/>
+                    <SolidColorBrush x:Key="ToggleSwitchFillOnPointerOver" Color="#A87A26"/>
                     <SolidColorBrush x:Key="NexusSkeletonBrush" Color="#0F000000"/>
                     <Color x:Key="NexusSkeletonHighlightColor">#06000000</Color>
                     <SolidColorBrush x:Key="NexusDangerBrush" Color="#B91C1C"/>
@@ -235,7 +266,7 @@
                     <SolidColorBrush x:Key="NexusSurfaceBrush" Color="#FFFFFF"/>
                     <SolidColorBrush x:Key="NexusHairlineBrush" Color="#E4E4E7"/>
                     <SolidColorBrush x:Key="NexusMutedTextBrush" Color="#71717A"/>
-                    <SolidColorBrush x:Key="NexusAccentBrush" Color="#3B5BDB"/>
+                    <SolidColorBrush x:Key="NexusAccentBrush" Color="#8A5F12"/>
                     <SolidColorBrush x:Key="NexusTealBrush" Color="#71717A"/>
                     <SolidColorBrush x:Key="NexusAmberBrush" Color="#B45309"/>
                     <SolidColorBrush x:Key="NexusUserFillBrush" Color="#EEEEF0"/>

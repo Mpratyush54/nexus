@@ -157,7 +157,7 @@
                     <Button x:Name="FooterShared" AutomationProperties.Name="Shared with you" Tag="teleport" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Shared with you" Click="FooterNav_Click">
                         <Grid>
                             <FontIcon Glyph="&#xE8B7;" FontSize="14" Opacity="0.7"/>
-                            <Ellipse x:Name="FooterSharedDot" Width="6" Height="6" Fill="#4F6EF7" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-2,-3,0" Visibility="Collapsed"/>
+                            <Ellipse x:Name="FooterSharedDot" Width="6" Height="6" Fill="{ThemeResource AccentFillColorDefaultBrush}" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-2,-3,0" Visibility="Collapsed"/>
                         </Grid>
                     </Button>
                     <Button x:Name="FooterAgents" AutomationProperties.Name="Agents" Tag="agentsetup" Background="Transparent" BorderThickness="0" Padding="8" HorizontalAlignment="Center" ToolTipService.ToolTip="Agents: skills, sub-agents, MCP servers" Click="FooterNav_Click">
@@ -214,6 +214,7 @@
                     <MenuFlyoutItem Text="Open" Command="{x:Bind TrayOpenCommand}"/>
                     <MenuFlyoutItem x:Name="PauseItem" Text="Pause capture" Command="{x:Bind TrayPauseCommand}"/>
                     <MenuFlyoutItem Text="Shared with you" Command="{x:Bind TrayTeleportCommand}"/>
+                    <MenuFlyoutItem Text="Report a problem…" Command="{x:Bind TrayReportCommand}"/>
                     <MenuFlyoutSeparator/>
                     <MenuFlyoutItem Text="Quit" Command="{x:Bind TrayQuitCommand}"/>
                 </MenuFlyout>

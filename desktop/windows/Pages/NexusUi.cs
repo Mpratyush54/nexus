@@ -27,6 +27,14 @@ internal static class NexusTokens
     // Readable column for text-heavy pages.
     public const double ContentMaxWidth = 860;
 
+    // Brand colours (logo, landing page, portal, installer). The themed
+    // accent tokens in App.xaml derive from these; use the tokens for UI and
+    // these only as fallbacks or for theme-independent art.
+    public static readonly Windows.UI.Color BrandGold = Windows.UI.Color.FromArgb(255, 0xE8, 0xBB, 0x67);
+    public static readonly Windows.UI.Color BrandGoldDeep = Windows.UI.Color.FromArgb(255, 0x8A, 0x5F, 0x12); // gold text on white, 5.6:1
+    public static readonly Windows.UI.Color BrandInk = Windows.UI.Color.FromArgb(255, 0x0E, 0x0F, 0x0E);
+    public static readonly Windows.UI.Color BrandCream = Windows.UI.Color.FromArgb(255, 0xF4, 0xF1, 0xE9);
+
     public static Brush Brush(string key, Windows.UI.Color fallback) =>
         Application.Current?.Resources.TryGetValue(key, out var value) == true && value is Brush brush ? brush : new SolidColorBrush(fallback);
 

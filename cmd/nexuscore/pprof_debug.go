@@ -9,6 +9,8 @@ import (
 	_ "net/http/pprof" // registers /debug/pprof on http.DefaultServeMux
 	"os"
 	"strings"
+
+	"central-memory/internal/diagnostics"
 )
 
 // Opt-in profiling for the embedded core, in debug builds only. Release
@@ -37,6 +39,7 @@ func init() {
 		return
 	}
 	go func() {
+		defer diagnostics.Guard("pprof")()
 		if err := http.ListenAndServe(addr, nil); err != nil {
 			log.Printf("nexuscore: pprof server: %v", err)
 		}

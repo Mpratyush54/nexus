@@ -29,8 +29,9 @@ public static class AppPrefs
             // someone already using Nexus: don't greet them with setup.
             Data.SetupCompleted ??= true;
         }
-        catch
+        catch (Exception ex)
         {
+            Nexus.Core.Diagnostics.DiagLog.Warn("prefs", "could not read ui-prefs.json; using defaults", ex);
             IsFirstRun = false;
             Data = new PrefsData();
         }
@@ -44,9 +45,10 @@ public static class AppPrefs
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             File.WriteAllText(path, JsonSerializer.Serialize(Data, JsonOptions));
         }
-        catch
+        catch (Exception ex)
         {
             // Best-effort; shell still works for this session.
+            Nexus.Core.Diagnostics.DiagLog.Warn("prefs", "could not save ui-prefs.json", ex);
         }
     }
 
@@ -113,6 +115,9 @@ public static class AppPrefs
         public string MemoryScope { get; set; } = "all";
         // Agent last chosen for a new chat (Home's start composer).
         public string LastStartAgent { get; set; } = "claude";
+        // Crash reports: false = ask each time (the default), true = send
+        // them automatically, anonymously.
+        public bool AutoSendCrashReports { get; set; }
         // Appearance: "system" (follow Windows), "light" or "dark".
         public string Theme { get; set; } = "system";
         public Dictionary<string, string> ChatModels { get; set; } = new(StringComparer.OrdinalIgnoreCase);

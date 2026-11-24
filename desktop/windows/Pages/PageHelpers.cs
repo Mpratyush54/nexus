@@ -228,15 +228,38 @@ public class NexusPage : Page
         heading.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = title });
         heading.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = "" });
         context = (Microsoft.UI.Xaml.Documents.Run)heading.Inlines[1];
+        // Project pages show one project. When the sidebar switcher says
+        // "All projects" the title can't claim one: it stays "Memory" and a
+        // chip says which project is shown and opens the switcher (as Home's
+        // "start in" chip does). With one project chosen, the title names it.
+        var chipText = new TextBlock { FontSize = NexusTokens.FontCaption, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 260 };
+        var chipContent = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+        chipContent.Children.Add(new FontIcon { Glyph = "", FontSize = 12, Opacity = 0.7, VerticalAlignment = VerticalAlignment.Center });
+        chipContent.Children.Add(chipText);
+        chipContent.Children.Add(new FontIcon { Glyph = "", FontSize = 9, Opacity = 0.6, VerticalAlignment = VerticalAlignment.Center });
+        var chip = new Button
+        {
+            Content = chipContent, Padding = new Thickness(8, 3, 8, 4), MinHeight = 26, CornerRadius = new CornerRadius(13),
+            VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed
+        };
+        ToolTipService.SetToolTip(chip, "The sidebar shows all projects; this page shows one. Choose which.");
+        chip.Click += (_, _) => MainWindow.Current?.OpenProjectSwitcher(chip);
         void Update(object? _ = null, EventArgs? __ = null)
         {
             var project = ShellState.Current.ProjectName;
-            context.Text = project.Length > 0 ? " · " + project : "";
+            var all = ShellState.Current.ChatFilter.Length == 0;
+            context.Text = !all && project.Length > 0 ? " · " + project : "";
+            chip.Visibility = all && project.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            chipText.Text = "Showing " + project;
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(chip, "Showing project " + project + ". Choose another project");
         }
         Update();
-        header.Loaded += (_, _) => { ShellState.Changed += Update; Update(); };
-        header.Unloaded += (_, _) => ShellState.Changed -= Update;
-        header.Children.Add(heading);
+        header.Loaded += (_, _) => { ShellState.Changed += Update; ShellState.ChatFilterChanged += Update; Update(); };
+        header.Unloaded += (_, _) => { ShellState.Changed -= Update; ShellState.ChatFilterChanged -= Update; };
+        var titleRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 12 };
+        titleRow.Children.Add(heading);
+        titleRow.Children.Add(chip);
+        header.Children.Add(titleRow);
         var sub = Muted(subtitle);
         sub.FontSize = NexusTokens.FontBody - 0.5;
         sub.IsTextSelectionEnabled = false;

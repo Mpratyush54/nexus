@@ -49,13 +49,13 @@ public sealed class SetupWizardPage : NexusPage
     private readonly StackPanel _titles = new() { Spacing = 8, Margin = new Thickness(0, 28, 0, 22) };
     private readonly TextBlock _title = NexusTokens.PageTitle("");
     private readonly TextBlock _subtitle = new() { FontSize = NexusTokens.FontBody, Foreground = NexusPalette.Muted, TextWrapping = TextWrapping.Wrap, LineHeight = 20 };
-    // The app's own palette (App.xaml): the indigo accent, per theme, so the
+    // The app's own palette (App.xaml): the brand gold accent, per theme, so the
     // guide looks like the shell it opens into.
     private static Brush Brand => NexusPalette.Accent;
     private static Brush BrandFill => (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
     private static Brush OnBrand => (Brush)Application.Current.Resources["TextOnAccentFillColorPrimaryBrush"];
 
-    // The shell's accent button (App.xaml sets its indigo per theme).
+    // The shell's accent button (App.xaml: gold with ink text, per theme).
     private static void BrandPrimary(Button button)
     {
         if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style) button.Style = style;
@@ -101,6 +101,7 @@ public sealed class SetupWizardPage : NexusPage
     // startup
     private readonly ToggleSwitch _loginStart = new() { OnContent = "", OffContent = "", MinWidth = 0 };
     private readonly ToggleSwitch _desktopShortcut = new() { OnContent = "", OffContent = "", MinWidth = 0 };
+    private readonly ToggleSwitch _autoReports = new() { OnContent = "", OffContent = "", MinWidth = 0 };
     private bool _startupSync;
 
     public SetupWizardPage(Action finished)
@@ -407,8 +408,8 @@ public sealed class SetupWizardPage : NexusPage
             {
                 GradientStops =
                 {
-                    new GradientStop { Color = Windows.UI.Color.FromArgb(90, 79, 110, 247), Offset = 0 },
-                    new GradientStop { Color = Windows.UI.Color.FromArgb(0, 79, 110, 247), Offset = 1 }
+                    new GradientStop { Color = Windows.UI.Color.FromArgb(90, NexusTokens.BrandGold.R, NexusTokens.BrandGold.G, NexusTokens.BrandGold.B), Offset = 0 },
+                    new GradientStop { Color = Windows.UI.Color.FromArgb(0, NexusTokens.BrandGold.R, NexusTokens.BrandGold.G, NexusTokens.BrandGold.B), Offset = 1 }
                 }
             }
         };
@@ -523,6 +524,7 @@ public sealed class SetupWizardPage : NexusPage
         }
         catch (Exception ex)
         {
+            Nexus.Core.Diagnostics.DiagLog.Warn("auth", "could not open the sign-in page", ex);
             _connectResult.Text = "Could not open the browser: " + ex.Message;
         }
     }
@@ -771,6 +773,19 @@ public sealed class SetupWizardPage : NexusPage
         panel.Children.Add(Point("", "Where it goes", "Captured sessions and the memories extracted from them upload to your account on the server you connected to. While offline they wait on this computer and upload later."));
         panel.Children.Add(Point("", "Sharing is always your choice", "Chats stay private to you. Sharing a chat with a teammate or an organization is a separate action each time; joining an organization doesn't reveal private chats."));
         panel.Children.Add(Point("", "You stay in control", "Pause capture from the tray icon at any time. Remove a folder in Settings > Workspaces & capture; your existing history stays in your account. Uninstalling Nexus asks whether to delete its data from this computer."));
+        // Crash reports: ask each time unless the person opts in here.
+        _autoReports.IsOn = AppPrefs.Data.AutoSendCrashReports;
+        _autoReports.Toggled += (_, _) =>
+        {
+            AppPrefs.Data.AutoSendCrashReports = _autoReports.IsOn;
+            AppPrefs.Save();
+        };
+        AutomationProperties.SetName(_autoReports, "Send crash reports automatically");
+        var reports = ToggleRow("Send crash reports automatically",
+            "If Nexus crashes it saves a short report: the error, where in Nexus's code it happened, and recent lines from its own log. Never your chats, memories, files or tokens. " +
+            "Off: Nexus asks you each time and shows exactly what would be sent. On: reports go without asking, and without your account.", _autoReports);
+        reports.Margin = new Thickness(0, 4, 0, 0);
+        panel.Children.Add(reports);
         return panel;
     }
 

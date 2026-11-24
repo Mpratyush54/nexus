@@ -24,6 +24,7 @@ public sealed partial class SettingsPage
         new("memory", "Memory", "", "Project briefs and who can see what Nexus captures."),
         new("organizations", "Organizations", "", "Teams, invitations, and member roles."),
         new("usage", "Usage", "", "How much Nexus you and your agents use."),
+        new("privacy", "Privacy & diagnostics", "", "Crash reports, reporting a problem, and Nexus's log files."),
         new("advanced", "Advanced", "", "Sync, local cache, diagnostics, and version details.")
     ];
 
@@ -186,6 +187,7 @@ public sealed partial class SettingsPage
         "memory" => LoadMemorySectionAsync(),
         "organizations" => RefreshOrganizationsAsync(),
         "advanced" => LoadAdvancedAsync(),
+        "privacy" => LoadPrivacyAsync(),
         _ => Task.CompletedTask
     };
 
@@ -199,6 +201,7 @@ public sealed partial class SettingsPage
         "organizations" => BuildOrganizationSection(),
         "usage" => BuildUsageSectionSlot(),
         "advanced" => BuildAdvancedSection(),
+        "privacy" => BuildPrivacySection(),
         _ => new StackPanel()
     };
 
