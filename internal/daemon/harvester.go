@@ -21,12 +21,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"central-memory/adapters"
+	"central-memory/internal/platform"
 	"central-memory/internal/usage"
 )
 
@@ -330,7 +332,10 @@ func (h *Harvester) emit(ev Event) {
 //	zcode (JSONL + SQLite), deepseek, hermes (SQLite).
 func ResolveSources() []TranscriptSource {
 	home, _ := os.UserHomeDir()
-	appData := os.Getenv("APPDATA")
+	// %APPDATA% on Windows, ~/Library/Application Support on macOS,
+	// $XDG_CONFIG_HOME or ~/.config on Linux: where Cursor, VS Code,
+	// Windsurf and Antigravity keep User/workspaceStorage.
+	appData := platform.AppDataDir()
 	if appData == "" {
 		appData = filepath.Join(home, ".config")
 	}
@@ -669,6 +674,25 @@ func (h *Harvester) matchesWorkspaceJSON(path string) bool {
 	if !found {
 		return false
 	}
+	// Direct answer first: the folder workspace.json names is this workspace
+	// (or lives inside it), or carries its folder name after a move.
+	if folder := adapters.WorkspaceFolderOf(path); folder != "" {
+		if ws := strings.TrimSpace(h.workspace); ws != "" && pathWithin(folder, ws) {
+			return true
+		}
+		if h.folderName != "" && strings.EqualFold(lastPathSegment(folder), h.folderName) {
+			return true
+		}
+	}
+	if runtime.GOOS != "windows" {
+		// adapters.ProjectOf resolves through project.CachedLeaves, which
+		// walks every project root. Off Windows the default root is $HOME,
+		// and on macOS walking it reaches ~/Documents, ~/Desktop,
+		// ~/Downloads and ~/Library/Containers: each one is a privacy (TCC)
+		// prompt, raised just because a Cursor database changed. The direct
+		// check above is the whole answer here.
+		return false
+	}
 	home, _ := os.UserHomeDir()
 	leaf := adapters.ProjectOf(path, home)
 	if leaf == "" || leaf == "global" {
@@ -682,6 +706,27 @@ func (h *Harvester) matchesWorkspaceJSON(path string) bool {
 		return false
 	}
 	return strings.EqualFold(filepath.Base(ws), leaf)
+}
+
+// pathWithin reports whether p is root or below it. Case-insensitive, as
+// the default Windows and macOS file systems are.
+func pathWithin(p, root string) bool {
+	a := strings.ToLower(filepath.Clean(p))
+	b := strings.ToLower(filepath.Clean(root))
+	if a == b {
+		return true
+	}
+	return strings.HasPrefix(a, strings.TrimSuffix(b, string(filepath.Separator))+string(filepath.Separator))
+}
+
+// lastPathSegment returns the final element of a path written with either
+// separator (workspace.json folders may be Windows paths on any host).
+func lastPathSegment(p string) string {
+	p = strings.TrimRight(p, `/\`)
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 // defaultKeepTail is how much of an unseen transcript we ingest on first

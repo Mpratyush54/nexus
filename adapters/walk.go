@@ -227,6 +227,69 @@ func fileCwd(p string) string {
 	return cwd
 }
 
+// FolderURIPath turns a VS Code-style workspace.json "folder" URI into a
+// native path. Windows drive URIs (file:///d%3A/proj) become D-drive paths
+// with backslashes ("d:\proj"); POSIX URIs (file:///Users/me/proj) keep
+// their leading slash and forward slashes. Earlier code rewrote every URI
+// the Windows way, so on macOS "/Users/me/proj" became "Users\me\proj"
+// and never matched a workspace. Returns "" when raw is not a usable URI.
+func FolderURIPath(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Path == "" {
+		return ""
+	}
+	if u.Scheme != "" && u.Scheme != "file" {
+		// vscode-remote://, wsl+... and similar are not local folders.
+		return ""
+	}
+	decoded, err := url.PathUnescape(u.Path)
+	if err != nil {
+		decoded = u.Path
+	}
+	if isDriveURIPath(decoded) {
+		decoded = strings.ReplaceAll(decoded, "/", `\`)
+		return strings.TrimLeft(decoded, `\`)
+	}
+	if runtime.GOOS == "windows" {
+		return filepath.FromSlash(decoded)
+	}
+	return decoded
+}
+
+// isDriveURIPath reports "/c:/..." or "/c:" (a Windows drive in URI form).
+func isDriveURIPath(p string) bool {
+	if len(p) < 3 || p[0] != '/' || p[2] != ':' {
+		return false
+	}
+	c := p[1]
+	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// WorkspaceFolderOf returns the native folder recorded in the nearest
+// workspace.json at or above p (up to four levels, the depth VS Code-family
+// workspaceStorage/<hash>/... layouts use), or "" when there is none.
+func WorkspaceFolderOf(p string) string {
+	dir := filepath.Dir(p)
+	for i := 0; i < 4; i++ {
+		data, err := os.ReadFile(filepath.Join(dir, "workspace.json"))
+		if err == nil {
+			var w struct {
+				Folder string `json:"folder"`
+			}
+			if json.Unmarshal(data, &w) != nil || w.Folder == "" {
+				return ""
+			}
+			return FolderURIPath(w.Folder)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return ""
+		}
+		dir = parent
+	}
+	return ""
+}
+
 // workspaceFolder returns the decoded folder URI sibling to a workspace file.
 func workspaceFolder(p string) string {
 	dir := filepath.Dir(p)
@@ -237,10 +300,8 @@ func workspaceFolder(p string) string {
 				Folder string `json:"folder"`
 			}
 			if json.Unmarshal(data, &w) == nil && w.Folder != "" {
-				if u, err := url.Parse(w.Folder); err == nil {
-					decoded, _ := url.PathUnescape(u.Path)
-					decoded = strings.ReplaceAll(decoded, "/", `\`)
-					return strings.TrimLeft(decoded, `\`)
+				if native := FolderURIPath(w.Folder); native != "" {
+					return native
 				}
 				return w.Folder
 			}
@@ -371,10 +432,7 @@ func workspaceProject(p string) string {
 				Folder string `json:"folder"`
 			}
 			if json.Unmarshal(data, &w) == nil && w.Folder != "" {
-				if u, err := url.Parse(w.Folder); err == nil {
-					decoded, _ := url.PathUnescape(u.Path)
-					decoded = strings.ReplaceAll(decoded, "/", `\`)
-					decoded = strings.TrimLeft(decoded, `\`)
+				if decoded := FolderURIPath(w.Folder); decoded != "" {
 					if leaf := project.ForPath(decoded); leaf != "" {
 						return leaf
 					}

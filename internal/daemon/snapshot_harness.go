@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"central-memory/internal/platform"
 )
 
 // SnapshotLayout is the on-disk mapping for one harness conversation.
@@ -104,6 +106,10 @@ func ResolveSnapshotLayout(harness, conversationID, workspaceRoot string) (Snaps
 		appData := os.Getenv("APPDATA")
 		localApp := os.Getenv("LOCALAPPDATA")
 		roots := []string{filepath.Join(home, ".windsurf")}
+		if appData == "" {
+			// macOS ~/Library/Application Support, Linux ~/.config.
+			appData = platform.AppDataDir()
+		}
 		if appData != "" {
 			roots = append(roots, filepath.Join(appData, "Windsurf", "User", "workspaceStorage"))
 		}
