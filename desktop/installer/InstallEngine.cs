@@ -107,6 +107,13 @@ internal sealed class InstallEngine
             throw new InstallFailedException(LastLogError() ?? "Setup stopped with an error.", LogPath);
         if (!File.Exists(MainExe))
             throw new InstallFailedException("Setup finished, but Nexus.exe is missing.", LogPath);
+        // Velopack writes DisplayVersion without the prerelease label.
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(UninstallKey, true);
+            if (key is not null && _payload.Version.Length > 0) key.SetValue("DisplayVersion", _payload.Version);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException) { }
         progress.Report(new Progress(100, "Done"));
     }
 

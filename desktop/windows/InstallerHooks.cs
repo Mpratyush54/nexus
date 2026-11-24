@@ -21,7 +21,7 @@ public static class InstallerHooks
         VelopackApp.Build()
             .SetArgs(args)
             .OnAfterInstallFastCallback(_ => AfterInstall())
-            .OnAfterUpdateFastCallback(_ => RealSystem().RegisterUrlScheme())
+            .OnAfterUpdateFastCallback(_ => AfterInstall())
             .OnBeforeUninstallFastCallback(_ => BeforeUninstall())
             .Run();
     }
@@ -74,11 +74,14 @@ public static class InstallerHooks
 }
 
 /// <summary>
-/// The pre-installer setup (scripts/install-windows.ps1) put Nexus.exe in
-/// %LOCALAPPDATA%\Nexus\bin with Startup / Start menu / desktop shortcuts.
-/// After a real install those would start the old copy at sign-in or open
-/// it from the Start menu, so they are moved over to the installed copy.
-/// The old files stay (the CLI on PATH lives there).
+/// Shortcuts left by the pre-installer era: scripts/install-windows.ps1
+/// (Nexus.exe in %LOCALAPPDATA%\Nexus\bin) and the retired Fyne shell
+/// (nexus-desktop*.exe, e.g. Start Menu\Programs\Nexus\Nexus Desktop.lnk).
+/// After a real install they would open or autostart an old copy, or show
+/// up as duplicate Start entries, so they are removed. A legacy autostart
+/// or desktop shortcut is moved over to the installed copy so the user's
+/// choice survives. The old binaries stay (the CLI on PATH lives there).
+/// Runs after every install and update.
 /// </summary>
 [System.Runtime.Versioning.SupportedOSPlatform("windows")]
 internal static class LegacyInstall
@@ -88,26 +91,56 @@ internal static class LegacyInstall
 
     public static void Retire(IDesktopIntegration integration)
     {
-        var startup = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Startup), "Nexus.lnk");
-        if (PointsAtLegacy(startup))
+        var installRoot = Path.GetDirectoryName(Path.GetDirectoryName(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar)) ?? "") ?? "";
+        bool Legacy(string link) => IsLegacyTarget(ShellLinks.Target(link), installRoot, LegacyBin);
+
+        var startup = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+        foreach (var link in Links(startup, "*Nexus*.lnk").Where(Legacy))
         {
             InstallerHooks.Try(() => integration.SetStartsAtLogin(true));
-            InstallerHooks.Try(() => File.Delete(startup));
+            InstallerHooks.Try(() => File.Delete(link));
         }
         if (WindowsDesktopIntegration.IsUnder(WindowsDesktopIntegration.StartupTarget(), LegacyBin))
             InstallerHooks.Try(() => integration.SetStartsAtLogin(true));
-        var menu = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Nexus", "Nexus.lnk");
-        if (PointsAtLegacy(menu))
+
+        var programs = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+        var folder = Path.Combine(programs, "Nexus");
+        foreach (var link in Links(folder, "*.lnk").Concat(Links(programs, "Nexus Desktop.lnk")).Where(Legacy))
+            InstallerHooks.Try(() => File.Delete(link));
+        InstallerHooks.Try(() => { if (Directory.Exists(folder) && !Directory.EnumerateFileSystemEntries(folder).Any()) Directory.Delete(folder); });
+
+        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+        var hadDesktop = false;
+        foreach (var link in Links(desktop, "Nexus*.lnk").Where(Legacy))
         {
-            InstallerHooks.Try(() => File.Delete(menu));
-            InstallerHooks.Try(() => Directory.Delete(Path.GetDirectoryName(menu)!, false));
+            hadDesktop = true;
+            InstallerHooks.Try(() => File.Delete(link));
         }
-        if (PointsAtLegacy(WindowsDesktopIntegration.DesktopShortcutPath))
-            InstallerHooks.Try(() => integration.SetDesktopShortcut(true));
+        if (hadDesktop) InstallerHooks.Try(() => integration.SetDesktopShortcut(true));
     }
 
-    private static bool PointsAtLegacy(string link) =>
-        File.Exists(link) && WindowsDesktopIntegration.IsUnder(ShellLinks.Target(link), LegacyBin);
+    private static IEnumerable<string> Links(string dir, string pattern)
+    {
+        try { return Directory.Exists(dir) ? Directory.GetFiles(dir, pattern) : Array.Empty<string>(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return Array.Empty<string>(); }
+    }
+
+    /// <summary>
+    /// A shortcut target from an old Nexus: the script install's bin folder,
+    /// the Fyne shell / daemon executables, or a Nexus.exe that no longer
+    /// exists. Never the current installation.
+    /// </summary>
+    internal static bool IsLegacyTarget(string target, string installRoot, string legacyBin)
+    {
+        if (string.IsNullOrWhiteSpace(target)) return false;
+        if (installRoot.Length > 0 && WindowsDesktopIntegration.IsUnder(target, installRoot)) return false;
+        if (WindowsDesktopIntegration.IsUnder(target, legacyBin)) return true;
+        var name = Path.GetFileName(target);
+        if (name.StartsWith("nexus-desktop", StringComparison.OrdinalIgnoreCase) || name.StartsWith("nexus-daemon", StringComparison.OrdinalIgnoreCase)) return true;
+        // A dangling Nexus.exe from an old manual install; nothing broader, so
+        // other apps' shortcuts (e.g. "Nexus Mods") are never touched.
+        return name.Equals("Nexus.exe", StringComparison.OrdinalIgnoreCase) && !File.Exists(target);
+    }
 }
 
 /// <summary>Where Nexus keeps user data, and the uninstall-time choice to remove it.</summary>

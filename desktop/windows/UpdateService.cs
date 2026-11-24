@@ -71,6 +71,26 @@ public sealed class UpdateService
         });
     }
 
+    /// <summary>
+    /// Velopack writes Apps &amp; features' DisplayVersion without the prerelease
+    /// label (0.4.0 for 0.4.0-beta.6). Keep the full version there, including
+    /// after background updates. Never under NEXUS_PROFILE.
+    /// </summary>
+    public void SyncDisplayVersion()
+    {
+        if (!IsAvailable || _manager is null || !OperatingSystem.IsWindows() || Nexus.Core.ProfilePaths.Active) return;
+        try
+        {
+            var version = CurrentVersion;
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\" + _manager.AppId, true);
+            if (key is not null && version.Length > 0 && !string.Equals(key.GetValue("DisplayVersion") as string, version, StringComparison.Ordinal))
+                key.SetValue("DisplayVersion", version);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+        {
+        }
+    }
+
     /// <summary>Restarts into the downloaded version. The caller should shut the core down first.</summary>
     public void ApplyAndRestart()
     {

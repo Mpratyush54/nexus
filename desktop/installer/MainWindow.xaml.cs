@@ -257,14 +257,14 @@ public partial class MainWindow : Window
         Anim.Rise(OpenButton, 420, 10, 520);
         OpenButton.Focus();
         var left = 2;
-        DoneSub.Text = $"Opening Nexus in {left}…";
+        DoneSub.Text = $"{(_wasRunning ? "Restarting" : "Opening")} Nexus in {left}…";
         var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         timer.Tick += (_, _) =>
         {
             left--;
             if (_opened) { timer.Stop(); return; }
             if (left <= 0) { timer.Stop(); OpenNexus(); return; }
-            DoneSub.Text = $"Opening Nexus in {left}…";
+            DoneSub.Text = $"{(_wasRunning ? "Restarting" : "Opening")} Nexus in {left}…";
         };
         timer.Start();
     }
@@ -284,14 +284,19 @@ public partial class MainWindow : Window
     {
         if (_opened) return;
         _opened = true;
-        OpenButton.IsEnabled = false;
-        DoneSub.Text = "Opening Nexus…";
+        // The button bows out instead of greying: the window is handing over.
+        OpenButton.IsHitTestVisible = false;
+        Anim.To(OpenButton, OpacityProperty, 0, 220, 0, Anim.Out, null, () => OpenButton.Visibility = Visibility.Hidden);
+        DoneSub.Text = _wasRunning ? "Restarting Nexus…" : "Opening Nexus…";
         if (!_demoInstall && _engine is not null && File.Exists(_engine.MainExe))
         {
+            // Upgrade: the old copy must be fully gone first, or the new one
+            // would hand off to it (single instance) and the old version stays.
+            for (var i = 0; i < 40 && InstallEngine.ProcessesUnder(_engine.Root).Any(); i++) await Task.Delay(150);
             try { Process.Start(new ProcessStartInfo(_engine.MainExe) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(_engine.MainExe) })?.Dispose(); }
             catch (Exception ex) { ShowFailed(ex); return; }
         }
-        await Task.Delay(500);
+        await Task.Delay(700);
         await CloseAsync();
     }
 

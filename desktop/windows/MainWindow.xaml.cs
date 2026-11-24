@@ -95,6 +95,7 @@ public sealed partial class MainWindow : Window
         _ = RefreshInboxBadgeAsync();
         Activated += async (_, _) => await EnsureShellInitializedAsync();
         UpdateService.Shared.CheckInBackground(TimeSpan.FromSeconds(30));
+        _ = Task.Run(UpdateService.Shared.SyncDisplayVersion);
         if (!AppPrefs.SetupCompleted) ShowSetup();
         else DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ShowUpdatedToast);
     }
