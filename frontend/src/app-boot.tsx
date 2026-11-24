@@ -4,6 +4,7 @@ import App from './App'
 import './index.css'
 import { registerServiceWorker } from './lib/pwa'
 import { initTheme } from './lib/theme'
+import { dismissBootSplash } from './lib/boot-splash'
 
 const APP_FONTS =
   'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap'
@@ -28,5 +29,6 @@ createRoot(container).render(
     <App />
   </StrictMode>,
 )
+dismissBootSplash()
 
 void registerServiceWorker()

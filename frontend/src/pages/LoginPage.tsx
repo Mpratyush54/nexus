@@ -1,105 +1,130 @@
 import { useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { Button } from '@/components/ui/Button'
-import { GlassPanel } from '@/components/ui/GlassPanel'
-import { useToast } from '@/components/ui/Toast'
+import { Sparkles } from 'lucide-react'
 import { useLogin } from '@/hooks/useAuthMutations'
-import { ApiError } from '@/types/api'
+import { useIsDemo } from '@/auth/demo'
+import { friendlyAuthError, type FriendlyError } from '@/auth/errors'
+import { Field, FormAlert, PasswordField, SubmitButton } from '@/auth/fields'
+import { afterAuthPath, handoff, prefetchApp, useReleaseHoldOnLeave } from '@/auth/handoff'
 
 export function LoginPage() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
-  const { push } = useToast()
   const login = useLogin()
+  const demo = useIsDemo()
   const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
+  const [submitted, setSubmitted] = useState(false)
+  const [error, setError] = useState<FriendlyError | null>(null)
+  const [done, setDone] = useState(false)
   const next = params.get('next')
+  const forDesktop = Boolean(next?.startsWith('/cli/'))
+  const keep = next ? `?next=${encodeURIComponent(next)}` : ''
+  useReleaseHoldOnLeave()
 
   const onSubmit = (e: FormEvent) => {
     e.preventDefault()
+    setSubmitted(true)
     const user = identifier.trim()
+    if (!user || !password || login.isPending || done) return
+    setError(null)
+    handoff.hold()
+    prefetchApp()
     login.mutate(
       { username: user, password },
       {
         onSuccess: () => {
-          push({ title: 'Signed in', detail: `Welcome back` })
-          if (next && (next.startsWith('/cli/') || next.startsWith('/app/'))) {
-            navigate(next, { replace: true })
-            return
-          }
-          navigate('/app/dashboard')
+          setDone(true)
+          handoff.cover()
+          // Let the cover fade in before the route changes underneath it.
+          window.setTimeout(() => navigate(afterAuthPath(next), { replace: true }), 240)
         },
         onError: (err) => {
-          const message = err instanceof ApiError ? err.message : 'Login failed'
-          push({ title: 'Could not sign in', detail: message, tone: 'danger' })
+          handoff.release()
+          setError(friendlyAuthError(err, 'login'))
         },
       },
     )
   }
 
+  const clearError = () => {
+    if (error) setError(null)
+  }
+
   return (
-    <div className="mesh-bg flex min-h-svh items-center justify-center px-4 py-12">
-      <div className="w-full max-w-md">
-        <Link
-          to="/"
-          className="mb-8 block text-center font-[family-name:var(--font-display)] text-2xl font-semibold tracking-tight text-fg"
-        >
-          Nexus
-        </Link>
-        <GlassPanel className="p-6 sm:p-7">
-          <h1 className="text-xl font-semibold text-fg">Log in</h1>
-          <p className="mt-1 text-sm text-fg-dim">
-            {next?.startsWith('/cli/')
-              ? 'Sign in to connect the Nexus desktop app.'
-              : 'Use your email or username.'}
-          </p>
-          <form onSubmit={onSubmit} className="mt-6 space-y-4">
-            <label className="block">
-              <span className="mb-1.5 block text-xs text-fg-dim">Email or username</span>
-              <input
-                required
-                autoComplete="username"
-                value={identifier}
-                onChange={(e) => setIdentifier(e.target.value)}
-                className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
-                placeholder="you@company.com"
-              />
-            </label>
-            <label className="block">
-              <span className="mb-1.5 block text-xs text-fg-dim">Password</span>
-              <input
-                required
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
-                placeholder="••••••••"
-              />
-            </label>
-            <div className="flex justify-end">
-              <Link
-                to={next ? `/forgot-password?next=${encodeURIComponent(next)}` : '/forgot-password'}
-                className="text-xs text-ember hover:underline"
-              >
-                Forgot password?
-              </Link>
-            </div>
-            <Button type="submit" className="w-full" size="lg" disabled={login.isPending}>
-              {login.isPending ? 'Signing in…' : 'Log in'}
-            </Button>
-          </form>
-          <p className="mt-5 text-center text-sm text-fg-dim">
-            No account yet?{' '}
-            <Link
-              to={next ? `/signup?next=${encodeURIComponent(next)}` : '/signup'}
-              className="text-ember hover:underline"
-            >
-              Sign up free
-            </Link>
-          </p>
-        </GlassPanel>
+    <div>
+      <div className="au-head">
+        <p className="au-kicker">{forDesktop ? 'nexus desktop · step 1 of 2' : 'welcome back'}</p>
+        <h1 className="au-title">{forDesktop ? 'Log in to connect Nexus Desktop' : 'Log in to Nexus'}</h1>
+        <p className="au-sub">
+          {forDesktop
+            ? 'Then you’ll approve the desktop app on this device.'
+            : 'Pick up where your agents left off.'}
+        </p>
       </div>
+
+      {demo ? (
+        <div className="au-demo-note">
+          <Sparkles size={16} aria-hidden />
+          <span>
+            This is the demo. Enter any name and password to go back to the sample workspace.
+            Nothing is sent to a server.
+          </span>
+        </div>
+      ) : null}
+
+      <FormAlert error={error}>
+        {error?.action === 'forgot' ? (
+          <p style={{ marginTop: 6 }}>
+            <Link to={`/forgot-password${keep}`}>Reset your password</Link>
+          </p>
+        ) : null}
+      </FormAlert>
+
+      <form className="au-form" onSubmit={onSubmit} noValidate>
+        <Field
+          label="Email or username"
+          name="username"
+          autoComplete="username"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          enterKeyHint="next"
+          value={identifier}
+          onValue={(v) => {
+            setIdentifier(v)
+            clearError()
+          }}
+          validate={(v) => (v.trim() ? null : 'Enter your email or username.')}
+          showErrors={submitted}
+          autoFocus
+        />
+        <PasswordField
+          label="Password"
+          name="password"
+          autoComplete="current-password"
+          enterKeyHint="go"
+          value={password}
+          onValue={(v) => {
+            setPassword(v)
+            clearError()
+          }}
+          validate={(v) => (v ? null : 'Enter your password.')}
+          showErrors={submitted}
+          aside={
+            <Link className="au-label-aside" to={`/forgot-password${keep}`}>
+              Forgot password?
+            </Link>
+          }
+        />
+        <SubmitButton busy={login.isPending} done={done} busyLabel="Logging in…" doneLabel="Signed in">
+          Log in
+        </SubmitButton>
+      </form>
+
+      <p className="au-alt">
+        New to Nexus? <Link to={`/signup${keep}`}>Create a free account</Link>
+      </p>
     </div>
   )
 }
