@@ -267,7 +267,7 @@ public sealed class TeleportPage : NexusPage
     private async Task RestoreAsync()
     {
         if (_sessionId.Length == 0 || _codeFiles == 0) return;
-        var parent = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments), "Nexus Restores");
+        var parent = Path.Combine(Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.MyDocuments), "Nexus Restores");
         var folder = _sessionId[..Math.Min(8, _sessionId.Length)] + "-" + DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-fff");
         var destination = Path.Combine(parent, folder);
         var dialog = new ContentDialog

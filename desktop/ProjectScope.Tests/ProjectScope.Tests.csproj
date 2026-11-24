@@ -28,5 +28,6 @@
     <Compile Include="../windows/Core/GraphLayout.cs" Link="GraphLayout.cs" />
     <Compile Include="../windows/Core/Graph3D.cs" Link="Graph3D.cs" />
     <Compile Include="../windows/Core/NodeSprite.cs" Link="NodeSprite.cs" />
+    <Compile Include="../windows/Core/ProfilePaths.cs" Link="ProfilePaths.cs" />
   </ItemGroup>
 </Project>

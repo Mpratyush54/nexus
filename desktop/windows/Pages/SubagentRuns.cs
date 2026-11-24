@@ -48,7 +48,7 @@ internal static class SubagentRuns
     {
         var watch = System.Diagnostics.Stopwatch.StartNew();
         var runs = new Dictionary<string, LocalRun>(StringComparer.OrdinalIgnoreCase);
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects");
+        var root = Path.Combine(Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.UserProfile), ".claude", "projects");
         try
         {
             if (!Directory.Exists(root)) return runs;
@@ -109,7 +109,7 @@ internal static class SubagentRuns
 
     private static LocalRun? FindRun(string native)
     {
-        var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude", "projects");
+        var root = Path.Combine(Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.UserProfile), ".claude", "projects");
         if (!Directory.Exists(root)) return null;
         foreach (var folder in Directory.EnumerateDirectories(root))
         foreach (var parent in Directory.EnumerateDirectories(folder))
@@ -141,7 +141,7 @@ internal static class SubagentRuns
             if (s_driven is null || refresh || (s_driven.IsCompleted && DateTime.UtcNow - s_drivenAt > TimeSpan.FromMinutes(1)))
             {
                 s_drivenAt = DateTime.UtcNow;
-                s_driven = Task.Run(() => ScanDriven(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "Nexus", "continuations")));
+                s_driven = Task.Run(() => ScanDriven(Path.Combine(Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.ApplicationData), "Nexus", "continuations")));
             }
             return s_driven;
         }

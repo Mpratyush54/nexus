@@ -154,7 +154,7 @@ internal static class FileRefs
         if (hasWorkspace) roots.Add(workspace);
         roots.AddRange(otherRoots.Where(root => root.Length > 0 && Directory.Exists(root)));
         if (path.StartsWith("~/", StringComparison.Ordinal) || path.StartsWith(@"~\", StringComparison.Ordinal))
-            path = System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), path[2..]);
+            path = System.IO.Path.Combine(Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.UserProfile), path[2..]);
         string full;
         if (IsAbsolute(path) || path.StartsWith('/') && !hasWorkspace)
         {

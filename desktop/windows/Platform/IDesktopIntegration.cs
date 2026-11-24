@@ -34,8 +34,42 @@ public interface IDesktopIntegration
 
 public static class DesktopIntegration
 {
+    // A NEXUS_PROFILE instance (demos, side-by-side tests) must never touch
+    // the real Run key, desktop or nexus:// handler of the normal install.
     public static IDesktopIntegration Current { get; set; } =
-        OperatingSystem.IsWindows() ? new WindowsDesktopIntegration() : new NoDesktopIntegration();
+        Nexus.Core.ProfilePaths.Current is { } profile ? new ProfileDesktopIntegration(profile.Root)
+        : OperatingSystem.IsWindows() ? new WindowsDesktopIntegration()
+        : new NoDesktopIntegration();
+}
+
+/// <summary>
+/// NEXUS_PROFILE stand-in: remembers the choices in the profile folder so
+/// the setup guide and Settings behave normally, and changes nothing on the
+/// real system.
+/// </summary>
+public sealed class ProfileDesktopIntegration : IDesktopIntegration
+{
+    private readonly string _state;
+
+    public ProfileDesktopIntegration(string profileRoot) => _state = Path.Combine(profileRoot, "desktop-integration");
+
+    private bool Flag(string name) => File.Exists(Path.Combine(_state, name));
+
+    private void SetFlag(string name, bool on)
+    {
+        Directory.CreateDirectory(_state);
+        var path = Path.Combine(_state, name);
+        if (on) File.WriteAllText(path, "on");
+        else if (File.Exists(path)) File.Delete(path);
+    }
+
+    public bool StartsAtLogin => Flag("start-at-login");
+    public void SetStartsAtLogin(bool enabled) => SetFlag("start-at-login", enabled);
+    public bool SupportsDesktopShortcut => true;
+    public bool HasDesktopShortcut => Flag("desktop-shortcut");
+    public void SetDesktopShortcut(bool enabled) => SetFlag("desktop-shortcut", enabled);
+    public void RegisterUrlScheme() { }
+    public void UnregisterUrlScheme(string installRoot) { }
 }
 
 /// <summary>Fallback for hosts without any integration (tests, unsupported OS).</summary>

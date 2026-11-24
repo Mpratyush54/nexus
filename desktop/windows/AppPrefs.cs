@@ -86,7 +86,7 @@ public static class AppPrefs
 
     private static string PrefsPath()
     {
-        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var root = Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData);
         return Path.Combine(root, "Nexus", "ui-prefs.json");
     }
 
