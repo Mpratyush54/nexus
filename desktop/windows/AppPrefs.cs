@@ -19,12 +19,15 @@ public static class AppPrefs
             if (!File.Exists(path))
             {
                 IsFirstRun = true;
-                Data = new PrefsData();
+                Data = new PrefsData { SetupCompleted = false };
                 return;
             }
             IsFirstRun = false;
             var json = File.ReadAllText(path);
             Data = JsonSerializer.Deserialize<PrefsData>(json) ?? new PrefsData();
+            // Preferences from before the setup wizard existed belong to
+            // someone already using Nexus: don't greet them with setup.
+            Data.SetupCompleted ??= true;
         }
         catch
         {
@@ -83,12 +86,27 @@ public static class AppPrefs
 
     private static string PrefsPath()
     {
-        var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        var root = Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData);
         return Path.Combine(root, "Nexus", "ui-prefs.json");
+    }
+
+    /// <summary>True once the setup wizard was finished or skipped.</summary>
+    public static bool SetupCompleted
+    {
+        get => Data.SetupCompleted == true;
+        set
+        {
+            Data.SetupCompleted = value;
+            Save();
+        }
     }
 
     public sealed class PrefsData
     {
+        // null = written before the wizard existed (see Load).
+        public bool? SetupCompleted { get; set; }
+        // Installed version seen at the last start ("Updated to vX" toast).
+        public string LastVersion { get; set; } = "";
         public string ProjectId { get; set; } = "";
         public string ProjectName { get; set; } = "";
         public string LastNav { get; set; } = "timeline";

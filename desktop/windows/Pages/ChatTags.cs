@@ -16,7 +16,7 @@ internal static class ChatTags
     private static Dictionary<string, List<string>>? s_tags;
     public static event EventHandler? Changed;
 
-    private static string FilePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nexus", "chat-tags.json");
+    private static string FilePath => Path.Combine(Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData), "Nexus", "chat-tags.json");
 
     private static Dictionary<string, List<string>> Load()
     {

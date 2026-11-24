@@ -52,7 +52,7 @@ internal static class NexusTokens
 /// (UISettings.AnimationsEnabled). Everything here runs on the compositor,
 /// off the UI thread, and is skipped entirely when animations are off.
 /// </summary>
-internal static class Motion
+internal static partial class Motion
 {
     private static readonly Windows.UI.ViewManagement.UISettings s_settings = new();
 

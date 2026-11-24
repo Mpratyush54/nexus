@@ -34,7 +34,7 @@ internal sealed class ProjectSwitcher : UserControl
         public List<string> Recent { get; set; } = new();
     }
 
-    private static string FilePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Nexus", "project-switcher.json");
+    private static string FilePath => Path.Combine(Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData), "Nexus", "project-switcher.json");
     private static Saved? s_saved;
 
     private static Saved State

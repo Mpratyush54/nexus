@@ -108,7 +108,98 @@ public sealed partial class MainWindow : Window
         _ = RefreshBannerAsync();
         _ = RefreshInboxBadgeAsync();
         Activated += async (_, _) => await EnsureShellInitializedAsync();
-        Nav.Loaded += (_, _) => { if (ContentFrame.Content is DashboardPage home) home.FocusNewChat(); };
+        Nav.Loaded += (_, _) => { if (_setup is null && ContentFrame.Content is DashboardPage home) home.FocusNewChat(); };
+        UpdateService.Shared.CheckInBackground(TimeSpan.FromSeconds(30));
+        _ = Task.Run(UpdateService.Shared.SyncDisplayVersion);
+        if (!AppPrefs.SetupCompleted) ShowSetup();
+        else DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ShowUpdatedToast);
+    }
+
+    // After a background update is applied: a quiet toast, once per version.
+    private void ShowUpdatedToast()
+    {
+        var version = UpdateService.Shared.CurrentVersion;
+        if (version.Length == 0) return;
+        var previous = AppPrefs.Data.LastVersion;
+        AppPrefs.Data.LastVersion = version;
+        AppPrefs.Save();
+        if (previous.Length == 0 || previous == version || Content is not Grid root) return;
+        var whatsNew = new HyperlinkButton { Content = "What's new", NavigateUri = new Uri($"https://github.com/Mpratyush54/nexus/releases/tag/desktop-v{version}") };
+        var toast = new InfoBar
+        {
+            IsOpen = true, Severity = InfoBarSeverity.Success, Title = $"Updated to Nexus {version}",
+            ActionButton = whatsNew, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 20, 20), MaxWidth = 420
+        };
+        Grid.SetRowSpan(toast, 2);
+        root.Children.Add(toast);
+        Nexus.Pages.Motion.FadeSlideIn(toast, 400, 0, 16, 520);
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(12);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => toast.IsOpen = false;
+        toast.Closed += (_, _) => root.Children.Remove(toast);
+        timer.Start();
+    }
+
+    // ---- First-run setup (also reachable from Settings > General)
+
+    private SetupWizardPage? _setup;
+
+    // The guide covers the whole window on a Mica (BaseAlt) backdrop. When it
+    // closes the shell gets back its own backdrop (Mica behind the sidebar,
+    // solid reading canvas).
+    public void ShowSetup()
+    {
+        if (_setup is null && Content is Grid root)
+        {
+            _setup = new SetupWizardPage(FinishSetup);
+            Grid.SetRowSpan(_setup, 2);
+            _shellBackground = root.Background;
+            _shellBackdrop = SystemBackdrop;
+            root.Background = new Microsoft.UI.Xaml.Media.SolidColorBrush(Microsoft.UI.Colors.Transparent);
+            SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.BaseAlt };
+            Nav.Visibility = Visibility.Collapsed;
+            OfflineBar.Visibility = Visibility.Collapsed;
+            root.Children.Add(_setup);
+        }
+        if (AppWindow.IsVisible) Activate();
+    }
+
+    private Microsoft.UI.Xaml.Media.Brush? _shellBackground;
+    private Microsoft.UI.Xaml.Media.SystemBackdrop? _shellBackdrop;
+
+    private void FinishSetup()
+    {
+        if (Content is Grid root && _setup is not null)
+        {
+            root.Children.Remove(_setup);
+            root.Background = _shellBackground;
+        }
+        _setup = null;
+        SystemBackdrop = _shellBackdrop;
+        _shellBackdrop = null;
+        Nav.Visibility = Visibility.Visible;
+        OfflineBar.Visibility = Visibility.Visible;
+        // The shell rises in as the guide fades out.
+        ContentFrame.Transitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection
+        {
+            new Microsoft.UI.Xaml.Media.Animation.EntranceThemeTransition { FromVerticalOffset = 24 }
+        };
+        Nexus.Pages.Motion.FadeSlideIn(Nav, 0, 0, 16, 520);
+        ShowDashboard();
+        PageCache.Dashboard.FocusNewChat();
+        _ = RefreshBannerAsync();
+        PageCache.Settings.RefreshAccount();
+        _chatCache.Clear();
+        _ = ReloadAfterSetupAsync();
+        ApplyPendingLink();
+    }
+
+    private async Task ReloadAfterSetupAsync()
+    {
+        await BootstrapProjectsAsync();
+        await LoadChatsAsync(force: true);
     }
 
     // The first size is in layout pixels (DIPs): on a 150% display a raw
@@ -536,9 +627,11 @@ public sealed partial class MainWindow : Window
 
     // With "All projects", new chats start in the project being worked in
     // now, not in whatever project last session's prefs restored.
+    // Not while the first-run guide is up: the account (and so the chats the
+    // pick is made from) only exists once setup finishes.
     private void ApplyDefaultTarget(List<ChatPaneEntry> entries)
     {
-        if (_targetChosen) return;
+        if (_targetChosen || _setup is not null) return;
         _targetChosen = true;
         var known = SwitcherProjects().Select(p => p.Id).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var pick = DefaultProject.Pick(entries.Select(e => e.ProjectId), AppPrefs.Data.ProjectFolders, App.CaptureWorkspaceRoot(), known);
@@ -1187,6 +1280,8 @@ public sealed partial class MainWindow : Window
 
     private void ShowPage(NexusPage page, object? parameter = null)
     {
+        // Setup owns the window until it is finished or skipped.
+        if (_setup is not null) return;
         if (ReferenceEquals(ContentFrame.Content, page))
         {
             page.Enter(parameter);
@@ -1282,15 +1377,23 @@ public sealed partial class MainWindow : Window
         try
         {
             var authUrl = App.PendingAuthUrl;
-            if (App.PendingSessionId is { Length: > 0 } sessionId)
+            if (_setup is not null)
             {
-                OpenSession(sessionId);
+                // Links to chats wait until setup is done; sign-in does not.
+                App.ClearPendingAuth();
             }
-            else if (App.PendingTeleportId is { Length: > 0 } teleportId)
+            else
             {
-                OpenTeleport(teleportId);
+                if (App.PendingSessionId is { Length: > 0 } sessionId)
+                {
+                    OpenSession(sessionId);
+                }
+                else if (App.PendingTeleportId is { Length: > 0 } teleportId)
+                {
+                    OpenTeleport(teleportId);
+                }
+                App.ClearPending();
             }
-            App.ClearPending();
             if (authUrl is not { Length: > 0 })
             {
                 return;
@@ -1313,6 +1416,7 @@ public sealed partial class MainWindow : Window
                 return;
             }
             await Task.Run(() => App.InitializeCore());
+            _setup?.AccountChanged();
             await RefreshBannerAsync();
             PageCache.Settings.RefreshAccount();
             _chatCache.Clear();

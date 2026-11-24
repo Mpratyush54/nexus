@@ -1,8 +1,14 @@
 name: Release Desktop (all OS)
 
-# Builds Nexus Desktop (Fyne, CGO, native runners) + cross-compiles daemon + CLI,
-# publishes a GitHub Release on tags, and syncs artifacts to S3.
-# latest.json is promoted only for tagged / explicit versions (not master SHA).
+# Builds Nexus Desktop + cross-compiles daemon + CLI, publishes a GitHub
+# Release on tags, and syncs artifacts to S3.
+#  - Windows: native WinUI app packaged with Velopack (scripts/package-windows.ps1):
+#    Nexus-<ver>-win-x64-Setup.exe, Nexus-<ver>-win-x64-Portable.zip, the
+#    plain nexus-desktop-windows-amd64.zip (install-windows.ps1) and the
+#    auto-update feed (S3 desktop/velopack/). Built for stable AND beta tags;
+#    betas use the separate "win-beta" update channel and a prerelease.
+#  - macOS / Linux: legacy Fyne shell until the native ports ship.
+# latest.json is promoted only for tagged / explicit stable versions.
 
 on:
   push:
@@ -128,9 +134,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - goos: windows
-            goarch: amd64
-            runner: windows-latest
           - goos: darwin
             goarch: arm64
             runner: macos-latest
@@ -145,17 +148,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.26.x'
-      - uses: actions/setup-dotnet@v4
-        if: runner.os == 'Windows'
-        with:
-          dotnet-version: '8.0.x'
       - name: Install Linux GUI deps
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
       - name: Build desktop
-        if: runner.os != 'Windows'
         shell: bash
         env:
           GOOS: ${{ matrix.goos }}
@@ -175,34 +173,116 @@ jobs:
           export GOOS GOARCH CGO_ENABLED
           go build -trimpath -ldflags "${DESKTOP_LD}" -o "dist/nexus-desktop-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus-desktop
           ls -la dist
-      - name: Build native Windows desktop
-        if: runner.os == 'Windows'
-        shell: pwsh
-        env:
-          VER: ${{ needs.meta.outputs.version }}
-          BUILT_AT: ${{ needs.meta.outputs.built_at }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          New-Item -ItemType Directory -Force -Path dist, dist/Nexus | Out-Null
-          $ld = "-s -w -X central-memory/internal/buildinfo.Version=$env:VER -X central-memory/internal/buildinfo.Commit=$env:GITHUB_SHA -X central-memory/internal/buildinfo.BuiltAt=$env:BUILT_AT -X main.defaultServerURL=${{ env.API_URL }}"
-          dotnet publish desktop/windows/Nexus.csproj -c Release -r win-x64 --self-contained false -o dist/Nexus -p:AppxGeneratePriEnabled=false -p:WindowsAppSDKSelfContained=false
-          $env:CGO_ENABLED = '1'
-          go build -tags nexuscorelib -trimpath -ldflags $ld -buildmode=c-shared -o dist/Nexus/nexuscore.dll ./cmd/nexuscore
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Bundled stdio MCP proxy (Antigravity) so the app never needs the nexus CLI.
-          $env:CGO_ENABLED = '0'
-          go build -trimpath -ldflags "-s -w" -o dist/Nexus/nexus-mcp-proxy.exe ./cmd/nexus-mcp-proxy
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Compress-Archive -Path dist/Nexus/* -DestinationPath dist/nexus-desktop-windows-amd64.zip -Force
-          Get-ChildItem dist -Recurse | Select-Object FullName, Length
       - uses: actions/upload-artifact@v4
         with:
           name: desktop-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
           if-no-files-found: error
 
+  # Windows installer (Velopack). Self-contained: .NET 8 and the Windows App
+  # SDK are inside the app, so Setup.exe needs no prerequisites or admin.
+  build-windows:
+    needs: meta
+    name: desktop-windows-amd64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install vpk (Velopack CLI)
+        run: dotnet tool install --global vpk --version 1.2.161
+      # Code signing is optional until a certificate exists. Set the
+      # WINDOWS_CERT_PFX_BASE64 + WINDOWS_CERT_PASSWORD secrets to sign
+      # Nexus.exe, Update.exe and Setup.exe; unsigned builds trigger a
+      # SmartScreen "unrecognized app" warning on first run.
+      - name: Import signing certificate
+        id: sign
+        shell: pwsh
+        env:
+          CERT_PFX: ${{ secrets.WINDOWS_CERT_PFX_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          if (-not $env:CERT_PFX) { "params=" >> $env:GITHUB_OUTPUT; Write-Host "No signing certificate: building unsigned."; exit 0 }
+          $pfx = Join-Path $env:RUNNER_TEMP "nexus-sign.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX))
+          $password = ConvertTo-SecureString $env:CERT_PASSWORD -AsPlainText -Force
+          Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password | Out-Null
+          Remove-Item $pfx -Force
+          "params=/a /fd sha256 /tr http://timestamp.digicert.com /td sha256" >> $env:GITHUB_OUTPUT
+      - name: Package installer
+        shell: pwsh
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+          SIGN_PARAMS: ${{ steps.sign.outputs.params }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bucket = '${{ vars.RELEASES_S3_BUCKET }}'
+          if (-not $bucket) { $bucket = '${{ env.RELEASES_BUCKET }}' }
+          $channel = if ($env:PRERELEASE -eq 'true') { 'win-beta' } else { 'win' }
+          $feed = "https://$bucket.s3.${{ env.AWS_REGION }}.amazonaws.com/desktop/velopack"
+          ./scripts/package-windows.ps1 -Version $env:VER -Channel $channel -OutDir dist/windows `
+            -ApiUrl '${{ env.API_URL }}' -PreviousFeed $feed -SignParams $env:SIGN_PARAMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-windows-amd64
+          if-no-files-found: error
+          path: |
+            dist/windows/Nexus-*-Setup.exe
+            dist/windows/Nexus-*-Portable.zip
+            dist/windows/nexus-desktop-windows-amd64.zip
+            dist/windows/SHA256SUMS-windows.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: velopack-feed
+          path: dist/windows/releases/
+          if-no-files-found: error
+
+  # Beta tags: GitHub prerelease with the Windows installer only. Never
+  # touches desktop/latest.json; the update feed uses the win-beta channel.
+  publish-windows-beta:
+    needs: [meta, build-windows]
+    if: needs.meta.outputs.prerelease == 'true' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Assemble
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cp artifacts/desktop-windows-amd64/* dist/
+          ls -la dist
+      - name: GitHub prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: dist/*
+      - name: Configure AWS Credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Publish update feed (win-beta)
+        run: |
+          set -euo pipefail
+          BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
+          if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
+          FEED=artifacts/velopack-feed
+          # Packages first, the feed index last: clients never see an index
+          # that points at a package that is not uploaded yet.
+          aws s3 sync "$FEED" "s3://${BUCKET}/desktop/velopack/" --exclude "releases.*.json" --exclude "RELEASES*" --exclude "assets.*.json"
+          for f in "$FEED"/releases.*.json "$FEED"/assets.*.json "$FEED"/RELEASES*; do
+            [ -f "$f" ] && aws s3 cp "$f" "s3://${BUCKET}/desktop/velopack/$(basename "$f")" --cache-control "no-cache, max-age=60"
+          done
+
   publish:
-    needs: [meta, build-tools, build-desktop]
+    needs: [meta, build-tools, build-desktop, build-windows]
     if: needs.meta.outputs.prerelease != 'true'
     runs-on: ubuntu-latest
     steps:
@@ -218,8 +298,9 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           # nexus-mcp-proxy.exe ships inside the desktop zip only; flattening it
-          # here would read as a bogus "mcp-proxy" CLI platform below.
-          find artifacts -type f ! -name 'nexus-mcp-proxy.exe' -exec cp -f {} dist/ \;
+          # here would read as a bogus "mcp-proxy" CLI platform below. The
+          # Velopack feed is published separately (desktop/velopack/).
+          find artifacts -type f ! -name 'nexus-mcp-proxy.exe' ! -path 'artifacts/velopack-feed/*' -exec cp -f {} dist/ \;
           ls -la dist
           BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
           if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
@@ -272,7 +353,7 @@ jobs:
           open("dist/latest.json", "w", encoding="utf-8").write(json.dumps(manifest, indent=2) + "\n")
           print("platforms:", ", ".join(sorted(platforms)))
           PY
-          (cd dist && sha256sum nexus-* install-* latest.json > SHA256SUMS.txt) || true
+          (cd dist && sha256sum nexus-* Nexus-* install-* latest.json > SHA256SUMS.txt) || true
 
       - name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -293,7 +374,7 @@ jobs:
           set -euo pipefail
           BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
           if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
-          aws s3 sync dist "s3://${BUCKET}/desktop/${VER}/" --exclude "*" --include "nexus-*" --include "install-*" --include "SHA256SUMS.txt" --include "latest.json"
+          aws s3 sync dist "s3://${BUCKET}/desktop/${VER}/" --exclude "*" --include "nexus-*" --include "Nexus-*" --include "install-*" --include "SHA256SUMS*.txt" --include "latest.json"
           aws s3 sync dist "s3://${BUCKET}/cli/${VER}/" --exclude "*" --include "nexus-*" --include "install-*" --include "SHA256SUMS.txt"
 
           PROMOTE=0
@@ -302,6 +383,12 @@ jobs:
           if [[ "$VER" == 0.0.0-* ]]; then PROMOTE=0; fi
 
           if [ "$PROMOTE" = "1" ]; then
+            # Velopack update feed (channel "win"): packages first, index last.
+            FEED=artifacts/velopack-feed
+            aws s3 sync "$FEED" "s3://${BUCKET}/desktop/velopack/" --exclude "releases.*.json" --exclude "RELEASES*" --exclude "assets.*.json"
+            for f in "$FEED"/releases.*.json "$FEED"/assets.*.json "$FEED"/RELEASES*; do
+              [ -f "$f" ] && aws s3 cp "$f" "s3://${BUCKET}/desktop/velopack/$(basename "$f")" --cache-control "no-cache, max-age=60"
+            done
             aws s3 cp dist/latest.json "s3://${BUCKET}/desktop/latest.json" --cache-control "no-cache, max-age=60" --content-type application/json
             for f in install-windows.ps1 install-macos.sh install-linux.sh; do
               if [ -f "dist/$f" ]; then

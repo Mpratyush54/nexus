@@ -198,6 +198,7 @@ func Methods() []string {
 		"status.get",
 		"diagnostics.get",
 		"auth.callback",
+		"auth.connect",
 	}
 }
 
@@ -614,6 +615,8 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		return authStatus(), nil
 	case "auth.status":
 		return authStatus(), nil
+	case "auth.connect":
+		return authConnect(ctx, args, nil)
 	case "capture.pause":
 		if deps.Capture == nil {
 			return nil, errors.New("capture control is unavailable in this host")

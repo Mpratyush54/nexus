@@ -18,21 +18,24 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
+    <!-- Program.cs owns Main so the installer's hooks run before WinUI. -->
+    <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
     <!-- Unpackaged WinUI 3 (D5). Build nexuscore.dll first, then:
          dotnet build -c Release -r win-x64
          Copy nexuscore.dll next to Nexus.exe.
-         Velopack (D5): UpdateService.cs is a no-op stub until Velopack is
-         referenced; pack with `vpk pack` on Windows (see UpdateService.cs). -->
+         Installer and updates: Velopack. scripts/package-windows.ps1 builds
+         Setup.exe, the portable zip and the update feed (vpk pack). -->
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.6.250108002" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.2.0" />
+    <PackageReference Include="Velopack" Version="1.2.161" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Include="..\..\bindings\csharp\NxMethods.g.cs" Link="Core\NxMethods.g.cs" />
-    <Content Include="Assets\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Content Include="Assets\**" Exclude="Assets\InstallerSplash.gif" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

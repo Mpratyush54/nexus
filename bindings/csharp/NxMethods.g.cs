@@ -87,6 +87,7 @@ namespace Nexus.Core
         public const string AuthLogout = "auth.logout";
         public const string AuthStatus = "auth.status";
         public const string AuthCallback = "auth.callback";
+        public const string AuthConnect = "auth.connect";
         public const string CapturePause = "capture.pause";
         public const string CaptureResume = "capture.resume";
         public const string CaptureConfigure = "capture.configure";
