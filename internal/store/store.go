@@ -118,6 +118,8 @@ type MemStore struct {
 	// Super Admin + release registry (platform control plane).
 	platformAdmins map[string]bool
 	releases       map[string]*AppRelease
+	// Problem reports (diagnostics.go), keyed by report_id.
+	diagReports map[string]*DiagnosticReport
 	// Billing catalog + subscriptions (org and personal).
 	plans       map[string]*Plan
 	billingSubs map[string]*Subscription // ownerType/ownerID

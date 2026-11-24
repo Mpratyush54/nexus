@@ -60,6 +60,7 @@ func (s *Server) registerRoutes() {
 	s.registerCloudContractRoutes()
 	s.registerSessionDeleteRoutes()
 	s.registerOpsRoutes()
+	s.registerDiagnosticsRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

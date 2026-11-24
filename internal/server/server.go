@@ -66,6 +66,11 @@ type Server struct {
 	mcpCloudLimiter *mcp.RateLimiter
 	mcpCloudOnce    sync.Once
 
+	// diagLimits gates POST /v1/diagnostics (per IP, global anonymous,
+	// per account). Built on first use.
+	diagOnce   sync.Once
+	diagLimits *diagLimiters
+
 	// Users resolves login usernames to password hashes (issue #133).
 	// Nil means authentication is unconfigured and /auth/login fails
 	// closed with 503. Wire NewUserLookup(store.NewUserStore(db)) in
@@ -219,9 +224,10 @@ func (s *Server) authorizeProject(w http.ResponseWriter, r *http.Request, projec
 	return true
 }
 
-// Handler returns the CORS + request-logging middleware chain around the mux.
+// Handler returns the CORS + request-ID + request-logging middleware chain
+// around the mux.
 func (s *Server) Handler() http.Handler {
-	return s.withCORS(s.withLogging(s.Mux))
+	return s.withCORS(s.withRequestID(s.withLogging(s.Mux)))
 }
 
 // ServeHTTP implements http.Handler so *Server can be passed to http.Serve directly.
@@ -249,6 +255,9 @@ type errorEnvelope struct {
 	Error struct {
 		Code    int    `json:"code"`
 		Message string `json:"message"`
+		// RequestID matches the X-Request-ID header and the server log line,
+		// so a user can quote it ("ref ABC123") in a problem report.
+		RequestID string `json:"request_id,omitempty"`
 	} `json:"error"`
 }
 
@@ -260,10 +269,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // writeError writes the standard {"error":{"code":...,"message":...}} envelope.
+// The request ID comes from the header withRequestID set on w; the message
+// is kept on the recorder so the access log line can show why it failed.
 func writeError(w http.ResponseWriter, status int, msg string) {
 	var env errorEnvelope
 	env.Error.Code = status
 	env.Error.Message = msg
+	env.Error.RequestID = w.Header().Get(RequestIDHeader)
+	if rec, ok := w.(*statusRecorder); ok {
+		rec.errMsg = msg
+	}
 	writeJSON(w, status, env)
 }
 
@@ -300,6 +315,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 type statusRecorder struct {
 	http.ResponseWriter
 	status int
+	errMsg string
 }
 
 func (rec *statusRecorder) WriteHeader(status int) {
@@ -333,8 +349,20 @@ func (s *Server) withLogging(next http.Handler) http.Handler {
 		start := time.Now()
 		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(rec, r)
-		s.Log.Printf("%s %s -> %d (%s)", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond))
+		rid := requestIDOf(r)
+		if rec.status >= 400 && rec.errMsg != "" {
+			s.Log.Printf("%s %s -> %d (%s) rid=%s err=%q", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond), rid, truncateLog(rec.errMsg, 300))
+			return
+		}
+		s.Log.Printf("%s %s -> %d (%s) rid=%s", r.Method, r.URL.Path, rec.status, time.Since(start).Round(time.Millisecond), rid)
 	})
+}
+
+func truncateLog(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 // requireAuth enforces JWT or API-token auth on protected routes. /auth/login,
@@ -442,7 +470,7 @@ func (s *Server) withCORS(next http.Handler) http.Handler {
 		if origin != "" && allowed[origin] {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
 			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Max-Age", "86400")
 		}

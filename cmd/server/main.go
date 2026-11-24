@@ -418,6 +418,8 @@ func run() error {
 	defer stopSweeps()
 	stopSnap := server.StartSnapshotRetention(ctx, srv.Store, 0)
 	defer stopSnap()
+	stopDiag := server.StartDiagnosticsRetention(ctx, srv.Store, 0)
+	defer stopDiag()
 	httpSrv := &http.Server{
 		Addr:              ":" + cfg.port,
 		Handler:           buildMux(srv, cfg),
