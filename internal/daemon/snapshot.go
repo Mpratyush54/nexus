@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -30,18 +31,16 @@ func CollectSnapshot(root, conversationID, harness, machineID string) (*store.Se
 		return nil, fmt.Errorf("snapshot: harness %q has no layout for %s", harness, conversationID)
 	}
 
-	transcriptRaw, err := readSnapshotTranscript(layout, root)
+	// Streamed line by line: a live chat's transcript can be tens of
+	// megabytes and is re-packed every few minutes (snapshot_stream.go).
+	src, err := openSnapshotTranscript(layout, root)
 	if err != nil {
 		return nil, fmt.Errorf("snapshot: read transcript: %w", err)
 	}
-	if security.ContainsSecret(transcriptRaw) {
-		if redacted, ok := RedactSecrets(string(transcriptRaw)); ok {
-			transcriptRaw = []byte(redacted)
-		}
-	}
-	gzTranscript, err := gzipBytes(transcriptRaw)
+	gzTranscript, turnCount, err := gzipSnapshotTranscript(src)
+	_ = src.Close()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("snapshot: read transcript: %w", err)
 	}
 
 	artifacts, err := tarGzipArtifacts(layout)
@@ -56,11 +55,6 @@ func CollectSnapshot(root, conversationID, harness, machineID string) (*store.Se
 		return nil, err
 	}
 	gzDiff, diffSize, diffTrunc := diff.gz, diff.size, diff.trunc
-
-	turnCount := bytes.Count(transcriptRaw, []byte("\n"))
-	if len(transcriptRaw) > 0 && !bytes.HasSuffix(transcriptRaw, []byte("\n")) {
-		turnCount++
-	}
 
 	return &store.SessionSnapshot{
 		Harness:           harness,
@@ -78,35 +72,25 @@ func CollectSnapshot(root, conversationID, harness, machineID string) (*store.Se
 	}, nil
 }
 
-func readSnapshotTranscript(layout SnapshotLayout, workspaceRoot string) ([]byte, error) {
+// snapshotTranscriptStamp identifies the transcript a snapshot of
+// conversationID would pack (size and modification time), or "" when it
+// cannot tell (no transcript file, SQLite-only harnesses).
+func snapshotTranscriptStamp(root, conversationID, harness string) string {
+	layout, err := ResolveSnapshotLayout(normalizeHarness(harness), conversationID, root)
+	if err != nil || layout.TranscriptFile == "" || layout.SQLiteSource != "" {
+		return ""
+	}
 	path := layout.TranscriptFile
-	// Antigravity: prefer full sibling when caller pointed at truncated log.
-	if layout.Harness == "antigravity" && path != "" {
-		dir := filepath.Dir(path)
-		full := filepath.Join(dir, "transcript_full.jsonl")
-		if st, err := os.Stat(full); err == nil && !st.IsDir() {
+	if layout.Harness == "antigravity" {
+		if full := filepath.Join(filepath.Dir(path), "transcript_full.jsonl"); isRegularFile(full) {
 			path = full
-		} else {
-			alt := filepath.Join(dir, "transcript.jsonl")
-			if _, err := os.Stat(path); err != nil {
-				path = alt
-			}
 		}
 	}
-	if path != "" {
-		if raw, err := os.ReadFile(path); err == nil {
-			return raw, nil
-		}
+	st, err := os.Stat(path)
+	if err != nil || st.IsDir() {
+		return ""
 	}
-	// SQLite-only harnesses (Windsurf/Copilot/OpenCode/…): extract dialogue
-	// into JSONL at collect time — no permanent sidecar required.
-	if layout.SQLiteSource != "" {
-		return extractSnapshotTranscriptJSONL(layout.Harness, layout.SQLiteSource, workspaceRoot, layout.ConversationID)
-	}
-	if path != "" {
-		return nil, fmt.Errorf("no transcript at %s", path)
-	}
-	return nil, fmt.Errorf("no transcript path")
+	return path + "\x00" + strconv.FormatInt(st.Size(), 10) + ":" + strconv.FormatInt(st.ModTime().UnixNano(), 10)
 }
 
 // snapshotDiffBundle is the redacted, gzipped uncommitted diff of a snapshot.
@@ -333,7 +317,8 @@ func otherClaudeSession(layout SnapshotLayout, relSlash string) bool {
 // while the packed files' names, sizes and modification times are unchanged.
 var artifactCache = struct {
 	sync.Mutex
-	m map[string]artifactCacheEntry
+	m     map[string]artifactCacheEntry
+	bytes int
 }{m: map[string]artifactCacheEntry{}}
 
 type artifactCacheEntry struct {
@@ -341,7 +326,13 @@ type artifactCacheEntry struct {
 	bundle      []byte
 }
 
-const artifactCacheMax = 32
+// The cache is bounded by count and by bytes: a bundle can be megabytes
+// (sub-agent transcripts), and 32 of them stayed on the heap for good.
+const (
+	artifactCacheMax       = 32
+	artifactCacheMaxBytes  = 16 << 20
+	artifactCacheItemBytes = 4 << 20
+)
 
 func artifactCacheGet(key, fingerprint string) ([]byte, bool) {
 	artifactCache.Lock()
@@ -356,10 +347,19 @@ func artifactCacheGet(key, fingerprint string) ([]byte, bool) {
 func artifactCachePut(key, fingerprint string, bundle []byte) {
 	artifactCache.Lock()
 	defer artifactCache.Unlock()
-	if _, ok := artifactCache.m[key]; !ok && len(artifactCache.m) >= artifactCacheMax {
+	if old, ok := artifactCache.m[key]; ok {
+		artifactCache.bytes -= len(old.bundle)
+		delete(artifactCache.m, key)
+	}
+	if len(bundle) > artifactCacheItemBytes {
+		return
+	}
+	if len(artifactCache.m) >= artifactCacheMax || artifactCache.bytes+len(bundle) > artifactCacheMaxBytes {
 		artifactCache.m = map[string]artifactCacheEntry{}
+		artifactCache.bytes = 0
 	}
 	artifactCache.m[key] = artifactCacheEntry{fingerprint: fingerprint, bundle: bundle}
+	artifactCache.bytes += len(bundle)
 }
 
 func artifactSkipPrefixes(layout SnapshotLayout) []string {

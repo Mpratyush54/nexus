@@ -8,9 +8,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -83,6 +80,26 @@ func mirrorJSON(ctx context.Context, client *http.Client, method, endpoint, toke
 	if err != nil {
 		return 0, err
 	}
+	return mirrorDo(client, req, token, out)
+}
+
+// mirrorStream is mirrorJSON for a body too large to build in memory.
+func mirrorStream(ctx context.Context, client *http.Client, method, endpoint, token string, length int64, open func() (io.ReadCloser, error), out any) (int, error) {
+	body, err := open()
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		body.Close()
+		return 0, err
+	}
+	req.ContentLength = length
+	req.GetBody = open
+	return mirrorDo(client, req, token, out)
+}
+
+func mirrorDo(client *http.Client, req *http.Request, token string, out any) (int, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
@@ -275,26 +292,28 @@ func (s *HTTPMemoryStore) PublishAgentSessionVersion(ctx context.Context, snap *
 	if err != nil {
 		return err
 	}
-	transcript, err := ungzipBytes(snap.TranscriptPayload)
+	// Hash and upload stream from the gzip payload: the decompressed
+	// transcript is never held in memory (snapshot_stream.go).
+	hash, size, err := gzipDigest(snap.TranscriptPayload)
 	if err != nil {
 		return fmt.Errorf("daemon: cloud session mirror: decode transcript: %w", err)
 	}
-	if len(transcript) == 0 {
+	if size == 0 {
 		return fmt.Errorf("daemon: cloud session mirror: empty transcript")
 	}
 	base, token, projectID, client, err := s.mirrorConnection()
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(transcript)
-	hash := hex.EncodeToString(sum[:])
-	if _, err := mirrorJSON(ctx, client, http.MethodPut,
-		base+"/v1/blobs/"+hash, token, map[string]any{
-			"project_id": projectID,
-			"body_b64":   base64.StdEncoding.EncodeToString(transcript),
-			"kind":       "plain",
-			"purpose":    "transcript",
-		}, nil); err != nil {
+	length, open, err := streamingJSONBody(map[string]any{
+		"project_id": projectID,
+		"kind":       "plain",
+		"purpose":    "transcript",
+	}, []b64Field{gunzipField("body_b64", snap.TranscriptPayload, size)})
+	if err != nil {
+		return err
+	}
+	if _, err := mirrorStream(ctx, client, http.MethodPut, base+"/v1/blobs/"+hash, token, length, open, nil); err != nil {
 		return err
 	}
 	var version struct {

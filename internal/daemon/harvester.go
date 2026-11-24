@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -143,14 +144,16 @@ type Harvester struct {
 	completed  map[string]bool      // path -> SESSION_TRANSCRIPT_COMPLETE sent
 	agents     map[string]string    // path -> agent name
 	batch      map[string][]Turn    // path -> turns since session start
-	models     map[string]string    // path -> last model announced (Codex turn_context)
+	// batchDropped counts turns trimmed from batch (see addBatchLocked).
+	batchDropped map[string]int
+	models       map[string]string // path -> last model announced (Codex turn_context)
 	// extractors holds per-agent SQLite row extractors (nil value or absent
 	// agent = built-in fallback, then liveness-only). Issue #33/#77.
 	extractors map[string]SQLiteExtractor
 	// fallbackSeen dedupes stdlib SQLite fallback turns, which have no row
 	// timestamps and would otherwise re-emit the same window on every mtime
 	// change.
-	fallbackSeen map[string]map[string]struct{}
+	fallbackSeen map[string]map[uint64]struct{}
 	// lastFallback rate-limits the content-scanning SQLite fallback per file.
 	// IDE workspace databases change every few seconds while the IDE is open,
 	// and scanning them on every change made the whole machine sluggish.
@@ -251,7 +254,7 @@ func NewHarvesterWithPoll(workspaceRoot string, emitter EventEmitter, poll, idle
 		agents:       make(map[string]string),
 		batch:        make(map[string][]Turn),
 		extractors:   make(map[string]SQLiteExtractor),
-		fallbackSeen: make(map[string]map[string]struct{}),
+		fallbackSeen: make(map[string]map[uint64]struct{}),
 		lastFallback: make(map[string]time.Time),
 		titles:       make(map[string]nativeTitles),
 		agentFiles:   make(map[string]int),
@@ -1113,7 +1116,7 @@ func ParseTurns(r io.Reader) ([]Turn, error) {
 // rollout envelopes ({type, payload:{role|message|content}}). Structured
 // tool_use / function_call blocks are retained on Turn.ToolCalls (F3).
 func parseTurnLine(line []byte) (t Turn, ok bool) {
-	if len(strings.TrimSpace(string(line))) == 0 {
+	if len(bytes.TrimSpace(line)) == 0 {
 		return Turn{}, false
 	}
 	var m map[string]any
@@ -1554,15 +1557,6 @@ func firstNonEmpty(ss ...string) string {
 	return ""
 }
 
-func lastNewline(b []byte) int {
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] == '\n' {
-			return i
-		}
-	}
-	return -1
-}
-
 // turnPayload renders a Turn into the CONVERSATION_TURN payload shape.
 // Content is secret-screened (issue #132): transcripts routinely contain
 // pasted secrets, and the event stream lands in Postgres. Structured
@@ -1645,31 +1639,6 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	if _, err := f.Seek(off, io.SeekStart); err != nil {
 		return nil, err
 	}
-	// Only consume through the last full line so torn writes (no trailing
-	// newline) are retried on the next poll instead of failing JSON parse.
-	buf, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
-	}
-	if h.readThrottle != nil {
-		h.readThrottle(len(buf))
-	}
-	consumable := buf
-	if len(buf) > 0 && buf[len(buf)-1] != '\n' {
-		if i := lastNewline(buf); i >= 0 {
-			consumable = buf[:i+1]
-		} else {
-			h.mu.Lock()
-			h.offsets[path] = off // nothing consumable yet
-			h.mu.Unlock()
-			return nil, nil
-		}
-	}
-
-	var turns []Turn
-	sc := bufio.NewScanner(strings.NewReader(string(consumable)))
-	sc.Buffer(make([]byte, 64<<10), maxJSONLLineBytes)
-	position := off
 	h.mu.Lock()
 	titles, knownTitle := h.titles[path]
 	h.mu.Unlock()
@@ -1678,13 +1647,43 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 		// recover it from the bytes just before the cursor.
 		titles = titlesBefore(f, off)
 	}
-	for sc.Scan() {
-		position += int64(len(sc.Bytes())) + 1
-		if titles.observe(sc.Bytes()) {
+	// Stream the new bytes line by line instead of buffering them: a first
+	// read of a long chat is megabytes, mostly api-request-blob records that
+	// are dropped unparsed. Only complete lines are consumed, so a torn
+	// write (no trailing newline) is read again on the next poll. Reading
+	// stops at the size stat'ed above; later appends wait for the next call.
+	lr := newTranscriptLineReader(io.LimitReader(f, st.Size()-off), maxJSONLLineBytes)
+	var turns []Turn
+	var consumed, unthrottled int64
+	position := off
+	for {
+		line, size, overlong, ok := lr.next()
+		if !ok {
+			break
+		}
+		consumed += int64(size)
+		if h.readThrottle != nil {
+			if unthrottled += int64(size); unthrottled >= 1<<20 {
+				h.readThrottle(int(unthrottled))
+				unthrottled = 0
+			}
+		}
+		if overlong {
+			// Overlong single line: skip it, keep reading the rest.
+			position += int64(size)
 			continue
 		}
-		t, ok := parseTurnLine(sc.Bytes())
-		u, key, model := parseLineUsage(sc.Bytes())
+		// Source positions count each line without its line ending plus one,
+		// as they always have: they key cloud turns, so they must not change.
+		position += int64(len(line)) + 1
+		if skippableTranscriptLine(line) {
+			continue
+		}
+		if titles.observe(line) {
+			continue
+		}
+		t, ok := parseTurnLine(line)
+		u, key, model := parseLineUsage(line)
 		if model != "" {
 			h.setModel(path, model)
 		}
@@ -1693,7 +1692,7 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 				u.Model = h.modelFor(path)
 			}
 			if !ok {
-				t, ok = Turn{Speaker: "assistant", Timestamp: lineTime(sc.Bytes())}, true
+				t, ok = Turn{Speaker: "assistant", Timestamp: lineTime(line)}, true
 			}
 			t.Usage, t.UsageKey = u, key
 		}
@@ -1702,12 +1701,12 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 			turns = append(turns, t)
 		}
 	}
+	if h.readThrottle != nil && unthrottled > 0 {
+		h.readThrottle(int(unthrottled))
+	}
 	titles.apply(turns)
-	if err := sc.Err(); err != nil {
-		// Overlong single line: skip it but still advance the offset below.
-		if err != bufio.ErrTooLong {
-			return nil, err
-		}
+	if consumed == 0 {
+		return nil, nil // nothing complete yet
 	}
 
 	now := h.now().UTC()
@@ -1730,7 +1729,7 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 		}
 		h.cursorSourceAt[path] = carry
 	}
-	h.offsets[path] = off + int64(len(consumable))
+	h.offsets[path] = off + consumed
 	h.offsetsVersion++
 	if h.titles == nil {
 		h.titles = make(map[string]nativeTitles)
@@ -1747,7 +1746,7 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 		delete(h.completed, path) // new activity re-arms idle detection
 		for _, t := range turns {
 			if !t.UsageOnly() {
-				h.batch[path] = append(h.batch[path], t)
+				h.addBatchLocked(path, t)
 			}
 		}
 	}
@@ -1763,6 +1762,18 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	return turns, nil
 }
 
+// maxFallbackSeen bounds the per-database dedupe set of fallbackTurnKey
+// hashes (8 bytes each; it used to keep every turn's full text forever).
+const maxFallbackSeen = 20000
+
+func fallbackTurnKey(t Turn) uint64 {
+	f := fnv.New64a()
+	f.Write([]byte(t.Speaker))
+	f.Write([]byte{0})
+	f.Write([]byte(t.Content))
+	return f.Sum64()
+}
+
 func (h *Harvester) freshFallbackTurns(path string, turns []Turn) []Turn {
 	if len(turns) == 0 {
 		return nil
@@ -1770,13 +1781,21 @@ func (h *Harvester) freshFallbackTurns(path string, turns []Turn) []Turn {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	seen := h.fallbackSeen[path]
-	if seen == nil {
-		seen = make(map[string]struct{}, len(turns))
+	if seen == nil || len(seen) > maxFallbackSeen {
+		// Each scan reads the newest window of the database, so keys that
+		// fell out of the window never come back: keep only this window's.
+		old := seen
+		seen = make(map[uint64]struct{}, len(turns))
+		for _, turn := range turns {
+			if _, ok := old[fallbackTurnKey(turn)]; ok {
+				seen[fallbackTurnKey(turn)] = struct{}{}
+			}
+		}
 		h.fallbackSeen[path] = seen
 	}
 	fresh := make([]Turn, 0, len(turns))
 	for _, turn := range turns {
-		key := turn.Speaker + "\x00" + turn.Content
+		key := fallbackTurnKey(turn)
 		if _, ok := seen[key]; ok {
 			continue
 		}
@@ -1852,7 +1871,7 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 			}
 			delete(h.completed, turnPath)
 			if !turns[i].UsageOnly() {
-				h.batch[turnPath] = append(h.batch[turnPath], turns[i])
+				h.addBatchLocked(turnPath, turns[i])
 			}
 			if activityAt.After(h.lastActive[path]) {
 				h.lastActive[path] = activityAt
@@ -1916,6 +1935,31 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 	return true
 }
 
+// maxIdleBatchTurns bounds the turns a session keeps for its end-of-session
+// batch. Every turn has already been emitted on its own; the batch only
+// feeds the end-of-session extraction, which reads the speaker and text of
+// at most 120 turns. A chat that stays active for hours never goes idle,
+// and keeping all its turns (tool inputs included) grew the heap with the
+// length of the chat — and a history import held every imported chat's.
+const maxIdleBatchTurns = 120
+
+// addBatchLocked queues t for path's end-of-session batch, keeping the
+// latest maxIdleBatchTurns (up to twice that between trims) and only the
+// fields the batch carries. h.mu must be held.
+func (h *Harvester) addBatchLocked(path string, t Turn) {
+	b := append(h.batch[path], Turn{Speaker: t.Speaker, Content: t.Content, Timestamp: t.Timestamp})
+	if len(b) > 2*maxIdleBatchTurns {
+		drop := len(b) - maxIdleBatchTurns
+		if h.batchDropped == nil {
+			h.batchDropped = make(map[string]int)
+		}
+		h.batchDropped[path] += drop
+		// Copy so the dropped turns' backing array is released.
+		b = append([]Turn(nil), b[drop:]...)
+	}
+	h.batch[path] = b
+}
+
 // CheckIdle emits SESSION_TRANSCRIPT_COMPLETE for every session with no new
 // content for IdleTimeout. Each session fires once until new activity
 // re-arms it. Returned events were also passed to the emitter.
@@ -1935,11 +1979,13 @@ func (h *Harvester) CheckIdle() []Event {
 	for _, path := range due {
 		h.completed[path] = true
 		turns := append([]Turn(nil), h.batch[path]...)
+		harvested := len(turns) + h.batchDropped[path]
 		// Drain the batch (issue #132): without this the session's turns
 		// accumulate forever and every re-armed idle re-emits all old
 		// turns to the Memory Processor (duplicate extraction + LLM cost).
 		delete(h.batch, path)
-		detail := strconv.Itoa(len(turns)) + " turns harvested"
+		delete(h.batchDropped, path)
+		detail := strconv.Itoa(harvested) + " turns harvested"
 		if _, isSQLite := h.sqlite[path]; isSQLite && len(turns) == 0 {
 			detail = "sqlite/vscdb source: rows not parsed (no driver); " +
 				"deep extraction must read the store out-of-band"
@@ -1966,7 +2012,7 @@ func (h *Harvester) CheckIdle() []Event {
 				"agent":      h.agents[path],
 				"path":       path,
 				"session_id": sessionID(path),
-				"turn_count": len(turns),
+				"turn_count": harvested,
 				"turns":      flat,
 				"detail":     detail,
 			},

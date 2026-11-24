@@ -147,6 +147,7 @@ type Runtime struct {
 	sessionTurnCount      map[string]int
 	sessionHarness        map[string]string // session_id -> harvest agent/harness
 	lastSnapshotAttempt   map[string]time.Time
+	lastSnapshotStamp     map[string]string // session_id -> transcript size:mtime at last upload
 	// SnapshotMinInterval spaces periodic (non-idle) snapshots of one
 	// session; <=0 selects DefaultSnapshotMinInterval.
 	SnapshotMinInterval time.Duration
@@ -605,10 +606,27 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	if harness == "" {
 		harness = "antigravity"
 	}
+	// An unchanged transcript was already uploaded: packing it again re-reads
+	// and re-uploads the whole chat (an idle snapshot right after a periodic
+	// one did exactly that). The stamp is taken before reading, so a write
+	// that lands during the read still differs next time.
+	stamp := snapshotTranscriptStamp(r.Daemon.Root, sessionID, harness)
+	if stamp != "" {
+		r.snapshotMu.Lock()
+		unchanged := r.lastSnapshotStamp[sessionID] == stamp
+		if unchanged && r.lastSnapshotTurnCount != nil {
+			r.lastSnapshotTurnCount[sessionID] = turns
+		}
+		r.snapshotMu.Unlock()
+		if unchanged {
+			return
+		}
+	}
 	snap, err := CollectSnapshot(r.Daemon.Root, sessionID, harness, r.Daemon.MachineID)
 	if err != nil {
 		// Retry once with auto-detect when the hinted harness has no files yet.
 		if alt := DetectHarnessForConversation(sessionID, r.Daemon.Root); alt != "" && alt != harness {
+			stamp = snapshotTranscriptStamp(r.Daemon.Root, sessionID, alt)
 			snap, err = CollectSnapshot(r.Daemon.Root, sessionID, alt, r.Daemon.MachineID)
 			harness = alt
 		}
@@ -644,6 +662,12 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 		r.sessionHarness = map[string]string{}
 	}
 	r.sessionHarness[sessionID] = harness
+	if stamp != "" {
+		if r.lastSnapshotStamp == nil {
+			r.lastSnapshotStamp = map[string]string{}
+		}
+		r.lastSnapshotStamp[sessionID] = stamp
+	}
 	r.snapshotMu.Unlock()
 }
 

@@ -17,6 +17,7 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"os"
@@ -129,9 +130,8 @@ func openAIUsage(input, cached, output any) usage.Entry {
 
 // jsonMayHaveUsage is a cheap pre-filter so ordinary lines are not decoded twice.
 func jsonMayHaveUsage(line []byte) bool {
-	s := string(line)
-	return strings.Contains(s, `"usage"`) || strings.Contains(s, `"token_count"`) ||
-		strings.Contains(s, `"turn_context"`) || strings.Contains(s, `"tokens"`)
+	return bytes.Contains(line, []byte(`"usage"`)) || bytes.Contains(line, []byte(`"token_count"`)) ||
+		bytes.Contains(line, []byte(`"turn_context"`)) || bytes.Contains(line, []byte(`"tokens"`))
 }
 
 // lineTime reads the timestamp of a usage-only line.
