@@ -28,6 +28,7 @@ import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
 import { useAuth } from '@/providers/AuthProvider'
 import { formatRelative } from '@/utils/format'
+import { storage } from '@/utils/storage'
 import { projectLabel, projectSubtitle } from '@/lib/project-label'
 
 function shortTime(iso?: string) {
@@ -81,8 +82,8 @@ export function DashboardPage() {
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Home</h1>
         <p className="text-sm text-fg-dim">Pick or create a project to see memories and harvest.</p>
         <ProjectSwitcher />
-        <Link to="/app/org" className="text-sm text-amber hover:underline">
-          Open Org →
+        <Link to="/app/onboarding" className="text-sm text-amber hover:underline">
+          Set up the Desktop app →
         </Link>
       </div>
     )
@@ -97,6 +98,15 @@ export function DashboardPage() {
           Chats, memory and activity for this project. Switch projects below.
         </p>
       </div>
+
+      {!storage.getOnboardingDone() ? (
+        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 p-4">
+          <p className="text-sm text-fg-dim">New here? Install the Desktop app so your agent chats turn into memory.</p>
+          <Link to="/app/onboarding" className="text-sm text-amber hover:underline">
+            Set up →
+          </Link>
+        </GlassPanel>
+      ) : null}
 
       {harvestTarget === 'mismatch' && hs?.project_id ? (
         <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/40 p-4">

@@ -1,20 +1,24 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Activity, Bell, Bot, Building2, Cable, LayoutDashboard, Search, Settings, Shield, Split, Users } from 'lucide-react'
+import { Activity, Bell, Bot, Building2, Cable, History, LayoutDashboard, Search, Send, Settings, Shield, Smartphone, Split, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { STEER_ROUTE } from '@/lib/navigation'
 
 const items = [
-  { id: 'dashboard', label: 'Home', hint: 'Project memories, scanner, pulse', icon: LayoutDashboard, to: '/app/dashboard' },
-  { id: 'memory', label: 'Memory', hint: 'Review queue & editor', icon: Search, to: '/app/memory' },
+  { id: 'dashboard', label: 'Home', hint: 'Your projects at a glance', icon: LayoutDashboard, to: '/app/dashboard' },
+  { id: 'chats', label: 'Chats', hint: 'Agent conversations across projects', icon: History, to: '/app/chats' },
+  { id: 'memory', label: 'Memory', hint: 'What your agents saved, per project', icon: Search, to: '/app/memory' },
+  { id: 'team', label: 'Team & org', hint: 'People on this project', icon: Users, to: '/app/team' },
+  { id: 'org', label: 'Organization', hint: 'Members, roles, invites, projects', icon: Building2, to: '/app/org' },
+  { id: 'steer', label: 'Steer from phone', hint: 'Live sessions you can steer', icon: Smartphone, to: STEER_ROUTE },
+  { id: 'teleport', label: 'Teleport inbox', hint: 'Chats sent to you and by you', icon: Send, to: '/app/teleport' },
+  { id: 'connect', label: 'Desktop app', hint: 'Install and connect Desktop', icon: Cable, to: '/app/connect' },
   { id: 'agents', label: 'Agents', hint: 'MCP activity & permissions', icon: Bot, to: '/app/agents' },
-  { id: 'team', label: 'Team', hint: 'Members, roles, GitHub', icon: Users, to: '/app/team' },
-  { id: 'org', label: 'Org', hint: 'Organizations, projects, billing', icon: Building2, to: '/app/org' },
-  { id: 'branches', label: 'Overlays', hint: 'Memory fork / diff / merge (not git)', icon: Split, to: '/app/branches' },
+  { id: 'branches', label: 'Memory overlays', hint: 'Memory fork / diff / merge (not git)', icon: Split, to: '/app/branches' },
   { id: 'activity', label: 'Activity', hint: 'Project event log with filters', icon: Activity, to: '/app/activity' },
   { id: 'notifications', label: 'Notifications', hint: 'Inbox, preferences, devices', icon: Bell, to: '/app/notifications' },
-  { id: 'connect', label: 'Desktop setup', hint: 'Install Desktop + harvest', icon: Cable, to: '/app/connect' },
-  { id: 'onboarding', label: 'Onboarding', hint: 'First-run setup guide', icon: Cable, to: '/app/onboarding' },
-  { id: 'settings', label: 'Settings', hint: 'Tokens, plan, export', icon: Settings, to: '/app/settings' },
+  { id: 'onboarding', label: 'Setup guide', hint: 'First-run setup', icon: Cable, to: '/app/onboarding' },
+  { id: 'settings', label: 'Settings', hint: 'Account, plan, tokens', icon: Settings, to: '/app/settings' },
   { id: 'admin', label: 'Platform', hint: 'Super Admin, versions, CLI releases', icon: Shield, to: '/app/admin' },
 ]
 

@@ -2,6 +2,7 @@ import { motion } from 'framer-motion'
 import { ExternalLink, FolderGit2, UserPlus } from 'lucide-react'
 import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
+import { TeamTabs } from '@/components/TeamTabs'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
@@ -196,17 +197,23 @@ export function TeamPage() {
 
   if (!projectId) {
     return (
-      <div className="py-16 text-sm text-muted">Resolve a project first (sign in again if needed).</div>
+      <div className="space-y-6">
+        <TeamTabs />
+        <p className="py-10 text-sm text-muted">
+          Pick a project in the sidebar to see who can open it. Organizations are on the Organization tab.
+        </p>
+      </div>
     )
   }
 
   return (
     <div className="space-y-8">
+      <TeamTabs />
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-fg">Team</h1>
+          <h1 className="text-2xl font-semibold tracking-tight text-fg">Team & org</h1>
           <p className="mt-1 text-sm text-fg-dim">
-            Who can see this project's chats and memory, and what they can change.
+            Who can open this project's chats and memory, and what each person can change.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">

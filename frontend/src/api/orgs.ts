@@ -67,6 +67,16 @@ export const orgsApi = {
   createInvite(orgId: string, input: { email: string; role?: string }) {
     return apiRequest<OrgInvite>(`/orgs/${orgId}/invites`, { method: 'POST', body: input })
   },
+  listInvites(orgId: string) {
+    return apiRequest<ListResponse<OrgInvite>>(`/orgs/${orgId}/invites`)
+  },
+  revokeInvite(orgId: string, inviteId: string) {
+    return apiRequest<{ revoked: boolean }>(`/orgs/${orgId}/invites/${inviteId}`, { method: 'DELETE' })
+  },
+  /** Join an org with the code from an invite email (POST /orgs/invites/accept). */
+  acceptInvite(token: string) {
+    return apiRequest<OrganizationMember>('/orgs/invites/accept', { method: 'POST', body: { token } })
+  },
   setCapture(projectId: string, enabled: boolean) {
     return apiRequest<{ project_id: string; enabled: boolean }>(`/projects/${projectId}/capture`, {
       method: 'PUT',
@@ -119,7 +129,13 @@ export type OffboardResult = {
 
 export type OrgInvite = {
   id: string
+  org_id?: string
   email: string
   role: string
   token?: string
+  invited_by?: string
+  created_at?: string
+  expires_at?: string
+  accepted_at?: string
+  revoked_at?: string
 }
