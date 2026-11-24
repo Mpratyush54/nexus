@@ -159,7 +159,7 @@ internal sealed class FilePreviewPanel : UserControl
         var dialog = new ContentDialog { XamlRoot = root, Content = panel, CloseButtonText = "Close" };
         panel.CloseRequested += () => dialog.Hide();
         _ = panel.ShowAsync(reference, workspace);
-        try { await dialog.ShowAsync(); } catch (Exception) { /* another dialog is open */ }
+        try { await dialog.ShowThemedAsync(); } catch (Exception) { /* another dialog is open */ }
     }
 
     // The workspace first; with no workspace, each known project folder in

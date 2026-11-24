@@ -118,7 +118,7 @@ internal static class CaptureSetup
         };
         allow.Checked += (_, _) => dialog.IsPrimaryButtonEnabled = true;
         allow.Unchecked += (_, _) => dialog.IsPrimaryButtonEnabled = false;
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return null;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return null;
         return await SaveAsync(owner, chooser.Selected);
     }
 

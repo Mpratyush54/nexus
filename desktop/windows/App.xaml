@@ -56,7 +56,8 @@
             <x:Double x:Key="TextControlThemeMinHeight">30</x:Double>
 
             <ResourceDictionary.ThemeDictionaries>
-                <!-- Dark: true-black canvas, surfaces lifted ~3%, hairline white
+                <!-- Dark: the brand ink canvas (#0E0F0E, as in the installer and
+                     the landing page), surfaces lifted ~3%, hairline white
                      borders, white-alpha hover/selection; no grey fills. -->
                 <ResourceDictionary x:Key="Dark">
                     <!-- Brand gold on ink, as in the logo, landing page, portal
@@ -69,8 +70,6 @@
                     <SolidColorBrush x:Key="AccentTextFillColorPrimaryBrush" Color="#E8BB67"/>
                     <SolidColorBrush x:Key="AccentTextFillColorSecondaryBrush" Color="#F0CE8D"/>
                     <SolidColorBrush x:Key="AccentTextFillColorTertiaryBrush" Color="#D9A752"/>
-                    <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#0E0F0E"/>
-                    <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#0E0F0E"/>
                     <SolidColorBrush x:Key="ToggleSwitchFillOnPressed" Color="#D9A752"/>
                     <SolidColorBrush x:Key="ToggleSwitchKnobFillOnPressed" Color="#0E0F0E"/>
                     <Color x:Key="SystemAccentColor">#E8BB67</Color>
@@ -96,16 +95,16 @@
                     <SolidColorBrush x:Key="NexusDangerBrush" Color="#F28B8B"/>
                     <SolidColorBrush x:Key="NexusDangerFillBrush" Color="#1AF28B8B"/>
                     <SolidColorBrush x:Key="NexusHoverFillBrush" Color="#0DFFFFFF"/>
-                    <Color x:Key="NexusSidebarColor">#D90E0E0E</Color>
-                    <Color x:Key="NexusCanvasColor">#000000</Color>
-                    <SolidColorBrush x:Key="NexusCanvasBrush" Color="#000000"/>
-                    <SolidColorBrush x:Key="NexusSurfaceBrush" Color="#141414"/>
+                    <Color x:Key="NexusSidebarColor">#D90E0F0E</Color>
+                    <Color x:Key="NexusCanvasColor">#0E0F0E</Color>
+                    <SolidColorBrush x:Key="NexusCanvasBrush" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="NexusSurfaceBrush" Color="#171817"/>
                     <SolidColorBrush x:Key="NexusHairlineBrush" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="NexusMutedTextBrush" Color="#A3A3A3"/>
                     <SolidColorBrush x:Key="NexusAccentBrush" Color="#E8BB67"/>
                     <SolidColorBrush x:Key="NexusTealBrush" Color="#A3A3A3"/>
                     <SolidColorBrush x:Key="NexusAmberBrush" Color="#FBBF24"/>
-                    <SolidColorBrush x:Key="NexusUserFillBrush" Color="#1A1A1A"/>
+                    <SolidColorBrush x:Key="NexusUserFillBrush" Color="#1D1E1D"/>
                     <SolidColorBrush x:Key="NexusAccentBorderBrush" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="NexusAccentFillBrush" Color="#12FFFFFF"/>
 
@@ -117,24 +116,36 @@
                     <SolidColorBrush x:Key="DefaultTextForegroundThemeBrush" Color="#F2F2F2"/>
 
                     <!-- Surfaces and strokes -->
-                    <SolidColorBrush x:Key="ApplicationPageBackgroundThemeBrush" Color="#000000"/>
-                    <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="#0F0F0F"/>
+                    <SolidColorBrush x:Key="ApplicationPageBackgroundThemeBrush" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="CardBackgroundFillColorDefaultBrush" Color="#131413"/>
                     <SolidColorBrush x:Key="CardStrokeColorDefaultBrush" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="ControlStrokeColorDefaultBrush" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="ControlStrokeColorSecondaryBrush" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="DividerStrokeColorDefaultBrush" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="LayerFillColorDefaultBrush" Color="#00000000"/>
-                    <SolidColorBrush x:Key="SolidBackgroundFillColorBaseBrush" Color="#000000"/>
+                    <SolidColorBrush x:Key="SolidBackgroundFillColorBaseBrush" Color="#0E0F0E"/>
 
-                    <!-- Accent: brand gold, ink text on it -->
+                    <!-- Accent fills: brand gold, ink text on it -->
                     <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#E8BB67"/>
                     <SolidColorBrush x:Key="AccentFillColorSecondaryBrush" Color="#F0CE8D"/>
                     <SolidColorBrush x:Key="AccentFillColorTertiaryBrush" Color="#D9A752"/>
-                    <SolidColorBrush x:Key="AccentButtonBackground" Color="#E8BB67"/>
-                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#F0CE8D"/>
-                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#D9A752"/>
+                    <!-- Primary buttons (AccentButtonStyle and dialog primary
+                         buttons): cream with ink text, as in the installer and
+                         the web portal. Gold stays the accent. -->
+                    <SolidColorBrush x:Key="AccentButtonBackground" Color="#F2EFE6"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#FBF9F3"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#E4E1DB"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundDisabled" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="AccentButtonForeground" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundDisabled" Color="#66F2EFE6"/>
                     <SolidColorBrush x:Key="AccentButtonBorderBrush" Color="#00000000"/>
+                    <SolidColorBrush x:Key="AccentButtonBorderBrushPointerOver" Color="#00000000"/>
+                    <SolidColorBrush x:Key="AccentButtonBorderBrushPressed" Color="#00000000"/>
+                    <SolidColorBrush x:Key="AccentButtonBorderBrushDisabled" Color="#00000000"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillBrush" Color="#F2EFE6"/>
+                    <SolidColorBrush x:Key="NexusPrimaryInkBrush" Color="#0E0F0E"/>
 
                     <!-- Buttons: almost flat, hairline border -->
                     <SolidColorBrush x:Key="ButtonBackground" Color="#08FFFFFF"/>
@@ -161,13 +172,13 @@
                     <SolidColorBrush x:Key="ComboBoxBorderBrushPressed" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="ComboBoxBorderBrushFocused" Color="#1FFFFFFF"/>
                     <SolidColorBrush x:Key="ComboBoxForeground" Color="#D4D4D4"/>
-                    <SolidColorBrush x:Key="ComboBoxDropDownBackground" Color="#111111"/>
+                    <SolidColorBrush x:Key="ComboBoxDropDownBackground" Color="#161716"/>
                     <SolidColorBrush x:Key="ComboBoxDropDownBorderBrush" Color="#1FFFFFFF"/>
 
                     <!-- Text inputs: quiet fill, hairline border, no accent underline -->
                     <SolidColorBrush x:Key="TextControlBackground" Color="#06FFFFFF"/>
                     <SolidColorBrush x:Key="TextControlBackgroundPointerOver" Color="#0AFFFFFF"/>
-                    <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="#0A0A0A"/>
+                    <SolidColorBrush x:Key="TextControlBackgroundFocused" Color="#0B0C0B"/>
                     <SolidColorBrush x:Key="TextControlBorderBrush" Color="#14FFFFFF"/>
                     <SolidColorBrush x:Key="TextControlBorderBrushPointerOver" Color="#1FFFFFFF"/>
                     <SolidColorBrush x:Key="TextControlBorderBrushFocused" Color="#33FFFFFF"/>
@@ -178,9 +189,9 @@
                     <SolidColorBrush x:Key="TextControlPlaceholderForegroundPointerOver" Color="#737373"/>
 
                     <!-- Navigation chrome -->
-                    <SolidColorBrush x:Key="NavigationViewContentBackground" Color="#000000"/>
+                    <SolidColorBrush x:Key="NavigationViewContentBackground" Color="#0E0F0E"/>
                     <SolidColorBrush x:Key="NavigationViewContentGridBorderBrush" Color="#14FFFFFF"/>
-                    <SolidColorBrush x:Key="NavigationViewExpandedPaneBackground" Color="#0A0A0A"/>
+                    <SolidColorBrush x:Key="NavigationViewExpandedPaneBackground" Color="#0B0C0B"/>
                     <SolidColorBrush x:Key="NavigationViewItemBackgroundPointerOver" Color="#0AFFFFFF"/>
                     <SolidColorBrush x:Key="NavigationViewItemBackgroundSelected" Color="#10FFFFFF"/>
                     <SolidColorBrush x:Key="NavigationViewItemBackgroundSelectedPointerOver" Color="#14FFFFFF"/>
@@ -202,9 +213,9 @@
                     <SolidColorBrush x:Key="ExpanderContentBackground" Color="#00000000"/>
                     <SolidColorBrush x:Key="ExpanderHeaderBorderBrush" Color="#0FFFFFFF"/>
                     <SolidColorBrush x:Key="ExpanderContentBorderBrush" Color="#0FFFFFFF"/>
-                    <SolidColorBrush x:Key="FlyoutPresenterBackground" Color="#111111"/>
-                    <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="#111111"/>
-                    <SolidColorBrush x:Key="ContentDialogBackground" Color="#0F0F0F"/>
+                    <SolidColorBrush x:Key="FlyoutPresenterBackground" Color="#161716"/>
+                    <SolidColorBrush x:Key="MenuFlyoutPresenterBackground" Color="#161716"/>
+                    <SolidColorBrush x:Key="ContentDialogBackground" Color="#151615"/>
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
                     <!-- Brand gold deepened for white (WCAG AA). WinUI's control
@@ -233,13 +244,22 @@
                     <Color x:Key="SystemAccentColorDark3">#6E4B0E</Color>
                     <SolidColorBrush x:Key="TextOnAccentFillColorPrimaryBrush" Color="#FFFFFF"/>
                     <SolidColorBrush x:Key="AccentFillColorDefaultBrush" Color="#9A6A18"/>
-                    <SolidColorBrush x:Key="AccentButtonBackground" Color="#9A6A18"/>
-                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#A87A26"/>
-                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#8A5F12"/>
-                    <SolidColorBrush x:Key="AccentButtonForeground" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#FFFFFF"/>
-                    <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#F2EFE6"/>
+                    <!-- Primary buttons: brand ink with cream text, the web
+                         portal's light primary. Gold stays the accent. -->
+                    <SolidColorBrush x:Key="AccentButtonBackground" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPointerOver" Color="#262826"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundPressed" Color="#000000"/>
+                    <SolidColorBrush x:Key="AccentButtonBackgroundDisabled" Color="#0F000000"/>
+                    <SolidColorBrush x:Key="AccentButtonForeground" Color="#F2EFE6"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundPointerOver" Color="#F2EFE6"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundPressed" Color="#E4E1DB"/>
+                    <SolidColorBrush x:Key="AccentButtonForegroundDisabled" Color="#71717A"/>
                     <SolidColorBrush x:Key="AccentButtonBorderBrush" Color="#00000000"/>
+                    <SolidColorBrush x:Key="AccentButtonBorderBrushPointerOver" Color="#00000000"/>
+                    <SolidColorBrush x:Key="AccentButtonBorderBrushPressed" Color="#00000000"/>
+                    <SolidColorBrush x:Key="AccentButtonBorderBrushDisabled" Color="#00000000"/>
+                    <SolidColorBrush x:Key="NexusPrimaryFillBrush" Color="#0E0F0E"/>
+                    <SolidColorBrush x:Key="NexusPrimaryInkBrush" Color="#F2EFE6"/>
                     <SolidColorBrush x:Key="ToggleButtonBackgroundChecked" Color="#9A6A18"/>
                     <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPointerOver" Color="#A87A26"/>
                     <SolidColorBrush x:Key="ToggleButtonBackgroundCheckedPressed" Color="#8A5F12"/>

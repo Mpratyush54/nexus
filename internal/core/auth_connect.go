@@ -92,6 +92,14 @@ func authConnect(ctx context.Context, args json.RawMessage, client *http.Client)
 	}
 	out["token_valid"] = true
 	out["message"] = "Connected."
+	// Who the token belongs to (GET /users/me, the same call the web app
+	// makes), so the app can say "Signed in as @name" and knows its own user
+	// id for roles. A server without it still connects; the name stays empty.
+	identity, identityErr := fetchIdentity(ctx, client, server, token)
+	if identityErr == nil {
+		out["user_id"] = identity.ID
+		out["username"] = identity.Username
+	}
 	if !request.Save {
 		return out, nil
 	}
@@ -100,12 +108,112 @@ func authConnect(ctx context.Context, args json.RawMessage, client *http.Client)
 	if err := config.ClearCredentials(); err != nil {
 		return nil, err
 	}
-	if err := config.SaveFile(config.File{ServerURL: server, Token: token}); err != nil {
+	if err := config.SaveFile(config.File{ServerURL: server, Token: token, UserID: identity.ID, Username: identity.Username}); err != nil {
 		return nil, err
 	}
 	out["saved"] = true
 	out["status"] = authStatus()
 	return out, nil
+}
+
+// accountIdentity is the signed-in person as GET /users/me reports it.
+type accountIdentity struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+}
+
+func fetchIdentity(ctx context.Context, client *http.Client, server, token string) (accountIdentity, error) {
+	var identity accountIdentity
+	status, body, err := probe(ctx, client, strings.TrimRight(server, "/")+"/users/me", token)
+	if err != nil {
+		return identity, err
+	}
+	if status != http.StatusOK {
+		return identity, fmt.Errorf("users/me answered %d", status)
+	}
+	if err := json.Unmarshal(body, &identity); err != nil {
+		return identity, err
+	}
+	identity.ID = strings.TrimSpace(identity.ID)
+	identity.Username = strings.TrimSpace(identity.Username)
+	if identity.ID == "" {
+		return identity, errors.New("users/me returned no id")
+	}
+	return identity, nil
+}
+
+// identityRefreshTimeout bounds the lazy identity lookup behind auth.status.
+const identityRefreshTimeout = 4 * time.Second
+
+// authStatusWithIdentity is auth.status for a sign-in saved without a name
+// (token sign-in on an older build): it asks the server who the token
+// belongs to once and keeps the answer, so the account shows a username
+// and organization roles resolve. Any failure leaves the status as it was.
+func authStatusWithIdentity(ctx context.Context) map[string]any {
+	status := authStatus()
+	if status["signed_in"] != true {
+		return status
+	}
+	if id, _ := status["user_id"].(string); id != "" {
+		if name, _ := status["username"].(string); name != "" {
+			return status
+		}
+	}
+	cfg, err := config.LoadFile()
+	server := strings.TrimSpace(cfg.ServerURL)
+	if v := firstEnv("CENTRAL_SERVER_URL", "NEXUS_SERVER"); v != "" {
+		server = v
+	}
+	if err != nil || server == "" || strings.TrimSpace(cfg.Token) == "" {
+		return status
+	}
+	ctx, cancel := context.WithTimeout(ctx, identityRefreshTimeout)
+	defer cancel()
+	identity, err := fetchIdentity(ctx, &http.Client{Timeout: identityRefreshTimeout}, server, strings.TrimSpace(cfg.Token))
+	if err != nil {
+		return status
+	}
+	if err := config.SaveFile(config.File{UserID: identity.ID, Username: identity.Username}); err != nil {
+		return status
+	}
+	return authStatus()
+}
+
+// netProbeTimeout keeps the app's reachability check short: it runs on a
+// schedule while the server is down and must not pile up.
+const netProbeTimeout = 4 * time.Second
+
+// netProbe asks the configured server's /healthz whether it answers at all.
+// The OS network state (net.status) says nothing about a server that is
+// down or unreachable; the desktop uses this to show and clear its offline
+// banner. The raw error stays in "detail" for the log, never for people.
+func netProbe(ctx context.Context) map[string]any {
+	out := map[string]any{"reachable": false, "configured": false}
+	cfg, _ := config.LoadFile()
+	server := strings.TrimRight(strings.TrimSpace(cfg.ServerURL), "/")
+	if v := firstEnv("CENTRAL_SERVER_URL", "NEXUS_SERVER"); v != "" {
+		server = strings.TrimRight(v, "/")
+	}
+	parsed, err := url.Parse(server)
+	if server == "" || err != nil || parsed.Host == "" {
+		return out
+	}
+	out["configured"] = true
+	out["host"] = parsed.Host
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, netProbeTimeout)
+	defer cancel()
+	status, _, err := probe(ctx, &http.Client{Timeout: netProbeTimeout}, server+"/healthz", "")
+	out["ms"] = time.Since(started).Milliseconds()
+	if err != nil {
+		out["detail"] = err.Error()
+		return out
+	}
+	out["status"] = status
+	// Any HTTP answer means the server is there; only 5xx from /healthz
+	// (or a proxy in front of a stopped server) counts as down.
+	out["reachable"] = status < http.StatusInternalServerError
+	return out
 }
 
 func probe(ctx context.Context, client *http.Client, target, token string) (int, []byte, error) {

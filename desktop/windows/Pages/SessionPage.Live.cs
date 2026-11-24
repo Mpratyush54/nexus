@@ -311,7 +311,7 @@ public sealed partial class SessionPage
             };
             SetComposerStatus("Waiting for your approval…");
             var choice = ContentDialogResult.None;
-            try { choice = await dialog.ShowAsync(); }
+            try { choice = await dialog.ShowThemedAsync(); }
             catch (Exception) { /* another dialog is open: treat as deny */ }
             var allow = choice == ContentDialogResult.Primary;
             var response = await Call("live.approve", new { live_id = liveID, request_id = requestID, allow });

@@ -142,6 +142,7 @@ func Methods() []string {
 		"uploads.retry",
 		"cache.clear",
 		"net.status",
+		"net.probe",
 		"teleport.redaction_preview",
 		"teleport.send",
 		"teleport.restore_code",
@@ -228,6 +229,8 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		return map[string]any{"cleared": true}, nil
 	case "net.status":
 		return map[string]any{"online": deps.Online}, nil
+	case "net.probe":
+		return netProbe(ctx), nil
 	case "uploads.status":
 		n := 0
 		if deps.Outbox != nil {
@@ -614,7 +617,7 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		}
 		return authStatus(), nil
 	case "auth.status":
-		return authStatus(), nil
+		return authStatusWithIdentity(ctx), nil
 	case "auth.connect":
 		return authConnect(ctx, args, nil)
 	case "capture.pause":

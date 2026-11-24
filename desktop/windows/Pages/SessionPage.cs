@@ -422,7 +422,7 @@ public sealed partial class SessionPage : NexusPage
             var selection = new TextBox { Text = text, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinWidth = 480, MaxHeight = 520, Padding = new Thickness(14) };
             selection.Loaded += (_, _) => { selection.Focus(FocusState.Programmatic); selection.SelectAll(); };
             var dialog = new ContentDialog { XamlRoot = XamlRoot, Title = "Conversation text", Content = selection, PrimaryButtonText = "Copy all", CloseButtonText = "Close" };
-            if (await dialog.ShowAsync() == ContentDialogResult.Primary) { var data = new DataPackage(); data.SetText(text); Clipboard.SetContent(data); }
+            if (await dialog.ShowThemedAsync() == ContentDialogResult.Primary) { var data = new DataPackage(); data.SetText(text); Clipboard.SetContent(data); }
         };
         menu.Items.Add(selectConversation);
         more.Flyout = menu;
@@ -1608,9 +1608,7 @@ public sealed partial class SessionPage : NexusPage
 
     private static Brush Surface(string key, Windows.UI.Color fallback)
     {
-        return Application.Current?.Resources.TryGetValue(key, out var value) == true && value is Brush brush
-            ? brush
-            : new SolidColorBrush(fallback);
+        return ThemeService.Brush(key, fallback);
     }
 
     private static string Humanize(string iso)
@@ -2060,7 +2058,7 @@ public sealed partial class SessionPage : NexusPage
         {
             dialog.PrimaryButtonText = "";
         }
-        var result = await dialog.ShowAsync();
+        var result = await dialog.ShowThemedAsync();
         if (result == ContentDialogResult.Primary && child.Id.Length > 0)
         {
             MainWindow.Current?.OpenSession(child.Id);
@@ -2350,7 +2348,7 @@ public sealed partial class SessionPage : NexusPage
             DefaultButton = ContentDialogButton.Close,
             XamlRoot = XamlRoot
         };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return false;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return false;
         _trustedCursorFolders.Add(normalized);
         return true;
     }
@@ -3730,7 +3728,7 @@ public sealed partial class SessionPage : NexusPage
             XamlRoot = XamlRoot,
             DefaultButton = ContentDialogButton.Close
         };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary)
         {
             return;
         }
@@ -3754,7 +3752,7 @@ public sealed partial class SessionPage : NexusPage
                 XamlRoot = XamlRoot,
                 DefaultButton = ContentDialogButton.Close
             };
-            if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+            if (await confirm.ShowThemedAsync() != ContentDialogResult.Primary) return;
         }
         var response = selectedScope switch
         {
@@ -3888,7 +3886,7 @@ public sealed partial class SessionPage : NexusPage
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = XamlRoot
         };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary)
         {
             return;
         }

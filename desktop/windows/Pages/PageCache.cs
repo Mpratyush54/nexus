@@ -42,6 +42,23 @@ public static class PageCache
         return page;
     }
 
+    /// <summary>
+    /// Drops every cached page (a theme switch: their code-built visuals hold
+    /// brushes of the previous theme). Pages unsubscribe from shell events
+    /// when unloaded, so dropped pages are collectable.
+    /// </summary>
+    public static void Reset()
+    {
+        _homeHub = null;
+        _dashboard = null;
+        _memory = null;
+        _settings = null;
+        _agentSetup = null;
+        _sessions.Clear();
+        _sessionLru.Clear();
+        _timelineProjectId = "";
+    }
+
     public static void InvalidateProject(string? previousProjectId, string newProjectId)
     {
         if (string.Equals(previousProjectId ?? "", newProjectId, StringComparison.OrdinalIgnoreCase))

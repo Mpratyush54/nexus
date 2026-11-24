@@ -206,7 +206,7 @@ public sealed partial class SettingsPage : NexusPage
             XamlRoot = XamlRoot,
             DefaultButton = ContentDialogButton.Close
         };
-        if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await confirm.ShowThemedAsync() != ContentDialogResult.Primary) return;
         var response = await Call(NxMethods.AuthLogout);
         if (!response.Ok)
         {
@@ -351,7 +351,7 @@ public sealed partial class SettingsPage : NexusPage
             PrimaryButtonText = "Stop monitoring", CloseButtonText = "Cancel", XamlRoot = XamlRoot,
             DefaultButton = ContentDialogButton.Close
         };
-        if (await confirm.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await confirm.ShowThemedAsync() != ContentDialogResult.Primary) return;
         var result = await Call(NxMethods.CaptureConfigure, new { workspaces = _approved.Where(p => !p.Equals(path, StringComparison.OrdinalIgnoreCase)).ToArray(), confirm = true });
         Notify(result.Ok ? "Workspace monitoring stopped." : result.Error ?? "Could not stop monitoring.", !result.Ok);
         await RefreshCaptureAsync();

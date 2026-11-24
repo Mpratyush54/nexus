@@ -276,7 +276,7 @@ public sealed class TeleportPage : NexusPage
             Content = new TextBlock { Text = $"{_codeFiles} verified files will be copied to:\n{destination}\n\nNo existing files are overwritten and no commands are run.", TextWrapping = TextWrapping.Wrap },
             PrimaryButtonText = "Restore copy", CloseButtonText = "Cancel", XamlRoot = XamlRoot
         };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
         _preview.Text = "Downloading and verifying code…";
         var response = await Call(NxMethods.TeleportRestoreCode, new { session_id = _sessionId, dest = destination });
         _preview.Text = response.Ok ? "Code restored to " + destination + ". The chat can be viewed here. To run an agent against this copy, select it as your Nexus workspace first." : response.Error ?? "Restore failed.";

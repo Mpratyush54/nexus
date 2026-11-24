@@ -58,6 +58,7 @@ namespace Nexus.Core
         public const string UploadsResolveLargeFile = "uploads.resolve_large_file";
         public const string CacheClear = "cache.clear";
         public const string NetStatus = "net.status";
+        public const string NetProbe = "net.probe";
         public const string TeleportRedactionPreview = "teleport.redaction_preview";
         public const string TeleportSend = "teleport.send";
         public const string TeleportRestoreCode = "teleport.restore_code";

@@ -86,7 +86,7 @@ internal sealed class PromptNavigator : UserControl
     private void Render()
     {
         _canvas.Children.Clear(); _markers.Clear();
-        var ink = Application.Current.Resources.TryGetValue("TextFillColorPrimaryBrush", out var resource) && resource is Brush brush ? brush : new SolidColorBrush(Microsoft.UI.Colors.White);
+        var ink = ThemeService.Brush("TextFillColorPrimaryBrush", Microsoft.UI.Colors.White);
         // A faint rail ties the markers together so they read as an outline.
         _track.Background = ink;
         _track.Height = Math.Max(0, _canvas.ActualHeight - 4);

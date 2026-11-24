@@ -87,7 +87,7 @@ internal static class ReportDialogs
                 DefaultButton = ContentDialogButton.Primary,
                 XamlRoot = root,
             };
-            var choice = await dialog.ShowAsync();
+            var choice = await dialog.ShowThemedAsync();
             if (always.IsChecked == true)
             {
                 AppPrefs.Data.AutoSendCrashReports = true;
@@ -170,7 +170,7 @@ internal static class ReportDialogs
                 AppDiagnostics.OpenLogsFolder();
             };
             AutomationProperties.SetName(note, "What happened?");
-            if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+            if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
 
             var outcome = await AppDiagnostics.SendAsync(Build(), signed: true);
             await ShowConfirmationAsync(root, outcome);
@@ -223,7 +223,7 @@ internal static class ReportDialogs
             DefaultButton = ContentDialogButton.Close,
             XamlRoot = root,
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await dialog.ShowThemedAsync() == ContentDialogResult.Primary)
         {
             var data = new DataPackage();
             data.SetText(outcome.ReportId);

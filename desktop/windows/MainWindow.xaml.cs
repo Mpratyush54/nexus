@@ -96,10 +96,12 @@ public sealed partial class MainWindow : Window
         if (Microsoft.UI.Composition.SystemBackdrops.MicaController.IsSupported())
             SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base };
         else
-            RootGrid.Background = (Brush)Application.Current.Resources["NexusCanvasBrush"];
+            RootGrid.Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
         ThemeService.Apply(this);
         ThemeService.Watch(this);
-        ThemeService.Changed += (_, _) => { _chatRows.Clear(); RenderChats(); _projectSwitcher.Refresh(); };
+        // After the handler that changed the theme has returned (Settings'
+        // picker), so the page it lives on can be rebuilt.
+        ThemeService.Changed += (_, _) => DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, RebuildForTheme);
         Motion.ApplyPageTransitions(ContentFrame);
         AppWindow.Closing += OnClosing;
         TeleportBadge.Visibility = Visibility.Collapsed;
@@ -121,6 +123,37 @@ public sealed partial class MainWindow : Window
     }
 
     private bool _crashOfferDone;
+
+    // A live theme switch: XAML-bound resources follow the root's theme by
+    // themselves; everything built in code is rebuilt with brushes of the
+    // new theme (ThemeService.Lookup). The open page is recreated in place.
+    private void RebuildForTheme()
+    {
+        if (SystemBackdrop is null && _setup is null) RootGrid.Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
+        _chatRows.Clear();
+        _shownChatRows.Clear();
+        _liveChatRows.Clear();
+        ChatList.ItemTemplate = null;
+        ChatList.ItemsSource = null;
+        RenderChats();
+        _projectSwitcher.Refresh();
+        _setup?.ThemeChanged();
+        var current = ContentFrame.Content;
+        PageCache.Reset();
+        if (_setup is not null) return;
+        ContentFrame.Content = null;
+        switch (current)
+        {
+            case SessionPage session when session.SessionId.Length > 0: OpenSession(session.SessionId); break;
+            case MemoryPage: ShowPage(PageCache.Memory); break;
+            case SettingsPage: ShowPage(PageCache.Settings); break;
+            case AgentSetupPage: ShowPage(PageCache.AgentSetup); break;
+            case TeleportPage: OpenTeleport(); break;
+            case HomeHubPage: ShowTimeline(); break;
+            default: ShowDashboard(); break;
+        }
+        UpdateFooterSelection();
+    }
 
     private void OfferCrashReports()
     {
@@ -1437,7 +1470,7 @@ public sealed partial class MainWindow : Window
                     CloseButtonText = "Close",
                     XamlRoot = Content.XamlRoot
                 };
-                _ = dialog.ShowAsync();
+                _ = dialog.ShowThemedAsync();
                 return;
             }
             await Task.Run(() => App.InitializeCore());
@@ -1538,7 +1571,7 @@ public sealed partial class MainWindow : Window
             XamlRoot = Content.XamlRoot,
             DefaultButton = ContentDialogButton.Primary
         };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary)
         {
             return;
         }
@@ -1597,7 +1630,7 @@ public sealed partial class MainWindow : Window
             content.Children.Add(new ScrollViewer { MaxHeight = 240, Content = new TextBlock { Text = prompt, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } });
             content.Children.Add(new TextBlock { Text = "Allowing this turn lets the agent read and modify this workspace using its installed permissions. Approval applies only to this message.", TextWrapping = TextWrapping.Wrap });
             _desktopApproval = new ContentDialog { Title = "Allow browser request?", Content = content, PrimaryButtonText = "Allow this turn", CloseButtonText = "Decline", DefaultButton = ContentDialogButton.Close, XamlRoot = Content.XamlRoot };
-            var answer = await _desktopApproval.ShowAsync();
+            var answer = await _desktopApproval.ShowThemedAsync();
             await App.Core.CallAsync("desktop.execution.approve", new { request_id = id, approved = answer == ContentDialogResult.Primary });
         }
         catch (Exception ex)

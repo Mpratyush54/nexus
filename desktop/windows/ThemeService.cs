@@ -7,11 +7,10 @@ namespace Nexus;
 /// <summary>
 /// Appearance: follow Windows, or always light / always dark.
 ///
-/// The choice applies at launch through Application.RequestedTheme, so
-/// every brush resolves for the right theme. Switching while Nexus runs sets
-/// the window root's RequestedTheme (XAML-bound resources follow it) and
-/// recolours the brushes of the app's active theme dictionary in place, so
-/// pages that looked brushes up in code follow too, without a restart.
+/// The choice applies at launch through Application.RequestedTheme. Switching
+/// while Nexus runs sets the window root's RequestedTheme (XAML-bound
+/// resources follow it), and raises Changed so the shell rebuilds whatever
+/// was built in code with brushes from <see cref="Lookup"/>.
 /// </summary>
 internal static class ThemeService
 {
@@ -19,7 +18,6 @@ internal static class ThemeService
 
     public static event EventHandler? Changed;
 
-    private static readonly Dictionary<SolidColorBrush, Windows.UI.Color> s_original = new(ReferenceEqualityComparer.Instance);
     private static readonly Windows.UI.ViewManagement.UISettings s_ui = new();
 
     public static string Preference => Normalize(AppPrefs.Data.Theme);
@@ -84,49 +82,73 @@ internal static class ThemeService
         Apply(window);
     }
 
+    /// <summary>Shows a dialog in the theme in effect now.</summary>
+    public static Windows.Foundation.IAsyncOperation<Microsoft.UI.Xaml.Controls.ContentDialogResult> ShowThemedAsync(this Microsoft.UI.Xaml.Controls.ContentDialog dialog)
+    {
+        Prepare(dialog);
+        return dialog.ShowAsync();
+    }
+
     /// <summary>Applies the saved preference to the window (also on system theme changes).</summary>
     public static void Apply(Window window)
     {
         var dark = EffectiveIsDark;
+        var changed = s_applied is { } previous && previous != dark;
+        s_applied = dark;
         if (window.Content is FrameworkElement root && !HighContrast)
             root.RequestedTheme = dark ? ElementTheme.Dark : ElementTheme.Light;
-        MirrorActiveDictionary(dark);
         ApplyCaptionButtons(window, dark);
-        Changed?.Invoke(null, EventArgs.Empty);
+        if (changed || s_raiseAlways) Changed?.Invoke(null, EventArgs.Empty);
+        s_raiseAlways = false;
     }
 
-    // Brushes code looked up through Application.Resources come from the
-    // theme dictionary of the launch theme. When the effective theme differs,
-    // copy the other dictionary's colours onto those same brush objects.
-    private static void MirrorActiveDictionary(bool dark)
+    private static bool? s_applied;
+    private static bool s_raiseAlways;
+
+    /// <summary>The element theme every surface built in code should use.</summary>
+    public static ElementTheme ElementTheme => HighContrast ? ElementTheme.Default : EffectiveIsDark ? ElementTheme.Dark : ElementTheme.Light;
+
+    // Application.Current.Resources resolves theme dictionaries for the theme
+    // Nexus was launched with, which cannot change while it runs. Code-built
+    // UI therefore looks its brushes up here: the theme dictionary for the
+    // theme in effect now (Nexus's own, then WinUI's defaults), falling back
+    // to the plain lookup. Pages are rebuilt on Changed, so nothing keeps a
+    // brush from the previous theme (this used to recolour shared brushes in
+    // place, which left code-built panels black on a light window).
+    public static object? Lookup(string key)
     {
-        if (HighContrast) return;
-        var resources = Application.Current.Resources;
-        var launchDark = Application.Current.RequestedTheme == ApplicationTheme.Dark;
-        if (!resources.ThemeDictionaries.TryGetValue(launchDark ? "Dark" : "Light", out var activeObject) || activeObject is not ResourceDictionary active)
-            return;
-        if (dark == launchDark)
-        {
-            foreach (var (brush, color) in s_original) brush.Color = color;
-            return;
-        }
-        if (!resources.ThemeDictionaries.TryGetValue(dark ? "Dark" : "Light", out var sourceObject) || sourceObject is not ResourceDictionary source)
-            return;
-        foreach (var (key, value) in source)
-        {
-            if (value is not SolidColorBrush wanted) continue;
-            // Both the app dictionary's brush and whatever a code lookup
-            // resolves to (it can come from the WinUI defaults) are recoloured.
-            if (active.TryGetValue(key, out var current) && current is SolidColorBrush brush) Recolor(brush, wanted.Color);
-            if (resources.TryGetValue(key, out var resolved) && resolved is SolidColorBrush lookedUp) Recolor(lookedUp, wanted.Color);
-        }
+        var resources = Application.Current?.Resources;
+        if (resources is null) return null;
+        var themes = HighContrast ? new[] { "HighContrast" } : EffectiveIsDark ? new[] { "Dark", "Default" } : new[] { "Light" };
+        foreach (var theme in themes)
+            if (TryFind(resources, theme, key, 0, out var value)) return value;
+        return resources.TryGetValue(key, out var any) ? any : null;
     }
 
-    private static void Recolor(SolidColorBrush brush, Windows.UI.Color color)
+    public static Brush Brush(string key, Windows.UI.Color fallback) =>
+        Lookup(key) is Brush brush ? brush : new SolidColorBrush(fallback);
+
+    public static Windows.UI.Color Color(string key, Windows.UI.Color fallback) => Lookup(key) switch
     {
-        if (!s_original.ContainsKey(brush)) s_original[brush] = brush.Color;
-        brush.Color = color;
+        Windows.UI.Color color => color,
+        SolidColorBrush brush => brush.Color,
+        _ => fallback
+    };
+
+    private static bool TryFind(ResourceDictionary dictionary, string theme, string key, int depth, out object? value)
+    {
+        value = null;
+        if (depth > 6) return false;
+        if (dictionary.ThemeDictionaries.TryGetValue(theme, out var themed) && themed is ResourceDictionary themeDictionary &&
+            themeDictionary.TryGetValue(key, out value))
+            return true;
+        foreach (var merged in dictionary.MergedDictionaries)
+            if (TryFind(merged, theme, key, depth + 1, out value)) return true;
+        return false;
     }
+
+    /// <summary>Dialogs live outside the window's element tree, so they take the app's launch theme unless told.</summary>
+    public static void Prepare(Microsoft.UI.Xaml.Controls.ContentDialog dialog) => dialog.RequestedTheme = ElementTheme;
 
     // The content runs under the caption buttons, so they are coloured to
     // match the theme instead of the system defaults.

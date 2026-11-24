@@ -726,7 +726,7 @@ public sealed partial class MemoryPage : NexusPage
             DefaultButton = ContentDialogButton.Close,
             XamlRoot = XamlRoot
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary) await Mutate(NxMethods.MemoryForget, id);
+        if (await dialog.ShowThemedAsync() == ContentDialogResult.Primary) await Mutate(NxMethods.MemoryForget, id);
     }
 
     private Button CloudAction(string label, Action click)
@@ -775,8 +775,6 @@ public sealed partial class MemoryPage : NexusPage
 
     private static Brush ResourceBrush(string key, Windows.UI.Color fallback)
     {
-        return Application.Current?.Resources.TryGetValue(key, out var value) == true && value is Brush brush
-            ? brush
-            : new SolidColorBrush(fallback);
+        return ThemeService.Brush(key, fallback);
     }
 }

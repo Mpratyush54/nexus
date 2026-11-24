@@ -35,8 +35,7 @@ internal static class NexusTokens
     public static readonly Windows.UI.Color BrandInk = Windows.UI.Color.FromArgb(255, 0x0E, 0x0F, 0x0E);
     public static readonly Windows.UI.Color BrandCream = Windows.UI.Color.FromArgb(255, 0xF4, 0xF1, 0xE9);
 
-    public static Brush Brush(string key, Windows.UI.Color fallback) =>
-        Application.Current?.Resources.TryGetValue(key, out var value) == true && value is Brush brush ? brush : new SolidColorBrush(fallback);
+    public static Brush Brush(string key, Windows.UI.Color fallback) => ThemeService.Brush(key, fallback);
 
     public static TextBlock PageTitle(string text) => new()
     {
@@ -288,8 +287,7 @@ internal static class Skeleton
             try
             {
                 var compositor = ElementCompositionPreview.GetElementVisual(host).Compositor;
-                var highlight = Application.Current.Resources.TryGetValue("NexusSkeletonHighlightColor", out var c) && c is Windows.UI.Color color
-                    ? color : Windows.UI.Color.FromArgb(36, 255, 255, 255);
+                var highlight = ThemeService.Color("NexusSkeletonHighlightColor", Windows.UI.Color.FromArgb(36, 255, 255, 255));
                 var clear = Windows.UI.Color.FromArgb(0, highlight.R, highlight.G, highlight.B);
                 brush = compositor.CreateLinearGradientBrush();
                 brush.MappingMode = CompositionMappingMode.Absolute;

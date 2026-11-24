@@ -504,7 +504,7 @@ public sealed partial class MemoryPage
                 deferral.Complete();
             }
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary && saved is { ValueKind: JsonValueKind.Object } updated)
+        if (await dialog.ShowThemedAsync() == ContentDialogResult.Primary && saved is { ValueKind: JsonValueKind.Object } updated)
         {
             ReplaceCard(id, updated);
         }
@@ -544,7 +544,7 @@ public sealed partial class MemoryPage
             XamlRoot = XamlRoot
         };
         JsonElement? reverted = null;
-        var shown = dialog.ShowAsync();
+        var shown = dialog.ShowThemedAsync();
 
         var response = await Call(NxMethods.MemoryHistory, new { id });
         list.Children.Clear();

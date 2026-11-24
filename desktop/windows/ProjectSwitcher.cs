@@ -156,8 +156,8 @@ internal sealed class ProjectSwitcher : UserControl
             Foreground = new SolidColorBrush(color), HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center
         };
         AutomationProperties.SetName(_button, "Project: " + name + ". Switch project");
-        _button.Background = (Brush)Application.Current.Resources["NexusSurfaceBrush"];
-        _button.BorderBrush = (Brush)Application.Current.Resources["NexusHairlineBrush"];
+        _button.Background = ThemeService.Brush("NexusSurfaceBrush", Windows.UI.Color.FromArgb(255, 0x17, 0x18, 0x17));
+        _button.BorderBrush = ThemeService.Brush("NexusHairlineBrush", Windows.UI.Color.FromArgb(20, 255, 255, 255));
     }
 
     private void RenderList()

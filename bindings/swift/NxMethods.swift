@@ -55,6 +55,7 @@ public enum NxMethods {
     public static let uploadsResolveLargeFile = "uploads.resolve_large_file"
     public static let cacheClear = "cache.clear"
     public static let netStatus = "net.status"
+    public static let netProbe = "net.probe"
     public static let teleportRedactionPreview = "teleport.redaction_preview"
     public static let teleportSend = "teleport.send"
     public static let teleportRestoreCode = "teleport.restore_code"

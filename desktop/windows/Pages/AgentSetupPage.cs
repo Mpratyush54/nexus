@@ -979,7 +979,7 @@ public sealed partial class AgentSetupPage : NexusPage
             understand.Unchecked += (_, _) => dialog.IsPrimaryButtonEnabled = false;
             body.Children.Add(understand);
         }
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
 
         var done = await Core.CallAsync(RemoveMethod, new { agent, name, path, workspace = _workspace, dry_run = false });
         await UiThread.Resume(DispatcherQueue);
@@ -1024,7 +1024,7 @@ public sealed partial class AgentSetupPage : NexusPage
             PrimaryButtonText = writes.Count > 0 ? "Copy" : "", CloseButtonText = writes.Count > 0 ? "Cancel" : "Close",
             DefaultButton = writes.Count > 0 ? ContentDialogButton.Primary : ContentDialogButton.Close
         };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
 
         var done = await Core.CallAsync(NxMethods.AgentsSetupShare, new { item = JsonSerializer.Deserialize<object>(item.GetRawText()), from, to = targets, scope, workspace = _workspace, dry_run = false });
         await UiThread.Resume(DispatcherQueue);

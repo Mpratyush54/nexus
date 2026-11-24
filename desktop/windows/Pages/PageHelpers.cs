@@ -193,9 +193,7 @@ public class NexusPage : Page
 
     private static Brush ResourceBrush(string key, Windows.UI.Color fallback)
     {
-        return Application.Current?.Resources.TryGetValue(key, out var value) == true && value is Brush brush
-            ? brush
-            : new SolidColorBrush(fallback);
+        return ThemeService.Brush(key, fallback);
     }
 
     protected static Button Action(string label, Action click)

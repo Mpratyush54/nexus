@@ -156,6 +156,6 @@ internal static class TagEditor
             }
             finally { deferral.Complete(); }
         };
-        await dialog.ShowAsync();
+        await dialog.ShowThemedAsync();
     }
 }

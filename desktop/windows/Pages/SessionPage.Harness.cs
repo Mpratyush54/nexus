@@ -37,7 +37,7 @@ public sealed partial class SessionPage
             PrimaryButtonText = url.Length > 0 ? "Installation guide" : "OK", CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Close
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary && Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https")
+        if (await dialog.ShowThemedAsync() == ContentDialogResult.Primary && Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https")
         {
             try { Process.Start(new ProcessStartInfo(uri.ToString()) { UseShellExecute = true }); }
             catch (Exception ex) { SetComposerStatus("Could not open the installation guide: " + ex.Message); }

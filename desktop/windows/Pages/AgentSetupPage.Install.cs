@@ -104,7 +104,7 @@ public sealed partial class AgentSetupPage
             box.Unchecked += async (_, _) => await RefreshAsync();
         }
         _ = RefreshAsync();
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
 
         _status.Text = "Installing Nexus into your agents…";
         var done = await Core.CallAsync(InstallAllMethod, InstallArgs(false, share.IsChecked == true, memory.IsChecked == true, projectOnly.IsChecked == true));
@@ -122,7 +122,7 @@ public sealed partial class AgentSetupPage
             XamlRoot = XamlRoot, Title = "Nexus installed",
             Content = new ScrollViewer { Content = panel, MaxHeight = 480 },
             CloseButtonText = "Done", DefaultButton = ContentDialogButton.Close
-        }.ShowAsync();
+        }.ShowThemedAsync();
         await LoadAsync();
     }
 
@@ -153,7 +153,7 @@ public sealed partial class AgentSetupPage
             PrimaryButtonText = changes > 0 ? "Disconnect" : "", CloseButtonText = changes > 0 ? "Cancel" : "Close",
             DefaultButton = changes > 0 ? ContentDialogButton.Primary : ContentDialogButton.Close
         };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
 
         var removed = 0;
         var problems = new List<string>();

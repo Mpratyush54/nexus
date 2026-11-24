@@ -107,3 +107,67 @@ func TestAuthConnectUnreachableAndInvalidURL(t *testing.T) {
 		t.Fatal("expected an error for a non-http URL")
 	}
 }
+
+func identityServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	mux.HandleFunc("GET /projects", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	})
+	mux.HandleFunc("GET /users/me", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer good-token" {
+			http.Error(w, "nope", http.StatusUnauthorized)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"u-maya","username":"maya","email":"maya@example.test"}`))
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestAuthConnectSavesIdentity(t *testing.T) {
+	isolateAuthEnv(t)
+	server := identityServer(t)
+	out := callAuthConnect(t, map[string]any{"server_url": server.URL, "token": "good-token", "save": true})
+	if out["saved"] != true || out["username"] != "maya" || out["user_id"] != "u-maya" {
+		t.Fatalf("out = %+v", out)
+	}
+	cfg, err := config.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UserID != "u-maya" || cfg.Username != "maya" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+}
+
+func TestAuthStatusFillsMissingIdentity(t *testing.T) {
+	isolateAuthEnv(t)
+	server := identityServer(t)
+	if err := config.SaveFile(config.File{ServerURL: server.URL, Token: "good-token"}); err != nil {
+		t.Fatal(err)
+	}
+	status := authStatusWithIdentity(context.Background())
+	if status["username"] != "maya" || status["user_id"] != "u-maya" {
+		t.Fatalf("status = %+v", status)
+	}
+}
+
+func TestNetProbe(t *testing.T) {
+	isolateAuthEnv(t)
+	server := identityServer(t)
+	if err := config.SaveFile(config.File{ServerURL: server.URL, Token: "good-token"}); err != nil {
+		t.Fatal(err)
+	}
+	if out := netProbe(context.Background()); out["reachable"] != true || out["configured"] != true {
+		t.Fatalf("up: %+v", out)
+	}
+	server.Close()
+	if out := netProbe(context.Background()); out["reachable"] != false || out["detail"] == nil {
+		t.Fatalf("down: %+v", out)
+	}
+}

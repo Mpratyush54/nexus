@@ -52,8 +52,8 @@ public sealed class SetupWizardPage : NexusPage
     // The app's own palette (App.xaml): the brand gold accent, per theme, so the
     // guide looks like the shell it opens into.
     private static Brush Brand => NexusPalette.Accent;
-    private static Brush BrandFill => (Brush)Application.Current.Resources["AccentFillColorDefaultBrush"];
-    private static Brush OnBrand => (Brush)Application.Current.Resources["TextOnAccentFillColorPrimaryBrush"];
+    private static Brush BrandFill => ThemeService.Brush("AccentFillColorDefaultBrush", Windows.UI.Color.FromArgb(0x80, 0x80, 0x80, 0x80));
+    private static Brush OnBrand => ThemeService.Brush("TextOnAccentFillColorPrimaryBrush", Windows.UI.Color.FromArgb(0x80, 0x80, 0x80, 0x80));
 
     // The shell's accent button (App.xaml: gold with ink text, per theme).
     private static void BrandPrimary(Button button)
@@ -140,6 +140,15 @@ public sealed class SetupWizardPage : NexusPage
         Go(_index);
     }
 
+    /// <summary>A live theme switch: steps are rebuilt with the new theme's brushes.</summary>
+    public void ThemeChanged()
+    {
+        _views.Clear();
+        _railShown = -1;
+        foreach (var fill in _railFill) fill.Background = Brand;
+        Go(_index);
+    }
+
     /// <summary>Called by the shell after a nexus://auth callback completes.</summary>
     public void AccountChanged() => _ = RefreshAccountAsync();
 
@@ -218,7 +227,7 @@ public sealed class SetupWizardPage : NexusPage
             // Only the newly reached (or left) segment animates.
             Motion.FillX(_railFill[i], i == _index && i > _railShown ? 0f : was, target);
             _railLabels[i].FontWeight = i == _index ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
-            _railLabels[i].Foreground = i == _index ? (Brush)Application.Current.Resources["TextFillColorPrimaryBrush"] : NexusPalette.Muted;
+            _railLabels[i].Foreground = i == _index ? ThemeService.Brush("TextFillColorPrimaryBrush", Windows.UI.Color.FromArgb(0x80, 0x80, 0x80, 0x80)) : NexusPalette.Muted;
         }
         _railShown = _index;
         AutomationProperties.SetName(_rail, $"Setup progress, step {_index + 1} of {Steps.Length}, {Steps[_index].Name}");
@@ -393,7 +402,7 @@ public sealed class SetupWizardPage : NexusPage
             var dot = new Microsoft.UI.Xaml.Shapes.Ellipse
             {
                 Width = size, Height = size,
-                Fill = i % 3 == 0 ? Brand : (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"]
+                Fill = i % 3 == 0 ? Brand : ThemeService.Brush("TextFillColorSecondaryBrush", Windows.UI.Color.FromArgb(0x80, 0x80, 0x80, 0x80))
             };
             Canvas.SetLeft(dot, box / 2 + Math.Cos(a) * radius - size / 2);
             Canvas.SetTop(dot, box / 2 + Math.Sin(a) * radius - size / 2);
@@ -860,7 +869,7 @@ public sealed class SetupWizardPage : NexusPage
             var node = new Microsoft.UI.Xaml.Shapes.Ellipse
             {
                 Width = size, Height = size,
-                Fill = i % 4 == 0 ? BrandFill : i % 4 == 1 ? Brand : (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"]
+                Fill = i % 4 == 0 ? BrandFill : i % 4 == 1 ? Brand : ThemeService.Brush("TextFillColorSecondaryBrush", Windows.UI.Color.FromArgb(0x80, 0x80, 0x80, 0x80))
             };
             Canvas.SetLeft(node, x - size / 2);
             Canvas.SetTop(node, y - size / 2);

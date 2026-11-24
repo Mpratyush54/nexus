@@ -203,7 +203,7 @@ public sealed partial class SettingsPage
     };
 
     private async Task<bool> ConfirmOrgAsync(string title, string text, string action) =>
-        await OrgDialog(title, Line(text), action).ShowAsync() == ContentDialogResult.Primary;
+        await OrgDialog(title, Line(text), action).ShowThemedAsync() == ContentDialogResult.Primary;
 
     private async Task CreateOrganizationAsync()
     {
@@ -211,7 +211,7 @@ public sealed partial class SettingsPage
         var dialog = OrgDialog("Create organization", name, "Create", form: true);
         dialog.IsPrimaryButtonEnabled = false;
         name.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(name.Text);
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
         var result = await Call(NxMethods.OrgsCreate, new { name = name.Text.Trim() });
         Notify(result.Ok ? "Organization created. You are its owner." : result.Error ?? "Could not create organization.", !result.Ok);
         if (result.Ok) await RefreshOrganizationsAsync();
@@ -223,7 +223,7 @@ public sealed partial class SettingsPage
         var dialog = OrgDialog("Join an organization", token, "Join", form: true);
         dialog.IsPrimaryButtonEnabled = false;
         token.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(token.Text);
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
         var result = await Call(NxMethods.OrgsInviteAccept, new { token = token.Text.Trim() });
         Notify(result.Ok ? "You joined the organization." : result.Error ?? "Could not accept invitation.", !result.Ok);
         if (result.Ok) await RefreshOrganizationsAsync();
@@ -245,7 +245,7 @@ public sealed partial class SettingsPage
         dialog.IsPrimaryButtonEnabled = false;
         email.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled =
             System.Net.Mail.MailAddress.TryCreate(email.Text.Trim(), out var address) && address.Address == email.Text.Trim();
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary) return;
         var result = await Call(NxMethods.OrgsInviteCreate, new { org_id = orgID, email = email.Text.Trim(), role = role.SelectedItem as string ?? "MEMBER" });
         if (result.Ok && result.Result is { } created)
         {
@@ -260,7 +260,7 @@ public sealed partial class SettingsPage
     private async Task ChangeOrganizationRoleAsync(string orgID, string userID, string name, string current, bool owner)
     {
         var role = OrganizationRoles(owner, current);
-        if (await OrgDialog($"Change role for {name}", role, "Save role", form: true).ShowAsync() != ContentDialogResult.Primary) return;
+        if (await OrgDialog($"Change role for {name}", role, "Save role", form: true).ShowThemedAsync() != ContentDialogResult.Primary) return;
         var selected = role.SelectedItem as string ?? current;
         if (selected == current) return;
         var result = await Call(NxMethods.OrgsMemberRole, new { org_id = orgID, user_id = userID, role = selected });
