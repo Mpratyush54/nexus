@@ -40,6 +40,7 @@ import { ApiError, type MemoryItem } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 import { useProjectSummaries } from '@/hooks/useProjectSummaries'
 import { useProjects } from '@/hooks/useProjects'
+import { projectLabel } from '@/lib/project-label'
 
 const CATEGORY_ORDER = [
   'architecture',
@@ -108,9 +109,6 @@ const CATEGORY_CONFIG: Record<
   },
 }
 
-function projectLabelOf(p: { display_name?: string; folder_name?: string; id: string }) {
-  return p.display_name || p.folder_name || `${p.id.slice(0, 8)}…`
-}
 
 function normalizeItemCategory(cat?: string): string {
   if (!cat) return 'general'
@@ -317,7 +315,7 @@ export function MemoryPage() {
             <p className="text-sm text-fg">
               Desktop is writing memories to{' '}
               <span className="font-medium">
-                {harvestProject ? projectLabelOf(harvestProject) : 'another project'}
+                {harvestProject ? projectLabel(harvestProject) : 'another project'}
               </span>
               , not this Library.
             </p>
@@ -336,12 +334,12 @@ export function MemoryPage() {
         <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/30 p-4">
           <div>
             <p className="text-sm text-fg">
-              <span className="font-medium">{projectLabelOf(richer.project)}</span> has{' '}
+              <span className="font-medium">{projectLabel(richer.project)}</span> has{' '}
               {richer.metrics.memories} memories — more than this project.
             </p>
           </div>
           <Button type="button" size="sm" onClick={() => setProjectId(richer.project.id)}>
-            Switch to {projectLabelOf(richer.project)}
+            Switch to {projectLabel(richer.project)}
           </Button>
         </GlassPanel>
       ) : null}

@@ -28,6 +28,7 @@ import { DesktopInstallPicker } from '@/components/DesktopInstallPicker'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 import { daemonApi } from '@/api/daemon'
+import { projectLabel } from '@/lib/project-label'
 
 function folderFromPath(path?: string) {
   if (!path) return ''
@@ -111,7 +112,7 @@ export function ConnectPage() {
     }
     bind.mutate(folder, {
       onSuccess: (p) =>
-        push({ title: 'Workspace linked', detail: p.display_name || p.folder_name || p.id, tone: 'teal' }),
+        push({ title: 'Workspace linked', detail: projectLabel(p), tone: 'teal' }),
       onError: (err) =>
         push({
           title: 'Link failed',

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Suspense, useEffect, useState } from 'react'
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { AccountMismatchBanner } from './AccountMismatchBanner'
 import { CommandPalette } from './CommandPalette'
@@ -49,7 +49,7 @@ export function AppShell() {
         <div className="app-content">
           <main className="app-main" style={{ paddingTop: '2rem' }}>
             <div className="app-main-inner">
-              <Outlet />
+              <PageOutlet />
             </div>
           </main>
         </div>
@@ -71,7 +71,7 @@ export function AppShell() {
                 <LocalWorkspacePanel />
               </>
             ) : null}
-            <Outlet />
+            <PageOutlet />
           </div>
         </main>
         {!identityLocked ? (
@@ -79,5 +79,20 @@ export function AppShell() {
         ) : null}
       </div>
     </div>
+  )
+}
+
+/** Route pages load as separate chunks; keep the nav mounted while one loads. */
+function PageOutlet() {
+  return (
+    <Suspense
+      fallback={
+        <div role="status" className="p-8 text-sm text-fg-dim">
+          Loading…
+        </div>
+      }
+    >
+      <Outlet />
+    </Suspense>
   )
 }

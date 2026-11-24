@@ -28,6 +28,7 @@ import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
 import { useAuth } from '@/providers/AuthProvider'
 import { formatRelative } from '@/utils/format'
+import { projectLabel, projectSubtitle } from '@/lib/project-label'
 
 function shortTime(iso?: string) {
   if (!iso) return '—'
@@ -36,10 +37,6 @@ function shortTime(iso?: string) {
   } catch {
     return iso
   }
-}
-
-function projectLabelOf(p: { display_name?: string; folder_name?: string; id: string }) {
-  return p.display_name || p.folder_name || p.id.slice(0, 8)
 }
 
 export function DashboardPage() {
@@ -57,8 +54,7 @@ export function DashboardPage() {
 
   const m = dash.data?.metrics
   const hs = harvest.data
-  const projectLabel =
-    current?.display_name || current?.folder_name || (projectId ? `${projectId.slice(0, 8)}…` : 'No project')
+  const activeLabel = current ? projectLabel(current) : projectId ? `${projectId.slice(0, 8)}…` : 'No project'
   const harvestTarget =
     hs?.project_id && projectId && hs.project_id !== projectId
       ? 'mismatch'
@@ -96,7 +92,7 @@ export function DashboardPage() {
     <div className="space-y-8">
       <div className="min-w-0">
         <p className="text-[11px] uppercase tracking-wide text-muted">Project</p>
-        <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">{projectLabel}</h1>
+        <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">{activeLabel}</h1>
         <p className="mt-1 text-sm text-fg-dim">
           Chats, memory and activity for this project. Switch projects below.
         </p>
@@ -108,9 +104,9 @@ export function DashboardPage() {
             <p className="text-sm text-fg">
               Desktop is uploading memories to{' '}
               <span className="font-medium">
-                {harvestProjectRow ? projectLabelOf(harvestProjectRow.project) : 'another project'}
+                {harvestProjectRow ? projectLabel(harvestProjectRow.project) : 'another project'}
               </span>
-              , not the one selected here ({projectLabel}).
+              , not the one selected here ({activeLabel}).
             </p>
             <p className="mt-1 text-xs text-fg-dim">
               Folder <span className="font-mono">central-memory</span> often maps to git remote{' '}
@@ -127,7 +123,7 @@ export function DashboardPage() {
         <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/30 p-4">
           <div>
             <p className="text-sm text-fg">
-              <span className="font-medium">{projectLabelOf(richer.project)}</span> has{' '}
+              <span className="font-medium">{projectLabel(richer.project)}</span> has{' '}
               {richer.metrics.proposed > 0
                 ? `${richer.metrics.proposed} new`
                 : `${richer.metrics.memories} memories`}{' '}
@@ -140,7 +136,7 @@ export function DashboardPage() {
             size="sm"
             onClick={() => setProjectId(richer.project.id)}
           >
-            Switch to {projectLabelOf(richer.project)}
+            Switch to {projectLabel(richer.project)}
           </Button>
         </GlassPanel>
       ) : null}
@@ -170,12 +166,12 @@ export function DashboardPage() {
               >
                 <div className="flex items-center justify-between gap-2">
                   <span className="truncate text-sm font-medium text-fg">
-                    {projectLabelOf(row.project)}
+                    {projectLabel(row.project)}
                   </span>
                   {active ? <StatusPill tone="amber">active</StatusPill> : null}
                 </div>
                 <p className="mt-1 truncate font-mono text-[10px] text-muted">
-                  {row.project.folder_name || row.project.id.slice(0, 12)}
+                  {projectSubtitle(row.project)}
                 </p>
                 <p className="mt-2 text-xs text-fg-dim">
                   {row.metrics.memories} memories

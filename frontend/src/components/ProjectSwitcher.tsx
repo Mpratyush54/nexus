@@ -3,10 +3,7 @@ import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useCurrentProject, useProjects } from '@/hooks/useProjects'
 import { useAuth } from '@/providers/AuthProvider'
-
-function labelOf(p: { display_name?: string; folder_name?: string; id: string }) {
-  return p.display_name || p.folder_name || p.id.slice(0, 8)
-}
+import { projectLabel, projectSubtitle } from '@/lib/project-label'
 
 /** Global project switcher — every page works on one active project. */
 export function ProjectSwitcher({ compact = false }: { compact?: boolean }) {
@@ -18,7 +15,7 @@ export function ProjectSwitcher({ compact = false }: { compact?: boolean }) {
 
   const items = useMemo(() => projects.data ?? [], [projects.data])
   const activeLabel = current
-    ? labelOf(current)
+    ? projectLabel(current)
     : projectId
       ? `${projectId.slice(0, 8)}…`
       : 'Select project'
@@ -70,9 +67,9 @@ export function ProjectSwitcher({ compact = false }: { compact?: boolean }) {
                       navigate('/app/dashboard')
                     }}
                   >
-                    <span className="truncate text-fg">{labelOf(p)}</span>
+                    <span className="truncate text-fg">{projectLabel(p)}</span>
                     <span className="truncate font-mono text-[10px] text-muted">
-                      {p.folder_name || p.id.slice(0, 12)}
+                      {projectSubtitle(p)}
                     </span>
                   </button>
                 </li>

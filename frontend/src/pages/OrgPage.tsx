@@ -24,6 +24,8 @@ import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 import { initialsOf, usePeople } from '@/hooks/usePeople'
+import { MEMBER_ID_HELP, memberIdProblem, normalizeMemberId } from '@/lib/member-id'
+import { projectLabel, projectSubtitle } from '@/lib/project-label'
 
 const MANAGER_ROLES = ['ADMIN', 'MEMBER'] as const
 
@@ -158,13 +160,18 @@ export function OrgPage() {
 
   const onInvite = (e: FormEvent) => {
     e.preventDefault()
-    const id = inviteId.trim()
+    const id = normalizeMemberId(inviteId)
     if (!id || !selected) return
+    const problem = memberIdProblem(id, { emailInviteHere: true })
+    if (problem) {
+      push({ ...problem, tone: 'amber' })
+      return
+    }
     addMember.mutate(
       { user_id: id, role: inviteRole },
       {
         onSuccess: () => {
-          push({ title: 'Member added', detail: id, tone: 'teal' })
+          push({ title: 'Member added', detail: nameFor(id), tone: 'teal' })
           setInviteId('')
         },
         onError: (err) =>
@@ -185,7 +192,7 @@ export function OrgPage() {
       { folder_name: f, display_name: display.trim() || undefined },
       {
         onSuccess: (p) => {
-          push({ title: 'Project created', detail: p.display_name || p.folder_name, tone: 'teal' })
+          push({ title: 'Project created', detail: projectLabel(p), tone: 'teal' })
           setFolder('')
           setDisplay('')
         },
@@ -292,7 +299,7 @@ export function OrgPage() {
                   <h3 className="text-sm font-medium text-fg">Plan</h3>
                   <p className="mt-1 text-xs text-fg-dim">
                     {isOwner
-                      ? 'Org subscription. Paid upgrades stay disabled until checkout is available.'
+                      ? 'Org subscription. Paid plans aren’t open yet; the free plan stays free.'
                       : 'Billing is visible to organization owners.'}
                   </p>
                 </div>
@@ -302,13 +309,6 @@ export function OrgPage() {
                     current={orgBilling.data}
                     canChange={false}
                     allowPaidUpgrade={false}
-                    onPaidUnavailable={(plan) =>
-                      push({
-                        title: 'Sorry — not available yet',
-                        detail: `${plan.name} is coming soon. Keep enjoying free until paid plans open.`,
-                        tone: 'amber',
-                      })
-                    }
                   />
                 ) : null}
               </GlassPanel>
@@ -326,8 +326,14 @@ export function OrgPage() {
                         value={inviteId}
                         onChange={(e) => setInviteId(e.target.value)}
                         placeholder="e.g. 1b2c3d4e-5f60-…"
-                        className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none focus:border-amber"
+                        aria-describedby="org-invite-help"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="h-10 w-full rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber"
                       />
+                      <span id="org-invite-help" className="mt-1 block text-xs text-muted">
+                        A user ID, not a username. {MEMBER_ID_HELP} Only have an email? Invite by email below.
+                      </span>
                     </label>
                     <select
                       value={inviteRole}
@@ -502,8 +508,8 @@ export function OrgPage() {
                           className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
                         >
                           <span>
-                            <span className="block text-sm text-fg">{p.display_name || p.folder_name || p.id}</span>
-                            <span className="font-mono text-[11px] text-muted">{p.folder_name}</span>
+                            <span className="block text-sm text-fg">{projectLabel(p)}</span>
+                            <span className="font-mono text-[11px] text-muted">{projectSubtitle(p)}</span>
                           </span>
                           <span className="text-xs text-muted">Open →</span>
                         </button>
@@ -522,7 +528,7 @@ export function OrgPage() {
                                   onSuccess: () =>
                                     push({
                                       title: enabled ? 'Capture off' : 'Capture on',
-                                      detail: p.display_name || p.folder_name,
+                                      detail: projectLabel(p),
                                     }),
                                   onError: (err) =>
                                     push({

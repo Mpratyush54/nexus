@@ -25,10 +25,10 @@ import { ApiError } from '@/types/api'
 import type { GitHubImportItem } from '@/api/team'
 import { formatRelative } from '@/utils/format'
 import { initialsOf, usePeople } from '@/hooks/usePeople'
+import { MEMBER_ID_HELP, memberIdProblem, normalizeMemberId } from '@/lib/member-id'
 
 const BUILTIN_ROLES = ['OWNER', 'ADMIN', 'EDITOR', 'VIEWER'] as const
 
-const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function TeamPage() {
   const { projectId, user } = useAuth()
@@ -97,14 +97,11 @@ export function TeamPage() {
 
   const onInvite = (e: FormEvent) => {
     e.preventDefault()
-    const id = inviteId.trim()
+    const id = normalizeMemberId(inviteId)
     if (!id) return
-    if (!USER_ID.test(id)) {
-      push({
-        title: 'Enter a user ID',
-        detail: 'User IDs look like 1b2c3d4e-…. Your teammate can copy theirs from Settings.',
-        tone: 'amber',
-      })
+    const problem = memberIdProblem(id)
+    if (problem) {
+      push({ ...problem, tone: 'amber' })
       return
     }
     grant.mutate(id, {
@@ -265,7 +262,8 @@ export function TeamPage() {
               className="h-10 w-full rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber"
             />
             <span id="invite-help" className="mt-1 block text-xs text-muted">
-              Teammates find their ID in Settings. To invite by email, use your organization page.
+              Paste a user ID, not a username or email: Nexus can’t look people up yet. {MEMBER_ID_HELP}{' '}
+              To invite by email, use your organization page.
             </span>
           </label>
           <Button type="submit" size="sm" disabled={grant.isPending}>

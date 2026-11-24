@@ -11,14 +11,13 @@ type Props = {
   plans: BillingPlan[]
   current?: BillingSnapshot | null
   onSelect?: (planId: string) => void
-  /** Fired when someone clicks a paid plan while upgrades are closed. */
-  onPaidUnavailable?: (plan: BillingPlan) => void
   pending?: boolean
-  /** When false, hide switch/upgrade actions entirely (except paid “coming soon” CTA). */
+  /** When false, hide switch/upgrade actions entirely. */
   canChange?: boolean
   /**
-   * When false (default), paid plans cannot be self-selected — checkout is not wired.
-   * Free ↔ free switches still allowed if canChange is true.
+   * When false (default), paid plans cannot be self-selected: the server has no
+   * checkout and answers 402, so they show a plain "not open yet" note and no
+   * button. Free ↔ free switches still allowed if canChange is true.
    */
   allowPaidUpgrade?: boolean
   highlight?: string
@@ -32,7 +31,6 @@ export function PlanGrid({
   plans,
   current,
   onSelect,
-  onPaidUnavailable,
   pending,
   canChange = true,
   allowPaidUpgrade = false,
@@ -59,7 +57,7 @@ export function PlanGrid({
             <div className="flex items-center justify-between gap-2">
               <h3 className="text-sm font-medium text-fg">{plan.name}</h3>
               {active ? <StatusPill tone="teal">current</StatusPill> : null}
-              {blockedPaid ? <StatusPill tone="neutral">soon</StatusPill> : null}
+              {blockedPaid ? <StatusPill tone="neutral">not open yet</StatusPill> : null}
             </div>
             <p className="mt-1 text-lg font-semibold tracking-tight text-fg">{formatPlanPrice(plan)}</p>
             {plan.description ? <p className="mt-1 text-xs text-fg-dim">{plan.description}</p> : null}
@@ -84,20 +82,9 @@ export function PlanGrid({
             ) : null}
 
             {blockedPaid ? (
-              <div className="mt-4 space-y-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="secondary"
-                  className="w-full"
-                  onClick={() => onPaidUnavailable?.(plan)}
-                >
-                  Get {plan.name}
-                </Button>
-                <p className="text-[11px] leading-relaxed text-muted">
-                  Not available yet — keep enjoying free until paid plans open.
-                </p>
-              </div>
+              <p className="mt-4 text-[11px] leading-relaxed text-muted">
+                Paid plans aren’t open yet, so there’s nothing to buy. You keep the free plan.
+              </p>
             ) : canSelect ? (
               <Button
                 type="button"

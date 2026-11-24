@@ -14,6 +14,7 @@ import { LandingPage } from '../src/landing/LandingPage'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dist = path.join(root, 'dist')
 const htmlPath = path.join(dist, 'index.html')
+const shellPath = path.join(dist, 'spa.html')
 const manifestPath = path.join(dist, '.vite', 'manifest.json')
 
 type Chunk = { file: string; css?: string[]; imports?: string[]; isDynamicEntry?: boolean }
@@ -60,9 +61,13 @@ head.push(`<script type="application/ld+json">${JSON.stringify(jsonLd).replace(/
 const markup = renderToStaticMarkup(createElement(LandingPage))
 let html = readFileSync(htmlPath, 'utf8')
 if (!html.includes('<div id="root"></div>')) throw new Error('prerender: #root placeholder not found')
+// Keep the plain SPA shell (empty #root, no landing CSS or markup) for app
+// routes. deploy/deploy-frontend.sh uploads it under each client route and as
+// the S3 error document, so /app, /login, ... never carry the landing page.
+writeFileSync(shellPath, html)
 html = html.replace('</head>', `    ${head.join('\n    ')}\n  </head>`).replace('<div id="root"></div>', `<div id="root">${markup}</div>`)
 writeFileSync(htmlPath, html)
 
 // The manifest is a build artefact only; don't publish it.
 if (existsSync(path.dirname(manifestPath))) rmSync(path.dirname(manifestPath), { recursive: true, force: true })
-console.log(`prerender: wrote ${path.relative(root, htmlPath)} (${(html.length / 1024).toFixed(1)} kB)`)
+console.log(`prerender: wrote ${path.relative(root, htmlPath)} (${(html.length / 1024).toFixed(1)} kB) and ${path.relative(root, shellPath)}`)
