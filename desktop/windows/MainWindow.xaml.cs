@@ -96,6 +96,34 @@ public sealed partial class MainWindow : Window
         Activated += async (_, _) => await EnsureShellInitializedAsync();
         UpdateService.Shared.CheckInBackground(TimeSpan.FromSeconds(30));
         if (!AppPrefs.SetupCompleted) ShowSetup();
+        else DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ShowUpdatedToast);
+    }
+
+    // After a background update is applied: a quiet toast, once per version.
+    private void ShowUpdatedToast()
+    {
+        var version = UpdateService.Shared.CurrentVersion;
+        if (version.Length == 0) return;
+        var previous = AppPrefs.Data.LastVersion;
+        AppPrefs.Data.LastVersion = version;
+        AppPrefs.Save();
+        if (previous.Length == 0 || previous == version || Content is not Grid root) return;
+        var whatsNew = new HyperlinkButton { Content = "What's new", NavigateUri = new Uri($"https://github.com/Mpratyush54/nexus/releases/tag/desktop-v{version}") };
+        var toast = new InfoBar
+        {
+            IsOpen = true, Severity = InfoBarSeverity.Success, Title = $"Updated to Nexus {version}",
+            ActionButton = whatsNew, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Bottom,
+            Margin = new Thickness(0, 0, 20, 20), MaxWidth = 420
+        };
+        Grid.SetRowSpan(toast, 2);
+        root.Children.Add(toast);
+        Nexus.Pages.Motion.FadeSlideIn(toast, 400, 0, 16, 520);
+        var timer = DispatcherQueue.CreateTimer();
+        timer.Interval = TimeSpan.FromSeconds(12);
+        timer.IsRepeating = false;
+        timer.Tick += (_, _) => toast.IsOpen = false;
+        toast.Closed += (_, _) => root.Children.Remove(toast);
+        timer.Start();
     }
 
     // ---- First-run setup (also reachable from Settings > General)

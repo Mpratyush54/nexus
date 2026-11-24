@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Branded first-install front-end. .NET Framework 4.7.2 ships with every
+    supported Windows 10/11, so this starts instantly with no runtime to
+    install, and WPF draws vectors, so it is crisp at any DPI.
+
+    It carries the Velopack Setup.exe as an embedded resource, runs it
+    silently and turns its real on-disk progress into the memory-graph
+    animation. Velopack still owns the install layout, updates and
+    uninstall. Build with scripts/package-windows.ps1 (PayloadDir is the
+    folder holding Setup.exe + payload.json).
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net472</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>NexusInstaller</AssemblyName>
+    <RootNamespace>Nexus.Installer</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>..\windows\Assets\Nexus.ico</ApplicationIcon>
+    <Version>0.0.0</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <PayloadDir Condition="'$(PayloadDir)' == ''">payload</PayloadDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="..\windows\Assets\Nexus.png" Link="Assets\Nexus.png" />
+    <EmbeddedResource Include="$(PayloadDir)\Setup.exe" LogicalName="payload.Setup.exe" Condition="Exists('$(PayloadDir)\Setup.exe')" />
+    <EmbeddedResource Include="$(PayloadDir)\payload.json" LogicalName="payload.json" Condition="Exists('$(PayloadDir)\payload.json')" />
+  </ItemGroup>
+</Project>

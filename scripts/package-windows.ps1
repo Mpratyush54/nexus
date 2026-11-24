@@ -35,7 +35,10 @@ param(
   # Sign with signtool (e.g. '/a /fd sha256 /tr http://timestamp.digicert.com /td sha256').
   # Empty = unsigned; SmartScreen warns on unsigned installers.
   [string]$SignParams = "",
-  [switch]$SkipVelopackAppCheck
+  [switch]$SkipVelopackAppCheck,
+  # Reuse the app already in <OutDir>\publish (e.g. to pack a second
+  # version for an upgrade test) instead of building it again.
+  [switch]$SkipAppBuild
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,8 +50,10 @@ $out = [IO.Path]::GetFullPath((Join-Path $root $OutDir))
 $publish = Join-Path $out "publish"
 $compiled = Join-Path $out "compiled"
 $releases = Join-Path $out "releases"
-foreach ($dir in @($publish, $compiled)) {
-  if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+if (-not $SkipAppBuild) {
+  foreach ($dir in @($publish, $compiled)) {
+    if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
+  }
 }
 New-Item -ItemType Directory -Force -Path $out, $publish, $releases | Out-Null
 
@@ -56,8 +61,10 @@ $commit = (git rev-parse HEAD).Trim()
 $builtAt = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
 $ld = "-s -w -X central-memory/internal/buildinfo.Version=$Version -X central-memory/internal/buildinfo.Commit=$commit -X central-memory/internal/buildinfo.BuiltAt=$builtAt -X main.defaultServerURL=$ApiUrl"
 $numeric = ($Version -split '-')[0]
+$plainZip = Join-Path $out "nexus-desktop-windows-amd64.zip"
 $win = Join-Path $root "desktop\windows"
 
+if (-not $SkipAppBuild) {
 # 1. Native shell, self-contained (.NET runtime + Windows App SDK inside).
 $props = @(
   "-p:AppxGeneratePriEnabled=false",
@@ -127,9 +134,9 @@ foreach ($required in @("Nexus.exe", "Nexus.dll", "Velopack.dll", "nexuscore.dll
 }
 
 # 3. Plain zip: the layout scripts/install-windows.ps1 has always expanded.
-$plainZip = Join-Path $out "nexus-desktop-windows-amd64.zip"
 if (Test-Path -LiteralPath $plainZip) { Remove-Item -LiteralPath $plainZip -Force }
 Compress-Archive -Path (Join-Path $publish "*") -DestinationPath $plainZip -CompressionLevel Optimal
+}
 
 # 4. Velopack: Setup.exe, portable zip, full (+ delta) packages, feed.
 if ($PreviousFeed) {
@@ -160,10 +167,26 @@ if ($SkipVelopackAppCheck) { $pack += "--skipVeloAppCheck" }
 & $Vpk @pack
 Assert-Native "vpk pack"
 
-$setup = Join-Path $out "Nexus-$Version-win-x64-Setup.exe"
 $portable = Join-Path $out "Nexus-$Version-win-x64-Portable.zip"
-Copy-Item -LiteralPath (Join-Path $releases "NexusDesktop-$Channel-Setup.exe") -Destination $setup -Force
 Copy-Item -LiteralPath (Join-Path $releases "NexusDesktop-$Channel-Portable.zip") -Destination $portable -Force
+
+# 5. Branded installer (desktop/installer): carries Velopack's Setup.exe,
+# runs it silently and shows progress as the memory graph forming.
+$payloadDir = Join-Path $out "installer-payload"
+New-Item -ItemType Directory -Force -Path $payloadDir | Out-Null
+Copy-Item -LiteralPath (Join-Path $releases "NexusDesktop-$Channel-Setup.exe") -Destination (Join-Path $payloadDir "Setup.exe") -Force
+$appFiles = Get-ChildItem -LiteralPath $publish -Recurse -File
+$payloadJson = '{{"version":"{0}","bytes":{1},"files":{2}}}' -f $Version, ($appFiles | Measure-Object Length -Sum).Sum, $appFiles.Count
+[IO.File]::WriteAllText((Join-Path $payloadDir "payload.json"), $payloadJson)
+$installerBin = Join-Path $out "installer-bin"
+dotnet build (Join-Path $root "desktop\installer\NexusInstaller.csproj") -c Release -nodeReuse:false -o $installerBin "-p:PayloadDir=$payloadDir" "-p:Version=$numeric" "-p:InformationalVersion=$Version"
+Assert-Native "branded installer"
+$setup = Join-Path $out "Nexus-$Version-win-x64-Setup.exe"
+Copy-Item -LiteralPath (Join-Path $installerBin "NexusInstaller.exe") -Destination $setup -Force
+if ($SignParams) {
+  $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "x64" } | Select-Object -Last 1
+  if ($signtool) { & $signtool.FullName sign ($SignParams -split ' ') $setup; Assert-Native "signtool" } else { Write-Warning "signtool not found; branded installer left unsigned." }
+}
 
 $hashes = foreach ($file in @($setup, $portable, $plainZip)) {
   "{0}  {1}" -f (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant(), [IO.Path]::GetFileName($file)

@@ -105,6 +105,8 @@ public static class AppPrefs
     {
         // null = written before the wizard existed (see Load).
         public bool? SetupCompleted { get; set; }
+        // Installed version seen at the last start ("Updated to vX" toast).
+        public string LastVersion { get; set; } = "";
         public string ProjectId { get; set; } = "";
         public string ProjectName { get; set; } = "";
         public string LastNav { get; set; } = "timeline";

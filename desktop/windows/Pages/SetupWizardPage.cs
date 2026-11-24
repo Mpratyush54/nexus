@@ -49,7 +49,30 @@ public sealed class SetupWizardPage : NexusPage
     private readonly StackPanel _titles = new() { Spacing = 8, Margin = new Thickness(0, 28, 0, 22) };
     private readonly TextBlock _title = new() { FontSize = 30, FontFamily = new FontFamily("Segoe UI Variable Display, Segoe UI"), FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
     private readonly TextBlock _subtitle = new() { FontSize = 14, Foreground = NexusPalette.Muted, TextWrapping = TextWrapping.Wrap, LineHeight = 21 };
+    // The installer's palette (desktop/installer): ink, cream, gold.
     private static readonly SolidColorBrush Gold = new(Windows.UI.Color.FromArgb(255, 232, 187, 99));
+    private static readonly SolidColorBrush Ink = new(Windows.UI.Color.FromArgb(255, 14, 15, 14));
+
+    // Cream primary button that warms to gold, as in the installer.
+    private static void BrandPrimary(Button button)
+    {
+        if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style) button.Style = style;
+        static SolidColorBrush B(byte a, byte r, byte g, byte b) => new(Windows.UI.Color.FromArgb(a, r, g, b));
+        var r = button.Resources;
+        r["AccentButtonBackground"] = B(255, 242, 239, 230);
+        r["AccentButtonBackgroundPointerOver"] = B(255, 245, 215, 154);
+        r["AccentButtonBackgroundPressed"] = B(255, 232, 187, 99);
+        r["AccentButtonBackgroundDisabled"] = B(40, 242, 239, 230);
+        r["AccentButtonForeground"] = Ink;
+        r["AccentButtonForegroundPointerOver"] = Ink;
+        r["AccentButtonForegroundPressed"] = Ink;
+        r["AccentButtonForegroundDisabled"] = B(110, 242, 239, 230);
+        r["AccentButtonBorderBrush"] = B(0, 0, 0, 0);
+        r["AccentButtonBorderBrushPointerOver"] = B(0, 0, 0, 0);
+        r["AccentButtonBorderBrushPressed"] = B(0, 0, 0, 0);
+        button.CornerRadius = new CornerRadius(9);
+        button.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
+    }
     private Action? _playDone;
     private readonly ContentControl _body = new() { HorizontalContentAlignment = HorizontalAlignment.Stretch };
     private readonly ScrollViewer _scroller = new() { HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
@@ -98,7 +121,7 @@ public sealed class SetupWizardPage : NexusPage
         _finished = finished;
         // Transparent: the window shows Mica behind the setup guide.
         Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style) _next.Style = style;
+        BrandPrimary(_next);
         foreach (var live in new[] { _connectResult, _accountState, _agentState, _workspaceState })
             AutomationProperties.SetLiveSetting(live, AutomationLiveSetting.Polite);
         AutomationProperties.SetHeadingLevel(_title, AutomationHeadingLevel.Level1);
@@ -183,7 +206,7 @@ public sealed class SetupWizardPage : NexusPage
         for (var i = 0; i < Steps.Length; i++)
         {
             _rail.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            var fill = new Border { Background = NexusPalette.Accent, CornerRadius = new CornerRadius(2), Height = 4 };
+            var fill = new Border { Background = Gold, CornerRadius = new CornerRadius(2), Height = 4 };
             var track = new Border { Background = NexusPalette.Hairline, CornerRadius = new CornerRadius(2), Height = 4, Child = fill };
             var label = new TextBlock { Text = Steps[i].Name, FontSize = 11.5, Foreground = NexusPalette.Muted, Margin = new Thickness(0, 7, 0, 0), TextTrimming = TextTrimming.CharacterEllipsis };
             var cell = new StackPanel();
@@ -440,8 +463,8 @@ public sealed class SetupWizardPage : NexusPage
         var panel = new StackPanel { Spacing = 14 };
         panel.Children.Add(Card(_accountState));
 
-        var browser = new Button { Content = "Sign in with browser" };
-        if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style) browser.Style = style;
+        var browser = new Button { Content = "Sign in with browser", Padding = new Thickness(18, 8, 18, 9) };
+        BrandPrimary(browser);
         browser.Click += async (_, _) => await BrowserSignInAsync();
         var browserBlock = new StackPanel { Spacing = 6 };
         browserBlock.Children.Add(Label("Recommended"));
@@ -626,8 +649,8 @@ public sealed class SetupWizardPage : NexusPage
             var check = new Border
             {
                 Width = 20, Height = 20, CornerRadius = new CornerRadius(10),
-                Background = connected ? NexusPalette.Accent : NexusPalette.AccentFill,
-                Child = new FontIcon { Glyph = "\uE73E", FontSize = 10, Foreground = connected ? (Brush)Application.Current.Resources["TextOnAccentFillColorPrimaryBrush"] : Gold }
+                Background = connected ? Gold : NexusPalette.AccentFill,
+                Child = new FontIcon { Glyph = "\uE73E", FontSize = 10, Foreground = connected ? Ink : Gold }
             };
             row.Children.Add(check);
             var label = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
@@ -844,8 +867,8 @@ public sealed class SetupWizardPage : NexusPage
         }
         var badge = new Border
         {
-            Width = 52, Height = 52, CornerRadius = new CornerRadius(26), Background = NexusPalette.Accent,
-            Child = new FontIcon { Glyph = "\uE73E", FontSize = 22, Foreground = (Brush)Application.Current.Resources["TextOnAccentFillColorPrimaryBrush"] }
+            Width = 52, Height = 52, CornerRadius = new CornerRadius(26), Background = Gold,
+            Child = new FontIcon { Glyph = "\uE73E", FontSize = 22, Foreground = Ink }
         };
         Canvas.SetLeft(badge, w / 2 - 26);
         Canvas.SetTop(badge, h / 2 - 26);

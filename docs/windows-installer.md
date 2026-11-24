@@ -1,10 +1,12 @@
 # Windows installer
 
-Nexus for Windows ships as a [Velopack](https://velopack.io) installer.
+Nexus for Windows installs through a branded front-end (`desktop/installer`)
+on top of [Velopack](https://velopack.io), which owns the install layout,
+updates and uninstall.
 
 | Download | What it is |
 | --- | --- |
-| `Nexus-<ver>-win-x64-Setup.exe` | The installer. Per-user, no admin rights, no prerequisites. |
+| `Nexus-<ver>-win-x64-Setup.exe` | The branded installer. Per-user, no admin rights, no prerequisites. |
 | `Nexus-<ver>-win-x64-Portable.zip` | Same app, unzip anywhere. Updates itself like an installed copy. |
 | `nexus-desktop-windows-amd64.zip` | Plain app folder, kept for `install-windows.ps1`. |
 
@@ -18,6 +20,48 @@ dotnet tool install vpk --version 1.2.161 --tool-path .tools
 CI (`.github/workflows/release-desktop.yml`, job `build-windows`) runs the same
 script for every `desktop-v*` / `v*` tag. Stable tags use update channel `win`,
 `-beta` / `-alpha` / `-rc` tags use `win-beta` and a GitHub prerelease.
+
+## The front-end
+
+`desktop/installer` is a small WPF app on .NET Framework 4.7.2, which every
+supported Windows 10/11 already has. It starts instantly, adds about 100 KB
+to the download, and WPF's vector rendering stays crisp at 100/150/200%.
+Velopack's own `Setup.exe` is embedded as a resource.
+
+- A borderless 720x460 window with rounded corners, a DWM shadow and dark
+  acrylic (Windows 11 22H2+; solid ink elsewhere). It has custom minimize and
+  close buttons, can be dragged anywhere, and opens with a fade and scale.
+- Welcome: the Nexus mark assembles inside an orbiting node ring, followed by
+  one Install button. "Options" opens the install location, a desktop
+  shortcut and start at login. Fine print links Privacy (an in-window
+  summary) and the source.
+- Installing: no progress bar. A memory graph forms as real progress rises.
+  Velopack's `Setup.exe --silent` runs underneath, and progress is read from
+  what it does on disk and in the registry, in Velopack's own order:
+  1. `Update.exe` is written;
+  2. the package is copied;
+  3. `current\` fills up, measured by bytes against `payload.json`;
+  4. the Start shortcut is added;
+  5. `nexus://` is registered by the app's install hook;
+  6. the uninstall entry is written;
+  7. Setup exits with code 0.
+
+  Status lines change when these happen.
+- Done: the graph blooms. "Open Nexus" opens the app's setup guide
+  automatically after 2 s, in the same ink, cream and gold style.
+- Errors: a friendly screen with Try again and the setup log. If Nexus is
+  running: "Nexus is running. It will restart to update." The front-end asks
+  the app to quit (`--quit`) and reopens it afterwards.
+- Motion follows the Windows animation setting
+  (`SystemParameters.ClientAreaAnimation`).
+- `--demo-install` / `--demo-error` exercise the screens without installing.
+
+Uninstall (Apps & features) asks through a native task dialog with the Nexus
+icon and two command links: "Keep my data" (default, after a 25 s countdown)
+or "Remove my data from this PC".
+
+After a background update, the app shows "Updated to Nexus X" with a
+"What's new" link once.
 
 ## What the installer does
 

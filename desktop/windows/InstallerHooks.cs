@@ -21,10 +21,15 @@ public static class InstallerHooks
         VelopackApp.Build()
             .SetArgs(args)
             .OnAfterInstallFastCallback(_ => AfterInstall())
-            .OnAfterUpdateFastCallback(_ => DesktopIntegration.Current.RegisterUrlScheme())
+            .OnAfterUpdateFastCallback(_ => RealSystem().RegisterUrlScheme())
             .OnBeforeUninstallFastCallback(_ => BeforeUninstall())
             .Run();
     }
+
+    // Install hooks always act on the real system: a NEXUS_PROFILE in the
+    // environment isolates a running app, not the installation itself.
+    private static IDesktopIntegration RealSystem() =>
+        OperatingSystem.IsWindows() ? new WindowsDesktopIntegration() : DesktopIntegration.Current;
 
     private static string InstallRoot =>
         // ...\NexusDesktop\current\Nexus.exe -> ...\NexusDesktop
@@ -32,7 +37,7 @@ public static class InstallerHooks
 
     private static void AfterInstall()
     {
-        var integration = DesktopIntegration.Current;
+        var integration = RealSystem();
         integration.RegisterUrlScheme();
         if (OperatingSystem.IsWindows()) LegacyInstall.Retire(integration);
     }
@@ -40,7 +45,7 @@ public static class InstallerHooks
     private static void BeforeUninstall()
     {
         var root = InstallRoot;
-        var integration = DesktopIntegration.Current;
+        var integration = RealSystem();
         Try(() => integration.UnregisterUrlScheme(root));
         if (OperatingSystem.IsWindows())
         {
@@ -134,6 +139,8 @@ internal static class UserData
             string.Join("\n", Locations()) + "\n\n" +
             "Your chats and memories stay in your Nexus account either way.\n\n" +
             "Choose No to keep them for a later reinstall.";
+        // Branded task dialog first; a plain message box if it can't show.
+        if (UninstallPrompt.AskRemoveData(Locations()) is { } choice) return choice;
         try
         {
             return MessageBoxTimeout(IntPtr.Zero, text, "Uninstall Nexus", MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND | MB_TOPMOST, 0, 25_000) == IDYES;
