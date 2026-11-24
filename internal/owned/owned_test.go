@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -17,6 +18,10 @@ func isolate(t *testing.T) string {
 	ResetForTest()
 	return state
 }
+
+// native rewrites the Windows-style fixture paths for the host OS, so the
+// basename-based Gemini check sees a real file name on macOS and Linux too.
+func native(p string) string { return strings.ReplaceAll(p, "\\", string(filepath.Separator)) }
 
 func TestNexusOwnedTranscripts(t *testing.T) {
 	state := isolate(t)
@@ -35,7 +40,7 @@ func TestNexusOwnedTranscripts(t *testing.T) {
 		`C:\Users\u\.gemini\tmp\hash\chats\session-2026-11-22T07-59-5d727dae.jsonl`,
 	}
 	for _, p := range ownedPaths {
-		if !IsTranscript(p) {
+		if !IsTranscript(native(p)) {
 			t.Errorf("should skip %s", p)
 		}
 	}
@@ -43,7 +48,7 @@ func TestNexusOwnedTranscripts(t *testing.T) {
 		`C:\Users\u\.claude\projects\D--app\` + other + `.jsonl`,
 		`C:\Users\u\.gemini\tmp\hash\chats\session-2026-11-22T07-59-c7e18540.jsonl`,
 	} {
-		if IsTranscript(p) {
+		if IsTranscript(native(p)) {
 			t.Errorf("must keep capturing %s", p)
 		}
 	}
@@ -64,7 +69,7 @@ func TestNexusOwnedTranscripts(t *testing.T) {
 	if _, err := os.Stat(state); err != nil {
 		t.Fatal(err)
 	}
-	if !IsTranscript(ownedPaths[0]) {
+	if !IsTranscript(native(ownedPaths[0])) {
 		t.Fatal("registry not reloaded from disk")
 	}
 }

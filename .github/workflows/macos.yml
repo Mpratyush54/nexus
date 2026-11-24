@@ -54,16 +54,21 @@ jobs:
       - name: Vet the C-ABI library build
         run: go vet -tags nexuscorelib ./cmd/nexuscore/
 
+      # Later steps still run when this fails, so one unrelated test failure
+      # does not hide the dylib and smoke-test evidence; the job stays red.
       - name: Test (DB-free suite)
+        if: ${{ !cancelled() }}
         run: go test -short -count=1 ./...
 
       - name: macOS-specific checks, verbose
+        if: ${{ !cancelled() }}
         run: >
           go test -short -count=1 -v
           -run 'FakeHome|ResolveSourcesUsesOSAppDataDir|WorkspaceJSONPosix|DescriptorBudget|AppDataDir|AugmentGUIPath|AugmentedPath|LeavesSkipsMacHome|ResolveSources'
           ./internal/daemon/ ./internal/platform/ ./internal/project/
 
       - name: Build libnexuscore.dylib (arm64 + x86_64, universal)
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           mkdir -p dist
@@ -84,11 +89,13 @@ jobs:
           done
 
       - name: Build smoke host
+        if: ${{ !cancelled() }}
         run: |
           clang -Wall -Werror -arch arm64 -o dist/nxsmoke scripts/macos/nxsmoke.c
           clang -Wall -Werror -arch x86_64 -o dist/nxsmoke-x86_64 scripts/macos/nxsmoke.c
 
       - name: Smoke - dlopen + nx_call from a Finder-like environment
+        if: ${{ !cancelled() }}
         run: |
           set -euo pipefail
           FAKE_HOME="$RUNNER_TEMP/fakehome"
@@ -104,6 +111,7 @@ jobs:
           find "$FAKE_HOME" -maxdepth 4 -not -path '*/.local/bin*' | sed "s#$FAKE_HOME#~#" | sort
 
       - name: Smoke - x86_64 slice under Rosetta (informational)
+        if: ${{ !cancelled() }}
         continue-on-error: true
         run: |
           if ! arch -x86_64 /usr/bin/true 2>/dev/null; then echo "Rosetta not installed on this runner"; exit 0; fi
@@ -113,6 +121,7 @@ jobs:
             arch -x86_64 ./dist/nxsmoke-x86_64 "$PWD/dist/libnexuscore.dylib"
 
       - name: Code signing - hardened runtime host vs ad-hoc dylib
+        if: ${{ !cancelled() }}
         # Shows which entitlement a hardened-runtime app needs to load the
         # library when the two are not signed by the same Team ID.
         run: |
@@ -143,6 +152,7 @@ jobs:
           exit 0
 
       - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
         with:
           name: libnexuscore-macos-universal
           path: |
