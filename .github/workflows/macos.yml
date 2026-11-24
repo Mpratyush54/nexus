@@ -103,7 +103,9 @@ jobs:
           mkdir -p "$FAKE_HOME/.claude/projects" "$FAKE_HOME/.codex/sessions" "$FAKE_HOME/.local/bin"
           printf '#!/bin/sh\necho 9.9.9\n' > "$FAKE_HOME/.local/bin/claude"
           chmod +x "$FAKE_HOME/.local/bin/claude"
-          # A GUI app gets launchd's PATH, not the shell's.
+          # A GUI app gets launchd's PATH, not the shell's, and launchd's
+          # default soft descriptor limit of 256 (launchctl limit maxfiles).
+          ulimit -n 256
           env -i HOME="$FAKE_HOME" USER="$USER" TMPDIR="$TMPDIR" \
             PATH=/usr/bin:/bin:/usr/sbin:/sbin NXSMOKE_EXPECT_CLAUDE=1 \
             ./dist/nxsmoke "$PWD/dist/libnexuscore.dylib"
@@ -134,8 +136,7 @@ jobs:
           cp dist/nxsmoke dist/host-hardened
           codesign --force -s - -o runtime dist/host-hardened
           echo "=== hardened host, no entitlements"
-          env -i HOME="$FAKE_HOME" TMPDIR="$TMPDIR" PATH=/usr/bin:/bin ./dist/host-hardened "$PWD/dist/libnexuscore-adhoc.dylib"
-          echo "exit=$?"
+          env -i HOME="$FAKE_HOME" TMPDIR="$TMPDIR" PATH=/usr/bin:/bin ./dist/host-hardened "$PWD/dist/libnexuscore-adhoc.dylib"             && echo "loaded: exit=0" || echo "refused or failed: exit=$?"
 
           cat > dist/dlv.entitlements <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
@@ -147,8 +148,7 @@ jobs:
           cp dist/nxsmoke dist/host-dlv
           codesign --force -s - -o runtime --entitlements dist/dlv.entitlements dist/host-dlv
           echo "=== hardened host + disable-library-validation"
-          env -i HOME="$FAKE_HOME" TMPDIR="$TMPDIR" PATH=/usr/bin:/bin ./dist/host-dlv "$PWD/dist/libnexuscore-adhoc.dylib"
-          echo "exit=$?"
+          env -i HOME="$FAKE_HOME" TMPDIR="$TMPDIR" PATH=/usr/bin:/bin ./dist/host-dlv "$PWD/dist/libnexuscore-adhoc.dylib"             && echo "loaded: exit=0" || echo "refused or failed: exit=$?"
           exit 0
 
       - uses: actions/upload-artifact@v4

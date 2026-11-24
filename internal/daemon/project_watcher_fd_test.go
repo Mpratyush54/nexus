@@ -10,15 +10,19 @@ import (
 	"testing"
 
 	"github.com/fsnotify/fsnotify"
+	"golang.org/x/sys/unix"
 )
 
 func openFDs(t *testing.T) int {
 	t.Helper()
-	entries, err := os.ReadDir("/dev/fd")
-	if err != nil {
-		t.Skipf("cannot count descriptors: %v", err)
+	// Probe each descriptor number: reading /dev/fd is unreliable on macOS.
+	n := 0
+	for fd := 0; fd < 65536; fd++ {
+		if _, err := unix.FcntlInt(uintptr(fd), unix.F_GETFD, 0); err == nil {
+			n++
+		}
 	}
-	return len(entries)
+	return n
 }
 
 // makeTree builds dirs folders of files files each under root.

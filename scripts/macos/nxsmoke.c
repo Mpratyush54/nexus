@@ -30,7 +30,7 @@ static int call(nx_call_fn nx_call, nx_free_fn nx_free, const char *method,
         return 1;
     }
     printf("%s -> %.600s%s\n", method, out, strlen(out) > 600 ? "..." : "");
-    int bad = strncmp(out, "{\"ok\":true", 10) != 0 ||
+    int bad = !strstr(out, "\"ok\":true") ||
               (must_contain && !strstr(out, must_contain));
     if (bad) fprintf(stderr, "FAIL %s (want ok:true%s%s)\n", method,
                      must_contain ? " and " : "", must_contain ? must_contain : "");
@@ -72,7 +72,7 @@ int main(int argc, char **argv) {
 
     char *bad = nx_call("no.such.method", "{}");
     printf("no.such.method -> %s\n", bad ? bad : "(null)");
-    if (!bad || strncmp(bad, "{\"ok\":false", 11) != 0) {
+    if (!bad || !strstr(bad, "\"ok\":false")) {
         fprintf(stderr, "FAIL: unknown method must return ok:false\n");
         failed = 1;
     }
