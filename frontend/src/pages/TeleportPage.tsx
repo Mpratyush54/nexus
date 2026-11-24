@@ -51,7 +51,7 @@ export function TeleportPage() {
       <TeleportList
         title="Inbox"
         query={inbox}
-        empty="Nothing has been teleported to you."
+        empty="Nothing here yet. When a teammate sends you a chat with its code, it shows up here to accept in Nexus Desktop."
         action={(item) => (
           <Button size="sm" disabled={accept.isPending} onClick={() => accept.mutate(item.id)}>
             Accept
@@ -61,7 +61,7 @@ export function TeleportPage() {
       <TeleportList
         title="Sent"
         query={sent}
-        empty="You have not teleported a session."
+        empty="You haven't sent any chats. Use Teleport on a chat in Nexus Desktop to move it, with its code, to another computer."
         action={(item) => (
           <Button
             size="sm"

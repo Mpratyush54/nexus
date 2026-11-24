@@ -106,10 +106,7 @@ export type LocalGitStatus = {
 }
 
 /** Localhost candidates the PWA probes for same-machine desktop agents. */
-export const LOCAL_DAEMON_CANDIDATES = [
-  'http://127.0.0.1:7272',
-  'http://localhost:7272',
-] as const
+export const LOCAL_DAEMON_CANDIDATES = ['http://127.0.0.1:7272'] as const
 
 /**
  * Local workspace state is relayed daemon → central server → PWA.
@@ -175,6 +172,7 @@ export const daemonApi = {
     }
   },
 
+  /** null when nothing answers; {} when a daemon answers without /local/status. */
   async probeLocalStatus(
     baseUrl: string,
     signal?: AbortSignal,
@@ -184,7 +182,7 @@ export const daemonApi = {
       const res = await fetch(`${base}/local/status`, {
         signal: signal ?? AbortSignal.timeout(2_000),
       })
-      if (!res.ok) return null
+      if (!res.ok) return {}
       return (await res.json()) as LocalDaemonStatus
     } catch {
       return null
@@ -197,7 +195,9 @@ export const daemonApi = {
   ): Promise<{ baseUrl: string; status: LocalDaemonStatus } | null> {
     for (const base of LOCAL_DAEMON_CANDIDATES) {
       const status = await this.probeLocalStatus(base, signal)
-      if (status?.ok || status?.machine_id || status?.root) {
+      // Nothing listening: a second request would only log another error.
+      if (status === null) continue
+      if (status.ok || status.machine_id || status.root) {
         return { baseUrl: base, status }
       }
       // Fallback healthz-only (older daemons without /local/status)

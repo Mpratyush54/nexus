@@ -253,6 +253,10 @@ func TestWSUpgradeThroughLoggingMiddleware(t *testing.T) {
 		t.Fatalf("upgrade status = %d body=%s; want 101 (logging middleware must expose Hijacker)",
 			resp.StatusCode, body)
 	}
+	// RFC 6455 section 1.3 worked example: browsers fail the handshake on any other value.
+	if got := resp.Header.Get("Sec-WebSocket-Accept"); got != "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=" {
+		t.Fatalf("Sec-WebSocket-Accept = %q, want RFC 6455 value", got)
+	}
 }
 
 // doAuthedGet performs an authenticated plain GET /ws (no upgrade headers).

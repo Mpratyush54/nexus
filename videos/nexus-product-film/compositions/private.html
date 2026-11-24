@@ -1,0 +1,57 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; font-family: "Inter", sans-serif; color: #fff; }
+    #root .vp { position: absolute; overflow: hidden; border-radius: 16px; background: #000; border: 1px solid #2c2c2c; box-shadow: 0 40px 120px rgba(0, 0, 0, 0.6); }
+    #root .cam { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+    #root .cam img { display: block; }
+    #root .hl { position: absolute; border-radius: 12px; border: 3px solid #e8bb67; box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.5), 0 0 40px rgba(232, 187, 103, 0.45); }
+    #root .cursor { position: absolute; left: 0; top: 0; width: 46px; height: 62px; }
+    #root .pills { position: absolute; left: 120px; top: 870px; display: flex; gap: 22px; }
+    #root .pill { padding: 20px 32px; border-radius: 16px; background: #121316; border: 1px solid #2c3038; font-size: 32px; font-weight: 700; display: flex; gap: 16px; align-items: center; letter-spacing: -0.01em; }
+    #root .pill i { width: 14px; height: 14px; border-radius: 50%; background: #e8bb67; display: block; }
+  </style>
+  <div id="root" data-composition-id="private" data-width="1920" data-height="1080">
+    <div id="private-vp" class="vp" style="left: 120px; top: 176px; width: 1680px; height: 660px">
+      <div id="private-a" class="cam" style="width: 1800px; height: 1080px">
+        <img src="assets/shots/chat-redaction-dark.png" width="1800" height="1080" alt="" />
+        <div id="private-red" class="hl" style="left: 984px; top: 230px; width: 310px; height: 140px; opacity: 0"></div>
+      </div>
+    </div>
+    <div class="pills">
+      <div id="private-p0" class="pill"><i></i>Native Windows app</div>
+      <div id="private-p1" class="pill"><i></i>Not Electron</div>
+      <div id="private-p2" class="pill"><i></i>Private by default</div>
+    </div>
+
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+      const VW = 1680, VH = 660;
+      const SH = {"a": {"id": "private-a", "w": 1800, "h": 1080}};
+      const clampXY = (sh, cx, cy, s) => {
+        let x = VW / 2 - cx * s, y = VH / 2 - cy * s;
+        x = Math.min(0, Math.max(VW - sh.w * s, x));
+        y = Math.min(0, Math.max(VH - sh.h * s, y));
+        if (sh.w * s < VW) x = (VW - sh.w * s) / 2;
+        if (sh.h * s < VH) y = (VH - sh.h * s) / 2;
+        return { x, y, scale: s };
+      };
+      const camSet = (k, cx, cy, s) => gsap.set("#" + SH[k].id, clampXY(SH[k], cx, cy, s));
+      const cam = (k, at, cx, cy, s, d, ease) => tl.to("#" + SH[k].id, Object.assign(clampXY(SH[k], cx, cy, s), { duration: d, ease: ease || "power3.inOut" }), at);
+      const hl = (id, at, hold) => {
+        tl.fromTo("#" + id, { opacity: 0, scale: 1.06 }, { opacity: 1, scale: 1, duration: 0.3, ease: "power3.out" }, at);
+        tl.to("#" + id, { opacity: 0, duration: 0.25 }, at + hold);
+      };
+      const show = (k, at, d) => tl.fromTo("#" + SH[k].id, { opacity: 0 }, { opacity: 1, duration: d || 0.35 }, at);
+      const hide = (k, at, d) => tl.to("#" + SH[k].id, { opacity: 0, duration: d || 0.35 }, at);
+      camSet("a", 1150, 300, 1.25);
+      tl.fromTo("#private-vp", { y: 60, opacity: 0, filter: "blur(12px)" }, { y: 0, opacity: 1, filter: "blur(0px)", duration: 0.45, ease: "expo.out" }, 0);
+      cam("a", 0.3, 1180, 300, 1.75, 0.7);
+      hl("private-red", 0.95, 2.1);
+      tl.fromTo(["#private-p0", "#private-p1", "#private-p2"], { opacity: 0, y: 30 }, { opacity: 1, y: 0, duration: 0.4, ease: "power3.out", stagger: 0.12 }, 1.35);
+      tl.to(["#private-vp", "#private-p0", "#private-p1", "#private-p2"], { opacity: 0, filter: "blur(10px)", duration: 0.3, ease: "power2.in" }, 3.4);
+      window.__timelines["private"] = tl;
+    })();
+  </script>
+</template>

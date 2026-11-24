@@ -1,0 +1,68 @@
+<template>
+  <style>
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI"); font-weight: 400; }
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI Semibold"); font-weight: 600; }
+    #root { position: absolute; inset: 0; overflow: hidden; font-family: "Segoe UI", "Inter", sans-serif; color: #fff; }
+    #root .tile {
+      position: absolute; left: 140px; width: 440px; height: 100px; border-radius: 14px;
+      background: #121316; border: 2px solid #262930; display: flex; align-items: center; gap: 18px; padding: 0 26px;
+      font-size: 32px; font-weight: 600; color: #eceae4;
+    }
+    #root .tile .d { width: 16px; height: 16px; border-radius: 50%; }
+    #root .tile .s { margin-left: auto; font-size: 22px; font-weight: 400; color: #7d828b; }
+    #root .vp { position: absolute; left: 660px; top: 176px; width: 1140px; height: 850px; overflow: hidden; border-radius: 16px; background: #0a0a0a; border: 1px solid #2c2c2c; box-shadow: 0 40px 120px rgba(0, 0, 0, 0.6); }
+    #root .cam { position: absolute; left: 0; top: 0; width: 2000px; height: 1250px; transform-origin: 0 0; }
+    #root .cam img { display: block; }
+    #root .hl { position: absolute; left: 530px; width: 1250px; border-radius: 14px; border: 3px solid #e8bb67; box-shadow: 0 0 40px rgba(232, 187, 103, 0.45); }
+    #root .ghost { position: absolute; left: 0; top: 0; padding: 10px 18px; border-radius: 22px; background: #2b2b2b; border: 1px solid #444; font-size: 22px; color: #ddd; display: flex; gap: 10px; align-items: center; }
+    #root .hd { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  </style>
+  <div id="root" data-composition-id="capture" data-width="1920" data-height="1080">
+    <div id="cp-t0" class="tile" style="top: 214px"><span class="d" style="background: #e07a5f"></span>Claude Code<span class="s">captured</span></div>
+    <div id="cp-t1" class="tile" style="top: 352px"><span class="d" style="background: #4cc38a"></span>Codex<span class="s">captured</span></div>
+    <div id="cp-t2" class="tile" style="top: 490px"><span class="d" style="background: #c9ccd2"></span>Cursor<span class="s">captured</span></div>
+    <div id="cp-t3" class="tile" style="top: 628px"><span class="d" style="background: #f0b65a"></span>OpenCode<span class="s">captured</span></div>
+    <div id="cp-t4" class="tile" style="top: 766px"><span class="d" style="background: #6ea8ff"></span>Gemini CLI<span class="s">captured</span></div>
+    <div id="cp-t5" class="tile" style="top: 904px"><span class="d" style="background: #9d8cff"></span>Kimi Code<span class="s">captured</span></div>
+
+    <div id="cp-vp" class="vp">
+      <div id="cp-cam" class="cam">
+        <img src="assets/shots/web-timeline-dark.png" width="2000" height="1250" alt="" />
+        <div id="cp-h0" class="hl" style="top: 166px; height: 176px; opacity: 0"></div>
+        <div id="cp-h1" class="hl" style="top: 517px; height: 148px; opacity: 0"></div>
+        <div id="cp-h2" class="hl" style="top: 679px; height: 148px; opacity: 0"></div>
+        <div id="cp-h3" class="hl" style="top: 1164px; height: 90px; opacity: 0"></div>
+      </div>
+    </div>
+    <div id="cp-ghost" class="ghost"><span id="cp-gdot" class="hd" style="background: #fff"></span>new session</div>
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+      const VW = 1140, VH = 850, W = 2000, H = 1250;
+      const at = (cx, cy, s) => ({ x: Math.min(0, Math.max(VW - W * s, VW / 2 - cx * s)), y: Math.min(0, Math.max(VH - H * s, VH / 2 - cy * s)), scale: s });
+      gsap.set("#cp-cam", at(1150, 420, 0.86));
+      gsap.set("#cp-ghost", { opacity: 0 });
+      tl.fromTo("#cp-vp", { x: 260, opacity: 0, filter: "blur(12px)" }, { x: 0, opacity: 1, filter: "blur(0px)", duration: 0.55, ease: "expo.out" }, 0);
+      for (let t = 0; t < 6; t++) {
+        tl.fromTo("#cp-t" + t, { x: -200, opacity: 0 }, { x: 0, opacity: 1, duration: 0.45, ease: "expo.out" }, 0.05 + t * 0.05);
+      }
+      // Real timeline: claude, cursor, gemini, codex sessions. Each arrives from its agent.
+      const colors = ["#e07a5f", "#4cc38a", "#c9ccd2", "#f0b65a", "#6ea8ff", "#9d8cff"];
+      const arrivals = [[0, "#cp-h0"], [2, "#cp-h1"], [4, "#cp-h2"], [1, "#cp-h3"]];
+      tl.to("#cp-cam", Object.assign(at(1150, 860, 0.86), { duration: 5.6, ease: "sine.inOut" }), 1.0);
+      arrivals.forEach(([tile, h], k) => {
+        const t0 = 0.8 + k * 1.15;
+        tl.set("#cp-gdot", { background: colors[tile] }, t0);
+        tl.fromTo("#cp-ghost", { x: 500, y: 238 + tile * 138, opacity: 1, scale: 1 }, { x: 720, y: 420 + k * 90, scale: 0.9, duration: 0.35, ease: "power2.in", immediateRender: false }, t0);
+        tl.set("#cp-ghost", { opacity: 0 }, t0 + 0.36);
+        tl.fromTo("#cp-t" + tile, { borderColor: colors[tile] }, { borderColor: "#262930", duration: 0.8, immediateRender: false }, t0);
+        tl.fromTo(h, { opacity: 0, scale: 1.04 }, { opacity: 1, scale: 1, duration: 0.25 }, t0 + 0.33);
+        tl.to(h, { opacity: 0, duration: 0.3 }, t0 + 1.25);
+      });
+      tl.to("#cp-vp", { scale: 0.92, opacity: 0, filter: "blur(10px)", duration: 0.38, ease: "power3.in" }, 7.08);
+      for (let t = 0; t < 6; t++) tl.to("#cp-t" + t, { x: -120, opacity: 0, duration: 0.3, ease: "power3.in" }, 7.05 + t * 0.02);
+      window.__timelines["capture"] = tl;
+    })();
+  </script>
+</template>

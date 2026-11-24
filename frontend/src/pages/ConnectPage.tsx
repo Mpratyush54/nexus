@@ -431,10 +431,28 @@ export function ConnectPage() {
             </div>
           </>
         ) : (
-          <p className="text-sm text-fg-dim">
-            Harvest diagnostics stay hidden until Desktop and portal share the same account. That
-            stops one login from reading another user&apos;s local chats.
-          </p>
+          <div className="space-y-3">
+            <p className="text-sm text-fg-dim">
+              Scan details appear once Nexus Desktop on this computer is signed in to the same
+              account, so nobody can read another person&apos;s local chats.
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="secondary"
+              onClick={() => void bridge.local.refetch()}
+              disabled={bridge.local.isFetching}
+            >
+              <RefreshCw size={14} className={bridge.local.isFetching ? 'animate-spin' : ''} aria-hidden />
+              {bridge.local.isFetching ? 'Checking…' : 'Check this computer'}
+            </Button>
+            {bridge.local.isFetched && !bridge.local.isFetching && !bridge.local.data ? (
+              <p className="text-xs text-muted" role="status">
+                No older Nexus daemon answered here. Nexus Desktop reports in through your account
+                once it&apos;s signed in.
+              </p>
+            ) : null}
+          </div>
         )}
       </GlassPanel>
 

@@ -1,0 +1,86 @@
+<template>
+  <style>
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI"); font-weight: 400; }
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI Semibold"); font-weight: 600; }
+    #root { position: absolute; inset: 0; overflow: hidden; font-family: "Segoe UI", "Inter", sans-serif; color: #fff; }
+    #root .vp { position: absolute; left: 120px; top: 176px; width: 1680px; height: 850px; overflow: hidden; border-radius: 16px; background: #000; border: 1px solid #2c2c2c; box-shadow: 0 40px 120px rgba(0, 0, 0, 0.6); }
+    #root .cam { position: absolute; left: 0; top: 0; width: 1800px; height: 1080px; transform-origin: 0 0; }
+    #root .cam img { display: block; }
+    #root .hl { position: absolute; border-radius: 12px; border: 3px solid #e8bb67; box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.5), 0 0 40px rgba(232, 187, 103, 0.45); }
+    #root .term {
+      position: absolute; left: 160px; top: 560px; width: 820px; padding: 26px 32px; border-radius: 16px;
+      background: rgba(13, 14, 16, 0.97); border: 1px solid #3a3d44; font-family: "JetBrains Mono", monospace; font-size: 26px; line-height: 1.5; color: #cfd3da;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.8);
+    }
+    #root .term .bar { font-family: "Segoe UI", sans-serif; font-size: 21px; color: #8d929b; margin-bottom: 14px; display: flex; gap: 10px; align-items: center; }
+    #root .hd { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+    #root .call { color: #e8bb67; }
+    #root .str { color: #9be3bd; }
+    #root .res { margin-top: 14px; padding: 14px 20px; border-left: 4px solid #e8bb67; background: #17191d; border-radius: 6px; font-family: "Segoe UI", sans-serif; }
+    #root .res .k { font-size: 18px; color: #e8bb67; text-transform: uppercase; letter-spacing: 0.08em; }
+    #root .res .v { font-size: 26px; color: #f4f1e9; line-height: 1.35; margin-top: 4px; }
+    #root .tools { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 10px; }
+    #root .tools span { font-size: 20px; padding: 4px 12px; border-radius: 8px; background: #1b1d22; border: 1px solid #2c3038; color: #b9bec7; }
+    #root .sync { position: absolute; left: 460px; top: 230px; width: 1000px; padding: 40px 44px; border-radius: 18px; background: #0d0e10; border: 1px solid #2c2c2c; box-shadow: 0 40px 120px rgba(0, 0, 0, 0.6); }
+    #root .sync .h1 { font-size: 36px; font-weight: 600; }
+    #root .sync .d { font-size: 26px; color: #b0b4bb; line-height: 1.45; margin-top: 10px; }
+    #root .file { margin-top: 18px; height: 92px; border-radius: 12px; background: #16171a; display: flex; align-items: center; padding: 0 28px; gap: 18px; }
+    #root .file code { font-family: "JetBrains Mono", monospace; font-size: 30px; }
+    #root .file .ok { margin-left: auto; font-size: 26px; color: #4cc38a; }
+  </style>
+  <div id="root" data-composition-id="memory" data-width="1920" data-height="1080">
+    <div id="mm-vp" class="vp">
+      <div id="mm-cam" class="cam">
+        <img src="assets/shots/memory-brief-dark.png" width="1800" height="1080" alt="" />
+        <div id="mm-hl-key" class="hl" style="left: 428px; top: 328px; width: 1300px; height: 130px; opacity: 0"></div>
+        <div id="mm-hl-brief" class="hl" style="left: 428px; top: 148px; width: 1300px; height: 145px; opacity: 0"></div>
+      </div>
+    </div>
+    <div id="mm-term" class="term" data-layout-allow-overlap>
+      <div class="bar"><span class="hd" style="background: #4cc38a"></span>Codex · calling Nexus MCP</div>
+      <div><span class="call">memory_search</span>(<span class="str" id="mm-q"></span>)</div>
+      <div id="mm-res" class="res">
+        <div class="k">Decision · checkout-service</div>
+        <div class="v">One Idempotency-Key per capture. Retry 429 and 5xx with backoff; never retry a declined card.</div>
+      </div>
+      <div id="mm-tools" class="tools"><span>memory_search</span><span>project_knowledge</span><span>related_to</span><span>file_history</span><span>why</span><span>line_history</span></div>
+    </div>
+    <div id="mm-sync" class="sync">
+      <div class="h1">Agent instruction files</div>
+      <div class="d">Nexus keeps a marked section of each file in sync with project memory.</div>
+      <div class="file"><span class="hd" style="background: #e07a5f"></span><code>CLAUDE.md</code><span class="ok" id="mm-o0">✓ in sync</span></div>
+      <div class="file"><span class="hd" style="background: #4cc38a"></span><code>AGENTS.md</code><span class="ok" id="mm-o1">✓ in sync</span></div>
+      <div class="file"><span class="hd" style="background: #6ea8ff"></span><code>GEMINI.md</code><span class="ok" id="mm-o2">✓ in sync</span></div>
+    </div>
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+      const VW = 1680, VH = 850;
+      const at = (cx, cy, s) => ({ x: Math.min(0, Math.max(VW - 1800 * s, VW / 2 - cx * s)), y: Math.min(0, Math.max(VH - 1080 * s, VH / 2 - cy * s)), scale: s });
+      gsap.set("#mm-cam", at(1085, 360, 1.1));
+      gsap.set(["#mm-sync", "#mm-res"], { opacity: 0 });
+      tl.fromTo("#mm-vp", { x: 220, opacity: 0, filter: "blur(12px)" }, { x: 0, opacity: 1, filter: "blur(0px)", duration: 0.55, ease: "expo.out" }, 0);
+      tl.fromTo("#mm-term", { y: 80, opacity: 0 }, { y: 0, opacity: 1, duration: 0.5, ease: "expo.out" }, 0.3);
+      // Semantic query: no keyword overlap with the decision it finds.
+      const q = '"how do we avoid double charges?"';
+      const ty = { n: 0 };
+      tl.to(ty, { n: q.length, duration: 1.2, ease: "none", onUpdate: () => { document.querySelector("#mm-q").textContent = q.slice(0, Math.round(ty.n)); } }, 0.75);
+      tl.fromTo("#mm-res", { opacity: 0, y: 20 }, { opacity: 1, y: 0, duration: 0.4, ease: "power3.out" }, 2.55);
+      tl.fromTo("#mm-hl-key", { opacity: 0 }, { opacity: 1, duration: 0.3 }, 2.6);
+      tl.fromTo("#mm-tools span", { opacity: 0, y: 10 }, { opacity: 1, y: 0, duration: 0.3, stagger: 0.06 }, 3.1);
+      tl.to("#mm-term", { y: 60, opacity: 0, duration: 0.35, ease: "power3.in" }, 4.5);
+      tl.to("#mm-hl-key", { opacity: 0, duration: 0.25 }, 4.5);
+      // The project brief agents read first.
+      tl.to("#mm-cam", Object.assign(at(1085, 300, 1.22), { duration: 0.7, ease: "power3.inOut" }), 4.7);
+      tl.fromTo("#mm-hl-brief", { opacity: 0, scale: 1.05 }, { opacity: 1, scale: 1, duration: 0.3 }, 5.3);
+      tl.to("#mm-hl-brief", { opacity: 0, duration: 0.25 }, 7.5);
+      // Instruction file sync.
+      tl.to("#mm-vp", { x: -160, opacity: 0, filter: "blur(10px)", duration: 0.35, ease: "power3.in" }, 7.9);
+      tl.fromTo("#mm-sync", { x: 140, opacity: 0 }, { x: 0, opacity: 1, duration: 0.45, ease: "expo.out" }, 8.15);
+      tl.fromTo(["#mm-o0", "#mm-o1", "#mm-o2"], { opacity: 0, scale: 0.6 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2.4)", stagger: 0.22 }, 8.8);
+      tl.to("#mm-sync", { scale: 0.94, opacity: 0, filter: "blur(10px)", duration: 0.38, ease: "power3.in" }, 10.85);
+      window.__timelines["memory"] = tl;
+    })();
+  </script>
+</template>

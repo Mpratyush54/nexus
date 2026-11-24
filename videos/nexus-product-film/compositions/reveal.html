@@ -1,0 +1,79 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      font-family: "Inter", sans-serif;
+    }
+    #root .glow {
+      position: absolute;
+      left: 460px;
+      top: 40px;
+      width: 1000px;
+      height: 1000px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(232, 187, 103, 0.22), rgba(232, 187, 103, 0) 62%);
+    }
+    #root .lockup {
+      position: absolute;
+      left: 0;
+      top: 300px;
+      width: 1920px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 40px;
+    }
+    #root #rv-mark { width: 260px; height: 260px; }
+    #root .word {
+      font-size: 196px;
+      font-weight: 900;
+      letter-spacing: -0.05em;
+      color: #f4f1e9;
+      overflow: hidden;
+    }
+    #root .word span { display: inline-block; }
+    #root .tag {
+      position: absolute;
+      left: 0;
+      width: 1920px;
+      top: 650px;
+      text-align: center;
+      font-size: 56px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: #c8c4ba;
+    }
+    #root .tag b { color: #e8bb67; font-weight: 700; }
+  </style>
+  <div id="root" data-composition-id="reveal" data-width="1920" data-height="1080">
+    <div id="rv-glow" class="glow"></div>
+    <div id="rv-lockup" class="lockup">
+      <svg id="rv-mark" viewBox="0 0 64 64" fill="none">
+        <path id="rv-p1" d="M14 47V20a6 6 0 0 1 6-6h5l25 33" stroke="#F4F1E9" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+        <path id="rv-p2" d="M50 17v27a6 6 0 0 1-6 6h-5L14 17" stroke="#E8BB67" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+        <path id="rv-p3" d="m25 32 8 10" stroke="#F4F1E9" stroke-width="8" stroke-linecap="round" />
+      </svg>
+      <div class="word"><span id="rv-word">Nexus</span></div>
+    </div>
+    <div id="rv-tag" class="tag">One <b>shared memory</b> for every coding agent.</div>
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+      ["#rv-p1", "#rv-p2", "#rv-p3"].forEach((p, i) => {
+        const len = document.querySelector(p).getTotalLength();
+        tl.fromTo(p, { strokeDasharray: len, strokeDashoffset: len }, { strokeDashoffset: 0, duration: 0.55, ease: "power3.out" }, 0.02 + i * 0.12);
+      });
+      tl.fromTo("#rv-mark", { scale: 1.5, x: 230, rotation: -12 }, { scale: 1, x: 0, rotation: 0, duration: 0.8, ease: "expo.out" }, 0);
+      tl.fromTo("#rv-glow", { scale: 0.3, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.9, ease: "expo.out" }, 0);
+      tl.fromTo("#rv-word", { xPercent: -110, opacity: 0 }, { xPercent: 0, opacity: 1, duration: 0.7, ease: "expo.out" }, 0.35);
+      tl.fromTo("#rv-tag", { y: 30, opacity: 0, filter: "blur(10px)" }, { y: 0, opacity: 1, filter: "blur(0px)", duration: 0.6, ease: "power3.out" }, 0.95);
+      // Push through toward the app window.
+      tl.to("#rv-lockup, #rv-tag", { y: -160, opacity: 0, filter: "blur(14px)", duration: 0.45, ease: "power3.in" }, 3.2);
+      tl.to("#rv-glow", { opacity: 0, duration: 0.45 }, 3.2);
+      window.__timelines["reveal"] = tl;
+    })();
+  </script>
+</template>

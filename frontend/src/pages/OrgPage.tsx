@@ -23,18 +23,15 @@ import { PlanGrid } from '@/components/PlanGrid'
 import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
+import { initialsOf, usePeople } from '@/hooks/usePeople'
 
 const MANAGER_ROLES = ['ADMIN', 'MEMBER'] as const
-
-function initials(id: string) {
-  const s = id.replace(/^user_/, '').slice(0, 2)
-  return (s || '??').toUpperCase()
-}
 
 export function OrgPage() {
   const { orgId: orgIdParam } = useParams()
   const navigate = useNavigate()
   const { user, setProjectId } = useAuth()
+  const { nameFor } = usePeople()
   const { push } = useToast()
   const orgs = useOrgs()
   const createOrg = useCreateOrg()
@@ -324,11 +321,11 @@ export function OrgPage() {
                 {canManage ? (
                   <form onSubmit={onInvite} className="flex flex-wrap items-end gap-2">
                     <label className="block min-w-[12rem] flex-1">
-                      <span className="mb-1 block text-xs text-fg-dim">Add by user id</span>
+                      <span className="mb-1 block text-xs text-fg-dim">Add by user ID</span>
                       <input
                         value={inviteId}
                         onChange={(e) => setInviteId(e.target.value)}
-                        placeholder="user uuid"
+                        placeholder="e.g. 1b2c3d4e-5f60-…"
                         className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none focus:border-amber"
                       />
                     </label>
@@ -401,12 +398,12 @@ export function OrgPage() {
                     return (
                       <li key={m.user_id} className="flex flex-wrap items-center gap-3 py-3">
                         <div className="app-avatar flex h-9 w-9 items-center justify-center rounded-full bg-raised text-[10px] font-medium">
-                          {initials(m.user_id)}
+                          {initialsOf(nameFor(m.user_id, { you: false }))}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <p className="truncate font-mono text-sm text-fg">
-                            {m.user_id}
-                            {isSelf ? <span className="ml-2 text-xs text-muted">you</span> : null}
+                          <p className="truncate text-sm text-fg" title={m.user_id}>
+                            {nameFor(m.user_id, { you: false })}
+                            {isSelf ? <span className="ml-2 text-xs text-muted">(you)</span> : null}
                           </p>
                         </div>
                         <select
@@ -560,7 +557,7 @@ export function OrgPage() {
                   <ul className="space-y-1 text-sm text-fg">
                     {(storage.data?.members ?? []).map((row) => (
                       <li key={row.user_id} className="flex justify-between gap-3">
-                        <span className="truncate font-mono text-xs">{row.user_id}</span>
+                        <span className="truncate text-xs" title={row.user_id}>{nameFor(row.user_id)}</span>
                         <span className="text-xs text-fg-dim">
                           {row.session_count} sessions
                           {row.last_active_at ? ` · ${formatRelative(row.last_active_at)}` : ''}
@@ -656,7 +653,7 @@ export function OrgPage() {
                           setOffboardUser(e.target.value)
                           setOffboardPreview(null)
                         }}
-                        placeholder="user uuid"
+                        placeholder="e.g. 1b2c3d4e-5f60-…"
                         className="h-10 w-full rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber"
                       />
                     </label>
@@ -665,7 +662,7 @@ export function OrgPage() {
                       <input
                         value={offboardReceiver}
                         onChange={(e) => setOffboardReceiver(e.target.value)}
-                        placeholder="user uuid"
+                        placeholder="e.g. 1b2c3d4e-5f60-…"
                         className="h-10 w-full rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber"
                       />
                     </label>
@@ -724,7 +721,7 @@ export function OrgPage() {
                   {(audit.data?.items ?? []).map((ev, i) => (
                     <li key={`${ev.at}-${ev.action}-${i}`} className="text-xs text-fg-dim">
                       <span className="text-fg">{ev.action}</span>
-                      {ev.actor_user_id ? ` · ${ev.actor_user_id}` : ''} · {formatRelative(ev.at)}
+                      {ev.actor_user_id ? ` · ${nameFor(ev.actor_user_id)}` : ''} · {formatRelative(ev.at)}
                     </li>
                   ))}
                   {(audit.data?.items ?? []).length === 0 ? (

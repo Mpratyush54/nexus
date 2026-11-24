@@ -13,7 +13,9 @@ export function AppProviders({ children }: { children: ReactNode }) {
       <AuthProvider>
         <ToastProvider>{children}</ToastProvider>
       </AuthProvider>
-      <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
+      {import.meta.env.VITE_RQ_DEVTOOLS === '1' ? (
+        <ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-left" />
+      ) : null}
     </QueryClientProvider>
   )
 }

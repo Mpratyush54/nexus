@@ -1,4 +1,9 @@
 @import 'tailwindcss';
+@import './conversation.css';
+@import './theme.css';
+
+.nexus-brand { display: inline-flex; align-items: center; gap: 9px; font-size: 18px; font-weight: 650; letter-spacing: -.045em; color: var(--brand-fg); }
+.nexus-brand img { flex: none; object-fit: contain; }
 
 @theme {
   --color-base: #0a0a0a;
@@ -6,7 +11,7 @@
   --color-raised: #181818;
   --color-border: #262626;
   --color-border-strong: #3a3a3a;
-  --color-muted: #6e6e6e;
+  --color-muted: #8a8780;
   --color-fg: #e4e1db;
   --color-fg-dim: #9a9690;
   --color-accent: #e4e1db;
@@ -39,6 +44,10 @@
 
   html {
     color-scheme: dark;
+  }
+
+  html[data-theme='light'] {
+    color-scheme: light;
   }
 
   body {
@@ -92,7 +101,7 @@
   }
 
   .glass {
-    background: rgba(17, 17, 17, 0.78);
+    background: var(--glass-bg);
     backdrop-filter: blur(14px);
     -webkit-backdrop-filter: blur(14px);
     box-shadow: var(--shadow-glass);
@@ -375,7 +384,7 @@
     position: absolute;
     inset: 0;
     border: 0;
-    background: rgba(0, 0, 0, 0.6);
+    background: var(--overlay-bg);
     cursor: pointer;
   }
 

@@ -1,4 +1,4 @@
-import { type ButtonHTMLAttributes, type ReactNode } from 'react'
+import { type ButtonHTMLAttributes, type ReactNode, type Ref } from 'react'
 
 type Variant = 'primary' | 'secondary' | 'ghost' | 'danger'
 type Size = 'sm' | 'md' | 'lg'
@@ -7,10 +7,11 @@ type Props = ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: Variant
   size?: Size
   children: ReactNode
+  ref?: Ref<HTMLButtonElement>
 }
 
 const variants: Record<Variant, string> = {
-  primary: 'bg-accent text-ink hover:bg-white',
+  primary: 'bg-accent text-ink hover:opacity-90',
   secondary:
     'bg-transparent text-fg border border-border hover:border-border-strong hover:bg-raised',
   ghost: 'bg-transparent text-fg-dim hover:text-fg hover:bg-raised',

@@ -65,7 +65,9 @@ export function useEnsureActiveProject() {
     if (!list?.length) return
     const stillValid = Boolean(projectId && list.some((p) => p.id === projectId))
     if (stillValid) return
+    // Wait for the counts so the busiest project wins, not the first listed.
+    if (!summaries.data && summaries.isFetching) return
     const best = summaries.data?.[0]?.project ?? list[0]
     if (best?.id) setProjectId(best.id)
-  }, [isAuthenticated, projectId, projects.data, summaries.data, setProjectId])
+  }, [isAuthenticated, projectId, projects.data, summaries.data, summaries.isFetching, setProjectId])
 }

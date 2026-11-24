@@ -15,6 +15,7 @@ import { authApi } from '@/api/auth'
 import { notificationsApi } from '@/api/notifications'
 import { projectsApi, type ExportMemory } from '@/api/projects'
 import { PlanGrid } from '@/components/PlanGrid'
+import { AppearanceSettings } from '@/components/AppearanceSettings'
 import { subscribeWebPush } from '@/lib/pwa'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
@@ -254,7 +255,7 @@ export function SettingsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Settings</h1>
         <p className="mt-1 text-sm text-fg-dim">
-          Profile, password, and API tokens. PWA {import.meta.env.VITE_APP_VERSION ?? 'dev'}
+          Your profile, appearance, password and API tokens.
           {me.data?.is_platform_admin ? (
             <>
               {' · '}
@@ -270,19 +271,39 @@ export function SettingsPage() {
         <h2 className="text-sm font-medium text-fg">Profile</h2>
         {me.data ? (
           <>
-            <p className="font-mono text-xs text-muted">@{me.data.username}</p>
+            <dl className="grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[auto_1fr]">
+              <dt className="text-fg-dim">Username</dt>
+              <dd className="font-mono text-fg">@{me.data.username}</dd>
+              <dt className="text-fg-dim">User ID</dt>
+              <dd className="flex min-w-0 items-center gap-2">
+                <code className="truncate font-mono text-fg">{me.data.id}</code>
+                <button
+                  type="button"
+                  className="shrink-0 text-amber underline-offset-2 hover:underline"
+                  onClick={() => {
+                    void navigator.clipboard
+                      .writeText(me.data!.id)
+                      .then(() => push({ title: 'User ID copied', detail: 'Share it with a project owner to be added.' }))
+                      .catch(() => push({ title: 'Copy blocked', detail: 'Select the ID to copy it.', tone: 'amber' }))
+                  }}
+                >
+                  Copy
+                </button>
+              </dd>
+            </dl>
             <form onSubmit={onSaveEmail} className="flex flex-wrap items-end gap-2">
               <label className="block min-w-[14rem] flex-1">
                 <span className="mb-1 block text-xs text-fg-dim">Email</span>
                 <input
                   type="email"
+                  autoComplete="email"
                   defaultValue={me.data.email ?? ''}
                   onChange={(e) => setEmail(e.target.value)}
                   className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none focus:border-amber"
                 />
               </label>
               <Button type="submit" size="sm">
-                Save
+                Save email
               </Button>
             </form>
           </>
@@ -290,6 +311,8 @@ export function SettingsPage() {
           <p className="text-sm text-muted">Loading profile…</p>
         )}
       </GlassPanel>
+
+      <AppearanceSettings />
 
       <GlassPanel className="space-y-4 p-5">
         <div>

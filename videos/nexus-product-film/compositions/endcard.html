@@ -1,0 +1,58 @@
+<template>
+  <style>
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI"); font-weight: 400; }
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI Semibold"); font-weight: 600; }
+    #root { position: absolute; inset: 0; overflow: hidden; font-family: "Inter", sans-serif; color: #f4f1e9; }
+    #root .glow { position: absolute; left: 560px; top: 40px; width: 800px; height: 800px; border-radius: 50%; background: radial-gradient(circle, rgba(232, 187, 103, 0.16), rgba(232, 187, 103, 0) 62%); }
+    #root .lock { position: absolute; left: 0; top: 250px; width: 1920px; display: flex; justify-content: center; align-items: center; gap: 30px; }
+    #root #ec-mark { width: 170px; height: 170px; }
+    #root .word { font-size: 150px; font-weight: 900; letter-spacing: -0.05em; overflow: hidden; }
+    #root .word span { display: inline-block; }
+    #root .line { position: absolute; left: 0; width: 1920px; top: 490px; text-align: center; font-size: 48px; font-weight: 700; letter-spacing: -0.02em; color: #d8d4ca; }
+    #root .agents { position: absolute; left: 0; width: 1920px; top: 572px; text-align: center; font-family: "Segoe UI", sans-serif; font-size: 27px; color: #8d929b; }
+    #root .cta { position: absolute; left: 660px; top: 668px; width: 600px; height: 96px; border-radius: 16px; background: #e8bb67; color: #17130b; font-size: 34px; font-weight: 700; display: flex; align-items: center; justify-content: center; gap: 16px; letter-spacing: -0.01em; }
+    #root .sub { position: absolute; left: 0; width: 1920px; top: 790px; text-align: center; font-family: "Segoe UI", sans-serif; font-size: 24px; color: #8d929b; }
+    #root .credit { position: absolute; left: 0; width: 1920px; top: 958px; text-align: center; font-family: "Segoe UI", sans-serif; font-size: 18px; color: #5c6068; }
+    #root .cursor { position: absolute; left: 0; top: 0; width: 46px; height: 62px; }
+  </style>
+  <div id="root" data-composition-id="endcard" data-width="1920" data-height="1080">
+    <div id="ec-glow" class="glow"></div>
+    <div id="ec-lock" class="lock">
+      <svg id="ec-mark" viewBox="0 0 64 64" fill="none">
+        <path id="ec-p1" d="M14 47V20a6 6 0 0 1 6-6h5l25 33" stroke="#F4F1E9" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+        <path id="ec-p2" d="M50 17v27a6 6 0 0 1-6 6h-5L14 17" stroke="#E8BB67" stroke-width="8" stroke-linecap="round" stroke-linejoin="round" />
+        <path id="ec-p3" d="m25 32 8 10" stroke="#F4F1E9" stroke-width="8" stroke-linecap="round" />
+      </svg>
+      <div class="word"><span id="ec-word">Nexus</span></div>
+    </div>
+    <div id="ec-line" class="line">One shared memory for every coding agent.</div>
+    <div id="ec-agents" class="agents">Claude Code · Codex · Cursor · OpenCode · Gemini CLI · Kimi Code</div>
+    <div id="ec-cta" class="cta"><svg width="30" height="30" viewBox="0 0 24 24" fill="none" stroke="#17130b" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M6 10l6 6 6-6M4 20h16" /></svg><span data-var-text="cta">Download Nexus for Windows</span></div>
+    <div id="ec-sub" class="sub">Desktop app for Windows · cloud sync for teams</div>
+    <div id="ec-credit" class="credit">Music: "EDM Detection Mode" by Kevin MacLeod (incompetech.com) · CC BY 4.0 · Product UI recreated with demo data</div>
+    <svg id="ec-cursor" class="cursor" viewBox="0 0 46 62"><path d="M4 3 L4 50 L16 39 L24 58 L32 54 L24 36 L40 36 Z" fill="#fff" stroke="#111" stroke-width="3" stroke-linejoin="round" /></svg>
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+      ["#ec-p1", "#ec-p2", "#ec-p3"].forEach((p, i) => {
+        const len = document.querySelector(p).getTotalLength();
+        tl.fromTo(p, { strokeDasharray: len, strokeDashoffset: len }, { strokeDashoffset: 0, duration: 0.6, ease: "power3.out" }, 0.1 + i * 0.12);
+      });
+      tl.fromTo("#ec-glow", { opacity: 0, scale: 0.4 }, { opacity: 1, scale: 1, duration: 1.0, ease: "expo.out" }, 0);
+      tl.fromTo("#ec-mark", { x: 200, scale: 1.3 }, { x: 0, scale: 1, duration: 0.8, ease: "expo.out" }, 0.1);
+      tl.fromTo("#ec-word", { xPercent: -110, opacity: 0 }, { xPercent: 0, opacity: 1, duration: 0.7, ease: "expo.out" }, 0.45);
+      tl.fromTo("#ec-line", { y: 24, opacity: 0, filter: "blur(10px)" }, { y: 0, opacity: 1, filter: "blur(0px)", duration: 0.5, ease: "power3.out" }, 1.0);
+      tl.fromTo("#ec-agents", { opacity: 0 }, { opacity: 1, duration: 0.5 }, 1.35);
+      tl.fromTo("#ec-cta", { y: 30, opacity: 0, scale: 0.94 }, { y: 0, opacity: 1, scale: 1, duration: 0.5, ease: "back.out(1.7)" }, 1.8);
+      tl.fromTo("#ec-sub", { opacity: 0 }, { opacity: 1, duration: 0.5 }, 2.2);
+      tl.fromTo("#ec-credit", { opacity: 0 }, { opacity: 1, duration: 0.5 }, 2.4);
+      tl.fromTo("#ec-cursor", { x: 1500, y: 1100 }, { x: 1222, y: 728, duration: 0.9, ease: "power3.out" }, 2.75);
+      tl.to("#ec-cursor", { scale: 0.85, duration: 0.06, yoyo: true, repeat: 1, transformOrigin: "0 0" }, 3.8);
+      tl.to("#ec-cta", { scale: 0.96, duration: 0.07, yoyo: true, repeat: 1 }, 3.8);
+      tl.fromTo("#ec-cta", { boxShadow: "0 0 0 0 rgba(232,187,103,0.7)" }, { boxShadow: "0 0 0 26px rgba(232,187,103,0)", duration: 0.8, ease: "power2.out" }, 3.82);
+      tl.to("#ec-cursor", { opacity: 0, duration: 0.4 }, 4.9);
+      window.__timelines["endcard"] = tl;
+    })();
+  </script>
+</template>

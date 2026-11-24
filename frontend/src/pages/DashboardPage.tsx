@@ -94,17 +94,12 @@ export function DashboardPage() {
 
   return (
     <div className="space-y-8">
-      <div className="flex flex-wrap items-end justify-between gap-4">
-        <div className="min-w-0 flex-1">
-          <p className="text-[11px] uppercase tracking-wide text-muted">Working on</p>
-          <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">{projectLabel}</h1>
-          <p className="mt-1 text-sm text-fg-dim">
-            Memories are per project — switch below if this folder looks empty
-          </p>
-        </div>
-        <div className="w-full max-w-xs sm:w-56">
-          <ProjectSwitcher compact />
-        </div>
+      <div className="min-w-0">
+        <p className="text-[11px] uppercase tracking-wide text-muted">Project</p>
+        <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight text-fg">{projectLabel}</h1>
+        <p className="mt-1 text-sm text-fg-dim">
+          Chats, memory and activity for this project. Switch projects below.
+        </p>
       </div>
 
       {harvestTarget === 'mismatch' && hs?.project_id ? (
@@ -154,7 +149,7 @@ export function DashboardPage() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h2 className="text-sm font-medium text-fg">Your projects</h2>
           <p className="text-[11px] text-muted">
-            {(summaries.data ?? []).length || '…'} registered · folders on disk need Desktop bind / resolve to appear
+            {summaries.data ? `${summaries.data.length} ${summaries.data.length === 1 ? 'project' : 'projects'}` : 'Loading…'}
           </p>
         </div>
         <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -165,6 +160,7 @@ export function DashboardPage() {
                 key={row.project.id}
                 type="button"
                 onClick={() => setProjectId(row.project.id)}
+                aria-pressed={active}
                 className={[
                   'rounded-lg border px-3 py-3 text-left transition',
                   active
