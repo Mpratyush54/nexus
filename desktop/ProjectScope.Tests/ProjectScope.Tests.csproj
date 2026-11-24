@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <RootNamespace>Nexus.Core.Tests</RootNamespace>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="../windows/Core/ProjectScope.cs" Link="ProjectScope.cs" />
+    <Compile Include="../windows/Core/NxJson.cs" Link="NxJson.cs" />
+    <Compile Include="../windows/Pages/SessionLineage.cs" Link="SessionLineage.cs" />
+    <Compile Include="../windows/Core/TranscriptText.cs" Link="TranscriptText.cs" />
+    <Compile Include="../windows/Core/ConversationIndex.cs" Link="ConversationIndex.cs" />
+    <Compile Include="../windows/Core/ActivityCalendar.cs" Link="ActivityCalendar.cs" />
+    <Compile Include="../windows/Core/SidebarLayout.cs" Link="SidebarLayout.cs" />
+    <Compile Include="../windows/Core/LiveActivityLog.cs" Link="LiveActivityLog.cs" />
+    <Compile Include="../windows/Core/FileDiffPreview.cs" Link="FileDiffPreview.cs" />
+    <Compile Include="../windows/Core/BoundedShutdown.cs" Link="BoundedShutdown.cs" />
+    <Compile Include="../windows/Core/ModelPickerCatalog.cs" Link="ModelPickerCatalog.cs" />
+    <Compile Include="../windows/Core/FileRefs.cs" Link="FileRefs.cs" />
+    <Compile Include="../windows/Core/HarnessMessage.cs" Link="HarnessMessage.cs" />
+    <Compile Include="../windows/Core/TurnPaging.cs" Link="TurnPaging.cs" />
+    <Compile Include="../windows/Core/GraphLayout.cs" Link="GraphLayout.cs" />
+    <Compile Include="../windows/Core/Graph3D.cs" Link="Graph3D.cs" />
+    <Compile Include="../windows/Core/NodeSprite.cs" Link="NodeSprite.cs" />
+    <Compile Include="../windows/Core/ProfilePaths.cs" Link="ProfilePaths.cs" />
+  </ItemGroup>
+</Project>

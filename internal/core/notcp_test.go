@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"central-memory/internal/agents/mcpconfig"
+	"central-memory/internal/mcpproxy"
 )
 
 func TestNexuscoreSourceHasNoTCPListen(t *testing.T) {
@@ -43,11 +44,17 @@ func TestNoTCPEnv(t *testing.T) {
 func TestConfigureMCPViaCall(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp.json")
+	app := t.TempDir()
+	bundled := filepath.Join(app, mcpproxy.BinaryName())
+	if err := os.WriteFile(bundled, []byte("stub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	payload, err := json.Marshal(map[string]any{
 		"agent":      "antigravity",
 		"path":       path,
 		"server_url": "https://api.example.test",
 		"project_id": "p",
+		"app_dir":    app,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -77,7 +84,7 @@ func TestConfigureMCPViaCall(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "mcp-proxy") && !strings.Contains(string(body), "proxy") {
-		t.Fatalf("config missing proxy: %s", body)
+	if res.Command != bundled || !strings.Contains(string(body), "nexus-mcp-proxy") {
+		t.Fatalf("config missing bundled proxy: %+v %s", res, body)
 	}
 }

@@ -20,6 +20,7 @@ import {
 import { useMemo, useState } from 'react'
 import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { NotificationBell } from './NotificationBell'
+import { NexusBrand } from './NexusBrand'
 import { Button } from './ui/Button'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { useAuth } from '@/providers/AuthProvider'
@@ -28,7 +29,7 @@ import { useProjectPresence } from '@/hooks/useTeam'
 
 const links = [
   { to: '/app/dashboard', label: 'Home', icon: LayoutDashboard },
-  { to: '/app/timeline', label: 'Timeline', icon: History },
+  { to: '/app/timeline', label: 'Chats', icon: History },
   { to: '/app/teleport', label: 'Teleport', icon: Send },
   { to: '/app/memory', label: 'Memory', icon: Layers },
   { to: '/app/sessions', label: 'Sessions', icon: Radio },
@@ -76,6 +77,7 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
           <NavLink
             key={link.to}
             to={link.to}
+            title={link.label}
             onClick={onNavigate}
             className={({ isActive }) =>
               ['app-nav-link', isActive ? 'is-active' : ''].filter(Boolean).join(' ')
@@ -178,7 +180,7 @@ export function SideNav({ onOpenCommand }: Props) {
     <aside className="app-sidebar" aria-label="Main">
       <div className="app-sidebar-top">
         <NavLink to="/app/dashboard" className="app-brand">
-          Nexus
+          <NexusBrand />
         </NavLink>
 
         <div className="mt-5 flex items-center gap-1">
@@ -215,7 +217,7 @@ export function MobileNav({ onOpenCommand }: Props) {
   return (
     <>
       <div className="app-mobile-bar">
-        <span className="app-brand">Nexus</span>
+        <span className="app-brand"><NexusBrand /></span>
         <div className="app-mobile-actions">
           <NotificationBell />
           <Button variant="ghost" size="sm" onClick={onOpenCommand} aria-label="Search">
@@ -249,7 +251,7 @@ export function MobileNav({ onOpenCommand }: Props) {
               transition={{ type: 'spring', stiffness: 380, damping: 34 }}
             >
               <div className="app-drawer-head">
-                <span className="app-brand">Nexus</span>
+                <span className="app-brand"><NexusBrand /></span>
                 <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
                   <X size={16} />
                 </Button>

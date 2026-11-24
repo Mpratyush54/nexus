@@ -1,0 +1,23 @@
+<template>
+<style>
+#root{position:absolute;inset:0;overflow:hidden;font-family:Inter,sans-serif;color:#f4f1e9}.ground{position:absolute;inset:0;background:#171816}.product{position:absolute;inset:0;background:#282522;overflow:hidden}.capture{position:absolute;left:44px;top:132px;width:1536px;height:816px;max-width:none;clip-path:inset(0 0 0 296px)}.source{position:absolute;left:340px;top:985px;font-size:29px;color:#bbbdb1}.words{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;background:#171816}.label{font-size:62px;letter-spacing:-.035em;margin-bottom:35px;color:#b9bcae}.slot{display:grid;overflow:hidden;line-height:1.16;width:1500px;text-align:center}.name{grid-area:1/1;font-size:242px;font-weight:550;letter-spacing:-.075em;white-space:nowrap}.context{position:absolute;inset:0;background:#171816;display:flex;align-items:center;justify-content:center;overflow:hidden}.context h1{font-size:182px;line-height:1.04;letter-spacing:-.07em;font-weight:500;white-space:nowrap}.context span{color:#e8bb67}
+</style>
+<div data-hf-id="hf-7f7n" id="root" data-composition-id="switch" data-width="1920" data-height="1080">
+<div data-hf-id="hf-ygft" class="ground"></div>
+<div data-hf-id="hf-dkug" id="switch-shot" class="clip" data-start="0" data-duration="7" data-track-index="1">
+<div data-hf-id="hf-qv80" class="product" data-layout-allow-overflow="true"><img data-hf-id="hf-am98" class="capture" src="assets/05-codex-context.jpg" alt="Actual Nexus conversation and recorded patch, with Codex selected"><p data-hf-id="hf-2scu" class="source">Nexus · Demo workspace</p></div>
+<div data-hf-id="hf-m60b" class="words"><p data-hf-id="hf-zvpu" class="label">Your agent changes.</p><div data-hf-id="hf-zm2p" class="slot" data-layout-allow-overflow="true"><span data-hf-id="hf-80le" class="name cursor">Cursor.</span><span data-hf-id="hf-fpkq" class="name codex">Codex.</span><span data-hf-id="hf-f0jk" class="name opencode">OpenCode.</span></div></div>
+<div data-hf-id="hf-jxbd" class="context"><h1 data-hf-id="hf-9iwp">The <span data-hf-id="hf-kwfc">context</span> stays.</h1></div>
+</div></div>
+<script>
+// Registry kinetic-type-swap: fixed grid slot, no reflow, pulse, glow or bounce.
+// Registry page-slide: same directional handoff between real product and type.
+const tl=gsap.timeline({paused:true});
+tl.set('.words',{x:1920},0);tl.set('.context',{x:1920},0);tl.set('.codex,.opencode',{yPercent:112},0);
+tl.to('.product',{x:-1920,duration:.48,ease:'power3.inOut'},1.2);tl.to('.words',{x:0,duration:.48,ease:'power3.inOut'},1.2);
+tl.to('.cursor',{yPercent:-112,duration:.21,ease:'power4.in'},2.45);tl.to('.codex',{yPercent:0,duration:.34,ease:'power4.out'},2.62);
+tl.to('.codex',{yPercent:-112,duration:.21,ease:'power4.in'},3.35);tl.to('.opencode',{yPercent:0,duration:.34,ease:'power4.out'},3.52);
+tl.to('.words',{x:-1920,duration:.44,ease:'power3.inOut'},4.42);tl.to('.context',{x:0,duration:.44,ease:'power3.inOut'},4.42);
+tl.to('.context',{y:-1080,duration:.4,ease:'power3.in'},6.6);
+window.__timelines['switch']=tl;
+</script></template>

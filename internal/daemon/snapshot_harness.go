@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 // SnapshotLayout is the on-disk mapping for one harness conversation.
@@ -329,6 +331,79 @@ func resolveClaudeLayout(home, conversationID, workspaceRoot string) (SnapshotLa
 // restore when synthesizing JSONL from SQLite (parent becomes ArtifactDir
 // unless a live SQLite dir is a better brain root).
 func resolveSearchLayout(harness, conversationID string, roots []string, restoreTarget string) (SnapshotLayout, error) {
+	key := harness + "\x00" + conversationID + "\x00" + strings.Join(roots, "\x00") + "\x00" + restoreTarget
+	if layout, ok := searchLayoutCacheGet(key); ok {
+		return layout, nil
+	}
+	layout, err := resolveSearchLayoutUncached(harness, conversationID, roots, restoreTarget)
+	if err == nil {
+		searchLayoutCachePut(key, layout)
+	}
+	return layout, err
+}
+
+// searchLayoutCache remembers resolveSearchLayout results: each lookup walks
+// up to six levels of every harness root, and the snapshot pusher and
+// DetectHarnessForConversation repeat it for the same conversations. A found
+// transcript or database stays cached while it still exists; a miss is
+// re-checked after searchLayoutMissTTL.
+var searchLayoutCache = struct {
+	sync.Mutex
+	m map[string]searchLayoutEntry
+}{m: map[string]searchLayoutEntry{}}
+
+type searchLayoutEntry struct {
+	layout     SnapshotLayout
+	found      bool
+	transcript bool // TranscriptFile existed when resolved
+	at         time.Time
+}
+
+const (
+	searchLayoutMissTTL  = 5 * time.Minute
+	searchLayoutCacheMax = 2048
+)
+
+func searchLayoutCacheGet(key string) (SnapshotLayout, bool) {
+	searchLayoutCache.Lock()
+	e, ok := searchLayoutCache.m[key]
+	searchLayoutCache.Unlock()
+	if !ok {
+		return SnapshotLayout{}, false
+	}
+	if !e.found && time.Since(e.at) >= searchLayoutMissTTL {
+		return SnapshotLayout{}, false
+	}
+	// The files that decided the result must still be as they were.
+	if isRegularFile(e.layout.TranscriptFile) != e.transcript {
+		return SnapshotLayout{}, false
+	}
+	if e.layout.SQLiteSource != "" && !isRegularFile(e.layout.SQLiteSource) {
+		return SnapshotLayout{}, false
+	}
+	return e.layout, true
+}
+
+func isRegularFile(path string) bool {
+	if path == "" {
+		return false
+	}
+	st, err := os.Stat(path)
+	return err == nil && !st.IsDir()
+}
+
+func searchLayoutCachePut(key string, layout SnapshotLayout) {
+	transcript := isRegularFile(layout.TranscriptFile)
+	found := transcript || layout.SQLiteSource != ""
+	searchLayoutCache.Lock()
+	defer searchLayoutCache.Unlock()
+	if len(searchLayoutCache.m) >= searchLayoutCacheMax {
+		searchLayoutCache.m = map[string]searchLayoutEntry{}
+	}
+	searchLayoutCache.m[key] = searchLayoutEntry{layout: layout, found: found, transcript: transcript, at: time.Now()}
+}
+
+func resolveSearchLayoutUncached(harness, conversationID string, roots []string, restoreTarget string) (SnapshotLayout, error) {
 	wantNames := []string{
 		conversationID + ".jsonl",
 		conversationID + ".json",

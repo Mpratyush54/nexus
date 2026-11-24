@@ -1,8 +1,10 @@
 package config_test
 
 import (
+	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"central-memory/internal/config"
@@ -99,5 +101,83 @@ func TestSaveFileUpdatesRecentWorkspaces(t *testing.T) {
 	want := config.NormalizeWorkspacePath(ws)
 	if len(cfg.RecentWorkspaces) != 1 || cfg.RecentWorkspaces[0] != want {
 		t.Fatalf("RecentWorkspaces = %#v, want [%q]", cfg.RecentWorkspaces, want)
+	}
+}
+
+func TestTokenStoredProtected(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("DPAPI is Windows-only")
+	}
+	dir := t.TempDir()
+	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", dir)
+	const token = "secret-test-token-value"
+	if err := config.SaveFile(config.File{Token: token}); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, config.ConfigFileName)
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), token) {
+		t.Fatal("plaintext token leaked to config.json")
+	}
+	if !strings.Contains(string(raw), "token_protected") {
+		t.Fatal("protected token field missing from config.json")
+	}
+	cfg, err := config.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Token != token {
+		t.Fatalf("LoadFile token = %q, want protected token", cfg.Token)
+	}
+	if err := config.ClearCredentials(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.LoadFile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Token != "" || cfg.TokenProtected != "" {
+		t.Fatalf("ClearCredentials left token fields: %#v", cfg)
+	}
+}
+
+func TestTokenPersistsAcrossConfigurationChanges(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", dir)
+	const token = "cross-platform-sign-in-token"
+	if err := config.SaveFile(config.File{Token: token, UserID: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveFile(config.File{WorkspaceRoot: filepath.Join(dir, "workspace")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SetCaptureWorkspaces([]string{filepath.Join(dir, "workspace")}); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadFile()
+	if err != nil || cfg.Token != token {
+		t.Fatalf("saved token lost: %q, %v", cfg.Token, err)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(filepath.Join(dir, config.ConfigFileName))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("token config permissions = %o, want 0600", info.Mode().Perm())
+		}
+		if cfg.TokenProtected != "" {
+			t.Fatal("Unix token mislabeled as DPAPI-protected")
+		}
+	}
+	if err := config.ClearCredentials(); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = config.LoadFile()
+	if err != nil || cfg.Token != "" || cfg.TokenProtected != "" {
+		t.Fatal("logout did not clear credentials")
 	}
 }

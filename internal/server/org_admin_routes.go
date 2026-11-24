@@ -149,6 +149,33 @@ func (s *Server) ownerMayChangeRole(w http.ResponseWriter, r *http.Request, os o
 		writeError(w, http.StatusForbidden, "only an org owner can manage owners")
 		return false
 	}
+	// Never leave an organization without an owner: removing or demoting
+	// the last owner would lock everyone out of members, roles and billing.
+	if target == store.OrgRoleOwner {
+		demoting := removing
+		if !removing {
+			if norm, nerr := store.NormalizeOrgRole(newRole); nerr == nil && norm != store.OrgRoleOwner {
+				demoting = true
+			}
+		}
+		if demoting {
+			members, lerr := os.ListOrgMembers(r.Context(), orgID)
+			if lerr != nil {
+				writeError(w, http.StatusInternalServerError, "could not check org owners")
+				return false
+			}
+			owners := 0
+			for _, m := range members {
+				if m != nil && m.Role == store.OrgRoleOwner {
+					owners++
+				}
+			}
+			if owners <= 1 {
+				writeError(w, http.StatusConflict, "an organization needs at least one owner; make someone else an owner first")
+				return false
+			}
+		}
+	}
 	return true
 }
 

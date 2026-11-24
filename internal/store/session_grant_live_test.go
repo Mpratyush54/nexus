@@ -45,6 +45,19 @@ func TestLiveVsPointInTimeGrants(t *testing.T) {
 	if err := m.GrantAgentSessionOpts(ctx, parent.ID, "live-user", "owner", SessionGrantOpts{Live: true}); err != nil {
 		t.Fatal(err)
 	}
+	for _, tc := range []struct {
+		user string
+		want bool
+	}{
+		{user: "owner", want: true},
+		{user: "live-user", want: true},
+		{user: "pit-user", want: false},
+	} {
+		got, err := m.CanReadAgentSessionLive(ctx, tc.user, parent.ID)
+		if err != nil || got != tc.want {
+			t.Fatalf("live access for %s = %v, %v; want %v", tc.user, got, err, tc.want)
+		}
+	}
 
 	body2 := []byte("version-two-newer")
 	sum2 := sha256.Sum256(body2)
@@ -111,6 +124,9 @@ func TestForkAgentSessionTree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := m.AppendSessionTurn(ctx, SessionTurn{SessionID: parent.ID, Idx: 1, Role: "user", TextPreview: "Find the missing data"}); err != nil {
+		t.Fatal(err)
+	}
 	child, err := m.ForkAgentSession(ctx, parent.ID, "bob")
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +136,14 @@ func TestForkAgentSessionTree(t *testing.T) {
 	}
 	if child.OwnerUserID != "bob" || child.ProjectID != parent.ProjectID {
 		t.Fatalf("child ownership: %+v", child)
+	}
+	cloned, err := m.ListSessionTurns(ctx, child.ID)
+	if err != nil || len(cloned) != 1 || cloned[0].TextPreview != "Find the missing data" {
+		t.Fatalf("fork transcript=%+v err=%v", cloned, err)
+	}
+	timeline, _, err := m.ListTimeline(ctx, TimelineQuery{UserID: "bob", Query: "missing data"})
+	if err != nil || len(timeline) != 1 || timeline[0].Summary != "Find the missing data" {
+		t.Fatalf("fork timeline=%+v err=%v", timeline, err)
 	}
 	forks, err := m.ListAgentSessionForks(ctx, parent.ID)
 	if err != nil || len(forks) != 1 || forks[0].ID != child.ID {

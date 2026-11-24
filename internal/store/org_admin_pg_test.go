@@ -2,15 +2,11 @@ package store
 
 import (
 	"context"
-	"os"
 	"testing"
 )
 
 func TestOrgAdminPostgresCaptureAndStorage(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testPostgresDSN(t)
 	ctx := t.Context()
 	s, err := NewPostgresStore(ctx, dsn)
 	if err != nil {

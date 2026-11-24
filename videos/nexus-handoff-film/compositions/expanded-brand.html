@@ -1,0 +1,11 @@
+<template><style>*{box-sizing:border-box;margin:0}#root{position:absolute;inset:0;overflow:hidden;background:#252525;font-family:Inter,sans-serif}.clip{position:absolute;inset:0}.stage{position:absolute;inset:0;overflow:hidden;mask-image:linear-gradient(to bottom,#000 870px,transparent 930px)}.camera{position:absolute;left:0;top:0;width:1920px;height:1080px;transform-origin:0 0;will-change:transform}.camera video{position:absolute;left:0;top:0;width:1920px;height:1080px;object-fit:contain}
+#brand-lockup{color:#f5f4ef;text-align:center}#brand-mark{position:absolute;left:875px;top:215px;width:170px;height:170px}#brand-title{position:absolute;left:480px;top:415px;width:960px;font-size:128px;line-height:1;letter-spacing:-6px;font-weight:700}#brand-line{position:absolute;left:200px;top:605px;width:1520px;font-size:46px;letter-spacing:-1.5px}#brand-platform{position:absolute;left:200px;top:720px;width:1520px;font-size:34px;color:#edbd62}#brand-credit{position:absolute;left:200px;top:930px;width:1520px;font-size:28px;color:#b4b7b2}
+</style><div data-hf-id="hf-ss98" id="root" data-composition-id="expanded-brand" data-duration="7.5" data-width="1920" data-height="1080"><div data-hf-id="hf-ngon" id="brand-lockup" class="clip" data-start="0" data-duration="7.5" data-hold>
+<img data-hf-id="hf-8s1f" id="brand-mark" src="assets/nexus-mark.svg" alt="Nexus">
+<h1 data-hf-id="hf-54nu" id="brand-title">Nexus</h1><p data-hf-id="hf-tho0" id="brand-line">Shared memory. Across agents. Across your team.</p>
+<p data-hf-id="hf-8gfu" id="brand-platform">Windows beta · macOS coming soon</p><p data-hf-id="hf-44ka" id="brand-credit">Music: “EDM Detection Mode” · Kevin MacLeod · CC BY 4.0</p>
+</div></div><script>const tl=gsap.timeline({paused:true});
+tl.fromTo("#brand-mark",{scale:.85,opacity:0},{scale:1,opacity:1,duration:.6,ease:"power4.out"},0);
+tl.fromTo("#brand-title",{clipPath:"inset(0 100% 0 0)"},{clipPath:"inset(0 0% 0 0)",duration:.65,ease:"power4.out"},.2);
+tl.fromTo("#brand-line",{opacity:0,y:20},{opacity:1,y:0,duration:.6,ease:"power4.out"},.7);
+tl.fromTo("#brand-platform",{opacity:0},{opacity:1,duration:.5},1.2);window.__timelines=window.__timelines||{};window.__timelines["expanded-brand"]=tl;</script></template>

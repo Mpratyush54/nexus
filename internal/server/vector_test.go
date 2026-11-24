@@ -76,6 +76,36 @@ func (v *vectorStub) SearchMemoryVector(_ context.Context, _ string, queryVec []
 	return v.items, nil
 }
 
+type vectorPageStub struct {
+	store.Store
+	items  []*store.MemoryItem
+	offset int
+	level  string
+}
+
+func (v *vectorPageStub) SearchMemoryVectorPage(_ context.Context, _ string, _ []float32, _, offset int, level string) ([]*store.MemoryItem, error) {
+	v.offset = offset
+	v.level = level
+	return v.items, nil
+}
+
+func TestSearchMemoryHandlerVectorPagination(t *testing.T) {
+	stub := &vectorPageStub{Store: store.NewMemStore(), items: []*store.MemoryItem{{ID: "m1", Key: "k"}}}
+	s := NewServer(stub)
+	tok := loginAs(t, s, "alice")
+	projectID := resolveTestProject(t, s, tok, "vec-page-proj")
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&offset=1&limit=2&embedding=["+vec1536Raw()+"]", tok, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("vector page status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if stub.offset != 1 {
+		t.Fatalf("vector offset = %d, want 1", stub.offset)
+	}
+	if !strings.Contains(rec.Body.String(), `"offset":1`) {
+		t.Fatalf("response must echo offset 1, body = %s", rec.Body.String())
+	}
+}
+
 func TestSearchMemoryHandlerVectorPath(t *testing.T) {
 	stub := &vectorStub{Store: store.NewMemStore(), items: []*store.MemoryItem{{ID: "m1", Key: "k"}}}
 	s := NewServer(stub)
@@ -124,5 +154,29 @@ func TestSearchMemoryHandlerBadEmbedding400(t *testing.T) {
 	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&embedding=abc", tok, nil)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad embedding status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSearchMemoryHandlerVectorLevel(t *testing.T) {
+	stub := &vectorPageStub{Store: store.NewMemStore(), items: []*store.MemoryItem{{ID: "m1", Key: "k", Level: store.LevelPersonal}}}
+	s := NewServer(stub)
+	tok := loginAs(t, s, "alice")
+	projectID := resolveTestProject(t, s, tok, "vec-level-proj")
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&level=personal&embedding=["+vec1536Raw()+"]", tok, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("vector level status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if stub.level != store.LevelPersonal {
+		t.Fatalf("vector level = %q, want %q", stub.level, store.LevelPersonal)
+	}
+}
+
+func TestSearchMemoryHandlerInvalidLevel400(t *testing.T) {
+	s := newTestServer()
+	tok := loginAs(t, s, "alice")
+	projectID := resolveTestProject(t, s, tok, "vec-level-bad-proj")
+	rec := doJSON(t, s, http.MethodGet, "/memory/search?project_id="+projectID+"&level=global", tok, nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("invalid level status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
 }

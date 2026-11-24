@@ -15,6 +15,7 @@ export function AppShell() {
   const onHome = path.includes('/app/dashboard') || path === '/app' || path.endsWith('/app/')
   const onDesktop = path.includes('/app/connect')
   const onOnboarding = path.includes('/app/onboarding')
+  const onChat = path.includes('/app/timeline') || path.includes('/app/chats')
   const bridge = useTrustedLocalBridge()
   const identityLocked =
     bridge.identity === 'mismatch' || bridge.identity === 'unsigned'
@@ -57,7 +58,7 @@ export function AppShell() {
   }
 
   return (
-    <div className="mesh-bg app-shell">
+    <div className={`mesh-bg app-shell ${onChat ? 'is-conversation' : ''}`}>
       <SideNav onOpenCommand={() => setCmdOpen(true)} />
       <div className="app-content">
         <MobileNav onOpenCommand={() => setCmdOpen(true)} />

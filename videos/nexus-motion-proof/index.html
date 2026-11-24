@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en" data-composition-variables='[{"id":"platform","type":"string","label":"Availability","default":"Windows beta · macOS coming soon"}]'>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      /* Placeholders: replace all three with the film's own palette and display face. */
+      :root {
+        --ground: #171816;
+        --ink: #f4f1e9;
+        --font-display: Inter, sans-serif;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: var(--ground);
+      }
+      #root {
+        width: 100%;
+        height: 100%;
+        position: relative;
+        font-family: var(--font-display);
+      }
+      #title {
+        color: var(--ink);
+        font-size: 72px;
+        font-weight: 600;
+        letter-spacing: -0.03em;
+      }
+      .clip { position:absolute; inset:0; }
+    </style>
+  </head>
+  <body>
+    <div data-hf-id="hf-at0g"
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="20"
+      data-width="1920"
+      data-height="1080"
+    >
+      <div data-hf-id="hf-m67k" id="switch" class="clip" data-composition-id="switch" data-composition-src="compositions/switch.html" data-start="0" data-duration="7" data-track-index="1" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div data-hf-id="hf-zt3g" id="reason" class="clip" data-composition-id="reason" data-composition-src="compositions/reason.html" data-start="7" data-duration="5" data-track-index="2" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div data-hf-id="hf-3pav" id="team" class="clip" data-composition-id="team" data-composition-src="compositions/team.html" data-start="12" data-duration="4" data-track-index="3" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <div data-hf-id="hf-bfru" id="identity" class="clip" data-composition-id="identity" data-composition-src="compositions/identity.html" data-start="16" data-duration="4" data-track-index="4" data-track-kind="graphics" data-width="1920" data-height="1080"></div>
+      <audio data-hf-id="hf-5xjc" id="music" class="clip" src="assets/signal-to-noise.mp3" data-start="0" data-duration="20" data-media-start="200" data-volume="0.7" data-fade-in="0.35" data-fade-out="1.5" data-track-index="10"></audio>
+    </div>
+    <script>
+      const tl = gsap.timeline({ paused: true });
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

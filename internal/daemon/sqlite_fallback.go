@@ -2,26 +2,29 @@ package daemon
 
 // SQLite/VSCode-storage fallback extractor (issue #77, daemon side).
 //
-// No SQL driver dep is approved (ADR-033), so this file is stdlib-only:
-//  1. When the `sqlite3` CLI is present, dump the DB read-only and scan the
-//     dump text for chat-like JSON payloads.
-//  2. Otherwise (or when the CLI fails), scan the raw DB bytes for printable
-//     strings that look like dialogue turns.
+//  1. Open the DB read-only in-process (modernc.org/sqlite, already used for
+//     OpenCode) and scan the newest key/value rows for chat-like JSON
+//     payloads, with a hard byte and time budget.
+//  2. Otherwise (not SQLite, locked, unknown schema), scan the raw DB bytes
+//     for printable strings that look like dialogue turns.
+//
+// The previous `sqlite3 .dump` path spawned a process that serialised the
+// whole database (IDE state DBs reach gigabytes) into memory on every change,
+// which was a main cause of the machine stalling while capture ran.
 //
 // Both paths are best-effort and read-only: failures return nil (the caller
 // falls back to liveness-only). Opaque fixtures (no spaces / short blobs)
 // yield zero turns, preserving prior liveness behavior in tests.
 
 import (
-	"bytes"
 	"context"
+	"database/sql"
+	"net/url"
 	"os"
-	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
-
-	"central-memory/internal/hiddenproc"
 )
 
 // maxSQLiteScanBytes bounds raw DB reads (8MB).
@@ -37,38 +40,80 @@ var (
 // from a Cursor/VSCode .vscdb/.db file. It returns nil when nothing
 // chat-like is found (caller keeps liveness-only).
 func extractSQLiteFallback(dbPath string, since time.Time) []Turn {
-	// Fast path: sqlite3 CLI dump (read-only).
-	if turns := extractViaCLI(dbPath); len(turns) > 0 {
+	if turns, handled := extractViaDriver(dbPath); handled {
 		return turns
 	}
 	return extractViaRawScan(dbPath)
 }
 
-// extractViaCLI dumps the DB with the sqlite3 CLI (if present) and scans the
-// dump for role/content JSON fragments.
-func extractViaCLI(dbPath string) []Turn {
-	bin, err := exec.LookPath("sqlite3")
-	if err != nil || strings.TrimSpace(bin) == "" {
-		return nil
+// fallbackKVTables are the key/value tables VS Code-family IDEs use for chat
+// state (Cursor composer bubbles live in cursorDiskKV, others in ItemTable).
+var fallbackKVTables = []string{"cursorDiskKV", "ItemTable"}
+
+// extractViaDriver reads the newest rows of the IDE key/value tables through
+// a read-only in-process connection. handled=false means the file could not
+// be read this way and the raw scan should be tried instead.
+func extractViaDriver(dbPath string) (turns []Turn, handled bool) {
+	path := filepath.ToSlash(dbPath)
+	if filepath.VolumeName(dbPath) != "" {
+		path = "/" + path
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// mode=ro: never write or create a journal; the
+	// IDE stays the only writer.
+	uri := (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
+	db, err := sql.Open("sqlite", uri)
+	if err != nil {
+		return nil, false
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	// .dump is read-only; -readonly flag added when supported (best-effort:
-	// failure falls back to raw scan).
-	cmd := exec.CommandContext(ctx, bin, dbPath, ".dump")
-	hiddenproc.Configure(cmd)
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	// Bound output: LimitReader is not directly usable with cmd.Stdout, so
-	// cap after the fact.
-	if err := cmd.Run(); err != nil {
-		return nil
+	var text strings.Builder
+	found := false
+	for _, table := range fallbackKVTables {
+		var name string
+		if err := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&name); err != nil {
+			continue
+		}
+		found = true
+		// rowid DESC: newest writes first, so the byte budget keeps recent
+		// conversation rather than whatever happens to sit at the file start.
+		rows, err := db.QueryContext(ctx, `SELECT CAST(value AS TEXT) FROM "`+table+`" ORDER BY rowid DESC`)
+		if err != nil {
+			continue
+		}
+		var chunks []string
+		budget := maxSQLiteScanBytes - text.Len()
+		for budget > 0 && rows.Next() {
+			var v sql.NullString
+			if rows.Scan(&v) != nil || !v.Valid || len(v.String) < 20 {
+				continue
+			}
+			if !strings.Contains(v.String, `"text"`) && !strings.Contains(v.String, `"content"`) {
+				continue
+			}
+			s := v.String
+			if len(s) > budget {
+				s = s[:budget]
+			}
+			chunks = append(chunks, s)
+			budget -= len(s)
+		}
+		rows.Close()
+		// Restore chronological order for turnsFromText's trailing window.
+		for i := len(chunks) - 1; i >= 0; i-- {
+			text.WriteString(chunks[i])
+			text.WriteByte('\n')
+		}
+		if text.Len() >= maxSQLiteScanBytes {
+			break
+		}
 	}
-	dump := out.String()
-	if len(dump) > maxSQLiteScanBytes {
-		dump = dump[:maxSQLiteScanBytes]
+	if !found {
+		return nil, false
 	}
-	return turnsFromText(dump)
+	return turnsFromText(text.String()), true
 }
 
 // extractViaRawScan reads up to 8MB of the DB file and scans printable
@@ -148,14 +193,11 @@ func turnsFromText(text string) []Turn {
 				continue
 			}
 			out = append(out, Turn{Speaker: "unknown", Content: c})
-			if len(out) >= 20 {
-				break
-			}
 		}
-		return out
+		return lastTurns(out, 20)
 	}
 	var out []Turn
-	// For each role, look ahead ≤4KB for the next content/text payload.
+	// For each role, look ahead <=4KB for the next content/text payload.
 	for _, r := range roles {
 		if len(r) < 4 {
 			continue
@@ -175,12 +217,24 @@ func turnsFromText(text string) []Turn {
 		if len(content) < 20 || !strings.Contains(content, " ") {
 			continue
 		}
-		out = append(out, Turn{Speaker: normalizeSpeaker(role), Content: content})
-		if len(out) >= 20 {
-			break
+		turn := Turn{Speaker: normalizeSpeaker(role), Content: content}
+		if turn.Speaker == "user" {
+			// Cursor chat stores keep the prompt's <timestamp> header.
+			turn.Timestamp, _ = cursorPromptTime(content)
 		}
+		out = append(out, turn)
 	}
-	return out
+	return lastTurns(out, 20)
+}
+
+// lastTurns keeps the trailing window of fallback turns. Raw SQLite scans
+// walk the file from the start, so an un-capped first-20 window can stay
+// pinned to ancient rows forever.
+func lastTurns(turns []Turn, limit int) []Turn {
+	if limit <= 0 || len(turns) <= limit {
+		return turns
+	}
+	return turns[len(turns)-limit:]
 }
 
 // unescapeJSONStr unescapes \" \\ \n etc. in an extracted JSON string.

@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"central-memory/internal/mcpproxy"
 )
 
 const (
@@ -31,10 +33,17 @@ type Options struct {
 	ProjectID string
 	// Transport forces "remote" or "proxy". Empty picks by agent.
 	Transport string
-	// ProxyCommand is the executable for proxy mode (default "nexus").
+	// ProxyCommand is the executable for proxy mode. Empty resolves it with
+	// mcpproxy.Locate: the app's bundled nexus-mcp-proxy first, then a CLI
+	// on PATH. An explicit command defaults to ProxyArgs ["mcp-proxy"].
 	ProxyCommand string
-	// ProxyArgs are args after the command (default ["mcp-proxy"]).
+	// ProxyArgs are args after the command.
 	ProxyArgs []string
+	// AppDir holds the bundled proxy; empty uses the running executable's
+	// folder (Nexus.exe inside the desktop app).
+	AppDir string
+	// LookPath is the PATH fallback; nil uses exec.LookPath.
+	LookPath func(string) (string, error)
 }
 
 // Result is what agents.configure_mcp returns.
@@ -97,12 +106,25 @@ func Configure(opts Options) (Result, error) {
 		entry["headers"] = headers
 	case "proxy":
 		cmd := strings.TrimSpace(opts.ProxyCommand)
-		if cmd == "" {
-			cmd = "nexus"
-		}
 		args := opts.ProxyArgs
-		if len(args) == 0 {
+		if cmd == "" {
+			appDir := strings.TrimSpace(opts.AppDir)
+			if appDir == "" {
+				appDir = mcpproxy.DefaultAppDir()
+			}
+			argv, err := mcpproxy.Locate(appDir, opts.LookPath)
+			if err != nil {
+				return Result{}, fmt.Errorf("mcpconfig: %w", err)
+			}
+			cmd = argv[0]
+			if len(args) == 0 {
+				args = argv[1:]
+			}
+		} else if len(args) == 0 {
 			args = []string{"mcp-proxy"}
+		}
+		if args == nil {
+			args = []string{}
 		}
 		env := map[string]string{}
 		if pid := strings.TrimSpace(opts.ProjectID); pid != "" {
