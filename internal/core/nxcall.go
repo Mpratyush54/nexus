@@ -839,6 +839,10 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 			if level := argString(args, "level", "scope"); level != "" {
 				query.Set("level", level)
 			}
+			// GET /memory/search filters by tag (comma-separated, all must match).
+			if tags := argString(args, "tags", "tag"); tags != "" {
+				query.Set("tags", tags)
+			}
 			return http.MethodGet, "/memory/search?" + query.Encode(), nil, nil
 		}
 		// The remote agent search endpoint intentionally requires a non-empty

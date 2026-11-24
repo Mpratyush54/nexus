@@ -185,13 +185,11 @@ public sealed partial class SessionPage
         }
         else if (step.Kind == StepKind.Agent)
         {
-            // Claude Code's "Agent" tool often carries no "subagent" marker in
-            // its arguments; every sub-agent step still gets its actions.
-            var spawned = TryResolveSubagentFromTool(call) ?? new ChildSessionEntry("", SubagentLabelFromCall(call), call.Name);
-            if (spawned.Id.Length > 0) _inlineSubagentIds.Add(spawned.Id);
-            if (step.Target.Length == 0) step.Target = NxJson.Scrub(spawned.Title);
-            var description = Regex.Match(call.ArgsSummary, "\"description\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"").Groups[1].Value;
-            step.Extra = () => SubagentActions(spawned, JsonUnquote(description));
+            // Each run is its own card in the transcript (SessionPage.Subagents.cs),
+            // not a row buried in the collapsed work log.
+            if (TryResolveSubagentFromTool(call) is { Id.Length: > 0 } spawned) _inlineSubagentIds.Add(spawned.Id);
+            AddSubagentCard(call);
+            return;
         }
         _turnSteps.Add(step);
     }

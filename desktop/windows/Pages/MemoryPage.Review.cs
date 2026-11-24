@@ -194,6 +194,7 @@ public sealed partial class MemoryPage
         if (id.Length == 0) return;
         _seenProposed[id] = IsProposed(item);
         _seenCategories.Add(NormalizeCategory(NxJson.Text(item, "category")));
+        NoteSeenTags(item);
     }
 
     private static bool IsProposed(JsonElement item) =>

@@ -270,6 +270,13 @@ func TestCloudMethodsUseContractRoutes(t *testing.T) {
 	if c.method != "GET" || c.path != "/memory/search?limit=50&offset=100&project_id=p%2F1&q=hello" {
 		t.Fatalf("memory browse route = %s %s", c.method, c.path)
 	}
+	// The desktop's tag filter rides on the existing GET /memory/search tags parameter.
+	if _, err := Call(context.Background(), "memory.search", json.RawMessage(`{"browse":true,"project_id":"p1","q":"","limit":50,"offset":0,"tags":"release notes"}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "GET" || c.path != "/memory/search?limit=50&offset=0&project_id=p1&tags=release+notes" {
+		t.Fatalf("memory browse tag route = %s %s", c.method, c.path)
+	}
 
 	if _, err := Call(context.Background(), "sessions.turns", json.RawMessage(`{"session_id":"s/1"}`), deps); err != nil {
 		t.Fatal(err)

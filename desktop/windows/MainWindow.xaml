@@ -8,6 +8,7 @@
     <Grid Background="{ThemeResource NexusCanvasBrush}">
         <Grid.KeyboardAccelerators>
             <KeyboardAccelerator Key="K" Modifiers="Control" Invoked="Search_Invoked"/>
+            <KeyboardAccelerator Key="P" Modifiers="Control" Invoked="ProjectSwitch_Invoked"/>
         </Grid.KeyboardAccelerators>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -105,13 +106,16 @@
                 <Grid x:Name="ChatPane" Margin="10,2,10,0" Width="276" HorizontalAlignment="Left" RowSpacing="10">
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
+                    <!-- The one project selector (ProjectSwitcher.cs), always on top. -->
+                    <ContentControl x:Name="ProjectSwitcherHost" Grid.Row="0" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch" IsTabStop="False"/>
                     <!-- Hidden source of truth for the selected project. The
                          sidebar shows chats from every project; the filter
                          button narrows it to one (reference: T3 Code). -->
                     <ComboBox x:Name="ProjectSelector" Visibility="Collapsed" AutomationProperties.Name="Project"/>
-                    <Grid ColumnSpacing="2" Margin="4,0,0,0">
+                    <Grid Grid.Row="1" ColumnSpacing="2" Margin="4,0,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
@@ -121,14 +125,14 @@
                         <FontIcon Glyph="&#xE721;" FontSize="13" Opacity="0.55" VerticalAlignment="Center"/>
                         <TextBox x:Name="ChatSearch" Grid.Column="1" PlaceholderText="Search" AutomationProperties.Name="Search chats" TextChanged="ChatSearch_TextChanged"
                                  Background="Transparent" BorderThickness="0" FontSize="13" Padding="8,5,4,5" MinHeight="30"/>
-                        <Button x:Name="ProjectFilterButton" Grid.Column="2" Background="Transparent" BorderThickness="0" Padding="7" MinWidth="30" MinHeight="30" ToolTipService.ToolTip="Filter by project">
+                        <Button x:Name="ProjectFilterButton" Grid.Column="2" Background="Transparent" BorderThickness="0" Padding="7" MinWidth="30" MinHeight="30" ToolTipService.ToolTip="Filter by tag" AutomationProperties.Name="Filter chats by tag">
                             <FontIcon Glyph="&#xE71C;" FontSize="13" Opacity="0.7"/>
                         </Button>
                         <Button x:Name="NewChatButton" Grid.Column="3" Background="Transparent" BorderThickness="0" Padding="7" MinWidth="30" MinHeight="30" Click="NewChatButton_Click" ToolTipService.ToolTip="New chat">
                             <FontIcon Glyph="&#xE70F;" FontSize="13" Opacity="0.85"/>
                         </Button>
                     </Grid>
-                    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" Padding="0,0,2,4">
+                    <ScrollViewer x:Name="ChatScroll" Grid.Row="2" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" HorizontalScrollMode="Disabled" Padding="0,0,2,4" ViewChanged="ChatScroll_ViewChanged">
                         <StackPanel Spacing="2">
                             <TextBlock x:Name="ProjectFilterLabel" FontSize="11.5" Opacity="0.5" Margin="10,0,0,4" Visibility="Collapsed"/>
                             <!-- Virtualized: only the rows in view are realized

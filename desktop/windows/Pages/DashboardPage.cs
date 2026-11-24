@@ -58,7 +58,7 @@ public sealed class DashboardPage : NexusPage
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled
         };
         WatchShellProject(() => LoadAsync());
-        void FilterChanged(object? _, EventArgs __) => ApplyHeader();
+        void FilterChanged(object? _, EventArgs __) { ApplyHeader(); _ = LoadActivityAsync(_version, ShellProjectId(), null); }
         Loaded += (_, _) => { ShellState.ChatFilterChanged += FilterChanged; ApplyHeader(); };
         Unloaded += (_, _) => ShellState.ChatFilterChanged -= FilterChanged;
     }
@@ -210,7 +210,8 @@ public sealed class DashboardPage : NexusPage
         if (version != _version) return;
         _notice.Text = project.Length == 0 ? "Choose a project in the sidebar to see its chats and memories." : "";
         _metrics.Children.Clear();
-        _calendar.Render(dashboard is { Ok: true } ? dashboard.Result : null);
+        if (dashboard is not null) NoteMemoryCount(project, dashboard);
+        _ = LoadActivityAsync(version, project, dashboard);
         if (dashboard is { Ok: true, Result: { } data } && data.TryGetProperty("metrics", out var metrics))
         {
             var grid = new Grid { ColumnSpacing = 12 };
@@ -250,6 +251,72 @@ public sealed class DashboardPage : NexusPage
             _recent.Children.Add(open);
         }
         if (_recent.Children.Count == 0) _recent.Children.Add(Muted("No chats in this project yet. Type above to start one, or set up capture below to bring in your agents' history."));
+    }
+
+    // Agent activity follows the chat list's project filter. With "All
+    // projects" it adds up every project the person can see: the shell
+    // project alone (often an old one restored from the last session) left
+    // the calendar empty while the work happened in other projects.
+    private static readonly Dictionary<string, (ActivitySummary? Summary, string? Error, DateTime At)> s_activity = new(StringComparer.Ordinal);
+    private static readonly TimeSpan ActivityFresh = TimeSpan.FromMinutes(5);
+
+    private async Task LoadActivityAsync(int version, string shellProject, NxResponse? shellDashboard)
+    {
+        var filter = ShellState.Current.ChatFilter;
+        var all = filter.Length == 0;
+        var scope = all ? "all your projects" : ShellProjectLabel() is { Length: > 0 } label ? label : "this project";
+        var key = all ? "*" : filter;
+        if (s_activity.TryGetValue(key, out var cached) && DateTime.UtcNow - cached.At < ActivityFresh)
+        {
+            _calendar.Render(cached.Summary, scope, cached.Error);
+            return;
+        }
+        var offset = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalMinutes;
+        ActivitySummary? summary;
+        string? error = null;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        if (!all)
+        {
+            var response = filter == shellProject && shellDashboard is not null
+                ? shellDashboard
+                : await Core.CallAsync(NxMethods.DashboardGet, new { project_id = filter, utc_offset_minutes = offset });
+            summary = response.Ok ? ActivitySummaries.Parse(response.Result) : null;
+            if (!response.Ok) error = response.Error;
+        }
+        else
+        {
+            _calendar.ShowLoading(scope);
+            var projects = await Core.CallAsync(NxMethods.ProjectsList);
+            var ids = NxJson.Items(projects.Result).Select(p => NxJson.Text(p, "id", "project_id")).Where(ProjectScope.LooksLikeUuid).Distinct().ToList();
+            if (!projects.Ok || ids.Count == 0)
+            {
+                summary = null;
+                error = projects.Ok ? "No projects yet." : projects.Error;
+            }
+            else
+            {
+                var calls = ids.Select(id => id == shellProject && shellDashboard is { Ok: true }
+                    ? Task.FromResult(shellDashboard)
+                    : Core.CallAsync(NxMethods.DashboardGet, new { project_id = id, utc_offset_minutes = offset })).ToList();
+                var answers = await Task.WhenAll(calls);
+                for (var i = 0; i < ids.Count; i++) NoteMemoryCount(ids[i], answers[i]);
+                error = answers.FirstOrDefault(a => !a.Ok)?.Error;
+                summary = answers.Any(a => a.Ok) ? ActivitySummaries.Merge(answers.Select(a => a.Ok ? ActivitySummaries.Parse(a.Result) : null)) : null;
+            }
+        }
+        System.Diagnostics.Trace.WriteLine($"[perf] activity ({key}): {watch.ElapsedMilliseconds} ms");
+        await UiThread.Resume(DispatcherQueue);
+        if (version != _version || ShellState.Current.ChatFilter != filter) return;
+        if (summary is not null || NxErrors.IsSignedOut(error)) s_activity[key] = (summary, error, DateTime.UtcNow);
+        _calendar.Render(summary, scope, error);
+    }
+
+    // The project switcher shows memory counts for projects already loaded.
+    private static void NoteMemoryCount(string projectId, NxResponse dashboard)
+    {
+        if (dashboard is { Ok: true, Result: { } data } && data.TryGetProperty("metrics", out var metrics) &&
+            long.TryParse(NxJson.Text(metrics, "memories"), out var memories))
+            ProjectStats.SetMemories(projectId, memories);
     }
 
     private void RenderCapture(NxResponse status)

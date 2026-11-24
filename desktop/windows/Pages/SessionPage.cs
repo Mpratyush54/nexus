@@ -411,6 +411,9 @@ public sealed partial class SessionPage : NexusPage
             Clipboard.SetContent(data);
         };
         menu.Items.Add(copyConversation);
+        var tagsItem = new MenuFlyoutItem { Text = "Tags…", Icon = new FontIcon { Glyph = "" } };
+        tagsItem.Click += async (_, _) => { if (_id.Length > 0) await ChatTags.EditAsync(XamlRoot, _id, _header.Text); };
+        menu.Items.Add(tagsItem);
         var selectConversation = new MenuFlyoutItem { Text = "Select conversation text…" };
         selectConversation.Click += async (_, _) =>
         {
@@ -442,7 +445,8 @@ public sealed partial class SessionPage : NexusPage
         var usage = new ChatUsageBar(() => _id) { Margin = new Thickness(0, 0, 8, 0) };
         var usageInline = new Border { Child = usage, VerticalAlignment = VerticalAlignment.Center };
         var usageBelow = new Border { Margin = new Thickness(0, -2, 0, 0) };
-        var headerActions = Row(usageInline, _lineageMarker, find, detailsButton, _forkButton, shareButton, more);
+        InitSubagentsButton();
+        var headerActions = Row(usageInline, _lineageMarker, _subagentsButton, find, detailsButton, _forkButton, shareButton, more);
         headerActions.Spacing = 2;
         foreach (var action in headerActions.Children.OfType<Button>())
         {
@@ -818,6 +822,7 @@ public sealed partial class SessionPage : NexusPage
             _chat.Children.Add(Line("Could not render this conversation: " + ex.Message));
         }
         _paintedAt = Environment.TickCount64;
+        _ = RefreshSubagentCountAsync();
         // A sub-agent chat with no meta description is named from its first
         // request, which exists only now.
         if (_subagentTitlePending.Length > 0 && _subagentTitlePending == _id) _ = NameSubagentChatAsync(_id, _nativeID);
@@ -1062,12 +1067,98 @@ public sealed partial class SessionPage : NexusPage
     // before an exclusive idx cursor ("" = the end of the chat), in idx order.
     // A server without backward paging answers with the chat's FIRST turns;
     // then the pages are cut from a forward walk instead (TurnPaging).
-    private Task<NxResponse> CallLatestTurnsAsync(string sessionId, string beforeCursor, int limit) =>
-        s_backwardIgnored ? LatestTurnsFromForwardWalkAsync(sessionId, beforeCursor, limit) : CallBackwardTurnsAsync(sessionId, beforeCursor, limit);
+    private Task<NxResponse> CallLatestTurnsAsync(string sessionId, string beforeCursor, int limit)
+    {
+        // Read on the UI thread, before any await: the sidebar's turn count.
+        var count = MainWindow.Current?.ChatTurnCountFor(sessionId) ?? -1;
+        return s_backwardIgnored ? LatestTurnsWithoutBackwardAsync(sessionId, beforeCursor, limit, count) : CallBackwardTurnsAsync(sessionId, beforeCursor, limit, count);
+    }
+
+    // A server that ignores direction=backward forced a walk over the whole
+    // chat before its newest page could show: 2,000 turns took ten sequential
+    // 200-turn requests (~26 s measured on a real chat). Turn indexes are
+    // consecutive, so the newest page is read directly from idx count-limit
+    // (one request), racing the walk; the walk still wins when the count is
+    // wrong. Older pages jump the same way.
+    private async Task<NxResponse> LatestTurnsWithoutBackwardAsync(string sessionId, string beforeCursor, int limit, long count)
+    {
+        if (HasForwardWalk(sessionId)) return await LatestTurnsFromForwardWalkAsync(sessionId, beforeCursor, limit);
+        if (beforeCursor.Length > 0)
+        {
+            if (long.TryParse(beforeCursor, out var before) && await JumpOlderAsync(sessionId, before, limit) is { } older) return older;
+            return await LatestTurnsFromForwardWalkAsync(sessionId, beforeCursor, limit);
+        }
+        if (count <= limit + ForwardWalkPageSize) return await LatestTurnsFromForwardWalkAsync(sessionId, "", limit);
+        var abandon = new CancellationTokenSource();
+        var walk = LatestTurnsFromForwardWalkAsync(sessionId, "", limit, abandon.Token);
+        var jump = JumpTailAsync(sessionId, count, limit);
+        if (await Task.WhenAny((Task)walk, jump) == jump && await jump is { } tail)
+        {
+            abandon.Cancel();
+            System.Diagnostics.Trace.WriteLine($"[paging] session {sessionId}: newest page by idx jump (count {count})");
+            return tail;
+        }
+        if (!walk.IsCompleted && await jump is { } late) { abandon.Cancel(); return late; }
+        return await walk;
+    }
+
+    private static bool HasForwardWalk(string sessionId)
+    {
+        lock (s_forwardTurns) return s_forwardTurns.ContainsKey(sessionId);
+    }
+
+    private async Task<NxResponse?> JumpTailAsync(string sessionId, long count, int limit)
+    {
+        var turns = new List<JsonElement>();
+        var cursor = (count - limit - 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        for (var page = 0; page < 6 && cursor.Length > 0; page++)
+        {
+            var response = await Call(NxMethods.SessionsTurns, new { session_id = sessionId, id = sessionId, limit = ForwardWalkPageSize, cursor });
+            if (!response.Ok || response.Result is not { } body) return null;
+            var items = NxJson.Items(body).Select(t => t.Clone()).ToList();
+            if (items.Count == 0) break;
+            turns.AddRange(items);
+            cursor = NxJson.Text(body, "next_cursor");
+        }
+        // Nothing past the jump point (the count was too high), or still more
+        // after six pages: let the walk answer.
+        if (turns.Count == 0 || cursor.Length > 0) return null;
+        turns.Sort((a, b) => TurnIdx(a).CompareTo(TurnIdx(b)));
+        var (slice, _) = TurnPaging.Before(turns, TurnIdx, null, limit);
+        return PageResponse(slice, slice.Count > 0 && TurnIdx(slice[0]) > 0 ? TurnIdx(slice[0]).ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
+    }
+
+    private async Task<NxResponse?> JumpOlderAsync(string sessionId, long before, int limit)
+    {
+        var from = before - limit - 1;
+        var response = await Call(NxMethods.SessionsTurns, from >= 0
+            ? new { session_id = sessionId, id = sessionId, limit, cursor = from.ToString(System.Globalization.CultureInfo.InvariantCulture) }
+            : (object)new { session_id = sessionId, id = sessionId, limit });
+        if (!response.Ok || response.Result is not { } body) return null;
+        var items = NxJson.Items(body).Select(t => t.Clone()).Where(t => TurnIdx(t) < before).OrderBy(TurnIdx).ToList();
+        if (items.Count == 0) return from > 0 ? null : PageResponse(items, "");
+        return PageResponse(items, from >= 0 && TurnIdx(items[0]) > 0 ? TurnIdx(items[0]).ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
+    }
+
+    private static NxResponse PageResponse(List<JsonElement> slice, string nextCursor)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteStartArray("items");
+            foreach (var turn in slice) turn.WriteTo(writer);
+            writer.WriteEndArray();
+            writer.WriteString("next_cursor", nextCursor);
+            writer.WriteEndObject();
+        }
+        using var doc = JsonDocument.Parse(stream.ToArray());
+        return new NxResponse(true, null, doc.RootElement.Clone());
+    }
 
     private static bool s_backwardIgnored;
 
-    private async Task<NxResponse> CallBackwardTurnsAsync(string sessionId, string beforeCursor, int limit)
+    private async Task<NxResponse> CallBackwardTurnsAsync(string sessionId, string beforeCursor, int limit, long count)
     {
         var response = await Call(NxMethods.SessionsTurns, beforeCursor.Length > 0
             ? new { session_id = sessionId, id = sessionId, limit, cursor = beforeCursor, direction = "backward" }
@@ -1083,7 +1174,7 @@ public sealed partial class SessionPage : NexusPage
         if (!TurnPaging.LooksForward(idxs, NxJson.Text(body, "next_cursor"), before)) return response;
         s_backwardIgnored = true;
         System.Diagnostics.Trace.WriteLine($"[paging] session {sessionId}: server ignored direction=backward; paging from a forward walk");
-        return await LatestTurnsFromForwardWalkAsync(sessionId, beforeCursor, limit);
+        return await LatestTurnsWithoutBackwardAsync(sessionId, beforeCursor, limit, count);
     }
 
     // Forward-walked turns per chat (idx order). Older pages reuse the walk;
@@ -1098,12 +1189,13 @@ public sealed partial class SessionPage : NexusPage
 
     private static long TurnIdx(JsonElement turn) => long.TryParse(NxJson.Text(turn, "idx"), out var idx) ? idx : 0;
 
-    private async Task<NxResponse> LatestTurnsFromForwardWalkAsync(string sessionId, string beforeCursor, int limit)
+    private async Task<NxResponse> LatestTurnsFromForwardWalkAsync(string sessionId, string beforeCursor, int limit, CancellationToken abandon = default)
     {
         await s_forwardGate.WaitAsync();
         try
         {
-            s_forwardTurns.TryGetValue(sessionId, out var known);
+            ForwardTurns? known;
+            lock (s_forwardTurns) s_forwardTurns.TryGetValue(sessionId, out known);
             if (known is null || beforeCursor.Length == 0)
             {
                 var turns = known?.Turns ?? new List<JsonElement>();
@@ -1114,6 +1206,8 @@ public sealed partial class SessionPage : NexusPage
                 var cursor = keep > 0 ? NxJson.Text(turns[^1], "idx") : "";
                 for (var page = 0; page < MaxForwardWalkPages; page++)
                 {
+                    // The idx jump answered first: stop, and cache nothing partial.
+                    if (abandon.IsCancellationRequested) return NoResponse;
                     var response = await Call(NxMethods.SessionsTurns, cursor.Length > 0
                         ? new { session_id = sessionId, id = sessionId, limit = ForwardWalkPageSize, cursor }
                         : (object)new { session_id = sessionId, id = sessionId, limit = ForwardWalkPageSize });
@@ -1125,29 +1219,18 @@ public sealed partial class SessionPage : NexusPage
                     cursor = next;
                 }
                 known = new ForwardTurns(turns);
-                s_forwardTurns[sessionId] = known;
+                lock (s_forwardTurns) s_forwardTurns[sessionId] = known;
                 s_forwardOrder.Remove(sessionId);
                 s_forwardOrder.AddFirst(sessionId);
                 while (s_forwardOrder.Count > MaxForwardWalks)
                 {
-                    s_forwardTurns.Remove(s_forwardOrder.Last!.Value);
+                    lock (s_forwardTurns) s_forwardTurns.Remove(s_forwardOrder.Last!.Value);
                     s_forwardOrder.RemoveLast();
                 }
             }
             long? before = long.TryParse(beforeCursor, out var exclusive) ? exclusive : null;
             var (slice, nextCursor) = TurnPaging.Before(known.Turns, TurnIdx, before, limit);
-            using var stream = new MemoryStream();
-            using (var writer = new Utf8JsonWriter(stream))
-            {
-                writer.WriteStartObject();
-                writer.WriteStartArray("items");
-                foreach (var turn in slice) turn.WriteTo(writer);
-                writer.WriteEndArray();
-                writer.WriteString("next_cursor", nextCursor);
-                writer.WriteEndObject();
-            }
-            using var doc = JsonDocument.Parse(stream.ToArray());
-            return new NxResponse(true, null, doc.RootElement.Clone());
+            return PageResponse(slice, nextCursor);
         }
         finally { s_forwardGate.Release(); }
     }
@@ -1528,6 +1611,7 @@ public sealed partial class SessionPage : NexusPage
             _chat.Children.Clear();
             _turnSteps.Clear();
             _inlineSubagentIds.Clear();
+            _subagentCards.Clear();
             _shownEnvelopes.Clear();
             _turnDedupe.Clear();
         }

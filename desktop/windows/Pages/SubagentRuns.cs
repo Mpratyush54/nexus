@@ -17,7 +17,14 @@ namespace Nexus.Pages;
 /// </summary>
 internal static class SubagentRuns
 {
-    internal sealed record LocalRun(string NativeId, string ParentNativeId, string Description, string AgentType, DateTime Modified);
+    internal sealed record LocalRun(string NativeId, string ParentNativeId, string Description, string AgentType, DateTime Modified)
+    {
+        /// <summary>Full path of agent-&lt;hex&gt;.jsonl ("" when only the meta file exists).</summary>
+        public string Transcript { get; init; } = "";
+        /// <summary>The meta file's "finished" flag; null when the meta file does not say.</summary>
+        public bool? Finished { get; init; }
+        public DateTime Created { get; init; }
+    }
 
     internal sealed record Run(string Id, string Title, string Agent, string AgentType, string When, string ParentNativeId)
     {
@@ -84,9 +91,25 @@ internal static class SubagentRuns
             }
         }
         catch { /* a bad meta file only loses the label */ }
+        bool? finished = null;
+        try
+        {
+            if (File.Exists(meta) && new FileInfo(meta).Length < 64 * 1024)
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(meta));
+                if (doc.RootElement.TryGetProperty("finished", out var done) && done.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    finished = done.GetBoolean();
+            }
+        }
+        catch { /* no status */ }
         var transcript = Path.Combine(dir, native + ".jsonl");
-        var modified = File.Exists(transcript) ? File.GetLastWriteTimeUtc(transcript) : File.Exists(meta) ? File.GetLastWriteTimeUtc(meta) : DateTime.MinValue;
-        return new LocalRun(native, Path.GetFileName(parent), description, type, modified);
+        var exists = File.Exists(transcript);
+        var modified = exists ? File.GetLastWriteTimeUtc(transcript) : File.Exists(meta) ? File.GetLastWriteTimeUtc(meta) : DateTime.MinValue;
+        var created = exists ? File.GetCreationTimeUtc(transcript) : File.Exists(meta) ? File.GetCreationTimeUtc(meta) : modified;
+        return new LocalRun(native, Path.GetFileName(parent), description, type, modified)
+        {
+            Transcript = exists ? transcript : "", Finished = finished, Created = created
+        };
     }
 
     /// <summary>

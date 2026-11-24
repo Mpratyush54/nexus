@@ -218,7 +218,22 @@ public class NexusPage : Page
     protected static StackPanel PageHeader(string title, string subtitle)
     {
         var header = new StackPanel { Spacing = 4 };
-        header.Children.Add(Line(title, title: true));
+        // "Memory & knowledge · central-memory": the page names the project it shows.
+        var heading = Line(title, title: true);
+        var context = new Microsoft.UI.Xaml.Documents.Run { Text = "" };
+        heading.Inlines.Clear();
+        heading.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = title });
+        heading.Inlines.Add(new Microsoft.UI.Xaml.Documents.Run { Text = "" });
+        context = (Microsoft.UI.Xaml.Documents.Run)heading.Inlines[1];
+        void Update(object? _ = null, EventArgs? __ = null)
+        {
+            var project = ShellState.Current.ProjectName;
+            context.Text = project.Length > 0 ? " · " + project : "";
+        }
+        Update();
+        header.Loaded += (_, _) => { ShellState.Changed += Update; Update(); };
+        header.Unloaded += (_, _) => ShellState.Changed -= Update;
+        header.Children.Add(heading);
         header.Children.Add(Muted(subtitle));
         return header;
     }

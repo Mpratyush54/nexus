@@ -49,7 +49,7 @@ public sealed partial class MainWindow : Window
     private string _chatInFlightKey = "";
     private bool _chatRefreshing;
     private CancellationTokenSource? _chatFetchCts;
-    private sealed record ChatPaneEntry(string Id, string Title, string Agent, string Summary, string When, bool Forked, string ParentId, string ProjectId = "", string Match = "");
+    private sealed record ChatPaneEntry(string Id, string Title, string Agent, string Summary, string When, bool Forked, string ParentId, string ProjectId = "", string Match = "", long TurnCount = -1);
 
     public new static MainWindow? Current { get; private set; }
 
@@ -69,7 +69,11 @@ public sealed partial class MainWindow : Window
         ProjectSelector.SelectionChanged += ProjectSelector_SelectionChanged;
         _projectCompactFlyout = new MenuFlyout();
         _projectCompactFlyout.Opening += (_, _) => RebuildCompactProjectFlyout();
-        ProjectCompactButton.Flyout = _projectCompactFlyout;
+        // The collapsed rail opens the same project switcher as the sidebar.
+        ProjectCompactButton.Click += (_, _) => _projectSwitcher.Open(ProjectCompactButton);
+        _projectSwitcher = new ProjectSwitcher(SwitcherProjects, () => _projectFilter, SetProjectFilter, ChatCountFor);
+        ProjectSwitcherHost.Content = _projectSwitcher;
+        ShellState.Changed += (_, _) => DispatcherQueue.TryEnqueue(_projectSwitcher.Refresh);
         ApplyPaneProjectLayout();
         Nav.SizeChanged += (_, _) => ResizeChatPane();
         Nav.Loaded += (_, _) => ResizeChatPane();
@@ -79,6 +83,7 @@ public sealed partial class MainWindow : Window
         var filterMenu = new MenuFlyout { Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.BottomEdgeAlignedRight };
         filterMenu.Opening += (_, _) => BuildProjectFilterMenu(filterMenu);
         ProjectFilterButton.Flyout = filterMenu;
+        ChatTags.Changed += (_, _) => { _chatRows.Clear(); RenderChats(); };
         Tray.ForceCreate();
         Current = this;
         AppWindow.Resize(new SizeInt32(1240, 820));
@@ -193,6 +198,7 @@ public sealed partial class MainWindow : Window
         RebuildCompactProjectFlyout();
         UpdateCompactProjectTooltip();
         _chatRows.Clear();
+        RestoreProjectChoice();
         RenderChats();
         ToolTipService.SetToolTip(ProjectSelector,
             loaded ? null : "Projects could not be refreshed. Keeping the last known list.");
@@ -442,6 +448,71 @@ public sealed partial class MainWindow : Window
 
     private string ChatQuery => ChatSearch.Text.Trim();
 
+    private ProjectSwitcher _projectSwitcher = null!;
+
+    private IReadOnlyList<(string Id, string Name)> SwitcherProjects() =>
+        ProjectSelector.Items.OfType<ComboBoxItem>().Select(i => (i.Tag as string ?? "", i.Content?.ToString() ?? "")).Where(p => p.Item1.Length > 0).ToList();
+
+    // Chats in the sidebar per project, from the unfiltered list when it is loaded.
+    private int ChatCountFor(string projectId)
+    {
+        var source = _chatCache.TryGetValue(ChatCacheKey("", ""), out var all) ? all.Entries : _chatEntries;
+        return projectId.Length == 0 ? source.Count : source.Count(e => string.Equals(e.ProjectId, projectId, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // The switcher's choice from the last run ("" = all projects).
+    private void RestoreProjectChoice()
+    {
+        if (ProjectSwitcher.SavedFilter is { } saved && (saved.Length == 0 || ProjectName(saved).Length > 0) && saved != _projectFilter)
+            SetProjectFilter(saved);
+        _projectSwitcher.Refresh();
+    }
+
+    private void ProjectSwitch_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        args.Handled = true;
+        _projectSwitcher.Open(Nav.IsPaneOpen ? null : ProjectCompactButton);
+    }
+
+    /// Turn count the chat list reported for a chat (-1 when unknown).
+    public long ChatTurnCountFor(string sessionId) =>
+        _chatEntries.FirstOrDefault(entry => entry.Id == sessionId)?.TurnCount ?? -1;
+
+    // Chats shown first and per "More chats": most timeline rows are often
+    // sub-agent runs (shown inside their parent chat, not here), so pages are
+    // fetched until this many chats are visible.
+    private const int ChatPageTarget = 15;
+    private const int ChatFetchLimit = 100;
+    private const int MaxChatPagesPerFill = 8;
+    private string _tagFilter = "";
+
+    private bool PassesTagFilter(ChatPaneEntry entry) => _tagFilter.Length == 0 || ChatTags.Has(entry.Id, _tagFilter);
+
+    private int VisibleChatCount(IEnumerable<ChatPaneEntry> entries) => entries.Count(PassesTagFilter);
+
+    // Fetches further pages into `entries` until `target` chats are visible
+    // or the timeline ends. Returns the cursor after the last page read.
+    private async Task<string> FillChatsAsync(string filter, string query, List<ChatPaneEntry> entries, string cursor, int target, Func<bool> stale, Action? progress = null)
+    {
+        for (var page = 0; page < MaxChatPagesPerFill && cursor.Length > 0 && VisibleChatCount(entries) < target; page++)
+        {
+            var response = await FetchChatsAsync(filter, query, cursor);
+            await UiThread.Resume(DispatcherQueue);
+            if (stale() || !response.Ok) break;
+            cursor = response.Result is { } result ? NxJson.Text(result, "next_cursor") : "";
+            AppendChats(response, filter, entries);
+            progress?.Invoke();
+        }
+        return cursor;
+    }
+
+    private void ChatScroll_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
+    {
+        // Infinite scroll: the next chats load as the end of the list comes into view.
+        if (ChatScroll.ScrollableHeight <= 0 || ChatScroll.VerticalOffset < ChatScroll.ScrollableHeight - 160) return;
+        if (!_chatLoading && _chatCursor.Length > 0) _ = LoadMoreChatsAsync();
+    }
+
     private static string ChatCacheKey(string filter, string query) => filter + "\n" + query;
 
     private static bool ChatMatches(ChatPaneEntry entry, string filter, string query) =>
@@ -536,14 +607,29 @@ public sealed partial class MainWindow : Window
             var entries = new List<ChatPaneEntry>();
             AppendChats(response, filter, entries);
             var cursor = response.Result is { } result ? NxJson.Text(result, "next_cursor") : "";
-            StoreChatCache(key, entries, cursor);
             // The search box may have moved on; its own request reconciles.
-            if (filter != _projectFilter || query != ChatQuery) return;
+            if (filter != _projectFilter || query != ChatQuery) { StoreChatCache(key, entries, cursor); return; }
             _chatStatus = "";
             _chatCursor = cursor;
             _chatEntries.Clear();
             _chatEntries.AddRange(entries);
             RenderChats();
+            System.Diagnostics.Trace.WriteLine($"[perf] chats: first page {watch.ElapsedMilliseconds} ms, {VisibleChatCount(entries)} visible");
+            if (VisibleChatCount(entries) < ChatPageTarget && cursor.Length > 0)
+            {
+                bool Stale() => version != _chatLoadVersion || filter != _projectFilter || query != ChatQuery;
+                cursor = await FillChatsAsync(filter, query, entries, cursor, ChatPageTarget, Stale, () =>
+                {
+                    _chatEntries.Clear();
+                    _chatEntries.AddRange(entries);
+                    RenderChats();
+                });
+                if (Stale()) return;
+                _chatCursor = cursor;
+                RenderChats();
+                System.Diagnostics.Trace.WriteLine($"[perf] chats: {VisibleChatCount(entries)} visible after fill {watch.ElapsedMilliseconds} ms");
+            }
+            StoreChatCache(key, entries, cursor);
         }
         finally
         {
@@ -570,12 +656,12 @@ public sealed partial class MainWindow : Window
     {
         if (filter.Length > 0)
             return await App.Core.CallAsync(NxMethods.TimelineList, cursor.Length > 0
-                ? new { project_id = filter, q, limit = 60, cursor } : (object)new { project_id = filter, q, limit = 60 }, ct);
-        var all = await App.Core.CallAsync(NxMethods.TimelineList, cursor.Length > 0 ? new { q, limit = 60, cursor } : (object)new { q, limit = 60 }, ct);
+                ? new { project_id = filter, q, limit = ChatFetchLimit, cursor } : (object)new { project_id = filter, q, limit = ChatFetchLimit }, ct);
+        var all = await App.Core.CallAsync(NxMethods.TimelineList, cursor.Length > 0 ? new { q, limit = ChatFetchLimit, cursor } : (object)new { q, limit = ChatFetchLimit }, ct);
         var selected = ShellState.Current.ProjectId;
         if (all.Ok || !ProjectScope.LooksLikeUuid(selected) || ct.IsCancellationRequested) return all;
         return await App.Core.CallAsync(NxMethods.TimelineList, cursor.Length > 0
-            ? new { project_id = selected, q, limit = 60, cursor } : (object)new { project_id = selected, q, limit = 60 }, ct);
+            ? new { project_id = selected, q, limit = ChatFetchLimit, cursor } : (object)new { project_id = selected, q, limit = ChatFetchLimit }, ct);
     }
 
     private void FinishChatLoading(int version)
@@ -604,7 +690,11 @@ public sealed partial class MainWindow : Window
                 return;
             }
             _chatCursor = response.Result is { } result ? NxJson.Text(result, "next_cursor") : "";
+            var before = VisibleChatCount(_chatEntries);
             AppendChats(response, filter, _chatEntries);
+            RenderChats();
+            _chatCursor = await FillChatsAsync(filter, query, _chatEntries, _chatCursor, before + ChatPageTarget,
+                () => version != _chatLoadVersion || filter != _projectFilter || query != ChatQuery, RenderChats);
             StoreChatCache(ChatCacheKey(filter, query), _chatEntries, _chatCursor);
             RenderChats();
         }
@@ -668,7 +758,8 @@ public sealed partial class MainWindow : Window
             into.Add(new ChatPaneEntry(id, title, agent, summary,
                 NxJson.Text(item, "last_active_at", "updated_at", "captured_at"),
                 SessionLineage.IsForkSession(item), NxJson.Text(item, "parent_session_id", "parentSessionId"),
-                NxJson.Text(item, "project_id", "projectId"), match));
+                NxJson.Text(item, "project_id", "projectId"), match,
+                long.TryParse(NxJson.Text(item, "turn_count"), out var turns) ? turns : -1));
         }
     }
 
@@ -694,12 +785,12 @@ public sealed partial class MainWindow : Window
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var entry in _chatEntries)
         {
-            if (seen.Add(entry.Id)) items.Add(entry);
+            if (PassesTagFilter(entry) && seen.Add(entry.Id)) items.Add(entry);
         }
         if (_chatStatus.Length > 0)
-            items.Add(new ChatListNotice(_chatStatus));
-        else if (_chatEntries.Count == 0)
-            items.Add(new ChatListNotice(_chatRefreshing ? "Loading chats…" : ChatQuery.Length > 0 ? "No matching chats." : "No chats yet. Start one with the pencil above."));
+            items.Add(new ChatListNotice(NxErrors.IsSignedOut(_chatStatus) ? NxErrors.SignedOutMessage : _chatStatus));
+        else if (seen.Count == 0)
+            items.Add(new ChatListNotice(_chatRefreshing ? "Loading chats…" : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No matching chats." : "No chats yet. Start one with the pencil above."));
         _chatItems = items;
         ChatList.ItemTemplate ??= new ChatRowFactory(this);
         ChatList.ItemsSource = items;
@@ -777,16 +868,22 @@ public sealed partial class MainWindow : Window
     private void BuildProjectFilterMenu(MenuFlyout menu)
     {
         menu.Items.Clear();
-        void Add(string label, string id)
+        // Projects are chosen in the project switcher above the list; this
+        // menu filters by tag (chat tags are kept on this device; see ChatTags).
+        var tags = ChatTags.All();
+        if (tags.Count == 0 && _tagFilter.Length == 0)
         {
-            var item = new ToggleMenuFlyoutItem { Text = label, IsChecked = _projectFilter == id };
-            item.Click += (_, _) => SetProjectFilter(id);
+            menu.Items.Add(new MenuFlyoutItem { Text = "No tags yet. Right-click a chat to tag it.", IsEnabled = false });
+            return;
+        }
+        void AddTag(string label, string tag)
+        {
+            var item = new ToggleMenuFlyoutItem { Text = label, IsChecked = _tagFilter == tag };
+            item.Click += (_, _) => { _tagFilter = tag; UpdateProjectFilterLabel(); RenderChats(); };
             menu.Items.Add(item);
         }
-        Add("All projects", "");
-        menu.Items.Add(new MenuFlyoutSeparator());
-        foreach (var project in ProjectSelector.Items.OfType<ComboBoxItem>())
-            Add(project.Content?.ToString() ?? "", project.Tag as string ?? "");
+        AddTag("Any tag", "");
+        foreach (var tag in tags.Take(20)) AddTag("#" + tag, tag);
     }
 
     private void SetProjectFilter(string projectId)
@@ -812,7 +909,9 @@ public sealed partial class MainWindow : Window
 
     private void UpdateProjectFilterLabel()
     {
-        var name = _projectFilter.Length > 0 ? ProjectName(_projectFilter) : "";
+        // The project shows in the switcher; only the tag filter is named here.
+        var name = _tagFilter.Length > 0 ? "Tagged #" + _tagFilter : "";
+        _projectSwitcher?.Refresh();
         ProjectFilterLabel.Text = name.Length > 0 ? name : "";
         ProjectFilterLabel.Visibility = name.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
@@ -871,6 +970,8 @@ public sealed partial class MainWindow : Window
         bottom.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 6, Height = 6, Fill = AgentBrush(entry.Agent), VerticalAlignment = VerticalAlignment.Center });
         bottom.Children.Add(new TextBlock { Text = ChatTitles.AgentName(entry.Agent), FontSize = 12, Opacity = 0.45 });
         if (entry.Forked) bottom.Children.Add(new TextBlock { Text = "· fork", FontSize = 12, Opacity = 0.4 });
+        if (ChatTags.For(entry.Id) is { Count: > 0 } chatTags)
+            bottom.Children.Add(new TextBlock { Text = "· " + string.Join(" ", chatTags.Select(t => "#" + t)), FontSize = 12, Opacity = 0.75, Foreground = NexusPalette.Accent, MaxWidth = 170, TextTrimming = TextTrimming.CharacterEllipsis });
         if (entry.Match.Length > 0 && showMatch)
             bottom.Children.Add(new TextBlock { Text = "· " + entry.Match, FontSize = 12, Opacity = 0.6, MaxWidth = 230, TextTrimming = TextTrimming.CharacterEllipsis });
         Grid.SetRow(bottom, 2);
@@ -885,6 +986,11 @@ public sealed partial class MainWindow : Window
         var summary = entry.Summary.Length > 240 ? entry.Summary[..240] + "…" : entry.Summary;
         ToolTipService.SetToolTip(button, entry.Title + (summary.Length > 0 && summary != entry.Title ? "\n\n" + summary : ""));
         button.Click += (_, _) => OpenSession(entry.Id, ChatSearch.Text.Trim());
+        var rowMenu = new MenuFlyout();
+        var editTags = new MenuFlyoutItem { Text = "Tags…", Icon = new FontIcon { Glyph = "\uE8EC" } };
+        editTags.Click += async (_, _) => await ChatTags.EditAsync(button.XamlRoot, entry.Id, entry.Title);
+        rowMenu.Items.Add(editTags);
+        button.ContextFlyout = rowMenu;
         return (button, title);
     }
 

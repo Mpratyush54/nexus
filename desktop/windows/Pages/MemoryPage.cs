@@ -152,7 +152,7 @@ public sealed partial class MemoryPage : NexusPage
         root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         AddHeaderWithGraphToggle(root, PageHeader(
             "Memory & knowledge",
-            "Browse retained decisions and facts for the project selected on Timeline. Search refines the list."), list);
+            "Browse retained decisions and facts for the selected project. Search refines the list."), list);
         Content = root;
         WatchShellProject(() => LoadPageAsync(reset: true));
     }
@@ -258,7 +258,7 @@ public sealed partial class MemoryPage : NexusPage
             _briefCard.Visibility = Visibility.Collapsed;
             _cards.Children.Add(EmptyCard(
                 "Choose a project",
-                "Choose a project on the Timeline page to browse its shared knowledge."));
+                "Choose a project in the project switcher at the top of the sidebar (Ctrl+P) to browse its shared knowledge."));
             return;
         }
         if (!string.Equals(_briefProjectId, projectId, StringComparison.Ordinal))
@@ -266,7 +266,7 @@ public sealed partial class MemoryPage : NexusPage
             _briefProjectId = projectId;
             _ = LoadBriefAsync(projectId);
         }
-        var browseKey = $"{projectId}\n{_activeScope}\n{_query.Text.Trim()}";
+        var browseKey = $"{projectId}\n{_activeScope}\n{_query.Text.Trim()}\n{_tagFilter}";
         if (!string.Equals(browseKey, _browseKey, StringComparison.Ordinal))
         {
             _browseKey = browseKey;
@@ -423,6 +423,8 @@ public sealed partial class MemoryPage : NexusPage
                 {
                     body["level"] = _activeScope;
                 }
+                // The server filters by tag across the whole project.
+                if (_tagFilter is { Length: > 0 } tag) body["tags"] = tag;
                 var response = await Call(NxMethods.MemorySearch, body);
                 if (!response.Ok)
                 {
@@ -490,7 +492,7 @@ public sealed partial class MemoryPage : NexusPage
         {
             return false;
         }
-        return true;
+        return PassesTagFilter(item);
     }
 
     private UIElement BuildMemoryCard(JsonElement item, string id)
@@ -516,6 +518,7 @@ public sealed partial class MemoryPage : NexusPage
         if (preview.Length > 0) body.Children.Add(Muted(preview));
         if (StaleBadge(item) is { } stale) body.Children.Add(stale);
         body.Children.Add(meta);
+        body.Children.Add(TagRow(item, id));
         if (SourceSessionId(item) is { Length: > 0 } sessionId) body.Children.Add(ChatLink(sessionId));
         body.Children.Add(MemoryActions(item, id, proposed));
 
@@ -621,13 +624,14 @@ public sealed partial class MemoryPage : NexusPage
         var categories = new HashSet<string>(_seenCategories, StringComparer.OrdinalIgnoreCase);
         if (_categoryFilter is { Length: > 0 } active) categories.Add(active);
         var ordered = categories.OrderBy(c => c, StringComparer.OrdinalIgnoreCase).ToList();
-        if (ordered.Count == 0) return;
+        if (ordered.Count == 0) { AddTagPills(); return; }
         _categoryBar.Children.Add(Muted("Category:"));
         _categoryBar.Children.Add(CategoryPill("All", null));
         foreach (var cat in ordered)
         {
             _categoryBar.Children.Add(CategoryPill(FormatCategory(cat), cat));
         }
+        AddTagPills();
     }
 
     private Button CategoryPill(string label, string? categoryId)

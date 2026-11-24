@@ -17,6 +17,9 @@
     <Compile Include="../windows/Core/TranscriptText.cs" Link="TranscriptText.cs" />
     <Compile Include="../windows/Core/ConversationIndex.cs" Link="ConversationIndex.cs" />
     <Compile Include="../windows/Core/ActivityCalendar.cs" Link="ActivityCalendar.cs" />
+    <Compile Include="../windows/Core/NxErrors.cs" Link="NxErrors.cs" />
+    <Compile Include="../windows/Core/TagText.cs" Link="TagText.cs" />
+    <Compile Include="../windows/Core/SubagentTranscript.cs" Link="SubagentTranscript.cs" />
     <Compile Include="../windows/Core/SidebarLayout.cs" Link="SidebarLayout.cs" />
     <Compile Include="../windows/Core/LiveActivityLog.cs" Link="LiveActivityLog.cs" />
     <Compile Include="../windows/Core/FileDiffPreview.cs" Link="FileDiffPreview.cs" />
