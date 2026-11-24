@@ -139,7 +139,7 @@ internal sealed class SubagentCard : UserControl
             Margin = new Thickness(0, 4, 0, 6)
         };
         AutomationProperties.SetName(_expander, kind + ": " + title);
-        _expander.Expanding += (_, _) => { if (!_bodyLoaded) { _bodyLoaded = true; _ = LoadBodyAsync(); } Pages.Reveal.AfterExpand(_expander); };
+        _expander.Expanding += (_, _) => { if (!_bodyLoaded) { _bodyLoaded = true; _ = LoadBodyAsync(); } Pages.Reveal.AfterExpand(_expander, alignTop: true); };
         Content = _expander;
         // Status needs the local index (cached after the first card) and two
         // small file reads; it never blocks the transcript paint.
@@ -265,7 +265,7 @@ internal sealed class SubagentCard : UserControl
         {
             // Read keeps the first messages and the last one (the outcome).
             if (total > MaxTurnsShown && i == items.Count - 1)
-                list.Children.Add(new TextBlock { Text = $"… {total - MaxTurnsShown - 1} more messages (Open as a chat to read them) …", Opacity = 0.55, FontSize = 11.5 });
+                list.Children.Add(new TextBlock { Text = $"… {Nexus.Core.FriendlyTime.Count(total - MaxTurnsShown - 1, "more message")} (open it as a chat to read them) …", Opacity = 0.55, FontSize = 11.5 });
             list.Children.Add(TurnView(items[i]));
         }
         if (list.Children.Count > 0) _body.Children.Add(list);
@@ -274,6 +274,7 @@ internal sealed class SubagentCard : UserControl
         open.Click += async (_, _) => await OpenChatAsync(open);
         actions.Children.Add(open);
         _body.Children.Add(actions);
+        if (_expander.IsExpanded) Pages.Reveal.AfterExpand(_expander, alignTop: true);
     }
 
     private static SubTurn? RemoteTurn(JsonElement item)

@@ -260,6 +260,9 @@ public sealed partial class SessionPage
         foreach (var child in _chat.Children) { child.InvalidateMeasure(); child.InvalidateArrange(); }
     }
 
+    /// <summary>Something was expanded on purpose: stop pinning the transcript to its end so it can be shown.</summary>
+    internal void StopFollowingBottom(string reason) => SetStickToBottom(false, reason);
+
     private void SetStickToBottom(bool stick, string reason)
     {
         if (_stickToBottom != stick)

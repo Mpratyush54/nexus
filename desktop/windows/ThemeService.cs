@@ -86,7 +86,36 @@ internal static class ThemeService
     public static Windows.Foundation.IAsyncOperation<Microsoft.UI.Xaml.Controls.ContentDialogResult> ShowThemedAsync(this Microsoft.UI.Xaml.Controls.ContentDialog dialog)
     {
         Prepare(dialog);
-        return dialog.ShowAsync();
+        // The dialog's default button uses the app's primary treatment (the
+        // template otherwise resolves WinUI's own gold AccentButtonStyle).
+        // Also as resources on the dialog: its template switches the default
+        // button to "AccentButtonStyle" in a visual state, and those
+        // lightweight brushes are looked up from the dialog outward.
+        foreach (var (key, source) in new[]
+        {
+            ("AccentButtonBackground", "NexusPrimaryFillBrush"), ("AccentButtonBackgroundPointerOver", "NexusPrimaryFillHoverBrush"),
+            ("AccentButtonBackgroundPressed", "NexusPrimaryFillPressedBrush"), ("AccentButtonBackgroundDisabled", "NexusPrimaryFillDisabledBrush"),
+            ("AccentButtonForeground", "NexusPrimaryInkBrush"), ("AccentButtonForegroundPointerOver", "NexusPrimaryInkBrush"),
+            ("AccentButtonForegroundPressed", "NexusPrimaryInkBrush"), ("AccentButtonForegroundDisabled", "NexusPrimaryInkDisabledBrush")
+        })
+            if (Lookup(source) is Brush brush) dialog.Resources[key] = brush;
+        if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var value) && value is Style primary)
+        {
+            dialog.Resources["AccentButtonStyle"] = primary;
+            switch (dialog.DefaultButton)
+            {
+                case Microsoft.UI.Xaml.Controls.ContentDialogButton.Primary: dialog.PrimaryButtonStyle = primary; break;
+                case Microsoft.UI.Xaml.Controls.ContentDialogButton.Secondary: dialog.SecondaryButtonStyle = primary; break;
+                case Microsoft.UI.Xaml.Controls.ContentDialogButton.Close: dialog.CloseButtonStyle = primary; break;
+            }
+        }
+        // One dim layer over the whole window, sidebar included; the
+        // dialog's own smoke only covered part of it.
+        dialog.Resources["ContentDialogSmokeFill"] = new SolidColorBrush(Colors.Transparent);
+        var dim = MainWindow.Current?.ShowDim();
+        var operation = dialog.ShowAsync();
+        if (dim is not null) dialog.Closed += (_, _) => MainWindow.Current?.HideDim(dim);
+        return operation;
     }
 
     /// <summary>Applies the saved preference to the window (also on system theme changes).</summary>

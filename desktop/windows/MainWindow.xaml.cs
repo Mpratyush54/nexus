@@ -133,6 +133,27 @@ public sealed partial class MainWindow : Window
     }
 
     private bool _crashOfferDone;
+
+    /// <summary>A dim layer over the whole window (sidebar and title bar too) while a dialog is open.</summary>
+    internal UIElement? ShowDim()
+    {
+        if (Content is not Grid root) return null;
+        var dim = new Microsoft.UI.Xaml.Shapes.Rectangle
+        {
+            Fill = new SolidColorBrush(ThemeService.EffectiveIsDark ? Windows.UI.Color.FromArgb(0x8C, 0, 0, 0) : Windows.UI.Color.FromArgb(0x4D, 0, 0, 0)),
+            IsHitTestVisible = true
+        };
+        Grid.SetRowSpan(dim, 2);
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetAccessibilityView(dim, Microsoft.UI.Xaml.Automation.Peers.AccessibilityView.Raw);
+        root.Children.Add(dim);
+        Nexus.Pages.Motion.FadeIn(dim, 0, 0, Nexus.Pages.Motion.Fast);
+        return dim;
+    }
+
+    internal void HideDim(UIElement dim)
+    {
+        if (Content is Grid root) root.Children.Remove(dim);
+    }
     private readonly DispatcherQueueTimer _a11yTimer;
 
     // A live theme switch: XAML-bound resources follow the root's theme by

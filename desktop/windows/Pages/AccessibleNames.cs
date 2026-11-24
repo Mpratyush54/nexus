@@ -96,17 +96,21 @@ internal static class Reveal
     /// anchored, so without this an expanded work log grew upward and its
     /// header slid out of view.
     /// </summary>
-    public static void AfterExpand(FrameworkElement element)
+    public static void AfterExpand(FrameworkElement element, bool alignTop = false)
     {
         void Once(object? sender, object e)
         {
             element.LayoutUpdated -= Once;
             var viewport = FindScroller(element)?.ViewportHeight ?? 0;
-            var tall = viewport > 0 && element.ActualHeight > viewport * 0.9;
+            var tall = alignTop || (viewport > 0 && element.ActualHeight > viewport * 0.9);
             element.StartBringIntoView(tall
                 ? new BringIntoViewOptions { VerticalAlignmentRatio = 0.02, AnimationDesired = Motion.Enabled }
                 : new BringIntoViewOptions { AnimationDesired = Motion.Enabled });
         }
+        // The chat follows its newest message; an expanded item in the
+        // middle must not be scrolled away again by that.
+        for (DependencyObject? node = element; node is not null; node = VisualTreeHelper.GetParent(node))
+            if (node is SessionPage page) { page.StopFollowingBottom("expanded an item"); break; }
         element.LayoutUpdated += Once;
         element.InvalidateMeasure();
     }
