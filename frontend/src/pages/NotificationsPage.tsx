@@ -19,8 +19,8 @@ import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 
 const PREF_LABELS: Record<string, string> = {
-  MEMORY_PROPOSED: 'Memory saved',
-  MEMORY_CONFIRMED: 'Memory saved',
+  MEMORY_PROPOSED: 'New memory suggested',
+  MEMORY_CONFIRMED: 'Memory confirmed',
   MEMORY_UPDATED: 'Memory edited',
   MEMORY_REJECTED: 'Memory rejected',
   MEMORY_SUPERSEDED: 'Memory superseded',
@@ -141,8 +141,7 @@ export function NotificationsPage() {
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Notifications</h1>
         <p className="mt-1 text-sm text-fg-dim">
-          Inbox, per-event preferences, and push devices for this account.
-          {unread ? ` ${unread} new.` : ''}
+          What changed in this project, and where Nexus should tell you.
         </p>
       </div>
 
@@ -156,9 +155,17 @@ export function NotificationsPage() {
             {unread ? `${unread} unread` : 'caught up'}
           </StatusPill>
         </div>
-        {inbox.isLoading ? <p className="text-sm text-muted">Loading…</p> : null}
-        {!inbox.isLoading && items.length === 0 ? (
-          <p className="text-sm text-fg-dim">Nothing yet. Project events will land here.</p>
+        {inbox.isLoading ? <p className="text-sm text-muted" role="status">Loading notifications…</p> : null}
+        {inbox.isError ? (
+          <p className="text-sm text-danger" role="alert">
+            Couldn't load notifications.{' '}
+            <button type="button" className="underline" onClick={() => void inbox.refetch()}>
+              Try again
+            </button>
+          </p>
+        ) : null}
+        {!inbox.isLoading && !inbox.isError && items.length === 0 ? (
+          <p className="text-sm text-fg-dim">You're all caught up. New memories and handoffs show up here.</p>
         ) : null}
         <ul className="divide-y divide-border">
           {items.map((n) => (
@@ -166,8 +173,9 @@ export function NotificationsPage() {
               <Link to={n.href || '/app/activity'} className="block hover:text-fg">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                   <p className="text-sm font-medium text-fg">{n.title}</p>
-                  <StatusPill>{n.type}</StatusPill>
-                  <span className="ml-auto text-[11px] text-muted">{formatRelative(n.created_at)}</span>
+                  <time className="ml-auto text-xs text-muted" dateTime={n.created_at}>
+                    {formatRelative(n.created_at)}
+                  </time>
                 </div>
                 <p className="mt-0.5 truncate text-xs text-fg-dim">{n.body}</p>
               </Link>
@@ -178,17 +186,18 @@ export function NotificationsPage() {
 
       <GlassPanel className="space-y-3 p-5">
         <h2 className="text-sm font-medium text-fg">Preferences</h2>
-        <p className="text-sm text-fg-dim">Choose which event types reach this inbox and Web Push.</p>
+        <p className="text-sm text-fg-dim">Choose what reaches this inbox and your push notifications.</p>
         <ul className="space-y-2">
           {Object.keys(PREF_LABELS).map((type) => {
             const on = types[type] !== false
             return (
               <li key={type} className="flex items-center justify-between gap-3">
-                <span className="text-sm text-fg">{PREF_LABELS[type]}</span>
+                <span className="text-sm text-fg" id={`pref-${type}`}>{PREF_LABELS[type]}</span>
                 <button
                   type="button"
                   role="switch"
                   aria-checked={on}
+                  aria-labelledby={`pref-${type}`}
                   disabled={savePrefs.isPending}
                   onClick={() => onTogglePref(type, !on)}
                   className={[

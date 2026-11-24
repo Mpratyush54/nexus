@@ -1,0 +1,116 @@
+<template>
+  <style>
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI"); font-weight: 400; }
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI Semibold"); font-weight: 600; }
+    #root {
+      position: absolute;
+      inset: 0;
+      overflow: hidden;
+      font-family: "Segoe UI", "Inter", sans-serif;
+    }
+    #root .card {
+      position: absolute;
+      width: 560px;
+      padding: 24px 30px 26px;
+      border-radius: 18px;
+      background: #121316;
+      border: 1px solid #262930;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55);
+    }
+    #root .who {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      font-size: 24px;
+      color: #a9adb5;
+      font-weight: 600;
+      margin-bottom: 10px;
+    }
+    #root .dot { width: 12px; height: 12px; border-radius: 50%; }
+    #root .msg { font-size: 31px; line-height: 1.3; color: #eceae4; }
+    #root .chip {
+      position: absolute;
+      padding: 10px 18px;
+      border-radius: 10px;
+      background: #15171b;
+      border: 1px dashed #3a3d44;
+      color: #8d929b;
+      font-family: "JetBrains Mono", monospace;
+      font-size: 24px;
+    }
+    #root .core {
+      position: absolute;
+      left: 948px;
+      top: 528px;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: #e8bb67;
+      box-shadow: 0 0 60px 20px rgba(232, 187, 103, 0.45);
+    }
+  </style>
+  <div id="root" data-composition-id="problem" data-width="1920" data-height="1080">
+    <div id="pb-c1" class="card" style="left: 150px; top: 110px">
+      <div class="who"><span class="dot" style="background: #e07a5f"></span>Claude Code</div>
+      <div class="msg">I don't have context from your earlier session.</div>
+    </div>
+    <div id="pb-c2" class="card" style="left: 1210px; top: 150px">
+      <div class="who"><span class="dot" style="background: #4cc38a"></span>Codex</div>
+      <div class="msg">Starting fresh. Can you explain the project again?</div>
+    </div>
+    <div id="pb-c3" class="card" style="left: 200px; top: 730px">
+      <div class="who"><span class="dot" style="background: #c9ccd2"></span>Cursor</div>
+      <div class="msg">Which file did the other agent change?</div>
+    </div>
+    <div id="pb-c4" class="card" style="left: 1170px; top: 760px">
+      <div class="who"><span class="dot" style="background: #6ea8ff"></span>Gemini CLI</div>
+      <div class="msg">What did you decide about retries?</div>
+    </div>
+
+    <div id="pb-f1" class="chip" style="left: 120px; top: 380px">CLAUDE.md</div>
+    <div id="pb-f2" class="chip" style="left: 1560px; top: 400px">AGENTS.md</div>
+    <div id="pb-f3" class="chip" style="left: 760px; top: 300px">.cursor/rules</div>
+    <div id="pb-f4" class="chip" style="left: 820px; top: 680px">GEMINI.md</div>
+    <div id="pb-f5" class="chip" style="left: 420px; top: 640px">notes-old.md</div>
+    <div id="pb-f6" class="chip" style="left: 1380px; top: 640px">chat-export.txt</div>
+
+    <div id="pb-core" class="core"></div>
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+      const cards = ["#pb-c1", "#pb-c2", "#pb-c3", "#pb-c4"];
+      const chips = ["#pb-f1", "#pb-f2", "#pb-f3", "#pb-f4", "#pb-f5", "#pb-f6"];
+      // Cards pop in one per half-bar.
+      cards.forEach((c, i) => {
+        if (i === 0) return; // first card is already on screen at frame 0
+        tl.fromTo(c, { opacity: 0, scale: 0.86, y: 30 }, { opacity: 1, scale: 1, y: 0, duration: 0.42, ease: "back.out(1.7)" }, 0.55 + i * 0.9);
+      });
+      chips.forEach((c, i) => {
+        tl.fromTo(c, { opacity: 0, y: 18 }, { opacity: 1, y: 0, duration: 0.5, ease: "power2.out" }, 4.7 + i * 0.16);
+      });
+      // Slow drift apart while the context stays scattered.
+      const drift = [[-60, -30], [60, -24], [-50, 40], [56, 36]];
+      cards.forEach((c, i) => {
+        tl.to(c, { x: drift[i][0], y: drift[i][1], rotation: (i % 2 ? 1.5 : -1.5), duration: 4.4, ease: "sine.inOut" }, 4.6);
+      });
+      const cdrift = [[-30, 20], [30, -20], [20, -30], [-20, 30], [-40, 10], [40, 10]];
+      chips.forEach((c, i) => {
+        tl.to(c, { x: cdrift[i][0], y: cdrift[i][1], duration: 4.0, ease: "sine.inOut" }, 5.2);
+      });
+      // A brief glitch jolt on the cards.
+      tl.to(cards.join(","), { x: "+=14", duration: 0.05, yoyo: true, repeat: 3, ease: "none" }, 5.2);
+      // Everything is pulled into one point.
+      const all = cards.concat(chips);
+      all.forEach((c, i) => {
+        const el = document.querySelector(c);
+        const isCard = el.classList.contains("card");
+        const r = { x: parseFloat(el.style.left) + (isCard ? 280 : 90), y: parseFloat(el.style.top) + (isCard ? 80 : 24) };
+        tl.to(c, { x: 960 - r.x, y: 540 - r.y, scale: 0.05, opacity: 0, filter: "blur(10px)", rotation: 0, duration: 0.7, ease: "power3.in" }, 9.35 + (i % 4) * 0.04);
+      });
+      tl.fromTo("#pb-core", { scale: 0, opacity: 0 }, { scale: 1, opacity: 1, duration: 0.24, ease: "back.out(3)" }, 9.95);
+      tl.to("#pb-core", { scale: 2.2, duration: 0.25, ease: "power2.in" }, 10.2);
+      window.__timelines["problem"] = tl;
+    })();
+  </script>
+</template>

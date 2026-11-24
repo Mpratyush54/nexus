@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+Disallow: /app/
+Disallow: /cli/
+Disallow: /api/
+
+Sitemap: https://nexus.pratyushes.dev/sitemap.xml

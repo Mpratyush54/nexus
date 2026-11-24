@@ -28,12 +28,19 @@ export function useBridgeReachable(proxyUrl: string | undefined) {
   })
 }
 
-/** Autodetect Nexus Desktop / daemon on loopback (Connect page). */
-export function useLocalDaemonAutodetect() {
+/**
+ * Autodetect a legacy same-machine daemon on loopback. Probing a closed port
+ * logs a network error in the browser console, so callers enable it only when
+ * the server says this project's desktop advertises a bridge (setup pages
+ * can refetch on demand). Once found it keeps polling.
+ */
+export function useLocalDaemonAutodetect(enabled = true, pollMs = 5_000) {
   return useQuery({
     queryKey: queryKeys.daemon.autodetect,
     queryFn: ({ signal }) => daemonApi.autodetectLocal(signal),
-    refetchInterval: 5_000,
+    enabled,
+    refetchInterval: (query) => (query.state.data ? pollMs : false),
+    refetchOnWindowFocus: false,
     retry: false,
     staleTime: 2_000,
   })

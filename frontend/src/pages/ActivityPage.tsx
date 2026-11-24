@@ -4,6 +4,7 @@ import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useActivity } from '@/hooks/useActivity'
 import { useAuth } from '@/providers/AuthProvider'
+import { usePeople } from '@/hooks/usePeople'
 import { formatRelative } from '@/utils/format'
 import { visibleEventLabel } from '@/lib/memory-status'
 import type { ProjectEvent } from '@/types/api'
@@ -40,7 +41,8 @@ function payloadSnippet(ev: ProjectEvent) {
 }
 
 export function ActivityPage() {
-  const { projectId } = useAuth()
+  const { projectId, user } = useAuth()
+  const { nameFor, people } = usePeople()
   const [type, setType] = useState('')
   const [userId, setUserId] = useState('')
   const [since, setSince] = useState('')
@@ -80,13 +82,20 @@ export function ActivityPage() {
           </select>
         </label>
         <label className="block min-w-[12rem] flex-1">
-          <span className="mb-1 block text-xs text-fg-dim">User</span>
-          <input
+          <span className="mb-1 block text-xs text-fg-dim">Person</span>
+          <select
             value={userId}
             onChange={(e) => setUserId(e.target.value)}
-            placeholder="user id"
             className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none focus:border-amber"
-          />
+          >
+            <option value="">Everyone</option>
+            {user?.userId ? <option value={user.userId}>You</option> : null}
+            {people.map((p) => (
+              <option key={p.user_id} value={p.user_id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
         </label>
         <label className="block">
           <span className="mb-1 block text-xs text-fg-dim">Since</span>
@@ -99,10 +108,21 @@ export function ActivityPage() {
         </label>
       </div>
 
-      {feed.isLoading ? <p className="text-sm text-muted">Loading activity…</p> : null}
-      {feed.isError ? <p className="text-sm text-danger">Could not load activity.</p> : null}
-      {!feed.isLoading && items.length === 0 ? (
-        <p className="text-sm text-fg-dim">No events yet. Create or edit a memory to start the log.</p>
+      {feed.isLoading ? <p className="text-sm text-muted" role="status">Loading activity…</p> : null}
+      {feed.isError ? (
+        <p className="text-sm text-danger" role="alert">
+          Couldn't load activity.{' '}
+          <button type="button" className="underline" onClick={() => void feed.refetch()}>
+            Try again
+          </button>
+        </p>
+      ) : null}
+      {!feed.isLoading && !feed.isError && items.length === 0 ? (
+        <p className="text-sm text-fg-dim">
+          {type || userId || since
+            ? 'Nothing matches these filters.'
+            : 'No activity yet. Saving or editing a memory starts the log.'}
+        </p>
       ) : null}
 
       <ul className="space-y-2">
@@ -118,9 +138,9 @@ export function ActivityPage() {
                 {payloadSnippet(ev)}
               </span>
               {ev.user_id ? (
-                <span className="font-mono text-[11px] text-muted">{ev.user_id}</span>
+                <span className="text-xs text-muted" title={ev.user_id}>{nameFor(ev.user_id)}</span>
               ) : null}
-              <span className="text-[11px] text-muted">{formatRelative(ev.created_at)}</span>
+              <time className="text-xs text-muted" dateTime={ev.created_at}>{formatRelative(ev.created_at)}</time>
             </GlassPanel>
           </motion.li>
         ))}

@@ -1,0 +1,107 @@
+<template>
+  <style>
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI"); font-weight: 400; }
+    @font-face { font-family: "Segoe UI"; src: local("Segoe UI Semibold"); font-weight: 600; }
+    #root { position: absolute; inset: 0; overflow: hidden; font-family: "Segoe UI", "Inter", sans-serif; color: #fff; }
+    #root .ed { position: absolute; left: 120px; top: 196px; width: 1110px; height: 820px; border-radius: 16px; background: #0d0e10; border: 1px solid #262930; overflow: hidden; box-shadow: 0 40px 120px rgba(0, 0, 0, 0.6); }
+    #root .tab { height: 58px; display: flex; align-items: center; gap: 12px; padding: 0 26px; font-size: 22px; color: #ddd; border-bottom: 1px solid #22252b; }
+    #root .gut { position: absolute; left: 0; top: 78px; width: 90px; text-align: right; font-family: "JetBrains Mono", monospace; font-size: 25px; color: #555a63; }
+    #root .gut div { height: 44px; line-height: 44px; }
+    #root .code { position: absolute; left: 120px; top: 78px; right: 0; height: 740px; font-family: "JetBrains Mono", monospace; font-size: 25px; color: #d4d4d4; }
+    #root .ln { position: absolute; left: 0; top: 0; height: 44px; line-height: 44px; white-space: pre; }
+    #root .hl { position: absolute; left: 0; top: 78px; width: 1110px; height: 44px; background: rgba(232, 187, 103, 0.16); border-left: 4px solid #e8bb67; }
+    #root .kw { color: #c792ea; }
+    #root .fn { color: #82aaff; }
+    #root .num { color: #f78c6c; }
+    #root .str { color: #c3e88d; }
+    #root .cm { color: #6b7280; }
+    #root .why { position: absolute; left: 1262px; top: 196px; width: 538px; height: 820px; border-radius: 16px; background: #0d0e10; border: 1px solid #2a2d33; padding: 28px 30px; box-shadow: 0 40px 120px rgba(0, 0, 0, 0.6); }
+    #root .why .q { font-family: "JetBrains Mono", monospace; font-size: 27px; margin-top: 8px; }
+    #root .why .src { font-size: 19px; color: #8d929b; }
+    #root .call { color: #e8bb67; font-family: "JetBrains Mono", monospace; text-transform: none; letter-spacing: 0; }
+    #root .why .lab { font-size: 18px; color: #8d929b; text-transform: uppercase; letter-spacing: 0.08em; margin-top: 24px; }
+    #root .why .v { font-size: 23px; color: #f2f2f2; margin-top: 8px; line-height: 1.38; }
+    #root .hd { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 8px; }
+    #root .hist { margin-top: 12px; padding: 14px 16px; border-radius: 10px; background: #17191d; }
+    #root .hist .a { font-size: 19px; color: #9a9a9a; display: flex; align-items: center; }
+    #root .hist .b { font-size: 22px; color: #eee; margin-top: 4px; }
+    #root .hash { margin-left: auto; font-family: "JetBrains Mono", monospace; font-size: 17px; color: #e8bb67; padding: 1px 8px; border-radius: 5px; border: 1px solid rgba(232, 187, 103, 0.5); }
+    #root .moved { display: block; width: max-content; margin-top: 8px; font-size: 18px; font-weight: 400; color: #4cc38a; padding: 2px 10px; border-radius: 6px; border: 1px solid rgba(76, 195, 138, 0.5); vertical-align: 5px; }
+    #root .foot { position: absolute; left: 30px; right: 30px; bottom: 26px; font-size: 19px; color: #8d929b; line-height: 1.4; }
+    #root .cursor { position: absolute; left: 0; top: 0; width: 46px; height: 62px; }
+  </style>
+  <div id="root" data-composition-id="linewhy" data-width="1920" data-height="1080">
+    <div id="lw-ed" class="ed">
+      <div class="tab"><span style="color: #4cc2ff">TS</span>src/payments/retry.ts</div>
+      <div class="gut" id="lw-gut"></div>
+      <div id="lw-hl" class="hl"></div>
+      <div class="code" id="lw-code">
+        <div class="ln" id="lw-l0"><span class="kw">import</span> { provider } <span class="kw">from</span> <span class="str">"./provider"</span></div>
+        <div class="ln" id="lw-l1"></div>
+        <div class="ln" id="lw-l2"><span class="kw">const</span> MAX_ATTEMPTS = env.CAPTURE_RETRY_ATTEMPTS ?? <span class="num">3</span></div>
+        <div class="ln" id="lw-l3"></div>
+        <div class="ln" id="lw-l4"><span class="kw">export async function</span> <span class="fn">captureWithRetry</span>(c: Capture) {</div>
+        <div class="ln" id="lw-l5">  <span class="kw">const</span> key = <span class="fn">idempotencyKey</span>(c)</div>
+        <div class="ln" id="lw-n0">  <span class="cm">// same key on every attempt: the provider dedupes</span></div>
+        <div class="ln" id="lw-n1">  <span class="kw">let</span> last: Response | <span class="kw">undefined</span></div>
+        <div class="ln" id="lw-l6">  <span class="kw">for</span> (<span class="kw">let</span> n = <span class="num">1</span>; n &lt;= MAX_ATTEMPTS; n++) {</div>
+        <div class="ln" id="lw-l7">    <span class="kw">const</span> res = <span class="kw">await</span> provider.<span class="fn">capture</span>(c, key)</div>
+        <div class="ln" id="lw-l8">    <span class="kw">if</span> (res.ok) <span class="kw">return</span> res</div>
+        <div class="ln" id="lw-l9">    <span class="kw">if</span> (res.status === <span class="num">402</span>) <span class="kw">throw new</span> <span class="fn">Declined</span>(res)</div>
+        <div class="ln" id="lw-l10">    <span class="kw">await</span> <span class="fn">sleep</span>(<span class="fn">backoff</span>(n))</div>
+        <div class="ln" id="lw-l11">  }</div>
+        <div class="ln" id="lw-l12">  <span class="kw">throw new</span> <span class="fn">CaptureFailed</span>(c)</div>
+        <div class="ln" id="lw-l13">}</div>
+      </div>
+    </div>
+    <div id="lw-why" class="why">
+      <div class="src">Nexus MCP · answer to Codex</div>
+      <div class="q"><span class="call">why</span>(<span class="str">"retry.ts:<span id="lw-num">42</span>"</span>)<span id="lw-moved" class="moved">moved · still traced</span></div>
+      <div class="lab">Changed by</div>
+      <div class="v"><span class="hd" style="background: #e07a5f"></span>Claude Code · "Retry failed card captures with backoff"</div>
+      <div class="lab">Why</div>
+      <div class="v">A declined card (402) is final. Only 429 and 5xx are retried, with the same Idempotency-Key, so a card is never charged twice.</div>
+      <div class="lab"><span class="call">line_history</span></div>
+      <div id="lw-h0" class="hist"><div class="a"><span class="hd" style="background: #e07a5f"></span>Nov 23 · Claude Code<span class="hash">#a3f91c</span></div><div class="b">Stop retrying declined cards</div></div>
+      <div id="lw-h1" class="hist"><div class="a"><span class="hd" style="background: #f0b65a"></span>Nov 19 · OpenCode<span class="hash">#7be204</span></div><div class="b">Make capture retry attempts configurable</div></div>
+      <div class="foot">Anchored by content hash, so the history follows the line when code moves.</div>
+    </div>
+    <svg id="lw-cursor" class="cursor" viewBox="0 0 46 62"><path d="M4 3 L4 50 L16 39 L24 58 L32 54 L24 36 L40 36 Z" fill="#fff" stroke="#111" stroke-width="3" stroke-linejoin="round" /></svg>
+  </div>
+  <script>
+    (function () {
+      const H = 44;
+      const gut = document.querySelector("#lw-gut");
+      let g = "";
+      for (let n = 33; n <= 49; n++) g += "<div>" + n + "</div>";
+      gut.innerHTML = g;
+      const tl = gsap.timeline({ paused: true });
+      // Before: lines l0..l13 in slots 0..13; inserted n0/n1 hidden.
+      const base = ["#lw-l0", "#lw-l1", "#lw-l2", "#lw-l3", "#lw-l4", "#lw-l5", "#lw-l6", "#lw-l7", "#lw-l8", "#lw-l9", "#lw-l10", "#lw-l11", "#lw-l12", "#lw-l13"];
+      base.forEach((s, i) => gsap.set(s, { y: i * H }));
+      gsap.set(["#lw-n0", "#lw-n1"], { y: 5 * H + H, opacity: 0 });
+      gsap.set("#lw-hl", { y: 9 * H, opacity: 0 });
+      gsap.set("#lw-moved", { opacity: 0 });
+      tl.fromTo("#lw-ed", { y: 60, opacity: 0, filter: "blur(12px)" }, { y: 0, opacity: 1, filter: "blur(0px)", duration: 0.55, ease: "expo.out" }, 0);
+      // Cursor picks line 42 (slot 9).
+      tl.fromTo("#lw-cursor", { x: 1300, y: 1100 }, { x: 1000, y: 196 + 78 + 9 * H + 14, duration: 0.8, ease: "power3.out" }, 0.55);
+      tl.to("#lw-cursor", { scale: 0.85, duration: 0.06, yoyo: true, repeat: 1, transformOrigin: "0 0" }, 1.42);
+      tl.fromTo("#lw-hl", { opacity: 0, scaleX: 0.2, transformOrigin: "0 50%" }, { opacity: 1, scaleX: 1, duration: 0.3, ease: "power3.out" }, 1.45);
+      tl.fromTo("#lw-why", { x: 140, opacity: 0 }, { x: 0, opacity: 1, duration: 0.5, ease: "expo.out" }, 1.5);
+      tl.fromTo("#lw-why .lab, #lw-why .v, #lw-h0, #lw-h1", { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.3, stagger: 0.08, ease: "power2.out" }, 1.75);
+      tl.to("#lw-cursor", { x: 1500, y: 1120, duration: 0.6, ease: "power2.in" }, 2.4);
+      // Two lines are inserted above: the line moves to 44 and stays traced.
+      const at = 3.7;
+      base.forEach((s, i) => { if (i >= 6) tl.to(s, { y: (i + 2) * H, duration: 0.4, ease: "power3.inOut" }, at); });
+      tl.to("#lw-hl", { y: 11 * H, duration: 0.4, ease: "power3.inOut" }, at);
+      tl.to("#lw-n0", { opacity: 1, y: 6 * H, duration: 0.35 }, at + 0.15);
+      tl.to("#lw-n1", { opacity: 1, y: 7 * H, duration: 0.35 }, at + 0.22);
+      tl.set("#lw-num", { textContent: "44" }, at + 0.4);
+      tl.fromTo("#lw-moved", { opacity: 0, scale: 0.7 }, { opacity: 1, scale: 1, duration: 0.3, ease: "back.out(2.2)" }, at + 0.45);
+      tl.fromTo("#lw-why .hash", { backgroundColor: "rgba(232,187,103,0.5)" }, { backgroundColor: "rgba(232,187,103,0)", duration: 0.8 }, at + 0.45);
+      // Exit.
+      tl.to(["#lw-ed", "#lw-why"], { y: -60, opacity: 0, filter: "blur(10px)", duration: 0.38, ease: "power3.in" }, 7.08);
+      window.__timelines["linewhy"] = tl;
+    })();
+  </script>
+</template>

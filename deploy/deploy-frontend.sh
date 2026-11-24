@@ -41,12 +41,30 @@ aws_file_uri() {
 sync_bucket() {
   local target="$1"
   echo "==> Syncing frontend assets to s3://${target}..."
-  aws s3 sync frontend/dist "s3://${target}" --delete \
-    --cache-control "public,max-age=31536000,immutable" \
-    --exclude "index.html" --exclude "sw.js" --exclude "manifest.webmanifest"
+  # Vite's content-hashed bundles never change under one name.
+  aws s3 sync frontend/dist/assets "s3://${target}/assets" --delete \
+    --cache-control "public,max-age=31536000,immutable"
 
+  # Everything else keeps a stable name (landing film and shots, og image,
+  # icons, robots.txt, sitemap.xml), so it must be able to change.
+  aws s3 sync frontend/dist "s3://${target}" --delete \
+    --cache-control "public,max-age=86400" \
+    --exclude "assets/*" --exclude "index.html" --exclude "sw.js" --exclude "manifest.webmanifest"
+
+  # The CLI guesses Content-Type from the runner's mime table, which may not
+  # know these; browsers refuse to play or decode them as octet-stream.
+  local pair ext type
+  for pair in "avif:image/avif" "webp:image/webp" "webm:video/webm" "mp4:video/mp4" "xml:application/xml" "txt:text/plain; charset=utf-8"; do
+    ext="${pair%%:*}"
+    type="${pair#*:}"
+    aws s3 cp frontend/dist "s3://${target}" --recursive \
+      --exclude "*" --include "*.${ext}" --exclude "assets/*" \
+      --content-type "$type" --cache-control "public,max-age=86400" --only-show-errors
+  done
+
+  # index.html carries the prerendered landing page and is the SPA fallback.
   aws s3 cp frontend/dist/index.html "s3://${target}/index.html" \
-    --cache-control "public,max-age=60" --content-type "text/html"
+    --cache-control "public,max-age=60" --content-type "text/html; charset=utf-8"
 
   aws s3 cp frontend/dist/sw.js "s3://${target}/sw.js" \
     --cache-control "public,max-age=60" --content-type "application/javascript"

@@ -2,11 +2,16 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { authApi } from '@/api/auth'
 import { GlassPanel } from '@/components/ui/GlassPanel'
+import { Button } from '@/components/ui/Button'
+import { NexusBrand } from '@/components/NexusBrand'
 import { useAuth } from '@/providers/AuthProvider'
 
-function isLoopbackRedirect(raw: string): boolean {
+function isDesktopRedirect(raw: string): boolean {
   try {
     const u = new URL(raw)
+    if (u.protocol === 'nexus:') {
+      return u.hostname === 'auth' && (u.pathname === '/callback' || u.pathname === '/callback/')
+    }
     if (u.protocol !== 'http:') return false
     if (u.hostname !== '127.0.0.1' && u.hostname !== 'localhost') return false
     if (u.pathname !== '/callback' && u.pathname !== '/callback/') return false
@@ -22,7 +27,8 @@ export function CliAuthPage() {
   const [params] = useSearchParams()
   const navigate = useNavigate()
   const [error, setError] = useState<string | null>(null)
-  const [phase, setPhase] = useState<'check' | 'mint' | 'redirect' | 'done'>('check')
+  const [phase, setPhase] = useState<'check' | 'confirm' | 'mint' | 'redirect' | 'done'>('check')
+  const [approved, setApproved] = useState(false)
 
   const redirect = useMemo(() => params.get('redirect')?.trim() ?? '', [params])
   const state = useMemo(() => params.get('state')?.trim() ?? '', [params])
@@ -34,12 +40,19 @@ export function CliAuthPage() {
   }, [redirect, state])
 
   useEffect(() => {
-    if (!redirect || !isLoopbackRedirect(redirect)) {
-      setError('Invalid desktop redirect URL. Expected http://127.0.0.1:<port>/callback')
+    if (!redirect || !isDesktopRedirect(redirect)) {
+      setError(
+        "This sign-in link isn't from Nexus Desktop or has expired. Start sign-in again from the desktop app.",
+      )
       return
     }
     if (!isAuthenticated || !token || !user) {
       navigate(`/login?next=${encodeURIComponent(nextPath)}`, { replace: true })
+      return
+    }
+    // Ask before handing a token to a local app: a link alone must not do it.
+    if (!approved) {
+      setPhase('confirm')
       return
     }
 
@@ -59,10 +72,17 @@ export function CliAuthPage() {
       if (cancelled) return
       setPhase('redirect')
       const target = new URL(redirect)
-      target.searchParams.set('token', desktopToken)
-      target.searchParams.set('user_id', user.userId)
-      target.searchParams.set('username', user.username)
-      if (state) target.searchParams.set('state', state)
+      const payload = new URLSearchParams({
+        token: desktopToken,
+        user_id: user.userId,
+        username: user.username,
+      })
+      if (state) payload.set('state', state)
+      if (target.protocol === 'nexus:') {
+        target.hash = payload.toString()
+      } else {
+        payload.forEach((value, key) => target.searchParams.set(key, value))
+      }
       setPhase('done')
       window.location.replace(target.toString())
     })()
@@ -70,24 +90,49 @@ export function CliAuthPage() {
     return () => {
       cancelled = true
     }
-  }, [isAuthenticated, token, user, redirect, state, nextPath, navigate])
+  }, [isAuthenticated, token, user, redirect, state, nextPath, navigate, approved])
 
   return (
     <div className="mesh-bg flex min-h-svh items-center justify-center px-4 py-12">
       <div className="w-full max-w-md">
-        <Link to="/" className="mb-8 block text-center text-lg font-semibold tracking-tight text-fg">
-          Nexus
+        <Link to="/" className="mb-8 flex justify-center text-fg">
+          <NexusBrand />
         </Link>
         <GlassPanel className="p-6 sm:p-7">
-          <h1 className="text-xl font-semibold text-fg">Connect desktop app</h1>
+          <h1 className="text-xl font-semibold text-fg">Connect Nexus Desktop</h1>
           {error ? (
-            <p className="mt-3 text-sm text-[var(--color-danger)]">{error}</p>
+            <>
+              <p className="mt-3 text-sm text-danger" role="alert">{error}</p>
+              <Link
+                to={isAuthenticated ? '/app/connect' : '/login'}
+                className="mt-5 inline-flex text-sm text-amber underline-offset-2 hover:underline"
+              >
+                {isAuthenticated ? 'Go to Desktop setup' : 'Log in to Nexus'}
+              </Link>
+            </>
+          ) : phase === 'confirm' ? (
+            <>
+              <p className="mt-3 text-sm text-fg-dim">
+                Nexus Desktop on this computer wants to sign in as{' '}
+                <strong className="text-fg">{user?.username}</strong>. It will be able to sync
+                your chats and memory.
+              </p>
+              <div className="mt-5 flex flex-wrap gap-2">
+                <Button onClick={() => setApproved(true)}>Connect Desktop</Button>
+                <Button variant="secondary" onClick={() => navigate('/app/dashboard', { replace: true })}>
+                  Cancel
+                </Button>
+              </div>
+              <p className="mt-4 text-xs text-muted">
+                Didn't start this from Nexus Desktop? Cancel. Nothing is shared.
+              </p>
+            </>
           ) : (
-            <p className="mt-3 text-sm text-fg-dim">
+            <p className="mt-3 text-sm text-fg-dim" role="status">
               {phase === 'mint' && 'Creating a desktop access token…'}
-              {phase === 'redirect' && 'Sending credentials back to Nexus Desktop…'}
-              {phase === 'done' && 'You can close this tab.'}
-              {phase === 'check' && 'Checking session…'}
+              {phase === 'redirect' && 'Returning to Nexus Desktop…'}
+              {phase === 'done' && 'Done. You can close this tab.'}
+              {phase === 'check' && 'Checking your session…'}
             </p>
           )}
         </GlassPanel>

@@ -1,0 +1,105 @@
+<template>
+  <style>
+    #root {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      font-family: "Inter", sans-serif;
+    }
+    #root .cap {
+      position: absolute;
+      color: #f4f1e9;
+      font-weight: 900;
+      letter-spacing: -0.035em;
+      line-height: 1.02;
+      white-space: nowrap;
+    }
+    #root .cap em {
+      font-style: normal;
+      color: #e8bb67;
+    }
+    #root .cap .w {
+      display: inline-block;
+      will-change: transform, opacity, filter;
+    }
+    #root .top {
+      left: 120px;
+      top: 64px;
+      font-size: 72px;
+    }
+    #root .mid {
+      left: 0;
+      width: 1920px;
+      top: 470px;
+      text-align: center;
+      font-size: 112px;
+    }
+  </style>
+  <div id="root" data-composition-id="captions" data-width="1920" data-height="1080">
+    <div id="cap-forget" class="cap mid clip" data-start="0.4" data-duration="4.1">Your agents <em>forget.</em></div>
+    <div id="cap-scatter" class="cap mid clip" data-start="4.75" data-duration="4.75" style="font-size: 96px">Context is <em>scattered</em> everywhere.</div>
+
+    <div id="cap-chat" class="cap top clip" data-start="14.7" data-duration="4.7">Chat with <em>any agent.</em></div>
+    <div id="cap-steps" class="cap top clip" data-start="19.7" data-duration="5.6">Watch every <em>step</em> it takes.</div>
+
+    <div id="cap-capture" class="cap top clip" data-start="25.8" data-duration="3.5">Every session, <em>captured.</em></div>
+    <div id="cap-search" class="cap top clip" data-start="29.5" data-duration="3.4">Every agent. Every <em>project.</em></div>
+
+    <div id="cap-memory" class="cap top clip" data-start="33.3" data-duration="4.4">One memory <em>every agent</em> can query.</div>
+    <div id="cap-stale" class="cap top clip" data-start="37.9" data-duration="3.1">A <em>brief</em> every agent reads first.</div>
+    <div id="cap-sync" class="cap top clip" data-start="41.2" data-duration="2.9">Instruction files stay <em>in sync.</em></div>
+
+    <div id="cap-graph" class="cap top clip" data-start="44.6" data-duration="3.6">See how it all <em>connects.</em></div>
+    <div id="cap-graph-stale" class="cap top clip" data-start="48.5" data-duration="3.1">It knows when code <em>moves on.</em></div>
+
+    <div id="cap-why" class="cap top clip" data-start="52.0" data-duration="3.5">Ask any line <em>why.</em></div>
+    <div id="cap-trace" class="cap top clip" data-start="55.7" data-duration="3.4">Every change, traced to its <em>session.</em></div>
+
+    <div id="cap-install" class="cap top clip" data-start="59.5" data-duration="5.2">One click. <em>Every agent.</em></div>
+
+    <div id="cap-team" class="cap top clip" data-start="65.1" data-duration="3.4">Share chats with your <em>team.</em></div>
+    <div id="cap-teleport" class="cap top clip" data-start="68.7" data-duration="3.5">Send the <em>code</em> along with it.</div>
+
+    <div id="cap-usage" class="cap top clip" data-start="72.6" data-duration="3.4">Know what every chat <em>costs.</em></div>
+
+    <div id="cap-private" class="cap top clip" data-start="76.3" data-duration="3.45">Secrets <em>redacted.</em> Native, not Electron.</div>
+  </div>
+  <script>
+    (function () {
+      const root = document.querySelector('[data-composition-id="captions"]');
+      const caps = Array.from(root.querySelectorAll(".cap"));
+      // Split each caption into word spans (keeps <em> colour on its words).
+      caps.forEach((cap) => {
+        const parts = [];
+        cap.childNodes.forEach((n) => {
+          const isEm = n.nodeType === 1 && n.tagName === "EM";
+          (n.textContent || "").split(/(\s+)/).forEach((tok) => {
+            if (!tok) return;
+            if (/^\s+$/.test(tok)) parts.push(" ");
+            else parts.push(isEm ? '<em class="w">' + tok + "</em>" : '<span class="w">' + tok + "</span>");
+          });
+        });
+        cap.innerHTML = parts.join("");
+      });
+
+      const tl = gsap.timeline({ paused: true });
+      caps.forEach((cap) => {
+        const s = parseFloat(cap.dataset.start);
+        const d = parseFloat(cap.dataset.duration);
+        const words = cap.querySelectorAll(".w");
+        tl.fromTo(
+          words,
+          { y: 46, opacity: 0, filter: "blur(12px)" },
+          { y: 0, opacity: 1, filter: "blur(0px)", duration: 0.5, ease: "power3.out", stagger: 0.07 },
+          s,
+        );
+        tl.to(
+          words,
+          { y: -24, opacity: 0, filter: "blur(8px)", duration: 0.28, ease: "power2.in", stagger: 0.025 },
+          s + d - 0.36,
+        );
+      });
+      window.__timelines["captions"] = tl;
+    })();
+  </script>
+</template>

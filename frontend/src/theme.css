@@ -1,0 +1,111 @@
+/*
+ * Portal colour tokens for both themes. Dark values live in index.css @theme;
+ * this file adds the chat palette and the light theme. <html data-theme> is
+ * set before first paint (index.html) from the saved choice or the system.
+ */
+
+:root {
+  /* Chat surface (dark) */
+  --chat-bg: #181b19;
+  --chat-surface: #252a25;
+  --chat-field: #ffffff08;
+  --chat-card: #ffffff05;
+  --chat-hover: #ffffff0c;
+  --chat-line: #343934;
+  --chat-line-strong: #4d5749;
+  --chat-fg: #eeeae1;
+  --chat-dim: #a3aaa0;
+  --chat-accent: #e8bb67;
+  --chat-accent-hover: #efca83;
+  --chat-on-accent: #24271f;
+  --chat-agent: #dac18e;
+  --chat-bubble: #2b312b;
+  --chat-link: #85c5b0;
+  --chat-tool: #92cbb6;
+  --chat-code-bg: #111613;
+  --chat-code-inline-bg: #ffffff0a;
+  --chat-code-fg: #bdd7c6;
+  --chat-pre-fg: #e0e5db;
+  --chat-added-bg: #66b57a17;
+  --chat-added-fg: #b5dec0;
+  --chat-removed-bg: #c4696917;
+  --chat-removed-fg: #e7b3ad;
+  --chat-hunk-bg: #6a97b411;
+  --chat-hunk-fg: #94b9d1;
+  --chat-error: #efb1a7;
+  --chat-scrollbar: #4b5148;
+  --chat-backdrop: #0009;
+  --chat-shadow: #0008;
+  --chat-shadow-soft: #0003;
+  --brand-fg: #f4f1e9;
+  --glass-bg: rgba(17, 17, 17, 0.78);
+  --overlay-bg: rgba(0, 0, 0, 0.6);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --color-base: #f7f6f3;
+  --color-surface: #ffffff;
+  --color-raised: #f0eee9;
+  --color-border: #e2dfd8;
+  --color-border-strong: #c9c5bc;
+  --color-muted: #6b675f;
+  --color-fg: #1c1b18;
+  --color-fg-dim: #4f4b44;
+  --color-accent: #1c1b18;
+  --color-accent-soft: rgba(28, 27, 24, 0.07);
+  --color-ink: #ffffff;
+  --color-ember: #a3541a;
+  --color-ember-soft: rgba(163, 84, 26, 0.1);
+  --color-teal: #2f6b52;
+  --color-teal-soft: rgba(47, 107, 82, 0.1);
+  --color-amber: #8a6400;
+  --color-amber-soft: rgba(176, 128, 0, 0.12);
+  --color-danger: #b03a3a;
+  --color-danger-soft: rgba(176, 58, 58, 0.1);
+  --shadow-glass: 0 8px 30px rgba(30, 25, 15, 0.08), 0 0 0 1px rgba(30, 25, 15, 0.05);
+  --shadow-glow-amber: 0 0 0 1px rgba(138, 100, 0, 0.35), 0 0 20px rgba(138, 100, 0, 0.1);
+  --shadow-glow-accent: 0 0 0 1px rgba(28, 27, 24, 0.2);
+
+  --chat-bg: #fbfaf7;
+  --chat-surface: #ffffff;
+  --chat-field: #f3f1ec;
+  --chat-card: #ffffff;
+  --chat-hover: rgba(28, 27, 24, 0.05);
+  --chat-line: #e3e0d8;
+  --chat-line-strong: #cdc8bd;
+  --chat-fg: #1f1e1a;
+  --chat-dim: #5c5850;
+  --chat-accent: #8a5a00;
+  --chat-accent-hover: #6f4800;
+  --chat-on-accent: #ffffff;
+  --chat-agent: #7a4f00;
+  --chat-bubble: #ece9e1;
+  --chat-link: #1f6b54;
+  --chat-tool: #2a6a55;
+  --chat-code-bg: #f4f2ed;
+  --chat-code-inline-bg: rgba(28, 27, 24, 0.06);
+  --chat-code-fg: #2b4f3d;
+  --chat-pre-fg: #23261f;
+  --chat-added-bg: rgba(46, 140, 72, 0.1);
+  --chat-added-fg: #1d6b35;
+  --chat-removed-bg: rgba(190, 60, 50, 0.09);
+  --chat-removed-fg: #a1312a;
+  --chat-hunk-bg: rgba(50, 100, 150, 0.08);
+  --chat-hunk-fg: #2d5d86;
+  --chat-error: #a1312a;
+  --chat-scrollbar: #c9c4b8;
+  --chat-backdrop: rgba(30, 25, 15, 0.35);
+  --chat-shadow: rgba(30, 25, 15, 0.18);
+  --chat-shadow-soft: rgba(30, 25, 15, 0.1);
+  --brand-fg: #1c1b18;
+  --glass-bg: rgba(255, 255, 255, 0.85);
+  --overlay-bg: rgba(30, 25, 15, 0.35);
+}
+
+:root[data-theme='light'] .mesh-bg {
+  background-image:
+    radial-gradient(ellipse 70% 45% at 50% -10%, rgba(176, 128, 0, 0.07), transparent 55%),
+    radial-gradient(ellipse 40% 30% at 100% 80%, rgba(163, 84, 26, 0.04), transparent 50%);
+}

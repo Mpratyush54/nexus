@@ -17,9 +17,10 @@ import {
   Users,
   X,
 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, NavLink, useNavigate } from 'react-router-dom'
 import { NotificationBell } from './NotificationBell'
+import { NexusBrand } from './NexusBrand'
 import { Button } from './ui/Button'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { useAuth } from '@/providers/AuthProvider'
@@ -28,7 +29,7 @@ import { useProjectPresence } from '@/hooks/useTeam'
 
 const links = [
   { to: '/app/dashboard', label: 'Home', icon: LayoutDashboard },
-  { to: '/app/timeline', label: 'Timeline', icon: History },
+  { to: '/app/timeline', label: 'Chats', icon: History },
   { to: '/app/teleport', label: 'Teleport', icon: Send },
   { to: '/app/memory', label: 'Memory', icon: Layers },
   { to: '/app/sessions', label: 'Sessions', icon: Radio },
@@ -69,19 +70,20 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
   ]
 
   return (
-    <nav className="app-nav">
+    <nav className="app-nav" aria-label="Sections">
       {items.map((link) => {
         const Icon = link.icon
         return (
           <NavLink
             key={link.to}
             to={link.to}
+            title={link.label}
             onClick={onNavigate}
             className={({ isActive }) =>
               ['app-nav-link', isActive ? 'is-active' : ''].filter(Boolean).join(' ')
             }
           >
-            <Icon size={15} strokeWidth={1.75} />
+            <Icon size={15} strokeWidth={1.75} aria-hidden />
             {link.label}
           </NavLink>
         )
@@ -92,20 +94,21 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
 
 function ProfileCard() {
   const { user, logout } = useAuth()
+  const me = useMe()
   const navigate = useNavigate()
   const initial = (user?.username?.[0] ?? 'U').toUpperCase()
 
   return (
     <div className="app-profile-wrap">
-      <Link to="/app/settings" className="app-profile">
+      <Link to="/app/settings" className="app-profile" aria-label={`Settings for ${user?.username ?? 'your account'}`}>
         <span className="app-profile-avatar" aria-hidden>
           {initial}
         </span>
         <span className="app-profile-meta">
           <span className="app-profile-name">{user?.username ?? 'User'}</span>
-          <span className="app-profile-email">{user?.userId?.slice(0, 8) ?? '—'}…</span>
+          <span className="app-profile-email">{me.data?.email || 'Settings'}</span>
         </span>
-        <ChevronRight size={14} className="app-profile-chevron" />
+        <ChevronRight size={14} className="app-profile-chevron" aria-hidden />
       </Link>
       <button
         type="button"
@@ -178,7 +181,7 @@ export function SideNav({ onOpenCommand }: Props) {
     <aside className="app-sidebar" aria-label="Main">
       <div className="app-sidebar-top">
         <NavLink to="/app/dashboard" className="app-brand">
-          Nexus
+          <NexusBrand />
         </NavLink>
 
         <div className="mt-5 flex items-center gap-1">
@@ -186,6 +189,7 @@ export function SideNav({ onOpenCommand }: Props) {
             type="button"
             className="app-search !mt-0 !w-auto min-w-0 flex-1"
             onClick={onOpenCommand}
+            aria-keyshortcuts="Control+K Meta+K"
           >
             <Search size={13} />
             <span className="app-search-label">Search</span>
@@ -211,17 +215,41 @@ export function SideNav({ onOpenCommand }: Props) {
 
 export function MobileNav({ onOpenCommand }: Props) {
   const [open, setOpen] = useState(false)
+  const menuButton = useRef<HTMLButtonElement>(null)
+  const closeButton = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    closeButton.current?.focus()
+    const opener = menuButton.current
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      opener?.focus()
+    }
+  }, [open])
 
   return (
     <>
       <div className="app-mobile-bar">
-        <span className="app-brand">Nexus</span>
+        <span className="app-brand"><NexusBrand /></span>
         <div className="app-mobile-actions">
           <NotificationBell />
           <Button variant="ghost" size="sm" onClick={onOpenCommand} aria-label="Search">
             <Search size={16} />
           </Button>
-          <Button variant="ghost" size="sm" onClick={() => setOpen(true)} aria-label="Open menu">
+          <Button
+            ref={menuButton}
+            variant="ghost"
+            size="sm"
+            onClick={() => setOpen(true)}
+            aria-label="Open menu"
+            aria-expanded={open}
+            aria-controls="app-drawer"
+          >
             <Menu size={16} />
           </Button>
         </div>
@@ -242,6 +270,10 @@ export function MobileNav({ onOpenCommand }: Props) {
               onClick={() => setOpen(false)}
             />
             <motion.aside
+              id="app-drawer"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Menu"
               className="app-drawer"
               initial={{ x: '-100%' }}
               animate={{ x: 0 }}
@@ -249,8 +281,8 @@ export function MobileNav({ onOpenCommand }: Props) {
               transition={{ type: 'spring', stiffness: 380, damping: 34 }}
             >
               <div className="app-drawer-head">
-                <span className="app-brand">Nexus</span>
-                <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
+                <span className="app-brand"><NexusBrand /></span>
+                <Button ref={closeButton} variant="ghost" size="sm" onClick={() => setOpen(false)} aria-label="Close menu">
                   <X size={16} />
                 </Button>
               </div>

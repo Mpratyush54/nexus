@@ -32,6 +32,7 @@ import { memoryApi, type HarvestJob } from '@/api/memory'
 import { useHarvestQueue, useMemorySearch } from '@/hooks/useMemory'
 import { isActiveMemory, visibleMemoryStatus } from '@/lib/memory-status'
 import { useLocalHarvest } from '@/hooks/useDaemon'
+import { usePeople } from '@/hooks/usePeople'
 import { useFollowHarvestProject } from '@/hooks/useFollowHarvestProject'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
 import { useAuth } from '@/providers/AuthProvider'
@@ -39,8 +40,6 @@ import { ApiError, type MemoryItem } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 import { useProjectSummaries } from '@/hooks/useProjectSummaries'
 import { useProjects } from '@/hooks/useProjects'
-
-const LEVEL_FILTERS = ['', 'project', 'personal', 'organization', 'session'] as const
 
 const CATEGORY_ORDER = [
   'architecture',
@@ -50,6 +49,15 @@ const CATEGORY_ORDER = [
   'conventions',
   'dependencies',
   'general',
+] as const
+
+const MEMORY_LEVELS = [
+  { value: '', label: 'All levels' },
+  { value: 'organization', label: 'Organization' },
+  { value: 'project', label: 'Project' },
+  { value: 'personal', label: 'Personal' },
+  { value: 'session', label: 'Session' },
+  { value: 'ephemeral', label: 'Ephemeral' },
 ] as const
 
 const CATEGORY_CONFIG: Record<
@@ -189,11 +197,12 @@ export function MemoryPage() {
 
   const filtered = useMemo(() => {
     return items.filter((i) => {
+      if (level && i.level !== level) return false
       if (tagFilter && !(i.tags ?? []).includes(tagFilter)) return false
       if (selectedCategory && normalizeItemCategory(i.category) !== selectedCategory) return false
       return true
     })
-  }, [items, tagFilter, selectedCategory])
+  }, [items, level, tagFilter, selectedCategory])
 
   const confirmed = useMemo(() => filtered.filter((i) => isActiveMemory(i.status)), [filtered])
 
@@ -269,7 +278,7 @@ export function MemoryPage() {
               className={[
                 'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
                 viewMode === 'hierarchy'
-                  ? 'bg-amber text-black shadow-sm font-semibold'
+                  ? 'bg-amber text-ink shadow-sm font-semibold'
                   : 'text-fg-dim hover:text-fg',
               ].join(' ')}
             >
@@ -282,7 +291,7 @@ export function MemoryPage() {
               className={[
                 'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
                 viewMode === 'timeline'
-                  ? 'bg-amber text-black shadow-sm font-semibold'
+                  ? 'bg-amber text-ink shadow-sm font-semibold'
                   : 'text-fg-dim hover:text-fg',
               ].join(' ')}
             >
@@ -413,20 +422,26 @@ export function MemoryPage() {
               className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
             />
           </label>
-          <label className="block">
-            <span className="mb-1.5 block text-xs text-fg-dim">Level</span>
-            <select
-              value={level}
-              onChange={(e) => setLevel(e.target.value)}
-              className="h-10 rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
+        </div>
+
+        {/* Level Pills */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-muted mr-1">Level:</span>
+          {MEMORY_LEVELS.map((option) => (
+            <button
+              key={option.value || 'all'}
+              type="button"
+              onClick={() => setLevel(option.value)}
+              className={[
+                'rounded-md px-2.5 py-1 text-xs font-medium transition',
+                level === option.value
+                  ? 'bg-amber-soft text-amber'
+                  : 'text-muted hover:bg-raised hover:text-fg',
+              ].join(' ')}
             >
-              {LEVEL_FILTERS.map((l) => (
-                <option key={l || 'all'} value={l}>
-                  {l || 'All levels'}
-                </option>
-              ))}
-            </select>
-          </label>
+              {option.label}
+            </button>
+          ))}
         </div>
 
         {/* Category Pills */}
@@ -684,7 +699,8 @@ function MemoryCard({
 }) {
   const [expanded, setExpanded] = useState(item.scope === 'episode_summary')
   const proposed = item.status === 'PROPOSED'
-  const agent = item.proposed_by || item.source
+  const { nameFor } = usePeople()
+  const agent = item.proposed_by ? nameFor(item.proposed_by) : item.source
   const previewLimit = item.scope === 'episode_summary' ? 420 : 180
   const preview =
     item.content.length > previewLimit && !expanded
@@ -755,8 +771,8 @@ function MemoryCard({
           ) : null}
 
           {agent ? (
-            <span className="inline-flex items-center gap-1 text-[11px] text-muted">
-              <Bot size={11} />
+            <span className="inline-flex items-center gap-1 text-[11px] text-muted" title={item.proposed_by || item.source}>
+              <Bot size={11} aria-hidden />
               {agent}
             </span>
           ) : null}

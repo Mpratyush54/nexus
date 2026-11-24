@@ -10,7 +10,16 @@ async function afterAuth(
   setProjectId: (id: string) => void,
 ) {
   setSession(res.token, { userId: res.user_id, username: res.username })
-  const project = await projectsApi.resolve({ folder_name: 'nexus-default' })
+  // Returning users land on their own projects (useEnsureActiveProject picks
+  // the busiest one). Only someone with no project at all gets a starter
+  // one; resolving it on every login switched people to an empty project
+  // and used up a slot of the plan's project limit.
+  const existing = await projectsApi.list().catch(() => null)
+  if (existing && existing.items?.length) return res
+  // Projects resolve by folder name across all users and only the first
+  // resolver becomes a member, so a shared name like 'nexus-default' left
+  // every later signup on a project they could not open (403s everywhere).
+  const project = await projectsApi.resolve({ folder_name: `${res.username}-personal` })
   if (project?.id) setProjectId(project.id)
   return res
 }

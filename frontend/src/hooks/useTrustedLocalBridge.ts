@@ -1,4 +1,5 @@
 import { useMemo } from 'react'
+import { useLocation } from 'react-router-dom'
 import {
   useLocalDaemonAutodetect,
   useLocalWorkspaceView,
@@ -19,8 +20,14 @@ export type DesktopIdentity =
  */
 export function useTrustedLocalBridge() {
   const { user } = useAuth()
-  const local = useLocalDaemonAutodetect()
+  const { pathname } = useLocation()
   const serverView = useLocalWorkspaceView()
+  // Desktop and current daemons advertise their bridge through the server
+  // heartbeat; only then is a loopback probe worth a console error. Setup
+  // pages can still probe on demand with local.refetch().
+  const setupPage = /\/app\/(connect|onboarding)/.test(pathname)
+  const advertised = Boolean(serverView.data?.online && serverView.data?.proxy_url)
+  const local = useLocalDaemonAutodetect(advertised, setupPage ? 5_000 : 30_000)
 
   const webUserId = (user?.userId ?? '').trim()
   const desktopUserId = (local.data?.status.user_id ?? '').trim()

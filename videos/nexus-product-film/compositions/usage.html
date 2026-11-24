@@ -1,0 +1,51 @@
+<template>
+  <style>
+    #root { position: absolute; inset: 0; overflow: hidden; font-family: "Inter", sans-serif; color: #fff; }
+    #root .vp { position: absolute; overflow: hidden; border-radius: 16px; background: #000; border: 1px solid #2c2c2c; box-shadow: 0 40px 120px rgba(0, 0, 0, 0.6); }
+    #root .cam { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+    #root .cam img { display: block; }
+    #root .hl { position: absolute; border-radius: 12px; border: 3px solid #e8bb67; box-shadow: 0 0 0 4000px rgba(0, 0, 0, 0.5), 0 0 40px rgba(232, 187, 103, 0.45); }
+    #root .cursor { position: absolute; left: 0; top: 0; width: 46px; height: 62px; }
+    
+  </style>
+  <div id="root" data-composition-id="usage" data-width="1920" data-height="1080">
+    <div id="usage-vp" class="vp" style="left: 120px; top: 176px; width: 1680px; height: 850px">
+      <div id="usage-a" class="cam" style="width: 1800px; height: 1080px">
+        <img src="assets/shots/settings-usage-dark.png" width="1800" height="1080" alt="" />
+        <div id="usage-cards" class="hl" style="left: 686px; top: 306px; width: 620px; height: 144px; opacity: 0"></div>
+        <div id="usage-agents" class="hl" style="left: 686px; top: 684px; width: 460px; height: 175px; opacity: 0"></div>
+      </div>
+    </div>
+
+  </div>
+  <script>
+    (function () {
+      const tl = gsap.timeline({ paused: true });
+      const VW = 1680, VH = 850;
+      const SH = {"a": {"id": "usage-a", "w": 1800, "h": 1080}};
+      const clampXY = (sh, cx, cy, s) => {
+        let x = VW / 2 - cx * s, y = VH / 2 - cy * s;
+        x = Math.min(0, Math.max(VW - sh.w * s, x));
+        y = Math.min(0, Math.max(VH - sh.h * s, y));
+        if (sh.w * s < VW) x = (VW - sh.w * s) / 2;
+        if (sh.h * s < VH) y = (VH - sh.h * s) / 2;
+        return { x, y, scale: s };
+      };
+      const camSet = (k, cx, cy, s) => gsap.set("#" + SH[k].id, clampXY(SH[k], cx, cy, s));
+      const cam = (k, at, cx, cy, s, d, ease) => tl.to("#" + SH[k].id, Object.assign(clampXY(SH[k], cx, cy, s), { duration: d, ease: ease || "power3.inOut" }), at);
+      const hl = (id, at, hold) => {
+        tl.fromTo("#" + id, { opacity: 0, scale: 1.06 }, { opacity: 1, scale: 1, duration: 0.3, ease: "power3.out" }, at);
+        tl.to("#" + id, { opacity: 0, duration: 0.25 }, at + hold);
+      };
+      const show = (k, at, d) => tl.fromTo("#" + SH[k].id, { opacity: 0 }, { opacity: 1, duration: d || 0.35 }, at);
+      const hide = (k, at, d) => tl.to("#" + SH[k].id, { opacity: 0, duration: d || 0.35 }, at);
+      camSet("a", 1000, 380, 1.45);
+      tl.fromTo("#usage-vp", { y: 80, opacity: 0, filter: "blur(12px)" }, { y: 0, opacity: 1, filter: "blur(0px)", duration: 0.45, ease: "expo.out" }, 0);
+      hl("usage-cards", 0.45, 1.1);
+      cam("a", 1.5, 950, 800, 1.35, 0.7);
+      hl("usage-agents", 2.1, 1.1);
+      tl.to("#usage-vp", { scale: 0.94, opacity: 0, filter: "blur(10px)", duration: 0.35, ease: "power3.in" }, 3.38);
+      window.__timelines["usage"] = tl;
+    })();
+  </script>
+</template>

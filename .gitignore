@@ -11,3 +11,13 @@ hackathon-demo/*
 brag-output/*
 dist-desktop/
 skills-lock.json
+# Video project renders and media
+videos/**/renders/
+videos/**/.hyperframes/
+videos/**/node_modules/
+videos/**/.media/
+videos/**/*.mp3
+videos/**/*.mp4
+videos/**/*.wav
+videos/**/.thumbnails/
+videos/**/.waveform-cache/

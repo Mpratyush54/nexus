@@ -7,7 +7,6 @@ import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useToast } from '@/components/ui/Toast'
 import {
-  useActiveWorkspaces,
   useGitHubConnect,
   useGitHubDisconnect,
   useGitHubImport,
@@ -16,6 +15,7 @@ import {
   useGitHubStatus,
   useGrantMember,
   useMembers,
+  useProjectPresence,
   useRevokeMember,
   useRoles,
   useSetMemberRole,
@@ -24,13 +24,11 @@ import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import type { GitHubImportItem } from '@/api/team'
 import { formatRelative } from '@/utils/format'
+import { initialsOf, usePeople } from '@/hooks/usePeople'
 
 const BUILTIN_ROLES = ['OWNER', 'ADMIN', 'EDITOR', 'VIEWER'] as const
 
-function initials(id: string) {
-  const s = id.replace(/^user_/, '').slice(0, 2)
-  return (s || '??').toUpperCase()
-}
+const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 export function TeamPage() {
   const { projectId, user } = useAuth()
@@ -39,7 +37,8 @@ export function TeamPage() {
   const members = useMembers()
   const roles = useRoles()
   const github = useGitHubStatus()
-  const presence = useActiveWorkspaces()
+  const presence = useProjectPresence()
+  const { nameFor } = usePeople()
   const grant = useGrantMember()
   const setRole = useSetMemberRole()
   const revoke = useRevokeMember()
@@ -81,12 +80,12 @@ export function TeamPage() {
 
   const onlineByUser = useMemo(() => {
     const map = new Set<string>()
-    for (const ws of presence.data ?? []) {
-      const uid = (ws as { user_id?: string }).user_id
-      if (uid) map.add(uid)
+    for (const p of presence.data ?? []) {
+      if (p.user_id && p.status !== 'offline') map.add(p.user_id)
     }
+    if (user?.userId) map.add(user.userId)
     return map
-  }, [presence.data])
+  }, [presence.data, user?.userId])
 
   const roleOptions = useMemo(() => {
     const names = new Set<string>(BUILTIN_ROLES)
@@ -100,9 +99,17 @@ export function TeamPage() {
     e.preventDefault()
     const id = inviteId.trim()
     if (!id) return
+    if (!USER_ID.test(id)) {
+      push({
+        title: 'Enter a user ID',
+        detail: 'User IDs look like 1b2c3d4e-…. Your teammate can copy theirs from Settings.',
+        tone: 'amber',
+      })
+      return
+    }
     grant.mutate(id, {
       onSuccess: () => {
-        push({ title: 'Member added', detail: id, tone: 'teal' })
+        push({ title: 'Member added', detail: nameFor(id), tone: 'teal' })
         setInviteId('')
       },
       onError: (err) =>
@@ -202,7 +209,7 @@ export function TeamPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-fg">Team</h1>
           <p className="mt-1 text-sm text-fg-dim">
-            Members, roles, presence, and GitHub collaborator import.
+            Who can see this project's chats and memory, and what they can change.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -223,10 +230,10 @@ export function TeamPage() {
                 initial={{ opacity: 0, y: 6 }}
                 animate={{ opacity: 1, y: 0 }}
                 transition={{ delay: i * 0.04 }}
-                title={m.user_id}
+                title={`${nameFor(m.user_id, { you: false })} · ${onlineByUser.has(m.user_id) ? 'online' : 'away'}`}
                 className="app-avatar relative flex h-9 w-9 items-center justify-center rounded-full border border-border bg-raised text-[10px] font-medium text-fg"
               >
-                {initials(m.user_id)}
+                {initialsOf(nameFor(m.user_id, { you: false }))}
                 <span
                   className={[
                     'absolute bottom-0 right-0 h-2 w-2 rounded-full border border-surface',
@@ -247,17 +254,23 @@ export function TeamPage() {
 
         <form onSubmit={onInvite} className="flex flex-wrap items-end gap-2">
           <label className="block min-w-[14rem] flex-1">
-            <span className="mb-1 block text-xs text-fg-dim">Invite by user id</span>
+            <span className="mb-1 block text-xs text-fg-dim">Add a teammate by user ID</span>
             <input
               value={inviteId}
               onChange={(e) => setInviteId(e.target.value)}
-              placeholder="user uuid or username id"
-              className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none focus:border-amber"
+              placeholder="e.g. 1b2c3d4e-5f60-…"
+              aria-describedby="invite-help"
+              autoComplete="off"
+              spellCheck={false}
+              className="h-10 w-full rounded-lg border border-border bg-raised px-3 font-mono text-sm text-fg outline-none focus:border-amber"
             />
+            <span id="invite-help" className="mt-1 block text-xs text-muted">
+              Teammates find their ID in Settings. To invite by email, use your organization page.
+            </span>
           </label>
           <Button type="submit" size="sm" disabled={grant.isPending}>
             <UserPlus className="h-3.5 w-3.5" />
-            Add
+            {grant.isPending ? 'Adding…' : 'Add member'}
           </Button>
         </form>
 
@@ -267,19 +280,20 @@ export function TeamPage() {
             const isOwner = m.role === 'OWNER'
             return (
               <li key={m.user_id} className="flex flex-wrap items-center gap-3 py-3">
-                <div className="app-avatar flex h-9 w-9 items-center justify-center rounded-full bg-raised text-[10px] font-medium">
-                  {initials(m.user_id)}
+                <div className="app-avatar flex h-9 w-9 items-center justify-center rounded-full bg-raised text-[10px] font-medium" aria-hidden>
+                  {initialsOf(nameFor(m.user_id, { you: false }))}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate font-mono text-sm text-fg">
-                    {m.user_id}
-                    {isSelf ? <span className="ml-2 text-xs text-muted">you</span> : null}
+                  <p className="truncate text-sm text-fg" title={m.user_id}>
+                    {nameFor(m.user_id, { you: false })}
+                    {isSelf ? <span className="ml-2 text-xs text-muted">(you)</span> : null}
                   </p>
                   <p className="text-xs text-fg-dim">
                     {onlineByUser.has(m.user_id) ? 'Online' : 'Away'}
                   </p>
                 </div>
                 <select
+                  aria-label={`Role for ${nameFor(m.user_id, { you: false })}`}
                   value={m.role ?? 'EDITOR'}
                   disabled={isOwner || setRole.isPending}
                   onChange={(e) =>
@@ -312,7 +326,7 @@ export function TeamPage() {
                     disabled={revoke.isPending}
                     onClick={() =>
                       revoke.mutate(m.user_id, {
-                        onSuccess: () => push({ title: 'Removed', detail: m.user_id }),
+                        onSuccess: () => push({ title: 'Member removed', detail: nameFor(m.user_id, { you: false }) }),
                         onError: (err) =>
                           push({
                             title: 'Remove failed',
@@ -323,6 +337,7 @@ export function TeamPage() {
                     }
                   >
                     Remove
+                    <span className="sr-only"> {nameFor(m.user_id, { you: false })}</span>
                   </Button>
                 ) : null}
               </li>
