@@ -62,6 +62,8 @@ export const queryKeys = {
     overview: ['admin', 'overview'] as const,
     users: ['admin', 'users'] as const,
     releases: ['admin', 'releases'] as const,
+    problems: (source: string, kind: string) => ['admin', 'problems', source, kind] as const,
+    problem: (fingerprint: string) => ['admin', 'problem', fingerprint] as const,
   },
   billing: {
     plans: ['billing', 'plans'] as const,

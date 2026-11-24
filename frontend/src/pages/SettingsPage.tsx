@@ -21,6 +21,7 @@ import {
   type SectionLink,
 } from '@/components/settings/SettingsKit'
 import { inputClass, useActiveSection } from '@/components/settings/settings-utils'
+import { SupportSection } from '@/components/settings/SupportSection'
 import { subscribeWebPush } from '@/lib/pwa'
 import { projectLabel } from '@/lib/project-label'
 import { ApiError } from '@/types/api'
@@ -37,6 +38,7 @@ const SECTIONS: SectionLink[] = [
   { id: 'notifications', label: 'Notifications' },
   { id: 'tokens', label: 'API tokens' },
   { id: 'project-data', label: 'Project data' },
+  { id: 'support', label: 'Privacy & support' },
 ]
 
 function errText(err: unknown) {
@@ -83,7 +85,7 @@ export function SettingsPage() {
       <header className="mb-6">
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Settings</h1>
         <p className="mt-1 text-sm text-fg-dim">
-          Your account, plan, notifications and API tokens.
+          Your account, plan, notifications, API tokens and error reports.
           {me.data?.is_platform_admin ? (
             <>
               {' '}
@@ -110,6 +112,7 @@ export function SettingsPage() {
           <NotificationsSection isAdmin={Boolean(me.data?.is_platform_admin)} />
           <TokensSection />
           <ProjectDataSection />
+          <SupportSection username={me.data?.username} />
         </div>
       </div>
     </div>

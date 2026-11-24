@@ -5,6 +5,11 @@ import './index.css'
 import { registerServiceWorker } from './lib/pwa'
 import { initTheme } from './lib/theme'
 import { dismissBootSplash } from './lib/boot-splash'
+import { installGlobalErrorHandlers } from './lib/diagnostics'
+
+// Uncaught errors and unhandled rejections become problem reports (unless
+// turned off in Settings). The /demo boot never installs this.
+installGlobalErrorHandlers()
 
 const APP_FONTS =
   'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap'

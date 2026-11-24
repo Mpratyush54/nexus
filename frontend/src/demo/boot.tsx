@@ -5,8 +5,11 @@
  */
 import { installDemoMocks } from './mock'
 import { dismissBootSplash } from '@/lib/boot-splash'
+import { disableDiagnostics } from '@/lib/diagnostics'
 
 installDemoMocks()
+// The demo never sends problem reports, even from the error screen.
+disableDiagnostics()
 
 const APP_FONTS =
   'https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Syne:wght@600;700;800&display=swap'

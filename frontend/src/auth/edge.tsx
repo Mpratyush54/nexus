@@ -2,6 +2,7 @@ import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode 
 import { useLocation } from 'react-router-dom'
 import { NexusMark } from '@/components/NexusBrand'
 import { handoff, useHandoff } from './handoff'
+import { reportError } from '@/lib/diagnostics'
 import './auth.css'
 
 /**
@@ -103,7 +104,7 @@ function isChunkError(error: Error | null) {
   return /dynamically imported module|Importing a module script failed|Failed to fetch|error loading dynamically|ChunkLoadError/i.test(m)
 }
 
-type BoundaryState = { error: Error | null; key?: string }
+type BoundaryState = { error: Error | null; key?: string; reported?: boolean }
 
 /**
  * Catches render errors anywhere below it. A failed page download (usually a
@@ -119,12 +120,16 @@ export class AppErrorBoundary extends Component<{ children: ReactNode; resetKey?
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     console.error('Nexus: screen failed to render', error, info.componentStack)
+    // Chunk errors are a stale tab after a deploy, not a bug.
+    if (!isChunkError(error) && reportError(error, 'crash', { componentStack: info.componentStack ?? undefined, via: 'AppErrorBoundary' })) {
+      this.setState({ reported: true })
+    }
   }
 
   // Navigating away clears the error so the next page gets a fresh try.
   static getDerivedStateFromProps(props: { resetKey?: string }, state: BoundaryState): Partial<BoundaryState> | null {
     if (props.resetKey === state.key) return null
-    return { key: props.resetKey, error: null }
+    return { key: props.resetKey, error: null, reported: false }
   }
 
   render() {
@@ -159,6 +164,11 @@ export class AppErrorBoundary extends Component<{ children: ReactNode; resetKey?
           )}
         </div>
         <p className="au-edge-detail">{error.message.slice(0, 240)}</p>
+        {this.state.reported ? (
+          <p className="au-sub" style={{ fontSize: 13, marginTop: 12 }}>
+            An error report was sent to the Nexus team: where in the code it failed, the app version and your browser, with no chats or other content. You can turn this off in Settings.
+          </p>
+        ) : null}
       </EdgeFrame>
     )
   }

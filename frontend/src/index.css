@@ -1007,3 +1007,28 @@
     max-width: none;
   }
 }
+
+/* "Report a problem" dialog: the chat modal's look, wider for the preview. */
+dialog.report-dialog {
+  margin: auto;
+  width: 100%;
+  max-width: 640px;
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  padding: 22px;
+  color: var(--chat-fg);
+  border: 1px solid var(--chat-line-strong);
+  border-radius: 16px;
+  background: var(--chat-surface);
+  box-shadow: 0 20px 100px var(--chat-shadow);
+}
+dialog.report-dialog::backdrop {
+  background: var(--chat-backdrop);
+  backdrop-filter: blur(5px);
+}
+@media (max-width: 640px) {
+  dialog.report-dialog {
+    max-width: calc(100vw - 32px);
+    padding: 18px;
+  }
+}

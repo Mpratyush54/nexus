@@ -1,4 +1,6 @@
 import { useMemo, useState, type FormEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
+import { ProblemReportsPanel } from '@/components/admin/ProblemReports'
 import { Shield } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
@@ -47,6 +49,11 @@ export function AdminPage() {
   const [winUrl, setWinUrl] = useState('')
   const [macUrl, setMacUrl] = useState('')
   const [linuxUrl, setLinuxUrl] = useState('')
+
+  const [params, setParams] = useSearchParams()
+  const tab = params.get('tab') === 'problems' ? 'problems' : 'overview'
+  const tabClass = (on: boolean) =>
+    ['rounded-md px-3 py-1.5 text-sm font-medium transition', on ? 'bg-raised text-fg shadow-sm' : 'text-fg-dim hover:text-fg'].join(' ')
 
   const isAdmin = Boolean(me.data?.is_platform_admin) || overview.isSuccess
   const forbidden = overview.isError && overview.error instanceof ApiError && overview.error.status === 403
@@ -124,6 +131,26 @@ export function AdminPage() {
           Super Admin control: versions, CLI/desktop releases, and who can operate Nexus on AWS.
         </p>
       </div>
+
+      <div role="tablist" aria-label="Platform sections" className="inline-flex rounded-lg border border-border bg-surface/60 p-0.5">
+        <button type="button" role="tab" aria-selected={tab === 'overview'} className={tabClass(tab === 'overview')} onClick={() => setParams({})}>
+          Overview
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={tab === 'problems'}
+          className={tabClass(tab === 'problems')}
+          onClick={() => setParams({ tab: 'problems' })}
+        >
+          Problem reports
+        </button>
+      </div>
+
+      {tab === 'problems' ? (
+        <ProblemReportsPanel />
+      ) : (
+        <>
 
       <GlassPanel className="space-y-3 p-5">
         <h2 className="text-sm font-medium text-fg">Overview</h2>
@@ -435,6 +462,8 @@ nexus daemon install
 nexus daemon status`}
         </pre>
       </GlassPanel>
+        </>
+      )}
     </div>
   )
 }
