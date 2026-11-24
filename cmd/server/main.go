@@ -64,6 +64,7 @@ import (
 	"time"
 
 	memctx "central-memory/internal/context"
+	"central-memory/internal/desktopbridge"
 	"central-memory/internal/extract"
 	"central-memory/internal/server"
 	"central-memory/internal/store"
@@ -399,6 +400,9 @@ func run() error {
 			log.Print("server: migrations dir missing, skipping Go-runner migrations (migrate.sh path)")
 		}
 		srv.Store = pg
+		// NewServer ran with the stub store, so wire the durable desktop
+		// execution queue (/v1/desktop/*) to the same database here.
+		srv.Desktop = desktopbridge.NewPostgres(pg.DB())
 		users := store.NewUserStore(pg.DB())
 		srv.Users = server.NewUserLookup(users)
 		srv.Accounts = users
