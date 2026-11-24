@@ -106,8 +106,9 @@ func mirrorJSON(ctx context.Context, client *http.Client, method, endpoint, toke
 }
 
 // upsertMirroredSession creates or touches the cloud session with a stable
-// (project, harness, native id, machine) identity.
-func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, nativeID, machineID, workspaceRoot, title string) (string, error) {
+// (project, harness, native id, machine) identity. parentNativeID links a
+// sub-agent run to the session that started it ("" when not one).
+func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, nativeID, machineID, workspaceRoot, title, parentNativeID string) (string, error) {
 	base, token, projectID, client, err := s.mirrorConnection()
 	if err != nil {
 		return "", err
@@ -120,7 +121,7 @@ func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, na
 	var out struct {
 		ID string `json:"id"`
 	}
-	_, err = mirrorJSON(ctx, client, http.MethodPost, base+"/v1/agent-sessions", token, map[string]any{
+	body := map[string]any{
 		"project_id":          projectID,
 		"harness":             harness,
 		"native_id":           nativeID,
@@ -128,7 +129,18 @@ func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, na
 		"workspace_root_hint": strings.TrimSpace(workspaceRoot),
 		"title":               strings.TrimSpace(title),
 		"visibility":          "private",
-	}, &out)
+	}
+	parentNativeID = strings.TrimSpace(parentNativeID)
+	if parentNativeID != "" {
+		body["parent_native_id"] = parentNativeID
+	}
+	status, err := mirrorJSON(ctx, client, http.MethodPost, base+"/v1/agent-sessions", token, body, &out)
+	if err != nil && status == http.StatusBadRequest && parentNativeID != "" {
+		// Servers before parent_native_id reject unknown fields: the run
+		// is still captured, only without its parent link.
+		delete(body, "parent_native_id")
+		_, err = mirrorJSON(ctx, client, http.MethodPost, base+"/v1/agent-sessions", token, body, &out)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -142,11 +154,22 @@ func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, na
 // immediately.  Indexes are deterministic source positions: a retry that
 // reaches an already-written turn receives 409 and is therefore idempotent.
 func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, nativeID, machineID, workspaceRoot string, turns []MirroredTurn, title ...string) (string, error) {
-	name := "Captured " + normalizeHarness(harness) + " session"
-	if len(title) > 0 && strings.TrimSpace(title[0]) != "" {
-		name = strings.TrimSpace(title[0])
+	t := ""
+	if len(title) > 0 {
+		t = title[0]
 	}
-	sessionID, err := s.upsertMirroredSession(ctx, harness, nativeID, machineID, workspaceRoot, name)
+	return s.MirrorAgentSessionTurnsWithParent(ctx, harness, nativeID, machineID, workspaceRoot, "", turns, t)
+}
+
+// MirrorAgentSessionTurnsWithParent is MirrorAgentSessionTurns for a session
+// that may be a sub-agent run: parentNativeID is the native id of the
+// session that started it, or "".
+func (s *HTTPMemoryStore) MirrorAgentSessionTurnsWithParent(ctx context.Context, harness, nativeID, machineID, workspaceRoot, parentNativeID string, turns []MirroredTurn, title string) (string, error) {
+	name := "Captured " + normalizeHarness(harness) + " session"
+	if strings.TrimSpace(title) != "" {
+		name = strings.TrimSpace(title)
+	}
+	sessionID, err := s.upsertMirroredSession(ctx, harness, nativeID, machineID, workspaceRoot, name, parentNativeID)
 	if err != nil || len(turns) == 0 {
 		return sessionID, err
 	}
@@ -268,7 +291,7 @@ func (s *HTTPMemoryStore) PublishAgentSessionVersion(ctx context.Context, snap *
 	if snap == nil {
 		return fmt.Errorf("daemon: cloud session mirror: nil snapshot")
 	}
-	sessionID, err := s.upsertMirroredSession(ctx, snap.Harness, snap.ConversationID, snap.SourceMachineID, workspaceRoot, "")
+	sessionID, err := s.upsertMirroredSession(ctx, snap.Harness, snap.ConversationID, snap.SourceMachineID, workspaceRoot, "", "")
 	if err != nil {
 		return err
 	}

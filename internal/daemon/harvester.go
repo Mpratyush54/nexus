@@ -20,6 +20,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -794,6 +795,23 @@ func sessionID(path string) string {
 		base = strings.TrimSuffix(base, ext)
 	}
 	return base
+}
+
+// claudeSubagentID is the file stem of a Claude Code sub-agent transcript.
+var claudeSubagentID = regexp.MustCompile(`(?i)^agent-[0-9a-f]{8,}$`)
+
+// subagentParentNativeID returns the parent session's native id for a Claude
+// Code sub-agent transcript, <project>/<parent session>/subagents/agent-<hex>.jsonl,
+// or "" for any other path.
+func subagentParentNativeID(path string) string {
+	parts := strings.Split(strings.ReplaceAll(strings.TrimSpace(path), `\`, "/"), "/")
+	if len(parts) < 3 || !strings.EqualFold(parts[len(parts)-2], "subagents") {
+		return ""
+	}
+	if !claudeSubagentID.MatchString(sessionID(parts[len(parts)-1])) {
+		return ""
+	}
+	return strings.TrimSpace(parts[len(parts)-3])
 }
 
 // noiseTypes are JSONL record types that carry no dialogue or structured

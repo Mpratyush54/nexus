@@ -137,7 +137,7 @@ func LoadProjectGraph(ctx context.Context, src GraphSources, viewerID, projectID
 
 	sessByID := map[string]*AgentSession{}
 	if src.Sessions != nil {
-		items, _, err := src.Sessions.ListTimeline(ctx, TimelineQuery{UserID: viewerID, ProjectID: projectID, Limit: 100})
+		items, _, err := src.Sessions.ListTimeline(ctx, TimelineQuery{UserID: viewerID, ProjectID: projectID, Limit: 100, IncludeSubagents: true})
 		if err != nil {
 			return nil, err
 		}

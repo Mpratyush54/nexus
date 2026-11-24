@@ -415,6 +415,7 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 		return http.MethodGet, "/v1/timeline" + queryArgs(args, map[string]string{
 			"project_id": "project_id", "project": "project_id", "agent": "harness",
 			"harness": "harness", "q": "q", "limit": "limit", "cursor": "cursor",
+			"include_subagents": "include_subagents",
 		}), nil, nil
 	case "memory.search":
 		if hasJSONKey(args, "browse") {
@@ -635,7 +636,8 @@ func capturedAgents(ctx context.Context, args json.RawMessage, deps Deps) (any, 
 	cursor := ""
 	projectID := argString(args, "project_id", "project")
 	for page := 0; page < 100; page++ {
-		path := "/v1/timeline?limit=100"
+		// Every captured session counts, sub-agent runs included.
+		path := "/v1/timeline?limit=100&include_subagents=1"
 		if projectID != "" {
 			path += "&project_id=" + url.QueryEscape(projectID)
 		}
