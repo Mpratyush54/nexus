@@ -163,9 +163,10 @@ internal sealed class SubagentCard : UserControl
             _local = await Task.Run(() => SubagentLinks.Match(runs, _description, _prompt));
             if (_local is { } run)
             {
-                var start = await Task.Run(() => SafeStart(run));
+                var (start, end) = await Task.Run(() => SafeSpan(run));
+                _end = end;
                 await UiThread.Resume(DispatcherQueue);
-                _status.Text = StatusLine(run, start, null);
+                _status.Text = StatusLine(run, start, null, end);
                 return;
             }
             var remote = await SubagentLinks.FindRemoteAsync(App.Core, _projectId, _prompt);
@@ -182,15 +183,29 @@ internal sealed class SubagentCard : UserControl
         }
     }
 
-    private static DateTimeOffset? SafeStart(SubagentRuns.LocalRun run)
+    private DateTimeOffset? _end;
+
+    // First timestamp from the head, last from the final 64 KB: the run's span
+    // without reading a transcript that can be tens of megabytes.
+    private static (DateTimeOffset? Start, DateTimeOffset? End) SafeSpan(SubagentRuns.LocalRun run)
     {
-        try { return run.Transcript.Length > 0 ? SubagentTranscript.FirstTimestamp(File.ReadLines(run.Transcript)) : null; }
-        catch { return null; }
+        if (run.Transcript.Length == 0) return (null, null);
+        try
+        {
+            var start = SubagentTranscript.FirstTimestamp(File.ReadLines(run.Transcript));
+            using var stream = new FileStream(run.Transcript, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            var size = (int)Math.Min(stream.Length, 64 * 1024);
+            stream.Seek(-size, SeekOrigin.End);
+            var buffer = new byte[size];
+            stream.ReadExactly(buffer);
+            return (start, SubagentTranscript.LastTimestamp(System.Text.Encoding.UTF8.GetString(buffer)));
+        }
+        catch { return (null, null); }
     }
 
-    internal static string StatusLine(SubagentRuns.LocalRun run, DateTimeOffset? start, int? messages)
+    internal static string StatusLine(SubagentRuns.LocalRun run, DateTimeOffset? start, int? messages, DateTimeOffset? lastMessage = null)
     {
-        var end = new DateTimeOffset(DateTime.SpecifyKind(run.Modified, DateTimeKind.Utc));
+        var end = lastMessage ?? new DateTimeOffset(DateTime.SpecifyKind(run.Modified, DateTimeKind.Utc));
         var running = run.Finished != true && DateTimeOffset.UtcNow - end < TimeSpan.FromMinutes(2);
         var status = run.Finished == true ? "Done" : running ? "Running" : run.Finished == false ? "Stopped" : "Ended";
         var parts = new List<string> { status };
@@ -215,8 +230,9 @@ internal sealed class SubagentCard : UserControl
             {
                 (turns, total) = await Task.Run(() => SubagentTranscript.Read(File.ReadLines(run.Transcript), MaxTurnsShown));
                 var start = turns.FirstOrDefault()?.At;
+                var end = turns.LastOrDefault()?.At ?? _end;
                 await UiThread.Resume(DispatcherQueue);
-                _status.Text = StatusLine(run, start, total);
+                _status.Text = StatusLine(run, start, total, end);
             }
             catch (Exception ex) { turns = new(); total = 0; error = ex.Message; }
         }

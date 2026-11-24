@@ -70,7 +70,10 @@ internal sealed class ActivityCalendarView : UserControl
             if (cell.Date == DateOnly.FromDateTime(DateTime.Today)) { mark.BorderThickness = new Thickness(1); mark.BorderBrush = NexusPalette.Accent; }
             Grid.SetColumn(mark, week + 1); Grid.SetRow(mark, i % 7 + 1); calendar.Children.Add(mark);
         }
-        _content.Children.Add(new ScrollViewer { Content = calendar, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, Padding = new Thickness(0, 0, 0, 6) });
+        var scroller = new ScrollViewer { Content = calendar, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, Padding = new Thickness(0, 0, 0, 6) };
+        // Open on the most recent weeks (the right end), not last year.
+        scroller.SizeChanged += (_, _) => scroller.ChangeView(scroller.ScrollableWidth, null, null, true);
+        _content.Children.Add(scroller);
         var offset = TimeZoneInfo.Local.GetUtcOffset(DateTime.Now);
         _content.Children.Add(new TextBlock { Text = $"Original agent timestamps · UTC{(offset < TimeSpan.Zero ? "−" : "+")}{offset.Duration():hh\\:mm}. Uploading history does not add activity.", FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
         if (activity.Undated > 0) _content.Children.Add(new TextBlock { Text = $"{activity.Undated:N0} historical messages have no original date and are not placed on the calendar.", Foreground = NexusPalette.Amber, FontSize = 12, TextWrapping = TextWrapping.Wrap });

@@ -47,3 +47,22 @@ public class SubagentTranscriptTests
     [InlineData(-5, "0s")]
     public void FormatsDurations(int seconds, string expected) => Assert.Equal(expected, SubagentTranscript.Duration(TimeSpan.FromSeconds(seconds)));
 }
+
+public class SubagentTranscriptSpacingTests
+{
+    [Fact]
+    public void SpacedJsonIsReadToo()
+    {
+        var line = """{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}, "timestamp": "2026-11-23T09:43:00Z"}""";
+        Assert.Equal("done", SubagentTranscript.ParseLine(line)?.Text);
+        Assert.Equal(new DateTimeOffset(2026, 11, 23, 9, 43, 0, TimeSpan.Zero), SubagentTranscript.FirstTimestamp([line]));
+    }
+}
+
+public class SubagentTranscriptTailTests
+{
+    [Fact]
+    public void LastTimestampIsTheLatestInTheTail() =>
+        Assert.Equal(new DateTimeOffset(2026, 11, 23, 13, 37, 1, 476, TimeSpan.Zero),
+            SubagentTranscript.LastTimestamp("partial line\",\"timestamp\":\"2026-11-23T13:37:01.298Z\"}\n{\"type\":\"user\",\"timestamp\":\"2026-11-23T13:37:01.476Z\"}\n"));
+}

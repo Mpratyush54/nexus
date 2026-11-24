@@ -1074,31 +1074,25 @@ public sealed partial class SessionPage : NexusPage
         return s_backwardIgnored ? LatestTurnsWithoutBackwardAsync(sessionId, beforeCursor, limit, count) : CallBackwardTurnsAsync(sessionId, beforeCursor, limit, count);
     }
 
-    // A server that ignores direction=backward forced a walk over the whole
-    // chat before its newest page could show: 2,000 turns took ten sequential
-    // 200-turn requests (~26 s measured on a real chat). Turn indexes are
-    // consecutive, so the newest page is read directly from idx count-limit
-    // (one request), racing the walk; the walk still wins when the count is
-    // wrong. Older pages jump the same way.
+    // A server that ignores direction=backward (production today) forced a
+    // walk over the whole chat before its newest page could show: 2,284 turns
+    // took 12 sequential 200-turn requests (16.4 s measured on a real chat).
+    // Turn indexes there are sparse but increasing (2108, 281496, …,
+    // 57592794), so the tail is found by probing cursors in parallel rounds
+    // (TurnPaging.TailProbes) while the walk runs; the first answer wins and
+    // the walk keeps going in the background for older pages.
     private async Task<NxResponse> LatestTurnsWithoutBackwardAsync(string sessionId, string beforeCursor, int limit, long count)
     {
-        if (HasForwardWalk(sessionId)) return await LatestTurnsFromForwardWalkAsync(sessionId, beforeCursor, limit);
-        if (beforeCursor.Length > 0)
+        if (beforeCursor.Length > 0 || HasForwardWalk(sessionId)) return await LatestTurnsFromForwardWalkAsync(sessionId, beforeCursor, limit);
+        if (count >= 0 && count <= ForwardWalkPageSize * 2) return await LatestTurnsFromForwardWalkAsync(sessionId, "", limit);
+        var walk = LatestTurnsFromForwardWalkAsync(sessionId, "", limit);
+        var probe = ProbeTailAsync(sessionId, limit);
+        if (await Task.WhenAny((Task)walk, probe) == probe && await probe is { } tail)
         {
-            if (long.TryParse(beforeCursor, out var before) && await JumpOlderAsync(sessionId, before, limit) is { } older) return older;
-            return await LatestTurnsFromForwardWalkAsync(sessionId, beforeCursor, limit);
-        }
-        if (count <= limit + ForwardWalkPageSize) return await LatestTurnsFromForwardWalkAsync(sessionId, "", limit);
-        var abandon = new CancellationTokenSource();
-        var walk = LatestTurnsFromForwardWalkAsync(sessionId, "", limit, abandon.Token);
-        var jump = JumpTailAsync(sessionId, count, limit);
-        if (await Task.WhenAny((Task)walk, jump) == jump && await jump is { } tail)
-        {
-            abandon.Cancel();
-            System.Diagnostics.Trace.WriteLine($"[paging] session {sessionId}: newest page by idx jump (count {count})");
+            System.Diagnostics.Trace.WriteLine($"[paging] session {sessionId}: newest page by cursor probes");
             return tail;
         }
-        if (!walk.IsCompleted && await jump is { } late) { abandon.Cancel(); return late; }
+        if (!walk.IsCompleted && await probe is { } late) return late;
         return await walk;
     }
 
@@ -1107,37 +1101,52 @@ public sealed partial class SessionPage : NexusPage
         lock (s_forwardTurns) return s_forwardTurns.ContainsKey(sessionId);
     }
 
-    private async Task<NxResponse?> JumpTailAsync(string sessionId, long count, int limit)
-    {
-        var turns = new List<JsonElement>();
-        var cursor = (count - limit - 1).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        for (var page = 0; page < 6 && cursor.Length > 0; page++)
-        {
-            var response = await Call(NxMethods.SessionsTurns, new { session_id = sessionId, id = sessionId, limit = ForwardWalkPageSize, cursor });
-            if (!response.Ok || response.Result is not { } body) return null;
-            var items = NxJson.Items(body).Select(t => t.Clone()).ToList();
-            if (items.Count == 0) break;
-            turns.AddRange(items);
-            cursor = NxJson.Text(body, "next_cursor");
-        }
-        // Nothing past the jump point (the count was too high), or still more
-        // after six pages: let the walk answer.
-        if (turns.Count == 0 || cursor.Length > 0) return null;
-        turns.Sort((a, b) => TurnIdx(a).CompareTo(TurnIdx(b)));
-        var (slice, _) = TurnPaging.Before(turns, TurnIdx, null, limit);
-        return PageResponse(slice, slice.Count > 0 && TurnIdx(slice[0]) > 0 ? TurnIdx(slice[0]).ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
-    }
+    private const int TailProbeRounds = 5;
+    private const int TailProbesPerRound = 8;
 
-    private async Task<NxResponse?> JumpOlderAsync(string sessionId, long before, int limit)
+    // Finds a cursor after which fewer than a full page (but at least `limit`
+    // turns) remain. Each round probes several cursors at once: before the end
+    // is bracketed they grow geometrically, then they split the bracket.
+    private async Task<NxResponse?> ProbeTailAsync(string sessionId, int limit)
     {
-        var from = before - limit - 1;
-        var response = await Call(NxMethods.SessionsTurns, from >= 0
-            ? new { session_id = sessionId, id = sessionId, limit, cursor = from.ToString(System.Globalization.CultureInfo.InvariantCulture) }
-            : (object)new { session_id = sessionId, id = sessionId, limit });
-        if (!response.Ok || response.Result is not { } body) return null;
-        var items = NxJson.Items(body).Select(t => t.Clone()).Where(t => TurnIdx(t) < before).OrderBy(TurnIdx).ToList();
-        if (items.Count == 0) return from > 0 ? null : PageResponse(items, "");
-        return PageResponse(items, from >= 0 && TurnIdx(items[0]) > 0 ? TurnIdx(items[0]).ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
+        var first = await Call(NxMethods.SessionsTurns, new { session_id = sessionId, id = sessionId, limit = ForwardWalkPageSize });
+        if (!first.Ok || first.Result is not { } firstBody) return null;
+        var firstItems = NxJson.Items(firstBody).ToList();
+        if (firstItems.Count == 0 || NxJson.Text(firstBody, "next_cursor").Length == 0) return null; // short chat: the walk is one page
+        long lo = TurnIdx(firstItems[^1]);
+        long? hi = null;
+        for (var round = 0; round < TailProbeRounds; round++)
+        {
+            var cursors = TurnPaging.TailProbes(lo, hi, TailProbesPerRound);
+            if (cursors.Count == 0) return null;
+            var pending = cursors.Select(c => (Cursor: c, Task: Call(NxMethods.SessionsTurns, new
+            {
+                session_id = sessionId, id = sessionId, limit = ForwardWalkPageSize,
+                cursor = c.ToString(System.Globalization.CultureInfo.InvariantCulture)
+            }))).ToList();
+            // Answers are used as they arrive: the tail can be found before a
+            // slow probe (an empty page can take seconds) comes back.
+            while (pending.Count > 0)
+            {
+                var done = await Task.WhenAny(pending.Select(p => p.Task));
+                var index = pending.FindIndex(p => p.Task == done);
+                var cursor = pending[index].Cursor;
+                pending.RemoveAt(index);
+                var answer = await done;
+                var items = answer.Ok && answer.Result is { } body ? NxJson.Items(body).Select(t => t.Clone()).ToList() : new List<JsonElement>();
+                var more = answer.Ok && answer.Result is { } page && NxJson.Text(page, "next_cursor").Length > 0;
+                if (answer.Ok && !more && items.Count >= limit)
+                {
+                    // The end of the chat, with at least a page before it.
+                    items.Sort((a, b) => TurnIdx(a).CompareTo(TurnIdx(b)));
+                    var (slice, _) = TurnPaging.Before(items, TurnIdx, null, limit);
+                    return PageResponse(slice, TurnIdx(slice[0]).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                }
+                if (more) lo = Math.Max(lo, TurnIdx(items[^1]));
+                else hi = hi is { } h ? Math.Min(h, cursor) : cursor; // too close to the end, or past it (or rejected)
+            }
+        }
+        return null;
     }
 
     private static NxResponse PageResponse(List<JsonElement> slice, string nextCursor)
@@ -1189,7 +1198,7 @@ public sealed partial class SessionPage : NexusPage
 
     private static long TurnIdx(JsonElement turn) => long.TryParse(NxJson.Text(turn, "idx"), out var idx) ? idx : 0;
 
-    private async Task<NxResponse> LatestTurnsFromForwardWalkAsync(string sessionId, string beforeCursor, int limit, CancellationToken abandon = default)
+    private async Task<NxResponse> LatestTurnsFromForwardWalkAsync(string sessionId, string beforeCursor, int limit)
     {
         await s_forwardGate.WaitAsync();
         try
@@ -1206,8 +1215,6 @@ public sealed partial class SessionPage : NexusPage
                 var cursor = keep > 0 ? NxJson.Text(turns[^1], "idx") : "";
                 for (var page = 0; page < MaxForwardWalkPages; page++)
                 {
-                    // The idx jump answered first: stop, and cache nothing partial.
-                    if (abandon.IsCancellationRequested) return NoResponse;
                     var response = await Call(NxMethods.SessionsTurns, cursor.Length > 0
                         ? new { session_id = sessionId, id = sessionId, limit = ForwardWalkPageSize, cursor }
                         : (object)new { session_id = sessionId, id = sessionId, limit = ForwardWalkPageSize });

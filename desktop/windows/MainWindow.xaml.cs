@@ -986,6 +986,7 @@ public sealed partial class MainWindow : Window
         var summary = entry.Summary.Length > 240 ? entry.Summary[..240] + "…" : entry.Summary;
         ToolTipService.SetToolTip(button, entry.Title + (summary.Length > 0 && summary != entry.Title ? "\n\n" + summary : ""));
         button.Click += (_, _) => OpenSession(entry.Id, ChatSearch.Text.Trim());
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, entry.Title + (projectName.Length > 0 ? ", " + projectName : ""));
         var rowMenu = new MenuFlyout();
         var editTags = new MenuFlyoutItem { Text = "Tags…", Icon = new FontIcon { Glyph = "\uE8EC" } };
         editTags.Click += async (_, _) => await ChatTags.EditAsync(button.XamlRoot, entry.Id, entry.Title);

@@ -43,6 +43,39 @@ internal static class TurnPaging
         for (var i = start; i < end; i++) page.Add(sorted[i]);
         return (page, start > 0 && page.Count > 0 ? idx(page[0]).ToString(System.Globalization.CultureInfo.InvariantCulture) : "");
     }
+
+    /// The server rejects cursors past a 32-bit int (HTTP 500).
+    public const long MaxCursor = int.MaxValue;
+
+    /// Cursors to probe for the end of a chat whose turn indexes are increasing
+    /// but sparse. lo: a cursor with a full page after it; hi: a cursor with
+    /// less than a page after it (null while unknown). Before the end is
+    /// bracketed the probes double from lo; then they split (lo, hi) evenly.
+    public static List<long> TailProbes(long lo, long? hi, int count)
+    {
+        var probes = new List<long>();
+        if (count <= 0) return probes;
+        lo = Math.Max(lo, 0);
+        if (hi is null)
+        {
+            var next = Math.Max(lo, 1);
+            for (var i = 0; i < count && next < MaxCursor; i++)
+            {
+                next = Math.Min(MaxCursor, next * 2);
+                probes.Add(next);
+            }
+            return probes;
+        }
+        var top = Math.Min(hi.Value, MaxCursor);
+        if (top - lo < 2) return probes;
+        var step = (top - lo) / (double)(count + 1);
+        for (var i = 1; i <= count; i++)
+        {
+            var cursor = lo + (long)Math.Round(step * i);
+            if (cursor > lo && cursor < top && (probes.Count == 0 || probes[^1] != cursor)) probes.Add(cursor);
+        }
+        return probes;
+    }
 }
 
 /// Hides turns a capture stored twice. Claude Code transcripts reach the

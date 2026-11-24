@@ -12,6 +12,10 @@ internal sealed record SubTurn(string Role, string Text, IReadOnlyList<string> T
 /// attachments) that can be megabytes each; only messages are parsed.
 internal static class SubagentTranscript
 {
+    // Claude Code writes compact JSON; other writers add spaces after colons.
+    private static readonly System.Text.RegularExpressions.Regex MessageType = new(@"""type""\s*:\s*""(?:user|assistant)""", System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex Timestamp = new(@"""timestamp""\s*:\s*""([^""]+)""", System.Text.RegularExpressions.RegexOptions.Compiled);
+
     /// The message on one transcript line, or null for bookkeeping lines,
     /// tool-result-only user lines and unreadable lines.
     internal static SubTurn? ParseLine(string line)
@@ -19,7 +23,7 @@ internal static class SubagentTranscript
         if (line.Length == 0) return null;
         // Cheap reject before parsing: request blobs are the big lines.
         var head = line.Length > 600 ? line[..600] : line;
-        if (!head.Contains("\"type\":\"user\"", StringComparison.Ordinal) && !head.Contains("\"type\":\"assistant\"", StringComparison.Ordinal)) return null;
+        if (!MessageType.IsMatch(head)) return null;
         try
         {
             using var doc = JsonDocument.Parse(line);
@@ -80,15 +84,23 @@ internal static class SubagentTranscript
     {
         foreach (var line in lines.Take(20))
         {
-            var at = line.IndexOf("\"timestamp\":\"", StringComparison.Ordinal);
-            if (at < 0) continue;
-            var start = at + 13;
-            var end = line.IndexOf('"', start);
-            if (end > start && DateTimeOffset.TryParse(line[start..end], System.Globalization.CultureInfo.InvariantCulture,
+            var match = Timestamp.Match(line);
+            if (match.Success && DateTimeOffset.TryParse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture,
                     System.Globalization.DateTimeStyles.AssumeUniversal, out var when))
                 return when;
         }
         return null;
+    }
+
+    /// The last timestamp in a piece of transcript text (its tail): when the run's last message was written.
+    internal static DateTimeOffset? LastTimestamp(string tail)
+    {
+        DateTimeOffset? last = null;
+        foreach (System.Text.RegularExpressions.Match match in Timestamp.Matches(tail))
+            if (DateTimeOffset.TryParse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.AssumeUniversal, out var when))
+                last = when;
+        return last;
     }
 
     /// "42s", "3m 05s", "1h 12m".

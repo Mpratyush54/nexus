@@ -306,7 +306,10 @@ public sealed class DashboardPage : NexusPage
         }
         System.Diagnostics.Trace.WriteLine($"[perf] activity ({key}): {watch.ElapsedMilliseconds} ms");
         await UiThread.Resume(DispatcherQueue);
-        if (version != _version || ShellState.Current.ChatFilter != filter) return;
+        if (version != _version) return;
+        // The project choice moved on while this loaded (e.g. restored at
+        // startup): load what is chosen now instead of leaving "Loading…".
+        if (ShellState.Current.ChatFilter != filter) { _ = LoadActivityAsync(version, ShellProjectId(), null); return; }
         if (summary is not null || NxErrors.IsSignedOut(error)) s_activity[key] = (summary, error, DateTime.UtcNow);
         _calendar.Render(summary, scope, error);
     }

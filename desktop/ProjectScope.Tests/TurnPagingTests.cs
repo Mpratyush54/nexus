@@ -222,3 +222,61 @@ public class TranscriptDedupeTests
         Assert.Equal(4, index.Entries.Count);
     }
 }
+
+public class TailProbeTests
+{
+    [Fact]
+    public void ProbesDoubleUntilTheEndIsBracketed()
+    {
+        Assert.Equal(new long[] { 400, 800, 1600 }, TurnPaging.TailProbes(200, null, 3));
+        Assert.All(TurnPaging.TailProbes(1_000_000_000, null, 8), c => Assert.True(c <= TurnPaging.MaxCursor));
+    }
+
+    [Fact]
+    public void ProbesSplitTheBracket()
+    {
+        var probes = TurnPaging.TailProbes(100, 1000, 8);
+        Assert.Equal(8, probes.Count);
+        Assert.All(probes, c => Assert.InRange(c, 101, 999));
+        Assert.Equal(probes.OrderBy(c => c), probes);
+        Assert.Empty(TurnPaging.TailProbes(5, 6, 8));
+    }
+
+    // Replays the desktop's search (SessionPage.ProbeTailAsync) on a chat
+    // shaped like the real 2,284-turn one: sparse byte-offset indexes up to
+    // ~57.6M. A probe answers with up to 200 turns after its cursor.
+    [Theory]
+    [InlineData(2284, 1)]
+    [InlineData(2284, 2)]
+    [InlineData(900, 3)]
+    [InlineData(20000, 4)]
+    public void SearchFindsTheTailInFewRounds(int turns, int seed)
+    {
+        var random = new Random(seed);
+        var idx = new List<long> { 2108 };
+        for (var i = 1; i < turns; i++) idx.Add(idx[^1] + (long)Math.Exp(random.NextDouble() * 12) + 1);
+        (List<long> Items, bool More) Fetch(long cursor)
+        {
+            if (cursor > TurnPaging.MaxCursor) return (new(), false);
+            var after = idx.Where(i => i > cursor).ToList();
+            return (after.Take(200).ToList(), after.Count > 200);
+        }
+        long lo = Fetch(-1).Items[^1];
+        long? hi = null;
+        for (var round = 1; round <= 5; round++)
+        {
+            foreach (var cursor in TurnPaging.TailProbes(lo, hi, 8))
+            {
+                var (items, more) = Fetch(cursor);
+                if (!more && items.Count >= 40)
+                {
+                    Assert.Equal(idx[^1], items[^1]);
+                    return;
+                }
+                if (more) lo = Math.Max(lo, items[^1]);
+                else hi = hi is { } h ? Math.Min(h, cursor) : cursor;
+            }
+        }
+        Assert.Fail("tail not found in 5 rounds");
+    }
+}

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Nexus.Core;
 
@@ -61,6 +62,7 @@ public sealed partial class SessionPage
         if (version != _subagentListVersion || sessionId != _id) return;
         var count = Math.Max(runs.Count, _subagentCards.Count);
         if (((StackPanel)_subagentsButton.Content).Children[1] is TextBlock label) label.Text = $"Sub-agents ({count})";
+        AutomationProperties.SetName(_subagentsButton, $"Sub-agents ({count})");
         _subagentsButton.Visibility = count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
