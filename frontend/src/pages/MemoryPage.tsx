@@ -23,7 +23,9 @@ import { useDeferredValue, useMemo, useState } from 'react'
 import { MemoryEditorSlideOver } from '@/components/MemoryEditorSlideOver'
 import { SharingControlsModal } from '@/components/SharingControlsModal'
 import { VersionHistoryDrawer } from '@/components/VersionHistoryDrawer'
-import { ProjectSwitcher } from '@/components/ProjectSwitcher'
+import { Link } from 'react-router-dom'
+import { PageHeader } from '@/components/PageHeader'
+import { ProjectPicker } from '@/components/ProjectPicker'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
@@ -146,7 +148,7 @@ export function MemoryPage() {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
   const [tagFilter, setTagFilter] = useState<string | null>(null)
   const deferredQ = useDeferredValue(q)
-  const search = useMemorySearch(deferredQ, level)
+  const search = useMemorySearch(deferredQ)
   const harvestQ = useHarvestQueue()
 
   const [expandedHarvest, setExpandedHarvest] = useState<string | null>(null)
@@ -247,99 +249,69 @@ export function MemoryPage() {
   const harvestTargetId = harvestStatus?.project_id?.trim()
   const harvestMismatch = Boolean(harvestTargetId && projectId && harvestTargetId !== projectId)
   const harvestProject = (projects.data ?? []).find((p) => p.id === harvestTargetId)
-  const richer = (summaries.data ?? []).find(
-    (s) =>
-      s.project.id !== projectId &&
-      s.metrics.memories > (filtered.length + 5),
-  )
+  const filtersOn = Boolean(level || tagFilter || selectedCategory)
+  const clearFilters = () => {
+    setQ('')
+    setLevel('')
+    setTagFilter(null)
+    setSelectedCategory(null)
+  }
+  // When the open project is empty, point at the project that has the memories.
+  const elsewhere = (summaries.data ?? []).find((row) => row.project.id !== projectId && row.metrics.memories > 0)
 
   return (
     <div className="space-y-8">
-      {/* Top Header */}
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-fg">Project Memory & Knowledge</h1>
-          <p className="mt-1 max-w-xl text-sm text-fg-dim">
-            Hierarchical architecture, state of truth, and chronological evolution harvested from agent pair programming.
-            {!projectId ? ' Select a project to load memories.' : null}
-          </p>
-          <div className="mt-3 max-w-xs">
-            <ProjectSwitcher compact />
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {/* Tab Selector */}
-          <div className="flex rounded-lg border border-border bg-raised/70 p-0.5">
-            <button
-              type="button"
-              onClick={() => setViewMode('hierarchy')}
-              className={[
-                'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
-                viewMode === 'hierarchy'
-                  ? 'bg-amber text-ink shadow-sm font-semibold'
-                  : 'text-fg-dim hover:text-fg',
-              ].join(' ')}
+      <PageHeader
+        title="Memory"
+        description="Facts and decisions your agents saved while you worked, one project at a time."
+        actions={
+          <>
+            <div className="flex rounded-lg border border-border bg-raised/70 p-0.5" role="group" aria-label="View">
+              {(
+                [
+                  ['hierarchy', 'By topic', Layers],
+                  ['timeline', 'By week', Calendar],
+                ] as const
+              ).map(([mode, label, Icon]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={viewMode === mode}
+                  onClick={() => setViewMode(mode)}
+                  className={[
+                    'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
+                    viewMode === mode ? 'bg-amber text-ink shadow-sm' : 'text-fg-dim hover:text-fg',
+                  ].join(' ')}
+                >
+                  <Icon size={13} aria-hidden />
+                  {label}
+                </button>
+              ))}
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void search.refetch()}
+              disabled={search.isFetching || !projectId}
+              aria-label="Refresh memories"
             >
-              <Layers size={13} />
-              Active Truth
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('timeline')}
-              className={[
-                'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
-                viewMode === 'timeline'
-                  ? 'bg-amber text-ink shadow-sm font-semibold'
-                  : 'text-fg-dim hover:text-fg',
-              ].join(' ')}
-            >
-              <Calendar size={13} />
-              Timeline & Changelog
-            </button>
-          </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void search.refetch()}
-            disabled={search.isFetching}
-          >
-            <RefreshCw size={13} className={search.isFetching ? 'animate-spin' : ''} />
-            Refresh
-          </Button>
-        </div>
-      </div>
+              <RefreshCw size={13} className={search.isFetching ? 'animate-spin' : ''} />
+            </Button>
+          </>
+        }
+      />
+
+      <ProjectPicker />
 
       {harvestMismatch && harvestTargetId ? (
         <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/40 p-4">
-          <div>
-            <p className="text-sm text-fg">
-              Desktop is writing memories to{' '}
-              <span className="font-medium">
-                {harvestProject ? projectLabel(harvestProject) : 'another project'}
-              </span>
-              , not this Library.
-            </p>
-            <p className="mt-1 text-xs text-fg-dim">
-              Folder <span className="font-mono">central-memory</span> maps to git remote{' '}
-              <span className="font-mono">nexus</span>.
-            </p>
-          </div>
+          <p className="text-sm text-fg">
+            Desktop is saving new memories to{' '}
+            <span className="font-medium">{harvestProject ? projectLabel(harvestProject) : 'another project'}</span>,
+            not the one shown here.
+          </p>
           <Button type="button" size="sm" onClick={() => setProjectId(harvestTargetId)}>
-            Show harvest project
-          </Button>
-        </GlassPanel>
-      ) : null}
-
-      {richer && !harvestMismatch ? (
-        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/30 p-4">
-          <div>
-            <p className="text-sm text-fg">
-              <span className="font-medium">{projectLabel(richer.project)}</span> has{' '}
-              {richer.metrics.memories} memories — more than this project.
-            </p>
-          </div>
-          <Button type="button" size="sm" onClick={() => setProjectId(richer.project.id)}>
-            Switch to {projectLabel(richer.project)}
+            Show that project
           </Button>
         </GlassPanel>
       ) : null}
@@ -408,130 +380,104 @@ export function MemoryPage() {
         </GlassPanel>
       ) : null}
 
-      {/* Search & Filter Bar */}
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="block min-w-[12rem] flex-1 max-w-md">
-            <span className="mb-1.5 block text-xs text-fg-dim">Search memories, files, commands</span>
+      {projectId ? (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_auto_auto_auto] sm:items-end">
+          <label className="col-span-2 block min-w-0 sm:col-span-1">
+            <span className="sr-only">Search memories</span>
             <input
+              type="search"
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="e.g. redis, jwt, docker, lightsail, store.go..."
+              placeholder="Search memories, files, commands…"
               className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
             />
           </label>
+          <FilterSelect
+            label="Topic"
+            value={selectedCategory ?? ''}
+            onChange={(v) => setSelectedCategory(v || null)}
+            options={[['', 'All topics'], ...CATEGORY_ORDER.map((c) => [c, CATEGORY_CONFIG[c].label] as [string, string])]}
+          />
+          <FilterSelect
+            label="Level"
+            value={level}
+            onChange={setLevel}
+            options={MEMORY_LEVELS.map((o) => [o.value, o.label] as [string, string])}
+          />
+          {allTags.length > 0 ? (
+            <FilterSelect
+              label="Tag"
+              value={tagFilter ?? ''}
+              onChange={(v) => setTagFilter(v || null)}
+              options={[['', 'All tags'], ...allTags.map((t) => [t, `#${t}`] as [string, string])]}
+            />
+          ) : null}
         </div>
+      ) : null}
 
-        {/* Level Pills */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-muted mr-1">Level:</span>
-          {MEMORY_LEVELS.map((option) => (
-            <button
-              key={option.value || 'all'}
-              type="button"
-              onClick={() => setLevel(option.value)}
-              className={[
-                'rounded-md px-2.5 py-1 text-xs font-medium transition',
-                level === option.value
-                  ? 'bg-amber-soft text-amber'
-                  : 'text-muted hover:bg-raised hover:text-fg',
-              ].join(' ')}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+      {filtersOn && (search.hasNext || search.hasPrev) ? (
+        <p className="text-[11px] text-muted">Topic, level and tag filters apply to the memories on this page.</p>
+      ) : null}
 
-        {/* Category Pills */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-muted mr-1">Category:</span>
-          <button
-            type="button"
-            onClick={() => setSelectedCategory(null)}
-            className={[
-              'rounded-md px-2.5 py-1 text-xs font-medium transition',
-              selectedCategory === null
-                ? 'bg-amber-soft text-amber'
-                : 'text-muted hover:bg-raised hover:text-fg',
-            ].join(' ')}
-          >
-            All
-          </button>
-          {CATEGORY_ORDER.map((catKey) => {
-            const cfg = CATEGORY_CONFIG[catKey]
-            const active = selectedCategory === catKey
-            const Icon = cfg.icon
-            return (
-              <button
-                key={catKey}
-                type="button"
-                onClick={() => setSelectedCategory((cur) => (cur === catKey ? null : catKey))}
-                className={[
-                  'flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition border',
-                  active
-                    ? 'bg-raised border-amber text-amber font-semibold'
-                    : 'border-border/50 text-muted hover:bg-raised hover:text-fg',
-                ].join(' ')}
-              >
-                <Icon size={12} />
-                {cfg.label}
-              </button>
-            )
-          })}
-        </div>
-
-        {/* Tag Pills */}
-        {allTags.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-1.5 pt-1">
-            <span className="text-xs text-muted mr-1">Tags:</span>
-            <button
-              type="button"
-              onClick={() => setTagFilter(null)}
-              className={[
-                'rounded-md px-2 py-0.5 font-mono text-[11px] transition',
-                tagFilter === null
-                  ? 'bg-amber-soft text-amber'
-                  : 'text-muted hover:bg-raised hover:text-fg',
-              ].join(' ')}
-            >
-              all
-            </button>
-            {allTags.slice(0, 15).map((tag) => (
-              <button
-                key={tag}
-                type="button"
-                onClick={() => setTagFilter((cur) => (cur === tag ? null : tag))}
-                className={[
-                  'rounded-md px-2 py-0.5 font-mono text-[11px] transition',
-                  tagFilter === tag
-                    ? 'bg-amber-soft text-amber'
-                    : 'text-muted hover:bg-raised hover:text-fg',
-                ].join(' ')}
-              >
-                #{tag}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
-
-      {search.isLoading ? <p className="text-sm text-muted">Loading memories…</p> : null}
+      {search.isLoading ? (
+        <p className="text-sm text-muted" role="status">
+          Loading memories…
+        </p>
+      ) : null}
 
       {search.isError ? (
-        <GlassPanel className="p-4">
+        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 p-4">
           <p className="text-sm text-danger">
-            {search.error instanceof ApiError
-              ? search.error.message
-              : 'Failed to load memories'}
+            {search.error instanceof ApiError && search.error.status === 403
+              ? 'You’re not a member of this project any more. Pick another project above.'
+              : search.error instanceof ApiError
+                ? `Couldn’t load memories: ${search.error.message}`
+                : 'Couldn’t load memories.'}
           </p>
+          <Button type="button" size="sm" variant="secondary" onClick={() => void search.refetch()}>
+            Try again
+          </Button>
         </GlassPanel>
       ) : null}
 
-      {!search.isLoading && !search.isError && filtered.length === 0 ? (
-        <GlassPanel className="p-6">
+      {!projectId && !projects.isLoading ? (
+        <GlassPanel className="space-y-2 p-6">
+          <p className="text-sm text-fg">No project yet.</p>
           <p className="text-sm text-fg-dim">
-            No memories found. Run an agent conversation or harvest from desktop to record decisions.
+            Memories are saved per project. Install the Desktop app and open a code folder, and memories start
+            appearing here.
           </p>
+          <Link to="/app/connect" className="text-sm text-amber hover:underline">
+            Set up the Desktop app →
+          </Link>
+        </GlassPanel>
+      ) : null}
+
+      {projectId && !search.isLoading && !search.isError && confirmed.length === 0 ? (
+        <GlassPanel className="space-y-3 p-6">
+          {filtersOn || deferredQ ? (
+            <>
+              <p className="text-sm text-fg-dim">No memories match {deferredQ ? `“${deferredQ}”` : 'these filters'}.</p>
+              <Button type="button" size="sm" variant="secondary" onClick={clearFilters}>
+                Clear search and filters
+              </Button>
+            </>
+          ) : elsewhere ? (
+            <>
+              <p className="text-sm text-fg">This project has no memories yet.</p>
+              <p className="text-sm text-fg-dim">
+                You have {elsewhere.metrics.memories} in <span className="text-fg">{projectLabel(elsewhere.project)}</span>.
+              </p>
+              <Button type="button" size="sm" onClick={() => setProjectId(elsewhere.project.id)}>
+                Show {projectLabel(elsewhere.project)}
+              </Button>
+            </>
+          ) : (
+            <p className="text-sm text-fg-dim">
+              No memories yet. They appear after you work with an agent in this project while the Desktop app is
+              running.
+            </p>
+          )}
         </GlassPanel>
       ) : null}
 
@@ -540,7 +486,8 @@ export function MemoryPage() {
         <div className="space-y-6">
           <div className="flex items-center justify-between">
             <h2 className="text-xs font-medium uppercase tracking-wide text-muted">
-              Active Project Architecture & Truth · {confirmed.length} active records
+              {confirmed.length} {confirmed.length === 1 ? 'memory' : 'memories'}
+              {search.total > confirmed.length && !filtersOn ? ` of ${search.total}` : ''}
             </h2>
             <div className="flex items-center gap-2">
               <Button
@@ -624,7 +571,7 @@ export function MemoryPage() {
         <div className="space-y-8">
           <div className="flex items-center justify-between">
             <h2 className="text-xs font-medium uppercase tracking-wide text-muted">
-              Project Evolution & Changelog by Week · {confirmed.length} records
+              {confirmed.length} {confirmed.length === 1 ? 'memory' : 'memories'} by week
             </h2>
           </div>
 
@@ -858,5 +805,35 @@ function MemoryCard({
         </div>
       </GlassPanel>
     </motion.div>
+  )
+}
+
+function FilterSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: [string, string][]
+}) {
+  return (
+    <label className="block">
+      <span className="sr-only">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={label}
+        className="h-10 w-full rounded-lg border border-border bg-raised px-2 text-sm text-fg outline-none focus:border-amber sm:w-auto"
+      >
+        {options.map(([v, l]) => (
+          <option key={v || 'all'} value={v}>
+            {l}
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }

@@ -227,6 +227,84 @@
     background: var(--color-raised);
   }
 
+  .app-nav-section {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .app-nav-section + .app-nav-section {
+    margin-top: 0.85rem;
+  }
+
+  .app-nav-bottom {
+    margin-top: auto !important;
+    padding-top: 0.75rem;
+  }
+
+  .app-nav-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 0.25rem;
+    padding: 0 0.625rem;
+    border: 0;
+    background: transparent;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    text-align: left;
+  }
+
+  .app-nav-heading.is-toggle {
+    cursor: pointer;
+    padding-block: 0.25rem;
+    border-radius: 0.375rem;
+  }
+
+  .app-nav-heading.is-toggle:hover {
+    color: var(--color-fg);
+  }
+
+  .app-tabbar {
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 40;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    padding: 0.25rem max(0.25rem, env(safe-area-inset-right)) max(0.25rem, env(safe-area-inset-bottom)) max(0.25rem, env(safe-area-inset-left));
+    border-top: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-base) 94%, transparent);
+    backdrop-filter: blur(10px);
+  }
+
+  .app-tab {
+    display: flex;
+    min-height: 3.25rem;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.2rem;
+    border: 0;
+    border-radius: 0.5rem;
+    background: transparent;
+    color: var(--color-muted);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .app-tab.is-active {
+    color: var(--color-amber);
+  }
+
+  .is-conversation .app-tabbar {
+    display: none;
+  }
+
   .app-sidebar-foot {
     flex-shrink: 0;
     margin-top: 0;
@@ -435,7 +513,8 @@
     }
 
     .app-mobile-bar,
-    .app-drawer-root {
+    .app-drawer-root,
+    .app-tabbar {
       display: none;
     }
 
@@ -447,6 +526,17 @@
 
 /* Mobile app density — prevent horizontal spill, tighten touch targets */
 @media (max-width: 767px) {
+  /* "More" in the bottom tab bar opens the menu; the top-bar button is only
+     for chat view, where the tab bar is hidden. Unlayered so it beats the
+     Button's display utility. */
+  .app-mobile-actions .app-menu-btn {
+    display: none;
+  }
+
+  .is-conversation .app-mobile-actions .app-menu-btn {
+    display: inline-flex;
+  }
+
   .app-mobile-bar {
     padding-inline: max(0.75rem, env(safe-area-inset-left))
       max(0.75rem, env(safe-area-inset-right));
@@ -456,7 +546,12 @@
   .app-main {
     padding-inline: max(0.85rem, env(safe-area-inset-left))
       max(0.85rem, env(safe-area-inset-right));
-    padding-bottom: max(2rem, env(safe-area-inset-bottom));
+    /* clear the bottom tab bar */
+    padding-bottom: calc(5rem + env(safe-area-inset-bottom));
+  }
+
+  .is-conversation .app-main {
+    padding-bottom: 0;
   }
 
   .app-main-inner {

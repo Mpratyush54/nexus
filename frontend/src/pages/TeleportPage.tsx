@@ -43,7 +43,7 @@ export function TeleportPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">Teleport</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-fg">Teleport inbox</h1>
         <p className="mt-1 text-sm text-fg-dim">
           Sessions sent to you, and sessions you sent. Previews are redacted.
         </p>

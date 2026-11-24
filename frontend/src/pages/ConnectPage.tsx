@@ -177,7 +177,7 @@ export function ConnectPage() {
   return (
     <div className="space-y-8">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight text-fg">Desktop setup</h1>
+        <h1 className="text-2xl font-semibold tracking-tight text-fg">Desktop app</h1>
         <p className="mt-1 max-w-2xl text-sm text-fg-dim">
           Install Nexus Desktop once — Start Menu and Startup shortcuts are included. Sign in with
           the <span className="text-fg">same</span> account as this portal (

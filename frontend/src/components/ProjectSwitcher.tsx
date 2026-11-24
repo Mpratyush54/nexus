@@ -77,7 +77,7 @@ export function ProjectSwitcher({ compact = false }: { compact?: boolean }) {
             })}
             {!items.length ? (
               <li className="px-3 py-3 text-xs text-muted">
-                No projects yet — open Org to create one, or bind a desktop folder on Desktop setup.
+                No projects yet. Open a folder in the Desktop app, or add a project under Team & org.
               </li>
             ) : null}
           </ul>

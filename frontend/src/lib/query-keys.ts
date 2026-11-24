@@ -36,6 +36,7 @@ export const queryKeys = {
     storage: (id: string) => ['orgs', 'storage', id] as const,
     audit: (id: string) => ['orgs', 'audit', id] as const,
     shares: (id: string) => ['orgs', 'shares', id] as const,
+    invites: (id: string) => ['orgs', 'invites', id] as const,
     offboardPreview: (id: string, userId: string) =>
       ['orgs', 'offboard-preview', id, userId] as const,
   },

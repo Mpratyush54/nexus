@@ -33,10 +33,9 @@ export function AppShell() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // Onboarding is about installing Desktop. It is offered from Home, never
+  // forced: a phone, or a second browser, must open straight to the content.
   const onboardingDone = storage.getOnboardingDone()
-  if (!onboardingDone && !onOnboarding) {
-    return <Navigate to="/app/onboarding" replace />
-  }
 
   // Account mismatch: only Desktop setup is reachable until re-linked.
   if (identityLocked && !onDesktop && !onOnboarding) {
