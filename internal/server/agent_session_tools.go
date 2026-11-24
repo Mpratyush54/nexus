@@ -38,6 +38,8 @@ func (s *Server) registerAgentSessionToolRoutes() {
 // returns the whole session, so the page is applied here. The cursor is the
 // last idx already returned, as a decimal string; turns with idx <= cursor
 // are omitted. next_cursor is that idx when another page remains.
+// direction=backward pages newest-first (cursor is an exclusive upper idx)
+// and q filters turns by text or tool calls; see the branch below.
 func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.PathValue("id"))
 	row, ok := s.requireAgentRead(w, r, sessionID)
@@ -58,9 +60,53 @@ func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request)
 		}
 		after = &n
 	}
+	direction := r.URL.Query().Get("direction")
+	if direction != "" && direction != "forward" && direction != "backward" {
+		writeError(w, http.StatusBadRequest, "direction must be forward or backward")
+		return
+	}
+	query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+	if len(query) > 512 {
+		writeError(w, http.StatusBadRequest, "search query must be at most 512 bytes")
+		return
+	}
 	var items []store.SessionTurn
 	var next string
-	if row.LineageKind == "legacy_snapshot" {
+	if direction == "backward" || query != "" {
+		// Newest-first pages and in-chat search need the whole session.
+		// direction=backward: cursor is an exclusive upper idx. With q,
+		// matches page forward from the cursor (last idx returned).
+		var turns []store.SessionTurn
+		if row.LineageKind == "legacy_snapshot" {
+			turns = s.legacySnapshotTurns(r.Context(), row)
+		} else {
+			cs, ok := s.agentCloud()
+			if !ok {
+				writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+				return
+			}
+			var err error
+			turns, err = cs.ListSessionTurns(r.Context(), sessionID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+		if query != "" {
+			matches := make([]store.SessionTurn, 0)
+			for _, turn := range turns {
+				if strings.Contains(strings.ToLower(turn.TextPreview), query) || strings.Contains(strings.ToLower(string(turn.ToolCalls)), query) {
+					matches = append(matches, turn)
+				}
+			}
+			turns = matches
+		}
+		if direction == "backward" {
+			items, next = pageSessionTurnsBefore(turns, after, limit)
+		} else {
+			items, next = pageSessionTurns(turns, after, limit)
+		}
+	} else if row.LineageKind == "legacy_snapshot" {
 		// Archived sessions have no session_turns rows; serve the redacted
 		// transcript stored in their snapshot so Chat is never empty.
 		items, next = pageSessionTurns(s.legacySnapshotTurns(r.Context(), row), after, limit)
@@ -77,8 +123,20 @@ func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	// Some historical indexes exceed JavaScript's exact-integer range. Keep
+	// the numeric idx for existing clients and add a lossless string key.
+	// The browser also reads cursor_idx as "this server pages backward and
+	// filters ?q=", so it stops paging whole transcripts locally.
+	type browserTurn struct {
+		store.SessionTurn
+		CursorIndex string `json:"cursor_idx"`
+	}
+	browserItems := make([]browserTurn, 0, len(items))
+	for _, turn := range items {
+		browserItems = append(browserItems, browserTurn{SessionTurn: turn, CursorIndex: strconv.Itoa(turn.Idx)})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"items":       items,
+		"items":       browserItems,
 		"next_cursor": next,
 	})
 }
@@ -132,6 +190,25 @@ func pageSessionTurns(turns []store.SessionTurn, after *int, limit int) ([]store
 		next = strconv.Itoa(page[len(page)-1].Idx)
 	}
 	return page, next
+}
+
+// pageSessionTurnsBefore returns the newest limit turns below the exclusive
+// upper bound before, in ascending idx order. next is the lowest idx on the
+// page when older turns remain.
+func pageSessionTurnsBefore(turns []store.SessionTurn, before *int, limit int) ([]store.SessionTurn, string) {
+	filtered := make([]store.SessionTurn, 0, len(turns))
+	for _, turn := range turns {
+		if before == nil || turn.Idx < *before {
+			filtered = append(filtered, turn)
+		}
+	}
+	sort.Slice(filtered, func(i, j int) bool { return filtered[i].Idx < filtered[j].Idx })
+	next := ""
+	if len(filtered) > limit {
+		filtered = filtered[len(filtered)-limit:]
+		next = strconv.Itoa(filtered[0].Idx)
+	}
+	return filtered, next
 }
 
 // handleAgentSessionSummary returns the summary for a session the caller

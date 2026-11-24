@@ -2,7 +2,7 @@ import { Suspense, useEffect, useState } from 'react'
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { AccountMismatchBanner } from './AccountMismatchBanner'
 import { CommandPalette } from './CommandPalette'
-import { DaemonBanner, LocalWorkspacePanel } from './LocalWorkspace'
+import { LocalWorkspacePanel } from './LocalWorkspace'
 import { MobileNav, SideNav } from './SideNav'
 import { useEnsureActiveProject } from '@/hooks/useProjectSummaries'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
@@ -33,10 +33,9 @@ export function AppShell() {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // Onboarding is about installing Desktop. It is offered from Home, never
+  // forced: a phone, or a second browser, must open straight to the content.
   const onboardingDone = storage.getOnboardingDone()
-  if (!onboardingDone && !onOnboarding) {
-    return <Navigate to="/app/onboarding" replace />
-  }
 
   // Account mismatch: only Desktop setup is reachable until re-linked.
   if (identityLocked && !onDesktop && !onOnboarding) {
@@ -49,6 +48,7 @@ export function AppShell() {
         <div className="app-content">
           <main className="app-main" style={{ paddingTop: '2rem' }}>
             <div className="app-main-inner">
+              <div id="app-top-slot" />
               <PageOutlet />
             </div>
           </main>
@@ -64,10 +64,11 @@ export function AppShell() {
         <MobileNav onOpenCommand={() => setCmdOpen(true)} />
         <main className="app-main">
           <div className="app-main-inner">
+            {/* In-flow strip for page-wide notices (the /demo bar portals here), so nothing floats over content. */}
+            <div id="app-top-slot" />
             {showLocalChrome ? (
               <>
                 <AccountMismatchBanner />
-                <DaemonBanner />
                 <LocalWorkspacePanel />
               </>
             ) : null}

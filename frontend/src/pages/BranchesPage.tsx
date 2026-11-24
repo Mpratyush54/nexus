@@ -17,7 +17,8 @@ import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 
-export function BranchesPage() {
+/** `embedded` drops the page title when this renders inside another page's Advanced section. */
+export function BranchesPage({ embedded = false }: { embedded?: boolean } = {}) {
   const { projectId } = useAuth()
   const { push } = useToast()
   const branches = useBranches()
@@ -77,6 +78,7 @@ export function BranchesPage() {
 
   return (
     <div className="space-y-8">
+      {embedded ? null : (
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Memory overlays</h1>
         <p className="mt-1 text-sm text-fg-dim">
@@ -84,6 +86,7 @@ export function BranchesPage() {
           remotes live under Team.
         </p>
       </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
         <GlassPanel className="space-y-4 p-5">

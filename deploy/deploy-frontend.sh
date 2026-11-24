@@ -49,7 +49,7 @@ aws_file_uri() {
 SPA_ROUTES=(
   login signup forgot-password cli/auth
   app app/connect app/onboarding app/dashboard app/timeline app/chats
-  app/teleport app/memory app/agents app/team app/org app/branches
+  app/teleport app/devices app/memory app/agents app/team app/org app/branches
   app/sessions app/activity app/notifications app/admin app/settings
   demo
 )

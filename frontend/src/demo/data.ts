@@ -258,6 +258,12 @@ function short(user: string, reply: string, tools: Tool[] = []): Turn[] {
   return [{ role: 'user', text: user }, ...(tools.length ? [{ role: 'assistant' as const, tools }] : []), { role: 'assistant', text: reply }]
 }
 
+const LONG: Turn[] = Array.from({ length: 140 }, (_, i): Turn =>
+  i % 2 === 0
+    ? { role: 'user', text: `Step ${i / 2 + 1}: move the next ledger write behind \`LedgerWriter\`.` }
+    : { role: 'assistant', text: `Done with step ${(i + 1) / 2}. The write now goes through \`LedgerWriter.append()\` in the same transaction, and \`go test ./ledger/...\` passes.` },
+)
+
 let chatSeq = 0
 function chat(project: string, harness: string, title: string, ageMs: number, turns: Turn[], summary: string, owner = ME.id): Chat {
   chatSeq += 1
@@ -283,7 +289,31 @@ export const CHATS: Chat[] = [
   chat(STOREFRONT, 'cursor', 'Show a retry notice on the checkout page', 3 * DAY + 4 * HOUR, short('While a capture is retrying, show the customer something better than a spinner.', 'After 1.5 s the button area shows “Still confirming your payment…”, and the Pay button stays disabled so nobody pays twice.'), 'Retry notice on checkout.'),
   chat(STOREFRONT, 'cursor', 'Tidy cart reducer types', 5 * DAY, short('The cart reducer accepts any action. Fix the types.', 'Cart actions are now a discriminated union; the reducer switch is exhaustive with `assertNever`.'), 'Typed cart reducer.'),
   chat(STOREFRONT, 'claude', 'Lazy-load the product gallery', 9 * DAY, short('The product page ships the whole gallery up front. Can we lazy-load it?', 'The gallery is now a separate chunk loaded when it scrolls into view; the product page bundle is 38 kB smaller.'), 'Lazy-loaded the gallery.', USERS.daniel.id),
+  // A chat the agent is still working in on MAYA-LAPTOP: open it and reply from the composer.
+  chat(CHECKOUT, 'claude', 'Add a test for declined captures', 1 * MIN, [
+    { role: 'user', text: 'Add a test proving a declined (402) capture is never retried.' },
+    { role: 'assistant', tools: [{ name: 'Read', args: { file_path: 'src/payments/retry.ts' } }, { name: 'Write', args: { file_path: 'src/payments/declined.test.ts', content: "it('never retries a 402', async () => { ... })" } }, { name: 'Bash', args: { command: 'npm run test:payments -- declined' }, result: 'Tests: 1 passed, 1 total' }] },
+    { role: 'assistant', text: 'Added `declined.test.ts`: a 402 from the provider throws `Declined` on the first attempt and `provider.capture` is called exactly once. It passes.\n\nWant me to cover 409 (`refund_exceeds_capture`) the same way?' },
+  ], 'Test that declined captures are never retried; asked whether to cover 409 too.'),
+  // A long session, so "Load earlier messages" (backward paging) has something to page.
+  chat(CHECKOUT, 'codex', 'Ledger writer refactor (long session)', 7 * DAY, LONG, 'A long refactor of the ledger writer, step by step.'),
 ]
+
+/** "New conversation" in the demo: an empty chat of yours, ready to message the sample laptop. */
+export function newChat(project: string, harness: string, title: string): Chat {
+  const c = chat(project, harness, title, 0, [], '')
+  CHATS.push(c)
+  return c
+}
+
+/** "Continue as copy" in the demo: a new chat of yours with the same messages. */
+export function forkChat(c: Chat): Chat {
+  const copy = chat(c.card.project_id, c.card.harness, `Copy of ${c.card.title ?? 'chat'}`, 0, c.turns, c.summary)
+  copy.card.parent_session_id = c.card.session_id
+  copy.card.lineage_kind = 'fork'
+  CHATS.push(copy)
+  return copy
+}
 
 export function chatTurns(c: Chat): ChatTurn[] {
   const start = NOW - Date.parse(c.card.last_active_at) + c.turns.length * 2 * MIN
@@ -305,6 +335,8 @@ export function chatSession(c: Chat): ChatSession {
     title: c.card.title,
     summary: c.summary,
     owner_user_id: c.owner,
+    parent_session_id: c.card.parent_session_id,
+    lineage_kind: c.card.lineage_kind,
     workspace_root_hint: `D:\\code\\${PROJECTS.find((p) => p.id === c.card.project_id)?.folder_name ?? ''}`,
     last_active_at: c.card.last_active_at,
   }
