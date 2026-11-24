@@ -11,6 +11,37 @@ import (
 	"central-memory/internal/daemon"
 )
 
+func TestRemovingAllWorkspacesStopsCaptureAndPreventsResume(t *testing.T) {
+	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", t.TempDir())
+	if err := config.SaveFile(config.File{Token: "preserve-signin"}); err != nil {
+		t.Fatal(err)
+	}
+	stopped := false
+	done := make(chan struct{})
+	nxState.mu.Lock()
+	nxState.captureGeneration++
+	nxState.captureConfig = &embeddedCaptureConfig{generation: nxState.captureGeneration, root: t.TempDir()}
+	nxState.captureCancel = func() { stopped = true; close(done) }
+	nxState.captureDone = done
+	nxState.mu.Unlock()
+	controller := embeddedCaptureController{}
+	result, err := controller.ConfigureWorkspaces(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := result.(map[string]any)
+	if !stopped || status["configured"] != false || status["running"] != false {
+		t.Fatalf("capture not stopped: %+v", status)
+	}
+	if err := controller.Resume(); err == nil {
+		t.Fatal("resume bypassed workspace approval")
+	}
+	saved, err := config.LoadFile()
+	if err != nil || saved.Token != "preserve-signin" || len(saved.CaptureWorkspaces) != 0 || saved.CaptureConsentVersion != 1 {
+		t.Fatal("revocation was not saved independently of sign-in")
+	}
+}
+
 func TestEmbeddedServerTokenPrefersSavedSignInOverStaleEnvironment(t *testing.T) {
 	t.Setenv("CENTRAL_MEMORY_CONFIG_DIR", t.TempDir())
 	t.Setenv("NEXUS_TOKEN", "stale-environment-token")

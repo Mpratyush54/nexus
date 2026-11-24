@@ -99,6 +99,18 @@ func TestSessionFetch(t *testing.T) {
 	if rest.Next != "" {
 		t.Fatalf("last page cursor: %q", rest.Next)
 	}
+	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+created.ID+"/fetch?q=SECOND", ownerTok, nil)
+	var search struct {
+		Items []store.SessionTurn `json:"items"`
+	}
+	decodeBody(t, rec, &search)
+	if rec.Code != http.StatusOK || len(search.Items) != 1 || search.Items[0].Idx != 1 {
+		t.Fatalf("full-session search failed: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodGet, "/v1/agent-sessions/"+created.ID+"/fetch?q=first", editorTok, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("search bypassed session ACL: %d", rec.Code)
+	}
 
 	rec = doJSON(t, s, http.MethodPost, "/v1/agent-sessions", ownerTok, map[string]any{
 		"project_id": orgProj.ID, "harness": "codex", "native_id": "org-private",

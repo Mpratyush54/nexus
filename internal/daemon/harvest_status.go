@@ -126,6 +126,11 @@ func (d *Daemon) TriggerHarvestScan() string {
 	if rt == nil || rt.Harvester == nil {
 		return "No harvester running"
 	}
+	if rt.Shared != nil && rt.Shared.Attached(rt.Harvester) {
+		// A private full walk here would duplicate the shared scanner's reads.
+		rt.Shared.ReconcileNow()
+		return "Scan started"
+	}
 	nFiles, nTurns, err := rt.Harvester.ScanAndTailCounted()
 	_ = rt.Harvester.CheckIdle()
 	rt.noteScan(nFiles, nTurns, err)
@@ -207,6 +212,9 @@ func (r *Runtime) noteHarvestEvent(ev Event) {
 	detail := ""
 	switch ev.Type {
 	case EventConversationTurn:
+		if only, _ := ev.Payload["usage_only"].(bool); only {
+			return // token usage, not dialogue
+		}
 		r.turnsEmitted++
 		if s, ok := ev.Payload["content"].(string); ok {
 			detail = trimDetail(s, 80)

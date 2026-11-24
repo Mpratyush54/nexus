@@ -69,7 +69,7 @@ func Login(ctx context.Context, opt Options) (Result, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		if got := q.Get("state"); got != "" && got != state {
+		if got := q.Get("state"); got != state {
 			http.Error(w, "invalid state", http.StatusBadRequest)
 			errCh <- fmt.Errorf("authbrowser: state mismatch")
 			return

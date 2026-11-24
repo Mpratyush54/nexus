@@ -15,6 +15,26 @@ public partial class App : Application
     public App()
     {
         InitializeComponent();
+        UnhandledException += OnUnhandledException;
+    }
+
+    private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+        try
+        {
+            var root = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            var directory = Path.Combine(root, "Nexus");
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(Path.Combine(directory, "last-error.log"),
+                DateTimeOffset.Now.ToString("O") + Environment.NewLine + e.Exception);
+        }
+        catch
+        {
+        }
+        if (_window is not null)
+        {
+            e.Handled = true;
+        }
     }
 
     protected override void OnLaunched(LaunchActivatedEventArgs args)
@@ -25,18 +45,21 @@ public partial class App : Application
             Environment.Exit(0);
             return;
         }
+        if (argv.Any(arg => arg.Equals("--quit", StringComparison.OrdinalIgnoreCase)))
+        {
+            SingleInstance.Stop();
+            Environment.Exit(0);
+            return;
+        }
 
+        ProtocolRegistration.Register();
         var background = argv.Any(a => string.Equals(a, "--background", StringComparison.OrdinalIgnoreCase));
         ReadDeepLink(argv);
 
-        Core.Init(JsonSerializer.Serialize(new
-        {
-            online = true,
-            // An explicit workspace is safest. During development, accepting
-            // the current directory only when it is a git worktree keeps an
-            // installed Nexus.exe from accidentally harvesting its own files.
-            workspace_root = CaptureWorkspaceRoot()
-        }));
+        AppPrefs.Load();
+        AppPrefs.ApplyToShell(ShellState.Current);
+
+        InitializeCore();
         var window = new MainWindow();
         _window = window;
         SingleInstance.Listen(payload =>
@@ -47,6 +70,18 @@ public partial class App : Application
         {
             window.AppWindow.Hide();
         }
+    }
+
+    public static bool InitializeCore()
+    {
+        return Core.Init(JsonSerializer.Serialize(new
+        {
+            online = true,
+            // An explicit workspace is safest. During development, accepting
+            // the current directory only when it is a git worktree keeps an
+            // installed Nexus.exe from accidentally harvesting its own files.
+            workspace_root = CaptureWorkspaceRoot()
+        }));
     }
 
     public static void ClearPending()

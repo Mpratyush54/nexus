@@ -33,6 +33,8 @@ func TestControllableRecordsArgv(t *testing.T) {
 }
 
 func TestExecRunnerWithFakeBinary(t *testing.T) {
+	SetAllowProcessSpawnForTest(true)
+	defer SetAllowProcessSpawnForTest(false)
 	dir := t.TempDir()
 	bin := filepath.Join(dir, "fake-agent")
 	if runtime.GOOS == "windows" {

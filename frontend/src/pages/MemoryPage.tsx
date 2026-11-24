@@ -40,8 +40,6 @@ import { formatRelative } from '@/utils/format'
 import { useProjectSummaries } from '@/hooks/useProjectSummaries'
 import { useProjects } from '@/hooks/useProjects'
 
-const LEVEL_FILTERS = ['', 'project', 'personal', 'organization', 'session'] as const
-
 const CATEGORY_ORDER = [
   'architecture',
   'infrastructure',
@@ -50,6 +48,15 @@ const CATEGORY_ORDER = [
   'conventions',
   'dependencies',
   'general',
+] as const
+
+const MEMORY_LEVELS = [
+  { value: '', label: 'All levels' },
+  { value: 'organization', label: 'Organization' },
+  { value: 'project', label: 'Project' },
+  { value: 'personal', label: 'Personal' },
+  { value: 'session', label: 'Session' },
+  { value: 'ephemeral', label: 'Ephemeral' },
 ] as const
 
 const CATEGORY_CONFIG: Record<
@@ -189,11 +196,12 @@ export function MemoryPage() {
 
   const filtered = useMemo(() => {
     return items.filter((i) => {
+      if (level && i.level !== level) return false
       if (tagFilter && !(i.tags ?? []).includes(tagFilter)) return false
       if (selectedCategory && normalizeItemCategory(i.category) !== selectedCategory) return false
       return true
     })
-  }, [items, tagFilter, selectedCategory])
+  }, [items, level, tagFilter, selectedCategory])
 
   const confirmed = useMemo(() => filtered.filter((i) => isActiveMemory(i.status)), [filtered])
 
@@ -413,20 +421,26 @@ export function MemoryPage() {
               className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
             />
           </label>
-          <label className="block">
-            <span className="mb-1.5 block text-xs text-fg-dim">Level</span>
-            <select
-              value={level}
-              onChange={(e) => setLevel(e.target.value)}
-              className="h-10 rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
+        </div>
+
+        {/* Level Pills */}
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-xs text-muted mr-1">Level:</span>
+          {MEMORY_LEVELS.map((option) => (
+            <button
+              key={option.value || 'all'}
+              type="button"
+              onClick={() => setLevel(option.value)}
+              className={[
+                'rounded-md px-2.5 py-1 text-xs font-medium transition',
+                level === option.value
+                  ? 'bg-amber-soft text-amber'
+                  : 'text-muted hover:bg-raised hover:text-fg',
+              ].join(' ')}
             >
-              {LEVEL_FILTERS.map((l) => (
-                <option key={l || 'all'} value={l}>
-                  {l || 'All levels'}
-                </option>
-              ))}
-            </select>
-          </label>
+              {option.label}
+            </button>
+          ))}
         </div>
 
         {/* Category Pills */}

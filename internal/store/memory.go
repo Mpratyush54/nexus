@@ -288,18 +288,19 @@ func (s *PostgresStore) ConfirmMemory(ctx context.Context, id string, confirmedB
 // explicitly organization-level. Sharing visibility (issue #164): WithViewer
 // filters private/shared rows; empty viewer returns project+public only.
 func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error) {
-	items, _, err := s.SearchMemoryPage(ctx, projectID, query, tags, limit, 0)
+	items, _, err := s.SearchMemoryPage(ctx, projectID, query, tags, limit, 0, "")
 	return items, err
 }
 
 // SearchMemoryPage returns a page of keyword matches plus the total visible count.
-func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int) ([]*MemoryItem, int, error) {
+func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int, level string) ([]*MemoryItem, int, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	if offset < 0 {
 		offset = 0
 	}
+	level = strings.ToLower(strings.TrimSpace(level))
 	viewerID := ViewerFrom(ctx)
 	// Over-fetch before visibility filter, then page in Go. For large libraries
 	// this is still bounded by limit+offset+buffer.
@@ -320,9 +321,10 @@ func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, 
 		    AND ($2 = '' OR content ILIKE '%'||$2||'%'
 		         OR "key" ILIKE '%'||$2||'%' OR $2 = ANY(tags))
 		    AND ($3::text[] IS NULL OR tags && $3)
+		    AND ($5 = '' OR level = $5)
 		  ORDER BY confidence DESC, created_at DESC
 		  LIMIT $4`,
-		nullText(projectID), query, nilTextArray(tags), fetch)
+		nullText(projectID), query, nilTextArray(tags), fetch, level)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -406,6 +408,10 @@ func nilTextArray(tags []string) any {
 // 2.2: knowledge is searchable on write). Confidence floor is 0.3.
 // Pinned rows rank ahead of similarity.
 func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*MemoryItem, error) {
+	return s.SearchMemoryVectorPage(ctx, projectID, queryVec, limit, 0, "")
+}
+
+func (s *PostgresStore) SearchMemoryVectorPage(ctx context.Context, projectID string, queryVec []float32, limit, offset int, level string) ([]*MemoryItem, error) {
 	if len(queryVec) == 0 {
 		return nil, fmt.Errorf("store: vector search needs a query embedding (use text search when there is none)")
 	}
@@ -415,6 +421,23 @@ func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string
 	if limit <= 0 {
 		limit = 20
 	}
+	if offset < 0 {
+		offset = 0
+	}
+	level = strings.ToLower(strings.TrimSpace(level))
+	viewerID := ViewerFrom(ctx)
+	isMember, role := false, ""
+	if viewerID != "" {
+		var err error
+		isMember, err = s.IsProjectMember(ctx, viewerID, projectID)
+		if err != nil {
+			return nil, err
+		}
+		role, err = s.GetMemberRole(ctx, viewerID, projectID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items
 		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
@@ -422,9 +445,24 @@ func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string
 		    AND superseded_by IS NULL
 		    AND confidence > 0.3
 		    AND embedding IS NOT NULL
-		  ORDER BY (CASE WHEN 'pinned' = ANY(tags) THEN 0 ELSE 1 END), embedding <=> $2::vector
-		  LIMIT $3`,
-		nullText(projectID), encodeEmbedding(queryVec), limit)
+		    AND ($3 = '' OR level = $3)
+		    AND (
+		      ($6 = '' AND COALESCE(visibility, 'project') IN ('project','public'))
+		      OR ($6 <> '' AND (
+		        visibility = 'public'
+		        OR (COALESCE(visibility, 'project') = 'project' AND $7 AND memory_items.project_id = $1::uuid)
+		        OR (visibility IN ('private','shared') AND COALESCE(proposed_by, user_id)::text = $6)
+		        OR (visibility = 'shared' AND EXISTS (
+		          SELECT 1 FROM memory_shares ms WHERE ms.memory_id = memory_items.id AND (
+		            ms.shared_with_user_id::text = $6
+		            OR (memory_items.project_id = $1::uuid AND $8 <> '' AND UPPER(ms.shared_with_role) = UPPER($8))
+		          )
+		        ))
+		      ))
+		    )
+		  ORDER BY (CASE WHEN 'pinned' = ANY(tags) THEN 0 ELSE 1 END), embedding <=> $2::vector, id
+		  LIMIT $4 OFFSET $5`,
+		nullText(projectID), encodeEmbedding(queryVec), level, limit, offset, viewerID, isMember, role)
 	if err != nil {
 		return nil, err
 	}

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"central-memory/internal/store"
 )
@@ -42,14 +43,19 @@ func TestMirrorAgentSessionTurnsUsesCloudContract(t *testing.T) {
 	defer srv.Close()
 
 	hs := NewHTTPMemoryStore(srv.URL, "test-token", "project-1")
+	sourceTime := time.Now().UTC().AddDate(0, 0, -10).Truncate(time.Second)
 	id, err := hs.MirrorAgentSessionTurns(t.Context(), "codex", "native-1", "machine-1", "C:/work", []MirroredTurn{{
 		Idx: 170000000000000001, Role: "user", TextPreview: "ship the bridge",
+		SourceAt: &sourceTime,
 	}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if id != "cloud-session" {
 		t.Fatalf("session id = %q", id)
+	}
+	if gotTurn["source_ts"] != sourceTime.Format(time.RFC3339) {
+		t.Fatalf("source timestamp dropped: %#v", gotTurn)
 	}
 	if gotTurn["idx"] != float64(170000000000000001) || gotTurn["role"] != "user" || gotTurn["text_preview"] != "ship the bridge" {
 		t.Fatalf("turn = %#v", gotTurn)

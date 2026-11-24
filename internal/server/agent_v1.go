@@ -102,20 +102,38 @@ func (s *Server) handleAgentMemorySearch(w http.ResponseWriter, r *http.Request)
 	if limit > 50 {
 		limit = 50
 	}
-	viewerCtx := store.WithViewer(r.Context(), authSubject(r))
-	items, err := s.Store.SearchMemory(viewerCtx, projectID, req.Query, req.Tags, limit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
+	level := strings.ToLower(strings.TrimSpace(req.Level))
+	if level != "" && !store.IsValidMemoryLevel(level) {
+		writeError(w, http.StatusBadRequest, "invalid level: want organization, project, personal, session, or ephemeral")
 		return
 	}
-	if lvl := strings.TrimSpace(req.Level); lvl != "" {
-		filtered := items[:0]
-		for _, it := range items {
-			if it != nil && strings.EqualFold(it.Level, lvl) {
-				filtered = append(filtered, it)
-			}
+	viewerCtx := store.WithViewer(r.Context(), authSubject(r))
+	var items []*store.MemoryItem
+	if pager, ok := s.Store.(interface {
+		SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int, level string) ([]*store.MemoryItem, int, error)
+	}); ok {
+		page, _, err := pager.SearchMemoryPage(viewerCtx, projectID, req.Query, req.Tags, limit, 0, level)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
+			return
 		}
-		items = filtered
+		items = page
+	} else {
+		found, err := s.Store.SearchMemory(viewerCtx, projectID, req.Query, req.Tags, limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
+			return
+		}
+		items = found
+		if level != "" {
+			filtered := items[:0]
+			for _, it := range items {
+				if it != nil && strings.EqualFold(it.Level, level) {
+					filtered = append(filtered, it)
+				}
+			}
+			items = filtered
+		}
 	}
 	out := make([]map[string]any, 0, len(items))
 	for _, it := range items {

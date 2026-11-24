@@ -33,7 +33,11 @@ export function useMemorySearch(q = '', level = '') {
 
   const items = query.data?.items ?? []
   const total = query.data?.total ?? query.data?.count ?? items.length
-  const pageCount = Math.max(1, Math.ceil(total / LIBRARY_PAGE_SIZE))
+  const pageCount = Math.max(
+    1,
+    Math.ceil(total / LIBRARY_PAGE_SIZE),
+    query.data?.has_more ? page + 2 : 1,
+  )
   const hasPrev = page > 0
   const hasNext =
     query.data?.has_more === true ||

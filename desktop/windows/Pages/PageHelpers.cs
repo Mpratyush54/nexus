@@ -30,6 +30,8 @@ public class NexusPage : Page
 
     public NexusPage()
     {
+        HorizontalAlignment = HorizontalAlignment.Stretch;
+        VerticalAlignment = VerticalAlignment.Stretch;
         Loaded += (_, _) =>
         {
             if (!_entered) Enter(null);
@@ -93,7 +95,7 @@ public class NexusPage : Page
             Text = NxJson.Scrub(text),
             TextWrapping = TextWrapping.Wrap,
             IsTextSelectionEnabled = true,
-            FontSize = title ? 18 : 14,
+            FontSize = title ? 15 : 13.5,
             FontWeight = title ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal
         };
     }
@@ -139,13 +141,12 @@ public class NexusPage : Page
     {
         return new Border
         {
-            Padding = new Thickness(8, 2, 8, 3),
-            CornerRadius = new CornerRadius(6),
+            // Plain muted metadata, not pills (reference: T3 Code headers).
+            Padding = new Thickness(0, 0, 10, 0),
             VerticalAlignment = VerticalAlignment.Center,
-            Background = ResourceBrush("ControlFillColorSecondaryBrush", Windows.UI.Color.FromArgb(36, 255, 255, 255)),
-            BorderBrush = ResourceBrush("ControlStrokeColorDefaultBrush", Windows.UI.Color.FromArgb(46, 255, 255, 255)),
-            BorderThickness = new Thickness(1),
-            Child = new TextBlock { Text = NxJson.Scrub(text), FontSize = 11, Opacity = 0.85 }
+            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
+            BorderThickness = new Thickness(0),
+            Child = new TextBlock { Text = NxJson.Scrub(text), FontSize = 12, Opacity = 0.55 }
         };
     }
 
@@ -212,5 +213,28 @@ public class NexusPage : Page
             row.Children.Add(child);
         }
         return row;
+    }
+
+    protected static StackPanel PageHeader(string title, string subtitle)
+    {
+        var header = new StackPanel { Spacing = 4 };
+        header.Children.Add(Line(title, title: true));
+        header.Children.Add(Muted(subtitle));
+        return header;
+    }
+
+    protected void WatchShellProject(Func<Task> reload)
+    {
+        async void Handler(object? _, EventArgs __) => await reload();
+        Loaded += (_, _) => ShellState.Changed += Handler;
+        Unloaded += (_, _) => ShellState.Changed -= Handler;
+    }
+
+    protected string ShellProjectId() => ShellState.Current.ProjectId;
+
+    protected string ShellProjectLabel()
+    {
+        var state = ShellState.Current;
+        return state.ProjectName.Length > 0 ? state.ProjectName : state.ProjectId;
     }
 }

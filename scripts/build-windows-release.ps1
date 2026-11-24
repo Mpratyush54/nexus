@@ -44,6 +44,11 @@ foreach ($resource in @("App.xbf", "MainWindow.xbf", "Microsoft.UI.pri", "Micros
 # stale core impossible even if dotnet cleans its destination.
 $env:CGO_ENABLED = "1"
 go build -tags nexuscorelib -trimpath -ldflags $ld -buildmode=c-shared -o "$app\nexuscore.dll" ./cmd/nexuscore
+if ($LASTEXITCODE -ne 0) { throw "nexuscore build failed" }
+# Bundled stdio MCP proxy for Antigravity: the app must not need the CLI.
+$env:CGO_ENABLED = "0"
+go build -trimpath -ldflags "-s -w" -o "$app\nexus-mcp-proxy.exe" ./cmd/nexus-mcp-proxy
+if ($LASTEXITCODE -ne 0) { throw "nexus-mcp-proxy build failed" }
 
 Compress-Archive -Path "$app\*" -DestinationPath "$dist\nexus-desktop-windows-amd64.zip" -Force
 Copy-Item "$root\scripts\install-windows.ps1" "$dist\install-windows.ps1" -Force

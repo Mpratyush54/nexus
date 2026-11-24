@@ -33,8 +33,26 @@ var systemDirs = map[string]bool{
 	"program files": true, "windowsapps": true, "recovery": true, "system.sav": true,
 }
 
+// darwinHomeDirs are the standard folders of a macOS home. On macOS the
+// default project root is $HOME, and walking these is both pointless and
+// harmful: ~/Library holds other apps' data (Mail, Messages, Safari, app
+// containers) and ~/Pictures, ~/Music, ~/Movies hold media libraries, so
+// reading them raises privacy (TCC) prompts or is refused outright.
+// ~/Desktop, ~/Documents and ~/Downloads are not listed: projects really do
+// live there, and the prompt they raise is the expected, explained one.
+var darwinHomeDirs = map[string]bool{
+	"library": true, "applications": true, "movies": true, "music": true,
+	"pictures": true, "public": true, ".trash": true,
+}
+
 // SystemDir reports OS-level directories that are never projects.
-func SystemDir(name string) bool { return systemDirs[strings.ToLower(name)] }
+func SystemDir(name string) bool {
+	n := strings.ToLower(name)
+	if systemDirs[n] {
+		return true
+	}
+	return runtime.GOOS == "darwin" && darwinHomeDirs[n]
+}
 
 func hasMarker(dir string) bool {
 	entries, err := os.ReadDir(dir)
