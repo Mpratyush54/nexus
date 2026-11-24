@@ -195,6 +195,8 @@ function billingSnapshot(owner_type: string, owner_id: string) {
 
 /** Mutations that make sense to try in the demo; they change this tab's copy only. */
 const WRITE: [string, RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
+  // After "Log out" in the demo, any name and password signs back in to the sample account.
+  ['POST', /^\/auth\/login$/, () => ok({ token: 'demo-session', user_id: ME.id, username: ME.username })],
   ['POST', /^\/memory\/([^/]+)\/confirm$/, (m) => setStatus(m[1], 'CONFIRMED')],
   ['POST', /^\/memory\/([^/]+)\/reject$/, (m) => setStatus(m[1], 'REJECTED')],
   ['POST', /^\/memory\/([^/]+)\/promote$/, (m) => {
