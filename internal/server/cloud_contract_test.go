@@ -256,7 +256,8 @@ func TestCloudContracts(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("invite: %d %s", rec.Code, rec.Body.String())
 	}
-	if mailer.to != "sam@ex.com" || !strings.Contains(mailer.body, "token") {
+	// The invite mail carries the join link and the paste-in code.
+	if mailer.to != "sam@ex.com" || !strings.Contains(mailer.body, "/app/org?invite=") || !strings.Contains(mailer.body, "Join with a code") {
 		t.Fatalf("mail = %+v", mailer)
 	}
 }
