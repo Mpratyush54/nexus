@@ -22,17 +22,24 @@ on:
       - 'scripts/macos/**'
       - '.github/workflows/desktop-macos.yml'
   workflow_dispatch:
+    inputs:
+      app_run_id:
+        description: Reuse the Nexus.app built by this earlier run (skips mac-app; for packaging and install checks only)
+        required: false
+        default: ''
 
 concurrency:
-  group: desktop-macos-${{ github.ref }}
+  group: desktop-macos-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   mac-app:
     name: Nexus.app (Uno Skia, osx-arm64)
+    if: ${{ !inputs.app_run_id }}
     runs-on: macos-15
     timeout-minutes: 45
     env:
@@ -194,6 +201,8 @@ jobs:
         with:
           name: nexus-macos-app
           path: dist/app
+          run-id: ${{ inputs.app_run_id || github.run_id }}
+          github-token: ${{ github.token }}
 
       - name: Unpack the app
         run: |
