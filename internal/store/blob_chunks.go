@@ -290,12 +290,14 @@ func AssembleBlobChunks(projectID, parentSHA256 string, maxBytes int64) (data []
 	return out, len(bodies), nil
 }
 
-// BlobChunkSetBytes is the size of an upload's stored pieces so far.
-func BlobChunkSetBytes(projectID, parentSHA256 string) int64 {
+// BlobChunkSetBytesExcept is the size of an upload's stored pieces other
+// than piece index (a re-sent piece replaces it, so it is not counted).
+func BlobChunkSetBytesExcept(projectID, parentSHA256 string, index int) int64 {
 	blobChunks.mu.Lock()
 	defer blobChunks.mu.Unlock()
-	if set := blobChunks.sets[chunkSetKey{Project: projectID, Parent: parentSHA256}]; set != nil {
-		return set.bytes
+	set := blobChunks.sets[chunkSetKey{Project: projectID, Parent: parentSHA256}]
+	if set == nil {
+		return 0
 	}
-	return 0
+	return set.bytes - int64(len(set.pieces[index].Body))
 }

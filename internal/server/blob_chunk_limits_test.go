@@ -151,3 +151,89 @@ func TestBlobAssembleConcurrencyIsBounded(t *testing.T) {
 		t.Fatalf("assembly with every slot busy: %d, want 429", rec.Code)
 	}
 }
+
+// Legacy snapshot and operations posts are size-capped (413), not decoded
+// without limit.
+func TestSnapshotAndOperationsBodyLimits(t *testing.T) {
+	s := newBlobServer(t)
+	old := maxSnapshotPostBytes
+	maxSnapshotPostBytes = 1 << 10
+	t.Cleanup(func() { maxSnapshotPostBytes = old })
+	projectID := claimFolder(t, s, "body-limits", "owner")
+	tok := loginAs(t, s, "owner")
+	const id = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+	big := base64.StdEncoding.EncodeToString(make([]byte, 2<<10))
+	rec := doJSON(t, s, http.MethodPost, "/sessions/"+id+"/snapshot", tok, map[string]any{
+		"project_id": projectID, "harness": "claude", "transcript_payload_b64": big,
+	})
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized snapshot post: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodPost, "/sessions/"+id+"/snapshot", tok, map[string]any{
+		"project_id": projectID, "harness": "claude", "transcript_payload_b64": "eA==",
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("small snapshot post: %d %s", rec.Code, rec.Body.String())
+	}
+	ops := make([]map[string]any, 0, 30000)
+	for i := 0; i < 30000; i++ {
+		ops = append(ops, map[string]any{"tool_name": "edit", "file_path": "some/long/path/to/a/file.go", "op_type": "edit"})
+	}
+	rec = doJSON(t, s, http.MethodPost, "/sessions/"+id+"/operations", tok, map[string]any{
+		"project_id": projectID, "harness": "claude", "file_operations": ops,
+	})
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized operations post: %d", rec.Code)
+	}
+}
+
+func TestChunkRequestCapAndConcurrency(t *testing.T) {
+	s := newBlobServer(t)
+	projectID := claimFolder(t, s, "chunk-limits", "owner")
+	tok := loginAs(t, s, "owner")
+	if maxChunkRequestBytes != 8<<20 {
+		t.Fatalf("maxChunkRequestBytes = %d, want 8 MiB", maxChunkRequestBytes)
+	}
+	big := make([]byte, 7<<20) // base64 ~9.3 MiB: over the request cap
+	if code := postPiece(t, s, tok, projectID, shaHex(big), 0, 1, big); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("piece request over 8 MiB: %d, want 413", code)
+	}
+	for i := 0; i < cap(chunkSlots); i++ {
+		chunkSlots <- struct{}{}
+	}
+	small := []byte("piece")
+	code := postPiece(t, s, tok, projectID, shaHex(small), 0, 1, small)
+	for len(chunkSlots) > 0 {
+		<-chunkSlots
+	}
+	if code != http.StatusTooManyRequests {
+		t.Fatalf("piece with every upload slot busy: %d, want 429", code)
+	}
+}
+
+// A piece sent again replaces the stored one; near the size cap it must not
+// be counted twice.
+func TestResentPieceIsNotCountedTwice(t *testing.T) {
+	s := newBlobServer(t)
+	old := maxAssembledBytes
+	maxAssembledBytes = 100
+	t.Cleanup(func() { maxAssembledBytes = old })
+	projectID := claimFolder(t, s, "chunk-resend", "owner")
+	tok := loginAs(t, s, "owner")
+	a, b := make([]byte, 50), make([]byte, 40)
+	b[0] = 1
+	whole := append(append([]byte{}, a...), b...)
+	parent := shaHex(whole)
+	for _, step := range []struct {
+		index int
+		body  []byte
+	}{{0, a}, {1, b}, {1, b}, {0, a}} {
+		if code := postPiece(t, s, tok, projectID, parent, step.index, 2, step.body); code != http.StatusCreated {
+			t.Fatalf("piece %d (re-sent): %d", step.index, code)
+		}
+	}
+	rec := doJSON(t, s, http.MethodPost, "/v1/blobs/"+parent+"/assemble", tok, map[string]any{"project_id": projectID, "purpose": "transcript"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("assemble after re-sends: %d %s", rec.Code, rec.Body.String())
+	}
+}

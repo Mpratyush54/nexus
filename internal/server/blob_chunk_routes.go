@@ -16,8 +16,13 @@ import (
 
 var blobChunkRoutes sync.Map
 
-// maxChunkRequestBytes fits one 16 MiB chunk after base64 expansion, plus JSON.
-const maxChunkRequestBytes = 32 << 20
+// maxChunkRequestBytes fits one piece of up to ~6 MiB after base64
+// expansion, plus JSON. Clients send 4 MiB (daemon) and 1 MiB (teleport)
+// pieces; a request this size costs about three times it while decoded.
+const maxChunkRequestBytes = 8 << 20
+
+// chunkSlots bounds concurrent piece uploads (each held while decoded).
+var chunkSlots = make(chan struct{}, 4)
 
 // maxAssembledBytes caps a file assembled from pieces. Assembly holds the
 // file in memory and stores it as one row, so this bounds what one upload
@@ -56,6 +61,14 @@ func (s *Server) handleBlobChunkPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "sha256 must be 64 hex characters")
 		return
 	}
+	select {
+	case chunkSlots <- struct{}{}:
+		defer func() { <-chunkSlots }()
+	default:
+		w.Header().Set("Retry-After", "10")
+		writeError(w, http.StatusTooManyRequests, "too many uploads in progress; retry shortly")
+		return
+	}
 	var body struct {
 		ProjectID   string `json:"project_id"`
 		Index       int    `json:"index"`
@@ -83,7 +96,7 @@ func (s *Server) handleBlobChunkPost(w http.ResponseWriter, r *http.Request) {
 	pieceBytes := int64(base64.StdEncoding.DecodedLen(len(body.BodyB64)))
 	if int64(body.Total) > maxAssembledBytes ||
 		(body.Index < body.Total-1 && pieceBytes*int64(body.Total-1) > maxAssembledBytes) ||
-		store.BlobChunkSetBytes(strings.TrimSpace(body.ProjectID), parent)+pieceBytes > maxAssembledBytes {
+		store.BlobChunkSetBytesExcept(strings.TrimSpace(body.ProjectID), parent, body.Index)+pieceBytes > maxAssembledBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, "file is larger than the upload limit")
 		return
 	}
@@ -284,12 +297,33 @@ func decodeBlobJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body is larger than the limit")
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return false
 	}
 	var extra any
 	if err := dec.Decode(&extra); err == nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: trailing data after JSON value")
+		return false
+	}
+	return true
+}
+
+// decodeLimitedJSON decodes a request body of at most limit bytes: 413 over
+// it, 400 for invalid JSON. For routes that do not use decodeJSON's 2 MB cap.
+func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body is larger than the limit")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return false
 	}
 	return true
