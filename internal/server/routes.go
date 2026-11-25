@@ -61,6 +61,7 @@ func (s *Server) registerRoutes() {
 	s.registerSessionDeleteRoutes()
 	s.registerOpsRoutes()
 	s.registerDesktopExecutionRoutes()
+	s.registerDiagnosticsRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
