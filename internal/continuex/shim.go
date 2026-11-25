@@ -144,6 +144,11 @@ func expandShimPath(s, dir string) string {
 		}
 	}
 	s = strings.ReplaceAll(s, "$exe", ".exe")
+	if runtime.GOOS != "windows" {
+		// Launchers are resolved only on Windows, but the fixture tests
+		// read the same .cmd files (backslash paths) on every OS.
+		s = strings.ReplaceAll(s, `\`, "/")
+	}
 	if strings.ContainsAny(s, "%$*?<>|") {
 		return "" // an unexpanded variable such as %_prog%
 	}
