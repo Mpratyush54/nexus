@@ -53,6 +53,8 @@ func setupDiagnostics(base, desktopVersion string) {
 		diagUploader = &diagnostics.Uploader{Base: base, Server: diagServerURL, Token: diagToken}
 		diagnostics.Go("diagnostics-uploader", runDiagnosticsUploader)
 		log.Printf("INFO nexuscore: started, logs in %s", diagnostics.LogsDir(base))
+		logsDir := diagnostics.LogsDir(base)
+		diagnostics.Go("memory-watch", func() { runMemoryWatch(logsDir) })
 	})
 }
 

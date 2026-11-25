@@ -8,16 +8,21 @@ import (
 	"strings"
 )
 
-// coreMemoryLimit is a soft limit for the Go heap inside the desktop app.
-// Capture and sync work allocates in bursts; with only GOGC the heap was
-// allowed to double before collecting, so a long-running Nexus swung by
-// hundreds of megabytes. Near this limit the collector runs sooner instead.
-// It is soft: real need above it is still met. GOMEMLIMIT overrides it.
-const coreMemoryLimit = 256 << 20
+// The Go heap inside the desktop app has a soft memory limit so capture
+// bursts are collected sooner instead of letting the heap double (GOGC).
+// It is adaptive (memory_watch.go): never below minCoreMemoryLimit and kept
+// at 1.5 times the live heap, so it never sits at or below what is really
+// in use — a fixed 256 MiB limit under a 262 MiB live heap made the
+// collector run about 300 times a minute. GOMEMLIMIT overrides all of it.
+const minCoreMemoryLimit = 384 << 20
+
+func memoryLimitFromEnv() bool {
+	return strings.TrimSpace(os.Getenv("GOMEMLIMIT")) != ""
+}
 
 func init() {
-	if strings.TrimSpace(os.Getenv("GOMEMLIMIT")) != "" {
+	if memoryLimitFromEnv() {
 		return
 	}
-	debug.SetMemoryLimit(coreMemoryLimit)
+	debug.SetMemoryLimit(minCoreMemoryLimit)
 }
