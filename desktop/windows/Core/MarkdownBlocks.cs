@@ -26,6 +26,10 @@ internal sealed class MdBlock
     public int Indent { get; init; }
     /// "1." for an ordered item (the number as written), "" for a bullet.
     public string Number { get; init; } = "";
+    /// The number shown: CommonMark takes a list's start from its first
+    /// item and counts up from there ("1. 2. 10." shows 1. 2. 3.). Set by
+    /// <see cref="MarkdownBlocks.NumberLists"/>; "" for bullets.
+    public string Ordinal { get; internal set; } = "";
     /// Task list state: null when not a task, else checked or not.
     public bool? Task { get; init; }
     /// The fence's info string ("python", "diff"), lower case.
@@ -36,7 +40,8 @@ internal sealed class MdBlock
     public IReadOnlyList<string> Rows { get; init; } = Array.Empty<string>();
 
     public bool SameAs(MdBlock other) =>
-        Kind == other.Kind && Closed == other.Closed && string.Equals(Source, other.Source, StringComparison.Ordinal);
+        Kind == other.Kind && Closed == other.Closed && string.Equals(Ordinal, other.Ordinal, StringComparison.Ordinal) &&
+        string.Equals(Source, other.Source, StringComparison.Ordinal);
 
     public override string ToString() => Kind + (Kind == MdKind.Code ? "(" + Language + (Closed ? "" : ",open") + ")" : "") + ": " + Text;
 }
@@ -49,7 +54,37 @@ internal sealed class MdBlock
 /// </summary>
 internal static partial class MarkdownBlocks
 {
-    public static List<MdBlock> Parse(string? text) => Parse(text ?? "", 0);
+    public static List<MdBlock> Parse(string? text)
+    {
+        var blocks = Parse(text ?? "", 0);
+        NumberLists(blocks);
+        return blocks;
+    }
+
+    /// <summary>
+    /// Sets <see cref="MdBlock.Ordinal"/> on ordered items: each list (items
+    /// at one indent with nothing but deeper items between them) starts at
+    /// its first item's number and counts up. Ordinals depend only on the
+    /// blocks before an item, so blocks that are final keep theirs.
+    /// </summary>
+    public static void NumberLists(IReadOnlyList<MdBlock> blocks)
+    {
+        var runs = new Dictionary<int, (bool Ordered, long Next)>();
+        foreach (var block in blocks)
+        {
+            if (block.Kind != MdKind.ListItem)
+            {
+                runs.Clear();
+                continue;
+            }
+            foreach (var deeper in runs.Keys.Where(k => k > block.Indent).ToList()) runs.Remove(deeper);
+            var ordered = block.Number.Length > 0;
+            if (!runs.TryGetValue(block.Indent, out var run) || run.Ordered != ordered)
+                run = (ordered, ordered && long.TryParse(block.Number.TrimEnd('.'), out var start) ? start : 1);
+            block.Ordinal = ordered ? run.Next + "." : "";
+            runs[block.Indent] = (ordered, run.Next + 1);
+        }
+    }
 
     /// Parses text[start..]; offsets in the result are absolute.
     public static List<MdBlock> Parse(string text, int start)
@@ -313,6 +348,7 @@ internal sealed class MarkdownStream
         var all = new List<MdBlock>(_committed.Count + tail.Count - keep);
         all.AddRange(_committed);
         for (var i = keep; i < tail.Count; i++) all.Add(tail[i]);
+        MarkdownBlocks.NumberLists(all);
         Blocks = all;
         return all;
     }

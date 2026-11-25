@@ -52,6 +52,26 @@ public class MarkdownBlocksTests
     }
 
     [Fact]
+    public void OrderedListsCountFromTheFirstItem()
+    {
+        // CommonMark: only the first number matters.
+        var blocks = P("1. a\n2. b\n   - nested\n3. c\n10. d");
+        Assert.Equal(new[] { "1.", "2.", "", "3.", "4." }, blocks.Select(b => b.Ordinal));
+        Assert.Equal(new[] { "5.", "6." }, P("5. a\n1. b").Select(b => b.Ordinal));
+        // A paragraph ends the list; the next one starts again.
+        Assert.Equal(new[] { "1.", "", "1." }, P("1. a\n\nText\n\n1. b").Select(b => b.Ordinal));
+    }
+
+    [Fact]
+    public void StreamedListsAreNumberedLikeAFullParse()
+    {
+        var stream = new MarkdownStream();
+        stream.Update("1. a\n2. b\n");
+        var blocks = stream.Update("1. a\n2. b\n7. c");
+        Assert.Equal(new[] { "1.", "2.", "3." }, blocks.Select(b => b.Ordinal));
+    }
+
+    [Fact]
     public void NestedItemsIndentPerTwoSpaces()
     {
         var blocks = P("- a\n  - b\n    - c\n- d");

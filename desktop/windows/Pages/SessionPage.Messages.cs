@@ -17,12 +17,17 @@ public sealed partial class SessionPage
     partial void ComposerEditHook(string text, ref bool handled);
     partial void ComposerRetryHook(string text, ref bool handled);
 
-    private sealed class MessageInfo(string role, string text, MessageActionRow actions)
+    private sealed class MessageInfo(string role, string text, Func<(UIElement Content, MessageActionRow Actions)> build, bool canRelease)
     {
         public string Role { get; } = role;
         public string Text { get; } = text;
-        public MessageActionRow Actions { get; } = actions;
+        public MessageActionRow Actions { get; set; } = null!;
         public bool FromUser => Role.Equals("user", StringComparison.OrdinalIgnoreCase);
+        /// Builds the message's visuals (again, after they were released).
+        public Func<(UIElement Content, MessageActionRow Actions)> Build { get; } = build;
+        /// Messages with attachment chips keep their visuals.
+        public bool CanRelease { get; } = canRelease;
+        public bool Realized { get; set; } = true;
     }
 
     private static readonly ConditionalWeakTable<UIElement, MessageInfo> s_messages = new();
@@ -54,59 +59,150 @@ public sealed partial class SessionPage
     {
         var fromUser = role.Equals("user", StringComparison.OrdinalIgnoreCase);
         var label = fromUser ? "You" : Nonempty(ChatTitles.AgentName(assistantAgent ?? _agent), "Assistant");
-        var view = !fromUser && _adoptStream is { } streamed ? AdoptStreamView(streamed, content) : new MarkdownView(content);
-        var selectMenu = new MenuFlyout();
-        var copySelection = new MenuFlyoutItem { Text = "Copy selection" };
-        copySelection.Click += (_, _) => { if (view.SelectedText.Length > 0) SetClipboard(view.SelectedText); };
-        selectMenu.Opening += (_, _) => copySelection.IsEnabled = view.SelectedText.Length > 0;
-        var select = new MenuFlyoutItem { Text = "Select whole message" };
-        select.Click += (_, _) => view.SelectAll();
-        var copyItem = new MenuFlyoutItem { Text = "Copy whole message" };
-        copyItem.Click += (_, _) => SetClipboard(content);
-        selectMenu.Items.Add(copySelection);
-        selectMenu.Items.Add(select);
-        selectMenu.Items.Add(copyItem);
-        view.ContextFlyout = selectMenu;
-        // Like T3 Code: no "You"/agent label on every turn; alignment and the
-        // user block's fill say who wrote it. The name stays for screen readers.
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(view.Root, label);
-        var bubble = fromUser
-            ? new Border
-            {
-                Child = view.Root, Padding = SessionChatRender.UserBubblePad, CornerRadius = new CornerRadius(14),
-                MaxWidth = 600, HorizontalAlignment = HorizontalAlignment.Right, Background = NexusPalette.UserFill,
-            }
-            : new Border
-            {
-                Child = view.Root, Padding = SessionChatRender.AssistantPad, HorizontalAlignment = HorizontalAlignment.Stretch,
-                Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-            };
-        Border? root = null;
-        var actions = new MessageActionRow(fromUser, () => content,
-            edit: fromUser ? () => EditMessage(content) : null,
-            retry: fromUser ? null : () => RetryReplyAsync(root!),
-            fork: () => ForkFromMessageAsync(root!));
-        var stack = new StackPanel { HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Stretch };
-        stack.Children.Add(bubble);
-        if (strip is not null)
+        Border root = new()
         {
-            strip.HorizontalAlignment = bubble.HorizontalAlignment;
-            strip.Margin = new Thickness(0, 6, 0, 0);
-            stack.Children.Add(strip);
-        }
-        stack.Children.Add(actions.View);
-        root = new Border
-        {
-            Child = stack, CornerRadius = new CornerRadius(14),
+            CornerRadius = new CornerRadius(14),
             HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Stretch,
-            // Transparent, not null: the whole message (gaps too) takes hover.
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0),
+            BorderThickness = new Thickness(0),
         };
-        actions.HoverOn(root);
-        actions.Time = () => MessageTime(root);
-        s_messages.AddOrUpdate(root, new MessageInfo(role, content, actions));
-        root.Loaded += (_, _) => QueueLatestReplyActions();
+        var adopted = !fromUser && _adoptStream is { } streamed ? AdoptStreamView(streamed, content) : null;
+        (UIElement, MessageActionRow) Build()
+        {
+            var view = adopted ?? new MarkdownView(content);
+            adopted = null;
+            var selectMenu = new MenuFlyout();
+            var copySelection = new MenuFlyoutItem { Text = "Copy selection" };
+            copySelection.Click += (_, _) => { if (view.SelectedText.Length > 0) SetClipboard(view.SelectedText); };
+            selectMenu.Opening += (_, _) => copySelection.IsEnabled = view.SelectedText.Length > 0;
+            var select = new MenuFlyoutItem { Text = "Select whole message" };
+            select.Click += (_, _) => view.SelectAll();
+            var copyItem = new MenuFlyoutItem { Text = "Copy whole message" };
+            copyItem.Click += (_, _) => SetClipboard(content);
+            selectMenu.Items.Add(copySelection);
+            selectMenu.Items.Add(select);
+            selectMenu.Items.Add(copyItem);
+            view.ContextFlyout = selectMenu;
+            // Like T3 Code: no "You"/agent label on every turn; alignment and the
+            // user block's fill say who wrote it. The name stays for screen readers.
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(view.Root, label);
+            var bubble = fromUser
+                ? new Border
+                {
+                    Child = view.Root, Padding = SessionChatRender.UserBubblePad, CornerRadius = new CornerRadius(14),
+                    MaxWidth = 600, HorizontalAlignment = HorizontalAlignment.Right, Background = NexusPalette.UserFill,
+                }
+                : new Border { Child = view.Root, Padding = SessionChatRender.AssistantPad, HorizontalAlignment = HorizontalAlignment.Stretch };
+            var actions = new MessageActionRow(fromUser, () => content,
+                edit: fromUser ? () => EditMessage(content) : null,
+                retry: fromUser ? null : () => RetryReplyAsync(root),
+                fork: () => ForkFromMessageAsync(root));
+            // Transparent, not null: the whole message (gaps too) takes hover.
+            var stack = new StackPanel { HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Stretch, Background = TransparentBrush };
+            stack.Children.Add(bubble);
+            if (strip is not null)
+            {
+                strip.HorizontalAlignment = bubble.HorizontalAlignment;
+                strip.Margin = new Thickness(0, 6, 0, 0);
+                stack.Children.Add(strip);
+            }
+            stack.Children.Add(actions.View);
+            actions.HoverOn(stack);
+            actions.Time = () => MessageTime(root);
+            return (stack, actions);
+        }
+        var info = new MessageInfo(role, content, Build, canRelease: strip is null);
+        var (first, firstActions) = Build();
+        root.Child = first;
+        info.Actions = firstActions;
+        s_messages.AddOrUpdate(root, info);
+        root.Loaded += (_, _) =>
+        {
+            QueueLatestReplyActions();
+            WatchTranscriptViewport();
+        };
         return root;
+    }
+
+    private static Brush? s_transparent;
+    private static Brush TransparentBrush => s_transparent ??= new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+
+    // ── Long chats: visuals only near the viewport ───────────────────────
+    //
+    // A chat keeps every message element (anchors, find and jumps use
+    // them), but a message more than a few screens away gives up its visual
+    // tree and keeps only its measured height; it is rebuilt before it
+    // scrolls back into view. The height does not change, so nothing moves.
+
+    private const double KeepScreensAbove = 2, KeepScreensBelow = 3;
+    private const double ReleaseScreensAbove = 5, ReleaseScreensBelow = 6;
+    private bool _viewportWatched;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _viewportTimer;
+
+    private void WatchTranscriptViewport()
+    {
+        if (!_viewportWatched)
+        {
+            _viewportWatched = true;
+            _chatScroll.ViewChanged += (_, _) => QueueViewportPass();
+            _chat.SizeChanged += (_, _) => QueueViewportPass();
+        }
+        QueueViewportPass();
+    }
+
+    private void QueueViewportPass()
+    {
+        if (_viewportTimer is null)
+        {
+            _viewportTimer = DispatcherQueue.CreateTimer();
+            _viewportTimer.Interval = TimeSpan.FromMilliseconds(80);
+            _viewportTimer.IsRepeating = false;
+            _viewportTimer.Tick += (_, _) => ViewportPass();
+        }
+        if (!_viewportTimer.IsRunning) _viewportTimer.Start();
+    }
+
+    private void ViewportPass()
+    {
+        var screen = _chatScroll.ViewportHeight;
+        if (screen <= 0 || _chat.XamlRoot is null) return;
+        double chatTop;
+        try { chatTop = _chat.TransformToVisual(_chatScroll).TransformPoint(new Windows.Foundation.Point(0, 0)).Y; }
+        catch (ArgumentException) { return; }
+        HashSet<DependencyObject>? focusPath = null;
+        foreach (var child in _chat.Children)
+        {
+            if (child is not Border element || !s_messages.TryGetValue(child, out var info)) continue;
+            var top = chatTop + element.ActualOffset.Y;
+            var bottom = top + element.ActualHeight;
+            if (info.Realized)
+            {
+                if (!info.CanRelease || element.ActualHeight <= 0) continue;
+                if (bottom > -ReleaseScreensAbove * screen && top < (1 + ReleaseScreensBelow) * screen) continue;
+                focusPath ??= FocusPath();
+                if (focusPath.Contains(element)) continue;
+                element.Height = element.ActualHeight;
+                element.Child = null;
+                info.Realized = false;
+            }
+            else if (bottom > -KeepScreensAbove * screen && top < (1 + KeepScreensBelow) * screen)
+            {
+                var (content, actions) = info.Build();
+                element.Child = content;
+                info.Actions = actions;
+                element.ClearValue(FrameworkElement.HeightProperty);
+                info.Realized = true;
+                QueueLatestReplyActions();
+            }
+        }
+    }
+
+    // The focused element and its ancestors: a message holding focus keeps its visuals.
+    private HashSet<DependencyObject> FocusPath()
+    {
+        var path = new HashSet<DependencyObject>();
+        var focused = XamlRoot is { } xamlRoot ? Microsoft.UI.Xaml.Input.FocusManager.GetFocusedElement(xamlRoot) as DependencyObject : null;
+        for (var node = focused; node is not null; node = VisualTreeHelper.GetParent(node)) path.Add(node);
+        return path;
     }
 
     private static void SetClipboard(string text)

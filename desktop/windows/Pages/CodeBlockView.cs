@@ -243,10 +243,17 @@ internal static class CodePalette
 {
     private static bool Dark => ThemeService.EffectiveIsDark;
 
+    // One brush per colour, shared by every code block (a long chat has
+    // thousands of coloured runs). Brushes are UI-thread objects.
+    private static readonly Dictionary<ulong, SolidColorBrush> s_brushes = new();
+
     private static SolidColorBrush Rgb(uint dark, uint light, byte alpha = 255)
     {
         var v = Dark ? dark : light;
-        return new SolidColorBrush(Windows.UI.Color.FromArgb(alpha, (byte)(v >> 16), (byte)(v >> 8), (byte)v));
+        var key = ((ulong)alpha << 24) | v;
+        if (!s_brushes.TryGetValue(key, out var brush))
+            s_brushes[key] = brush = new SolidColorBrush(Windows.UI.Color.FromArgb(alpha, (byte)(v >> 16), (byte)(v >> 8), (byte)v));
+        return brush;
     }
 
     public static Brush Fill => Dark ? Rgb(0xFFFFFF, 0, 10) : Rgb(0, 0xF6F8FA);

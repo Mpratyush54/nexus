@@ -285,7 +285,7 @@ internal static class MarkdownRender
                     // U+FE0E: the text form, not the colour emoji.
                     true => "☑︎",
                     false => "☐︎",
-                    _ => block.Number.Length > 0 ? block.Number : (block.Indent % 3) switch { 0 => "•", 1 => "◦", _ => "▪" },
+                    _ => block.Ordinal.Length > 0 ? block.Ordinal : block.Number.Length > 0 ? block.Number : (block.Indent % 3) switch { 0 => "•", 1 => "◦", _ => "▪" },
                 };
                 // Hanging indent: wrapped lines line up under the text, not the marker.
                 var hang = Math.Round((block.Task is null ? marker.Length : 1.4) * fontSize * 0.6 + fontSize * 0.55);
