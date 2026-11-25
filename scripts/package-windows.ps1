@@ -2,7 +2,7 @@
 <#
 .SYNOPSIS
   Build the Nexus Windows installer (Velopack): Setup.exe, a portable zip,
-  the update feed, and the plain app zip used by install-windows.ps1.
+  the update feed, and the plain app zip (kept for old links).
 
 .DESCRIPTION
   Self-contained build (.NET 8 and the Windows App SDK ship inside the app;
@@ -14,7 +14,7 @@
     releases\                              Velopack feed: releases.<channel>.json, *.nupkg
     Nexus-<ver>-win-x64-Setup.exe           installer
     Nexus-<ver>-win-x64-Portable.zip        portable copy (self-updating)
-    nexus-desktop-windows-amd64.zip         plain app zip (install-windows.ps1)
+    nexus-desktop-windows-amd64.zip         plain app zip (legacy; install-windows.ps1 now runs Setup.exe)
 
   Never stops a running Nexus and never installs anything.
 
@@ -146,7 +146,7 @@ foreach ($required in @("Nexus.exe", "Nexus.dll", "Velopack.dll", "nexuscore.dll
   if (-not (Test-Path -LiteralPath (Join-Path $publish $required))) { throw "Incomplete app folder: $required" }
 }
 
-# 3. Plain zip: the layout scripts/install-windows.ps1 has always expanded.
+# 3. Plain zip: the layout the old scripts/install-windows.ps1 expanded.
 if (Test-Path -LiteralPath $plainZip) { Remove-Item -LiteralPath $plainZip -Force }
 Compress-Archive -Path (Join-Path $publish "*") -DestinationPath $plainZip -CompressionLevel Optimal
 }
