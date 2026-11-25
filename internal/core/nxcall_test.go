@@ -791,3 +791,14 @@ func TestCloudPassThroughKeepsLargeTurnIndexes(t *testing.T) {
 		t.Fatalf("turn index rounded: %s", encoded)
 	}
 }
+
+func TestDiagnosticsGetReportsGoMemory(t *testing.T) {
+	out, err := Call(t.Context(), "diagnostics.get", nil, Deps{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mem, _ := out.(map[string]any)["memory"].(map[string]uint64)
+	if mem["go_total"] == 0 || mem["heap_alloc"] == 0 {
+		t.Fatalf("diagnostics.get memory = %v", mem)
+	}
+}

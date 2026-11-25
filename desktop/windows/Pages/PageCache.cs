@@ -24,6 +24,12 @@ public static class PageCache
     private static AgentSetupPage? _agentSetup;
     public static AgentSetupPage AgentSetup => _agentSetup ??= new AgentSetupPage();
 
+    /// <summary>Session pages kept for Back navigation (memory log).</summary>
+    public static int CachedSessionPages => _sessions.Count;
+
+    /// <summary>Chat elements held by the cached session pages (memory log).</summary>
+    public static int CachedChatElements => _sessions.Values.Sum(p => p.ChatElementCount);
+
     public static SessionPage GetSession(string sessionId)
     {
         if (sessionId.Length == 0)

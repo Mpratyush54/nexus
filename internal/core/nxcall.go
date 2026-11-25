@@ -571,6 +571,10 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		return sessionUsage(ctx, deps, args)
 	case "status.get", "diagnostics.get":
 		status := map[string]any{"ok": true, "online": deps.Online, "pending_uploads": pendingCount(deps), "workspace_root": deps.Root}
+		if method == "diagnostics.get" {
+			// The Go runtime's memory, for the desktop's memory log line.
+			status["memory"] = goMemory()
+		}
 		if deps.Capture != nil {
 			status["capture"] = deps.Capture.Status()
 		}

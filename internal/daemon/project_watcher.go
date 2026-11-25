@@ -153,17 +153,42 @@ func runProjectWatcher(ctx context.Context, root string, rep *FilesChangedReport
 	if st, err := os.Stat(root); err != nil || !st.IsDir() {
 		return
 	}
-	w, err := fsnotify.NewWatcher()
-	if err != nil {
-		log.Printf("daemon: project watcher: %v", err)
-		return
+	var (
+		w      *fsnotify.Watcher
+		rw     *recursiveWatcher
+		events <-chan fsnotify.Event
+		errs   <-chan error
+	)
+	if recursiveWatchSupported {
+		// Windows: the whole tree with one recursive watch; ignored folders
+		// are filtered by changedRelPath below instead of left unwatched.
+		if r, err := newRecursiveWatcher(); err == nil {
+			if err := r.AddRoot(root); err == nil {
+				rw = r
+				defer rw.Close()
+				events, errs = rw.Events(), rw.Errors()
+			} else {
+				_ = r.Close()
+			}
+		}
 	}
-	defer w.Close()
+	if rw == nil {
+		nw, err := fsnotify.NewWatcher()
+		if err != nil {
+			log.Printf("daemon: project watcher: %v", err)
+			return
+		}
+		w = nw
+		defer w.Close()
+		events, errs = w.Events, w.Errors
+	}
 	pw := &projectWatcher{root: filepath.Clean(root), w: w, watched: map[string]bool{}}
-	if watchCostsPerEntry {
-		pw.budget = kqueueBudget(platform.FileLimit())
+	if w != nil {
+		if watchCostsPerEntry {
+			pw.budget = kqueueBudget(platform.FileLimit())
+		}
+		pw.addTree(pw.root)
 	}
-	pw.addTree(pw.root)
 	// A capped tree misses changes: then git results are not cached
 	// (git_state_cache.go) and every caller runs git as before.
 	registered := !pw.capped
@@ -185,7 +210,7 @@ func runProjectWatcher(ctx context.Context, root string, rep *FilesChangedReport
 		select {
 		case <-ctx.Done():
 			return
-		case err, ok := <-w.Errors:
+		case err, ok := <-errs:
 			if !ok {
 				return
 			}
@@ -195,7 +220,7 @@ func runProjectWatcher(ctx context.Context, root string, rep *FilesChangedReport
 				loggedErr = true
 				log.Printf("daemon: project watcher: %v", err)
 			}
-		case ev, ok := <-w.Events:
+		case ev, ok := <-events:
 			if !ok {
 				return
 			}
@@ -207,7 +232,9 @@ func runProjectWatcher(ctx context.Context, root string, rep *FilesChangedReport
 				if pw.watched[key] {
 					noteWorkspaceChange(pw.root)
 					delete(pw.watched, key)
-					_ = w.Remove(ev.Name)
+					if w != nil {
+						_ = w.Remove(ev.Name)
+					}
 					continue
 				}
 			}
@@ -218,7 +245,7 @@ func runProjectWatcher(ctx context.Context, root string, rep *FilesChangedReport
 			noteWorkspaceChange(pw.root)
 			if ev.Op&(fsnotify.Write|fsnotify.Create) != 0 {
 				if st, err := os.Lstat(ev.Name); err == nil && st.IsDir() {
-					if ev.Op&fsnotify.Create != 0 {
+					if ev.Op&fsnotify.Create != 0 && w != nil {
 						pw.addTree(ev.Name)
 					}
 					continue // directory mtime churn is not a file change

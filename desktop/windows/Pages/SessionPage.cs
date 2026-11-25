@@ -2594,8 +2594,12 @@ public sealed partial class SessionPage : NexusPage
         };
     }
 
+    /// <summary>Elements in the chat column (memory log).</summary>
+    internal int ChatElementCount => _chat.Children.Count;
+
     internal static RichTextBlock FormattedMessage(string content)
     {
+        Interlocked.Increment(ref Nexus.Core.Diagnostics.UiStats.RenderedMessages);
         // One document per message: selection can cross every paragraph,
         // heading, list item and code block without stopping at a control edge.
         var document = new RichTextBlock { IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap, FontSize = 14, LineHeight = 22 };

@@ -150,6 +150,12 @@ type Runtime struct {
 	lastSnapshotAttempt   map[string]time.Time
 	lastSnapshotStamp     map[string]string // session_id -> transcript size:mtime at last upload
 	lastSnapshotUpload    map[string]time.Time
+	snapTracks            snapshotTracks // per-session publish backoff (snapshot_publish.go)
+	// snapQueue feeds the snapshot worker; snapQueued dedupes it (value:
+	// force). Guarded by snapQueueMu.
+	snapQueueMu sync.Mutex
+	snapQueue   chan string
+	snapQueued  map[string]bool
 	// LargeSnapshotMinInterval spaces periodic snapshots of a transcript
 	// over LargeSnapshotBytes; <=0 selects DefaultLargeSnapshotMinInterval.
 	LargeSnapshotMinInterval time.Duration
@@ -353,6 +359,19 @@ func (r *Runtime) Start(ctx context.Context) {
 	// and keep the opt-in agent instruction files in sync.
 	r.startCloudSideFeatures(ctx, &wg)
 
+	// Snapshots (collect, gzip, upload) run on their own worker, so a slow
+	// or failing upload never stalls the capture loop.
+	startMemLog()
+	snapCh := make(chan string, 256)
+	r.snapQueueMu.Lock()
+	r.snapQueue = snapCh
+	r.snapQueueMu.Unlock()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r.snapshotWorker(ctx, snapCh)
+	}()
+
 	// Materializer (issue #81): push-file regenerator when wired.
 	if r.Materializer != nil {
 		wg.Add(1)
@@ -450,7 +469,7 @@ func (r *Runtime) Start(ctx context.Context) {
 				}
 				for _, ev := range batch {
 					if ev.Type == EventSessionComplete {
-						r.maybePushSnapshot(ctx, sid, true)
+						r.queueSnapshot(sid, true)
 					}
 				}
 			}
@@ -557,7 +576,11 @@ func (r *Runtime) pushDueSnapshots(ctx context.Context) {
 	}
 	r.snapshotMu.Unlock()
 	for _, sid := range sessions {
-		r.maybePushSnapshot(ctx, sid, false)
+		if r.snapQueue != nil {
+			r.queueSnapshot(sid, false)
+		} else {
+			r.maybePushSnapshot(ctx, sid, false)
+		}
 	}
 }
 
@@ -631,55 +654,141 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	// one did exactly that). The stamp is taken before reading, so a write
 	// that lands during the read still differs next time.
 	stamp, size := snapshotTranscriptStamp(r.Daemon.Root, sessionID, harness)
-	if stamp != "" {
-		r.snapshotMu.Lock()
-		unchanged := r.lastSnapshotStamp[sessionID] == stamp
-		if unchanged && r.lastSnapshotTurnCount != nil {
-			r.lastSnapshotTurnCount[sessionID] = turns
-		}
-		// Each version uploads the whole transcript. A large live chat is
-		// published at most every LargeSnapshotMinInterval (it used to be
-		// every few minutes: a gzip copy of tens of megabytes each time);
-		// the idle snapshot (force) still always runs.
-		tooSoon := !force && size > LargeSnapshotBytes && !r.lastSnapshotUpload[sessionID].IsZero() &&
-			now.Sub(r.lastSnapshotUpload[sessionID]) < r.largeSnapshotMinInterval()
-		r.snapshotMu.Unlock()
-		if unchanged || tooSoon {
-			return
-		}
+	if stamp == "" {
+		// SQLite-only harnesses (OpenCode) have no transcript file: what a
+		// snapshot would hold changes only with new turns.
+		stamp = turnsStamp(turns)
 	}
-	snap, err := CollectSnapshot(r.Daemon.Root, sessionID, harness, r.Daemon.MachineID)
+	r.snapshotMu.Lock()
+	unchanged := r.lastSnapshotStamp[sessionID] == stamp
+	if unchanged && r.lastSnapshotTurnCount != nil {
+		r.lastSnapshotTurnCount[sessionID] = turns
+	}
+	// Each version uploads the whole transcript. A large live chat is
+	// published at most every LargeSnapshotMinInterval (it used to be
+	// every few minutes: a gzip copy of tens of megabytes each time);
+	// the idle snapshot (force) still always runs.
+	tooSoon := !force && size > LargeSnapshotBytes && !r.lastSnapshotUpload[sessionID].IsZero() &&
+		now.Sub(r.lastSnapshotUpload[sessionID]) < r.largeSnapshotMinInterval()
+	// Failed steps back off (snapshot_publish.go). Collection, the
+	// expensive part, runs only when some step is due.
+	tr := &r.snapTracks
+	collectT := tr.get(&tr.collect, sessionID)
+	versionT := tr.get(&tr.version, sessionID)
+	legacyT := tr.get(&tr.legacy, sessionID)
+	versionDue := versionT.due(now, stamp, size)
+	// The legacy snapshot is only a fallback for sessions without a cloud
+	// version, and the server keys it by UUID: a native id such as
+	// OpenCode's "ses_..." can never be stored there.
+	legacyAllowed := !tr.published[sessionID] && isStrictUUID(sessionID)
+	legacyDue := legacyAllowed && legacyT.due(now, stamp, size)
+	collectDue := collectT.due(now, stamp, size)
+	r.snapshotMu.Unlock()
+	if unchanged || tooSoon || !collectDue || (!versionDue && !legacyDue) {
+		return
+	}
+	// A transcript over MaxRawTranscriptBytes is never read: not uploadable
+	// anyway, and reading, scanning and compressing it every cycle was most
+	// of the core's memory and CPU in real use. Marked like the gzip cap,
+	// so it is not looked at again until it is smaller than now.
+	if size > MaxRawTranscriptBytes {
+		r.snapshotMu.Lock()
+		versionT.markTooLarge(size, stamp)
+		legacyT.markTooLarge(size, stamp)
+		r.snapshotMu.Unlock()
+		if noteSkipped(harness, "session "+sessionID, size, "too large to back up right now") {
+			log.Printf("daemon: session=%s not backed up: %d MB transcript is over the %d MB limit (until it shrinks)",
+				sessionID, size>>20, MaxRawTranscriptBytes>>20)
+		}
+		return
+	}
+	snapStats.collected.Add(1)
+	snapStats.bytesRead.Add(size)
+	snap, layout, err := collectSnapshotTranscript(r.Daemon.Root, sessionID, harness, r.Daemon.MachineID)
 	if errors.Is(err, errSubagentTranscriptGone) {
 		return // the run's transcript was removed with its parent chat
 	}
 	if err != nil {
 		// Retry once with auto-detect when the hinted harness has no files yet.
 		if alt := DetectHarnessForConversation(sessionID, r.Daemon.Root); alt != "" && alt != harness {
-			stamp, _ = snapshotTranscriptStamp(r.Daemon.Root, sessionID, alt)
-			snap, err = CollectSnapshot(r.Daemon.Root, sessionID, alt, r.Daemon.MachineID)
+			if altStamp, _ := snapshotTranscriptStamp(r.Daemon.Root, sessionID, alt); altStamp != "" {
+				stamp = altStamp
+			}
+			snap, layout, err = collectSnapshotTranscript(r.Daemon.Root, sessionID, alt, r.Daemon.MachineID)
 			harness = alt
 		}
 	}
 	if err != nil {
-		log.Printf("daemon: collect snapshot session=%s harness=%s: %v", sessionID, harness, err)
+		r.snapshotMu.Lock()
+		permanent := collectT.fail(now, err, stamp, size)
+		r.snapshotMu.Unlock()
+		logPublishFailure("collect snapshot harness="+harness, sessionID, err, permanent, collectT)
 		return
 	}
+	r.snapshotMu.Lock()
+	collectT.succeed()
+	r.snapshotMu.Unlock()
 	snap.SessionID = sessionID
 	snap.ProjectID = hs.ProjectID
-	legacyOK := true
-	if err := hs.PushSnapshot(ctx, snap); err != nil {
-		// Keep the historical endpoint best-effort during the transition.
-		// A legacy endpoint failure must not stop the real session/version
-		// publisher below; the latter is what makes Timeline and Teleport work.
-		legacyOK = false
-		log.Printf("daemon: push legacy snapshot session=%s: %v", sessionID, err)
+	// Hard cap on what one session upload may be (MaxUploadGzipBytes): the
+	// server assembles a blob in memory, and a huge live transcript took it
+	// down. Above the cap nothing is uploaded, version or legacy, until the
+	// transcript is smaller than it was.
+	if gz := int64(len(snap.TranscriptPayload)); gz > MaxUploadGzipBytes {
+		r.snapshotMu.Lock()
+		versionT.markTooLarge(size, stamp)
+		legacyT.markTooLarge(size, stamp)
+		r.snapshotMu.Unlock()
+		if noteSkipped(harness, "session "+sessionID, gz, "too large to back up right now") {
+			log.Printf("daemon: session=%s not backed up: %d MB compressed is over the %d MB upload limit (until the transcript shrinks)",
+				sessionID, gz>>20, MaxUploadGzipBytes>>20)
+		}
+		return
 	}
-	currentOK := true
-	if err := hs.PublishAgentSessionVersion(ctx, snap, r.Daemon.Root); err != nil {
-		currentOK = false
-		log.Printf("daemon: publish cloud session version session=%s: %v", sessionID, err)
+	forgetSkipped("session " + sessionID)
+
+	published := false
+	if versionDue {
+		err := hs.PublishAgentSessionVersion(ctx, snap, r.Daemon.Root)
+		r.snapshotMu.Lock()
+		if err == nil {
+			versionT.succeed()
+			legacyT.succeed()
+			if tr.published == nil {
+				tr.published = map[string]bool{}
+			}
+			tr.published[sessionID] = true
+			published = true
+		}
+		r.snapshotMu.Unlock()
+		if err != nil && ctx.Err() == nil {
+			r.snapshotMu.Lock()
+			permanent := versionT.fail(now, err, stamp, size)
+			r.snapshotMu.Unlock()
+			logPublishFailure("publish cloud session version", sessionID, err, permanent, versionT)
+		}
 	}
-	if !legacyOK && !currentOK {
+	if !published && legacyDue {
+		// The legacy snapshot also carries artifacts and the git diff; they
+		// are packed only now that it is actually being sent.
+		err := addSnapshotExtras(snap, layout, r.Daemon.Root)
+		if err == nil {
+			err = hs.PushSnapshot(ctx, snap)
+		}
+		r.snapshotMu.Lock()
+		if err == nil {
+			legacyT.succeed()
+			published = true
+		}
+		r.snapshotMu.Unlock()
+		if err != nil && ctx.Err() == nil {
+			r.snapshotMu.Lock()
+			permanent := legacyT.fail(now, err, stamp, size)
+			r.snapshotMu.Unlock()
+			logPublishFailure("push legacy snapshot", sessionID, err, permanent, legacyT)
+		}
+	}
+	if !published {
 		return
 	}
 	r.snapshotMu.Lock()
@@ -691,12 +800,10 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 		r.sessionHarness = map[string]string{}
 	}
 	r.sessionHarness[sessionID] = harness
-	if stamp != "" {
-		if r.lastSnapshotStamp == nil {
-			r.lastSnapshotStamp = map[string]string{}
-		}
-		r.lastSnapshotStamp[sessionID] = stamp
+	if r.lastSnapshotStamp == nil {
+		r.lastSnapshotStamp = map[string]string{}
 	}
+	r.lastSnapshotStamp[sessionID] = stamp
 	if r.lastSnapshotUpload == nil {
 		r.lastSnapshotUpload = map[string]time.Time{}
 	}
@@ -825,6 +932,11 @@ func (r *Runtime) httpStore() (*HTTPMemoryStore, bool) {
 func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID, harness string, batch []Event, interceptor []ToolEvent) {
 	hs, ok := r.httpStore()
 	if !ok || hs == nil || strings.TrimSpace(hs.ProjectID) == "" {
+		return
+	}
+	// The server keys operations by the cloud session UUID; without one
+	// (the mirror failed) a native id such as "ses_..." can never be stored.
+	if !isStrictUUID(strings.TrimSpace(sessionID)) {
 		return
 	}
 	harness = normalizeHarness(harness)

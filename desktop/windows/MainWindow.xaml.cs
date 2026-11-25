@@ -68,6 +68,9 @@ public sealed partial class MainWindow : Window
         TrayQuitCommand = new AsyncRelayCommand(QuitAsync);
         TrayReportCommand = new RelayCommand(() => { RestoreWindow(); ShowReportProblem(); });
         InitializeComponent();
+        // One memory line a minute in the desktop log (Core/Diagnostics/DesktopMemoryLog.cs).
+        Nexus.Core.Diagnostics.UiStats.Sidebar = () => (_chatEntries.Count, _chatRows.Count);
+        Nexus.Core.Diagnostics.DesktopMemoryLog.Start(DispatcherQueue);
         ProjectSelector.SelectionChanged += ProjectSelector_SelectionChanged;
         _projectCompactFlyout = new MenuFlyout();
         _projectCompactFlyout.Opening += (_, _) => RebuildCompactProjectFlyout();
