@@ -932,7 +932,15 @@ public sealed partial class MainWindow : Window
         try
         {
             NxResponse response;
-            try { response = await FetchChatsAsync(filter, query, "", cts.Token); }
+            try
+            {
+                var fetch = FetchChatsAsync(filter, query, "", cts.Token);
+                // No answer yet after a few seconds: check the server now
+                // instead of at the next heartbeat. If it is down, the
+                // connectivity change updates this list (ApplyConnectivity).
+                if (await Task.WhenAny(fetch, Task.Delay(ChatListRetry.FirstAnswer)) != fetch) Connectivity.ProbeNow();
+                response = await fetch;
+            }
             catch (OperationCanceledException) { return; }
             await UiThread.Resume(DispatcherQueue);
             if (version != _chatLoadVersion) return;
@@ -945,7 +953,7 @@ public sealed partial class MainWindow : Window
                 // a slow or briefly unreachable server doesn't leave the
                 // project's earlier chats missing for good.
                 var attempt = _chatRetryKey == key ? _chatRetryAttempt : 0;
-                var wait = ChatListRetry.NextDelay(attempt);
+                var wait = ChatListRetry.ShouldRetry(response.RawError) ? ChatListRetry.NextDelay(attempt) : null;
                 _chatRetryKey = key;
                 _chatRetryAttempt = attempt + 1;
                 _chatStatus = ChatListRetry.Status(filter.Length > 0, VisibleChatCount(_chatEntries), NxErrors.IsUnreachable(response.RawError), wait is not null, response.Error);
@@ -1910,6 +1918,13 @@ public sealed partial class MainWindow : Window
         _retryNow.Content = signedOut ? "Sign in" : "Try now";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_retryNow, signedOut ? "Sign in to Nexus" : "Try to reconnect now");
         OfflineBar.IsOpen = offline && _setup is null;
+        // A first chat request still waiting on a server that turned out to
+        // be down: show the outage now, not "Loading" until it times out.
+        if (offline && _chatLoading && VisibleChatCount(_chatEntries) == 0 && _chatStatus.Length == 0)
+        {
+            _chatStatus = signedOut ? NxErrors.SignedOutMessage : ChatListRetry.UnreachableEmpty;
+            RenderChats();
+        }
         if (_wasOffline && !offline) OnReconnected();
         _wasOffline = offline;
     }
