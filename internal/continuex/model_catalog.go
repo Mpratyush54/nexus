@@ -95,7 +95,7 @@ func DiscoverHarnessModels(ctx context.Context, agent string, refresh bool) (Har
 	agent = normalizeAgent(agent)
 	status := DetectHarness(agent)
 	catalog := HarnessModelCatalog{Agent: agent}
-	if !status.Installed {
+	if status.Executable == "" {
 		if agent == "claude" {
 			catalog = claudeStaticModels(status.Problem)
 			catalog.normalize()

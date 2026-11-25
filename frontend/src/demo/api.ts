@@ -149,7 +149,7 @@ const GET: [RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
   }],
   [/^\/v1\/sharing\/recipients$/, () => ok({ people: people.map((p) => ({ user_id: p.id, name: p.name, project_role: p.id === ME.id ? 'owner' : 'member', organization_role: 'member' })) })],
   // A fresh last_seen_at keeps the sample laptop "online" (the app treats >45 s as offline).
-  [/^\/v1\/desktop\/devices$/, () => list([{ id: DEMO_DEVICE, name: 'MAYA-LAPTOP', projects: PROJECTS.map((p) => p.id), harnesses: ['claude', 'codex', 'cursor', 'opencode'], last_seen_at: new Date().toISOString() }])],
+  [/^\/v1\/desktop\/devices$/, () => list([{ id: DEMO_DEVICE, name: 'MAYA-LAPTOP', projects: PROJECTS.map((p) => p.id), harnesses: ['claude', 'codex', 'cursor', 'opencode'], last_seen_at: new Date().toISOString(), protocol: 2 }])],
   [/^\/v1\/desktop\/jobs\/([^/]+)$/, (m) => { const j = demoJob(m[1]); return j ? ok(j) : missing() }],
   [/^\/v1\/teleports\/inbox$/, () => list([{ id: 'tp-1', session_id: CHATS[7].card.session_id, from_user_id: USERS.priya.id, to_user_id: ME.id, status: 'pending', preview: 'Explain the payment state machine', created_at: ago(3 * 3600000) }])],
   [/^\/v1\/teleports\/sent$/, () => list([])],
@@ -247,7 +247,11 @@ const WRITE: [string, RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
   ['POST', /^\/v1\/desktop\/jobs$/, (_m, r) => {
     const body = (r.body ?? {}) as Partial<DemoJobRequest>
     if (!body.id || !body.device_id || !body.kind) return { status: 400, body: { error: { code: 400, message: 'Missing request fields' } } }
-    jobs.set(body.id, { req: body as DemoJobRequest, started: Date.now() })
+    // Like the server: images are checked, and their bytes are kept out of every later read.
+    const attachments = (body.attachments ?? []).map((a) => ({ name: a.name, media_type: a.media_type, size: Math.floor(((a.data?.length ?? 0) * 3) / 4) }))
+    if (attachments.length > 4) return { status: 400, body: { error: { code: 400, message: 'attach at most 4 images' } } }
+    if (attachments.some((a) => a.size > 5 * 1024 * 1024)) return { status: 400, body: { error: { code: 400, message: 'each image must be 5 MB or smaller' } } }
+    jobs.set(body.id, { req: { ...(body as DemoJobRequest), attachments }, started: Date.now() })
     return ok(demoJob(body.id))
   }],
   ['POST', /^\/v1\/desktop\/jobs\/([^/]+)\/cancel$/, (m) => {
@@ -274,7 +278,8 @@ const CHAT_MEMORY_KEYS: Record<string, string[]> = {
   'Show a retry notice on the checkout page': ['checkout/retry-notice'],
   'Tidy cart reducer types': ['cart/reducer-types'],
 }
-type DemoJobRequest = { id: string; device_id: string; project_id: string; session_id: string; kind: 'turn' | 'models'; agent: string; model?: string; prompt?: string }
+type DemoAttachment = { name: string; media_type: string; data?: string; size?: number }
+type DemoJobRequest = { id: string; device_id: string; project_id: string; session_id: string; kind: 'turn' | 'models'; agent: string; model?: string; prompt?: string; attachments?: DemoAttachment[] }
 const jobs = new Map<string, { req: DemoJobRequest; started: number; cancelledAt?: number }>()
 
 /** A scripted run on the sample laptop, advanced by wall-clock time since it was sent. */
@@ -295,7 +300,7 @@ export function demoJob(id: string) {
   if (!j) return undefined
   const { req } = j
   const now = Date.now()
-  const base = { id, device_id: req.device_id, session_id: req.session_id, project_id: req.project_id, kind: req.kind, agent: req.agent, model: req.model, prompt: req.prompt }
+  const base = { id, device_id: req.device_id, session_id: req.session_id, project_id: req.project_id, kind: req.kind, agent: req.agent, model: req.model, prompt: req.prompt, attachments: req.attachments?.length ? req.attachments : undefined }
   if (req.kind === 'models') {
     return { ...base, state: 'completed', revision: 2, status: 'Done', result: { items: [{ id: 'default', name: 'Default model' }, { id: 'fast', name: 'Faster model' }] } }
   }
@@ -312,7 +317,8 @@ export function demoJob(id: string) {
     const done = activities.filter((a) => a.status === 'completed')
     return { ...base, state: 'cancelled', revision: step + 2, status: 'Stopped', text: '', activities: done }
   }
-  const reply = 'Done. I made the change in `src/payments/retry.ts` and ran the payment tests: all 12 pass.\n\n_This is a sample reply from the demo laptop._'
+  const seen = req.attachments?.length ? `I looked at the ${req.attachments.length === 1 ? 'screenshot' : `${req.attachments.length} images`} you sent: the Pay button overlaps the footer below 400px. ` : ''
+  const reply = seen + 'Done. I made the change in `src/payments/retry.ts` and ran the payment tests: all 12 pass.\n\n_This is a sample reply from the demo laptop._'
   const text = step >= 6 ? reply : step >= 4 ? 'Working on it…' : ''
   return {
     ...base,

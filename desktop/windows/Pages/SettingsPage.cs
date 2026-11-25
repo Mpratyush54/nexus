@@ -187,7 +187,7 @@ public sealed partial class SettingsPage : NexusPage
         catch (Exception ex)
         {
             Nexus.Core.Diagnostics.DiagLog.Warn("auth", "could not open the sign-in page", ex);
-            Notify("Could not open the browser: " + ex.Message, true);
+            Notify(NxErrors.ForException("Nexus couldn't open your browser. Try again.", ex, "settings"), true);
         }
     }
 

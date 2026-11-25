@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,6 +47,7 @@ func (c Client) Call(ctx context.Context, method, path string, body, out any) er
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("X-Nexus-Desktop-Key", c.Key)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(ProtocolHeader, strconv.Itoa(ProtocolVersion))
 	client := c.HTTP
 	if client == nil {
 		client = &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
@@ -62,11 +64,16 @@ func (c Client) Call(ctx context.Context, method, path string, body, out any) er
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return &HTTPError{Status: resp.StatusCode}
 	}
-	data, e := io.ReadAll(io.LimitReader(resp.Body, 2<<20+1))
+	// A claimed job can carry its images; every other answer stays small.
+	limit := int64(2 << 20)
+	if strings.HasSuffix(path, "/claim") {
+		limit = MaxClaimResponseBytes
+	}
+	data, e := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if e != nil {
 		return e
 	}
-	if len(data) > 2<<20 {
+	if int64(len(data)) > limit {
 		return fmt.Errorf("desktop channel response too large")
 	}
 	if out == nil {

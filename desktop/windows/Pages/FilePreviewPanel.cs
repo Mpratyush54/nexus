@@ -122,7 +122,7 @@ internal sealed class FilePreviewPanel : UserControl
         var roots = await KnownFolders.GetAsync();
         FileRefResolution result;
         try { result = await Task.Run(() => Resolve(reference, workspace, roots)); }
-        catch (Exception ex) { if (generation == _generation) Status("Could not look up this file: " + ex.Message); return; }
+        catch (Exception ex) { if (generation == _generation) Status(NxErrors.ForException("Nexus couldn't find this file. It may have moved.", ex, "files")); return; }
         if (generation != _generation) return;
         switch (result.Status)
         {
@@ -202,7 +202,7 @@ internal sealed class FilePreviewPanel : UserControl
         try { read = await Task.Run(() => Read(file)); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            if (generation == _generation) Status("Could not read this file: " + ex.Message);
+            if (generation == _generation) Status(NxErrors.ForException("Nexus couldn't open this file. Check that it isn't locked by another app.", ex, "files"));
             return;
         }
         if (generation != _generation) return;

@@ -59,13 +59,11 @@ const maxHeadlessOutput = 2 << 20
 
 // AllowedImage validates local files before passing them to a harness CLI.
 func AllowedImage(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".png", ".jpg", ".jpeg", ".webp":
-	default:
+	if !imageExtensionAllowed(path) {
 		return false
 	}
 	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() && info.Size() > 0 && info.Size() <= 20<<20
+	return err == nil && info.Mode().IsRegular() && info.Size() > 0 && info.Size() <= MaxLocalImageBytes
 }
 
 func (e HeadlessExecutor) Turn(ctx context.Context, plan LaunchPlan, workspace string) (string, error) {
@@ -92,20 +90,20 @@ func (HeadlessExecutor) TurnStreaming(ctx context.Context, plan LaunchPlan, work
 	}
 	defer func() { <-headlessTurnSlot }()
 	if plan.Mode != "here" || len(plan.Argv) == 0 {
-		return TurnOutput{}, errors.New("this agent cannot continue inside Nexus")
+		return TurnOutput{}, fmt.Errorf("%s can't reply inside Nexus yet", AgentDisplayName(plan.Agent))
 	}
 	if !SupportsHere(plan.Agent) {
-		return TurnOutput{}, fmt.Errorf("%s does not offer a supported headless reply in Nexus yet", plan.Agent)
+		return TurnOutput{}, fmt.Errorf("%s can't reply inside Nexus yet", AgentDisplayName(plan.Agent))
 	}
 	if strings.TrimSpace(workspace) == "" {
-		return TurnOutput{}, errors.New("select the original workspace before continuing here")
+		return TurnOutput{}, errors.New("Choose this chat's project folder before sending")
 	}
 	info, err := os.Stat(workspace)
 	if err != nil || !info.IsDir() {
-		return TurnOutput{}, errors.New("the original workspace is not available on this machine")
+		return TurnOutput{}, errors.New("This chat's project folder isn't on this computer. Choose a folder that is, then send again")
 	}
-	if _, err := exec.LookPath(plan.Argv[0]); err != nil {
-		return TurnOutput{}, fmt.Errorf("%s is not installed or is not on PATH", plan.Argv[0])
+	if _, err := lookAgent(plan.Argv[0]); err != nil {
+		return TurnOutput{}, agentErrorf(plan.Agent, "not_installed", "%s is not installed or is not on PATH", plan.Argv[0])
 	}
 	if onProgress != nil {
 		onProgress(StreamProgress{Kind: "status", Text: "Preparing workspace and agent…"})
@@ -133,16 +131,28 @@ func (HeadlessExecutor) TurnStreaming(ctx context.Context, plan LaunchPlan, work
 		if streamErr == nil {
 			result.ChangedFiles = workspaceChanges(beforeFiles, workspaceSnapshot(workspace))
 		}
-		return result, streamErr
+		if isOpenCodePreflightError(streamErr) {
+			var ae *AgentError
+			if !errors.As(streamErr, &ae) {
+				ae = &AgentError{Agent: normalizeAgent(plan.Agent), Kind: "cannot_start", Detail: streamErr.Error()}
+			}
+			return result, ae
+		}
+		return result, AsAgentError(plan.Agent, "failed", streamErr)
 	}
 	workerCtx, stopWorker := context.WithCancelCause(turnCtx)
 	defer stopWorker(nil)
-	cmd, err := commandForInAppTurn(workerCtx, plan, exec.LookPath)
+	cmd, err := commandForInAppTurn(workerCtx, plan, lookAgent)
 	if err != nil {
 		return TurnOutput{}, err
 	}
 	cmd.Dir = workspace
 	cmd.Stdin = nil
+	if len(plan.Stdin) > 0 {
+		// Claude reads image content blocks as one stream-json message; EOF
+		// right after it ends the turn, so nothing can wait for more input.
+		cmd.Stdin = bytes.NewReader(plan.Stdin)
+	}
 	cmd.WaitDelay = 3 * time.Second
 	var stderr cappedOutput
 	var progressLock sync.Mutex
@@ -159,13 +169,13 @@ func (HeadlessExecutor) TurnStreaming(ctx context.Context, plan LaunchPlan, work
 	cmd.Stdout = &harnessDiagnosticOutput{destination: stdout, agent: plan.Agent, onFailure: fail, onProgress: progress}
 	cmd.Stderr = &harnessDiagnosticOutput{destination: &stderr, agent: plan.Agent, stderr: true, onFailure: fail, onProgress: progress}
 	if onProgress != nil {
-		progress(StreamProgress{Kind: "status", Text: "Starting " + normalizeAgent(plan.Agent) + "…"})
+		progress(StreamProgress{Kind: "status", Text: "Starting " + AgentDisplayName(plan.Agent) + "…"})
 	}
 	if err := cmd.Start(); err != nil {
-		return TurnOutput{}, fmt.Errorf("could not start %s: %w", plan.Agent, err)
+		return TurnOutput{}, agentErrorf(plan.Agent, "cannot_start", "could not start %s: %v", plan.Agent, err)
 	}
 	if onProgress != nil {
-		progress(StreamProgress{Kind: "status", Text: "Agent started · waiting for a response…"})
+		progress(StreamProgress{Kind: "status", Text: AgentDisplayName(plan.Agent) + " is working on a reply…"})
 	}
 	waitErr := cmd.Wait()
 	if cause, ok := context.Cause(workerCtx).(*harnessFailure); ok {
@@ -173,23 +183,23 @@ func (HeadlessExecutor) TurnStreaming(ctx context.Context, plan LaunchPlan, work
 	}
 	if waitErr != nil {
 		if turnCtx.Err() != nil {
-			return TurnOutput{}, fmt.Errorf("agent timed out: %w", turnCtx.Err())
+			return TurnOutput{}, agentErrorf(plan.Agent, "timeout", "agent timed out: %v", turnCtx.Err())
 		}
 		problem := activityDetail(stderr.String(), 500)
 		if problem == "" {
 			problem = waitErr.Error()
 		}
-		return TurnOutput{}, fmt.Errorf("agent could not continue: %s", problem)
+		return TurnOutput{}, agentErrorf(plan.Agent, "failed", "agent could not continue: %s", problem)
 	}
 	stdout.Flush()
 	if stdout.truncated {
-		return TurnOutput{}, errors.New("agent reply exceeded the in-app display limit; open its native session to read the full output")
+		return TurnOutput{}, fmt.Errorf("%s's reply is too long to show here. Open the chat in %s itself to read all of it", AgentDisplayName(plan.Agent), AgentDisplayName(plan.Agent))
 	}
 	if answer := readableAgentOutput(stdout.String()); answer != "" {
 		return TurnOutput{Text: answer, NativeID: nativeIDFromAgentOutput(stdout.String()),
 			ChangedFiles: mergeChangedPaths(workspaceChanges(beforeFiles, workspaceSnapshot(workspace)), stdout.cursor.changedPaths())}, nil
 	}
-	return TurnOutput{}, errors.New("agent finished without a readable reply; check its native session")
+	return TurnOutput{}, agentErrorf(plan.Agent, "empty", "agent finished without a readable reply")
 }
 
 // streamingOutput scans only complete JSONL records. Tool details use a
@@ -387,7 +397,14 @@ func nativeIDFromAgentOutput(raw string) string {
 // visible cmd.exe. Resolve the installed native executable instead. Never
 // interpolate user prompts into a command shell.
 func directExecutable(path, agent string) (string, []string, error) {
-	if runtime.GOOS != "windows" || !strings.EqualFold(filepath.Ext(path), ".cmd") {
+	if runtime.GOOS != "windows" {
+		return path, nil, nil
+	}
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".cmd", ".bat", ".ps1", "":
+	case ".exe":
+		return resolveShim(path, agentBinary(agent)) // scoop .shim targets
+	default:
 		return path, nil, nil
 	}
 	dir := filepath.Dir(path)
@@ -477,12 +494,31 @@ func directExecutable(path, agent string) (string, []string, error) {
 			}
 		}
 	}
+	// Any other launcher (npm, pnpm, yarn, scoop, ps1/sh scripts): read it
+	// to find the program behind it, or the Node entry point to run.
+	if exe, prefix, err := resolveShim(path, agentBinary(agent)); err == nil {
+		return exe, prefix, nil
+	}
 	if exe := base + ".exe"; exe != path {
 		if _, err := os.Stat(exe); err == nil {
 			return exe, nil, nil
 		}
 	}
-	return "", nil, fmt.Errorf("%s is installed only as a shell shim; its native executable was not found", agent)
+	if strings.EqualFold(filepath.Ext(path), ".bat") {
+		// A hand-written batch file is the program itself; Windows runs it.
+		return path, nil, nil
+	}
+	return "", nil, &launcherError{agent: normalizeAgent(agent), path: path}
+}
+
+// agentBinary is the command an agent is started with.
+func agentBinary(agent string) string {
+	switch a := normalizeAgent(agent); a {
+	case "cursor", "agent":
+		return "cursor-agent"
+	default:
+		return a
+	}
 }
 
 // SupportsHere is deliberately narrower than native resume. Some vendors

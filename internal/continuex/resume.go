@@ -5,6 +5,7 @@
 package continuex
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"unicode"
@@ -27,6 +28,9 @@ type LaunchPlan struct {
 	Mode   string   `json:"mode"` // here | open_in_agent
 	Native bool     `json:"native"`
 	Argv   []string `json:"argv"`
+	// Stdin, when set, is written to the process and then closed (Claude
+	// messages with image content blocks). Never shown as a command.
+	Stdin []byte `json:"-"`
 }
 
 // SeededPlan starts a fresh local chat with captured context. Captured vendor
@@ -57,7 +61,7 @@ func SeededPlanTrusted(agent, prompt, context string, images []string, trustWork
 		argv = append(argv, seed)
 	case "cursor", "agent":
 		if len(images) != 0 {
-			return LaunchPlan{}, errors.New("Cursor CLI image attachments are not supported here")
+			return LaunchPlan{}, errors.New("Cursor can't take images in Nexus yet. Remove the image, or pick another agent")
 		}
 		argv = []string{"cursor-agent", "--disable-auto-update", "-p", "--output-format", "stream-json", "--stream-partial-output"}
 		if trustWorkspace {
@@ -72,11 +76,22 @@ func SeededPlanTrusted(agent, prompt, context string, images []string, trustWork
 		argv = append(argv, seed)
 	case "claude":
 		if len(images) != 0 {
-			return LaunchPlan{}, errors.New("Claude image attachments are not supported here")
+			// Claude Code -p has no image flag: the message, with base64
+			// image content blocks, goes in as stream-json on stdin.
+			message, err := ClaudeUserMessage(seed, images)
+			if err != nil {
+				return LaunchPlan{}, err
+			}
+			line, err := json.Marshal(message)
+			if err != nil {
+				return LaunchPlan{}, err
+			}
+			argv = []string{"claude", "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
+			return LaunchPlan{Agent: agent, Mode: "here", Native: false, Argv: argv, Stdin: append(line, byte(10))}, nil
 		}
 		argv = []string{"claude", "-p", seed, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
 	default:
-		return LaunchPlan{}, errors.New("continue: no in-app chat driver for " + agent)
+		return LaunchPlan{}, errors.New(AgentDisplayName(agent) + " can't reply inside Nexus yet")
 	}
 	return LaunchPlan{Agent: agent, Mode: "here", Native: false, Argv: argv}, nil
 }
@@ -90,10 +105,10 @@ func WithModel(plan LaunchPlan, model string) (LaunchPlan, error) {
 	}
 	if len(model) > 160 || strings.HasPrefix(model, "-") || strings.IndexFunc(model, unicode.IsSpace) >= 0 ||
 		strings.IndexFunc(model, unicode.IsControl) >= 0 {
-		return LaunchPlan{}, errors.New("continue: invalid model name")
+		return LaunchPlan{}, errors.New("That model name isn't valid. Pick a model from the list")
 	}
 	if normalizeAgent(plan.Agent) == "opencode" && !strings.Contains(model, "/") {
-		return LaunchPlan{}, errors.New("OpenCode model must be provider/model")
+		return LaunchPlan{}, errors.New("Choose an OpenCode model written as provider/model, for example anthropic/claude-sonnet-4")
 	}
 	if len(plan.Argv) == 0 {
 		return LaunchPlan{}, errors.New("continue: empty launch plan")

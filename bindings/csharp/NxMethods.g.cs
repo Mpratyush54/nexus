@@ -30,8 +30,11 @@ namespace Nexus.Core
         public const string FilesDiff = "files.diff";
         public const string ContinueStart = "continue.start";
         public const string HarnessStatus = "harness.status";
+        public const string HarnessAvailable = "harness.available";
         public const string HarnessModels = "harness.models";
         public const string ContinueHere = "continue.here";
+        public const string TranscriptImages = "transcript.images";
+        public const string TranscriptImage = "transcript.image";
         public const string ContinueCancel = "continue.cancel";
         public const string ContinueLocalList = "continue.local.list";
         public const string ContinueRecord = "continue.record";

@@ -61,7 +61,7 @@ func Locate(appDir string, look func(string) (string, error)) ([]string, error) 
 	if strings.TrimSpace(appDir) != "" {
 		where = appDir
 	}
-	return nil, fmt.Errorf("the Nexus MCP proxy (%s) is missing from %s; reinstall Nexus", BinaryName(), where)
+	return nil, fmt.Errorf("Part of Nexus is missing, so this agent couldn't be connected. Reinstall Nexus to fix it [detail: %s is missing from %s]", BinaryName(), where)
 }
 
 func absPath(p string) string {

@@ -155,6 +155,11 @@ public sealed partial class MainWindow : Window
         // A crash in an earlier run left a report: ask once the window is up
         // (not over the setup guide, not while hidden in the tray).
         Activated += (_, _) => DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, OfferCrashReports);
+        // Agents installed or signed in while Nexus was in the background show
+        // up in the pickers when the window comes back (checked off the UI thread).
+        // (Compared as numbers: Uno types the state as CoreWindowActivationState,
+        // which has the same values.)
+        Activated += (_, e) => { if ((int)e.WindowActivationState != (int)WindowActivationState.Deactivated) AgentAvailabilityService.Refresh(); };
     }
 
     private bool _crashOfferDone;
@@ -355,7 +360,7 @@ public sealed partial class MainWindow : Window
             DiagLog.Error("startup", "shell initialisation failed", ex);
             if (_chatEntries.Count == 0)
             {
-                _chatStatus = "Could not finish loading the shell. Retrying next time the window is activated. " + ex.Message;
+                _chatStatus = NxErrors.ForException("Nexus couldn't finish starting. It tries again when you come back to this window.", ex, "startup");
                 RenderChats();
             }
         }
@@ -929,13 +934,20 @@ public sealed partial class MainWindow : Window
             System.Diagnostics.Trace.WriteLine($"[perf] chats: server answer {watch.ElapsedMilliseconds} ms (ok={response.Ok})");
             if (!response.Ok)
             {
-                // Unreachable: the banner says so once; the list keeps what it has.
-                _chatStatus = NxErrors.IsUnreachable(response.RawError)
-                    ? (_chatEntries.Count > 0 ? "" : "Your chats appear here when Nexus reconnects.")
-                    : response.Error ?? "Could not load chats.";
+                // What is on screen may be only a preview (this project's
+                // chats found in the all-projects list). Say so and retry, so
+                // a slow or briefly unreachable server doesn't leave the
+                // project's earlier chats missing for good.
+                var attempt = _chatRetryKey == key ? _chatRetryAttempt : 0;
+                var wait = ChatListRetry.NextDelay(attempt);
+                _chatRetryKey = key;
+                _chatRetryAttempt = attempt + 1;
+                _chatStatus = ChatListRetry.Status(filter.Length > 0, VisibleChatCount(_chatEntries), NxErrors.IsUnreachable(response.RawError), wait is not null, response.Error);
                 RenderChats();
+                if (wait is { } delay) _ = RetryChatsAsync(key, delay);
                 return;
             }
+            if (_chatRetryKey == key) { _chatRetryKey = ""; _chatRetryAttempt = 0; }
             var entries = new List<ChatPaneEntry>();
             AppendChats(response, filter, entries);
             var cursor = response.Result is { } result ? NxJson.Text(result, "next_cursor") : "";
@@ -973,6 +985,18 @@ public sealed partial class MainWindow : Window
             }
             FinishChatLoading(version);
         }
+    }
+
+    private string _chatRetryKey = "";
+    private int _chatRetryAttempt;
+
+    private async Task RetryChatsAsync(string key, TimeSpan delay)
+    {
+        await Task.Delay(delay);
+        await UiThread.Resume(DispatcherQueue);
+        // Only while the same project and search are still on screen.
+        if (ChatCacheKey(_projectFilter, ChatQuery) != key || _chatRetryKey != key) return;
+        await LoadChatsAsync();
     }
 
     private void StoreChatCache(string key, List<ChatPaneEntry> entries, string cursor)
@@ -1763,6 +1787,21 @@ public sealed partial class MainWindow : Window
             var model = NxJson.Text(body, "model");
             content.Children.Add(new TextBlock { Text = "Model: " + (model.Length > 0 ? model : "the agent's default"), TextWrapping = TextWrapping.Wrap });
             content.Children.Add(new ScrollViewer { MaxHeight = 240, Content = new TextBlock { Text = prompt, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } });
+            // Images sent from the browser, already checked and saved here:
+            // shown before anything runs so the person sees what goes in.
+            if (body.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array && images.GetArrayLength() > 0)
+            {
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+                foreach (var image in images.EnumerateArray().Take(4))
+                {
+                    var path = image.GetString() ?? "";
+                    if (path.Length == 0 || !System.IO.File.Exists(path)) continue;
+                    var bitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage { DecodePixelWidth = 144, UriSource = new Uri(path) };
+                    row.Children.Add(new Border { Width = 72, Height = 72, CornerRadius = new CornerRadius(8), Child = new Image { Source = bitmap, Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill } });
+                }
+                content.Children.Add(new TextBlock { Text = images.GetArrayLength() == 1 ? "With 1 image:" : $"With {images.GetArrayLength()} images:", Opacity = 0.75 });
+                content.Children.Add(row);
+            }
             content.Children.Add(new TextBlock { Text = "Allowing this turn lets the agent read and modify this workspace using its installed permissions. Approval applies only to this message.", TextWrapping = TextWrapping.Wrap });
             _desktopApproval = new ContentDialog { Title = "Allow browser request?", Content = content, PrimaryButtonText = "Allow this turn", CloseButtonText = "Decline", DefaultButton = ContentDialogButton.Close, XamlRoot = Content.XamlRoot };
             var answer = await _desktopApproval.ShowThemedAsync();

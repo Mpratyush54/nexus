@@ -77,7 +77,7 @@ public sealed partial class SessionPage : NexusPage
     private readonly TextBox _prompt = new() { PlaceholderText = "Ask anything…", AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 68, MaxHeight = 160 };
     private readonly Button _sendHere = new() { Content = "Send ↗" };
     private readonly Button _cancelHere = new() { Content = "Stop", Visibility = Visibility.Collapsed };
-    private readonly Button _attachImage = Named(new Button { Padding = new Thickness(8), MinWidth = 36, MinHeight = 36 }, "Attach an image");
+    private readonly Button _attachImage = Named(new Button { Padding = new Thickness(8), MinWidth = 36, MinHeight = 36 }, "Attach images or files");
 
     private static T Named<T>(T element, string name) where T : DependencyObject
     {
@@ -153,11 +153,12 @@ public sealed partial class SessionPage : NexusPage
                 e.Handled = true;
                 await PasteClipboardImageAsync(content);
             }
-            catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
+            catch (Exception ex) { SetComposerStatus(NxErrors.ForException("Nexus couldn't paste that image. Try saving it and attaching the file.", ex, "attach")); }
         };
         _prompt.KeyboardAccelerators.Add(imagePaste);
         // The macOS Edit menu's Paste (and Cmd+V there) comes through this.
         Shortcuts.SetPasteHandler(_prompt, TryPasteClipboardImageAsync);
+        WireAttachmentDrop();
         _harness.SelectionChanged += (_, _) => {
             if (_lastHarness.Length > 0) _modelByHarness[_lastHarness] = SelectedModel();
             _lastHarness = SelectedHarness();
@@ -165,7 +166,7 @@ public sealed partial class SessionPage : NexusPage
             // Fill the picker in the background (cached lists return at once).
             _ = LoadHarnessModelsAsync(false, false);
             UpdateWorkspaceFlyoutVisibility();
-            if (SelectedHarness() is not ("opencode" or "codex")) ClearImageAttachments();
+            DropImagesFor(SelectedHarness());
             UpdateActions();
         };
         _harness.Padding = new Thickness(8, 3, 6, 3);
@@ -181,7 +182,7 @@ public sealed partial class SessionPage : NexusPage
         _model.MaxWidth = 260;
         _model.Padding = new Thickness(8, 3, 6, 3);
         SetModelTip("Choose a model, or type a model ID supported by the selected agent. Leave blank for its default.");
-        ToolTipService.SetToolTip(_refreshModels, "Refresh models from the selected harness (does not start a chat)");
+        ToolTipService.SetToolTip(_refreshModels, "Refresh this agent's model list (doesn't start a chat)");
         _refreshModels.Click += async (_, _) => await RefreshHarnessModelsAsync();
         _model.DropDownOpened += async (_, _) =>
         {
@@ -198,7 +199,7 @@ public sealed partial class SessionPage : NexusPage
         _model.TextSubmitted += (_, _) => DispatcherQueue.TryEnqueue(RememberModelChoice);
         _model.LostFocus += (_, _) => RememberModelChoice();
         _attachImage.Content = new FontIcon { Glyph = "\uE723", FontSize = 15, Opacity = 0.72 };
-        ToolTipService.SetToolTip(_attachImage, "Attach image");
+        ToolTipService.SetToolTip(_attachImage, "Attach images or files" + Environment.NewLine + "You can also paste (Ctrl+V) or drop them here.");
         _attachImage.Padding = new Thickness(6);
         _attachImage.MinWidth = 32;
         _attachImage.MinHeight = 32;
@@ -541,8 +542,8 @@ public sealed partial class SessionPage : NexusPage
         root.Children.Add(head);
         root.Children.Add(body);
         Content = root;
-        Loaded += (_, _) => { ShellState.Changed += HandleShellChanged; App.Core.EventReceived += HandleCoreEvent; UpdateActions(); };
-        Unloaded += (_, _) => { ShellState.Changed -= HandleShellChanged; App.Core.EventReceived -= HandleCoreEvent; _ = CloseLiveAsync(); };
+        Loaded += (_, _) => { ShellState.Changed += HandleShellChanged; App.Core.EventReceived += HandleCoreEvent; UpdateActions(); AgentAvailabilityService.Changed += OnAgentsChanged; AgentAvailabilityService.Refresh(); };
+        Unloaded += (_, _) => { ShellState.Changed -= HandleShellChanged; App.Core.EventReceived -= HandleCoreEvent; AgentAvailabilityService.Changed -= OnAgentsChanged; _ = CloseLiveAsync(); };
         UpdateActions();
     }
 
@@ -843,9 +844,10 @@ public sealed partial class SessionPage : NexusPage
         {
             Nexus.Core.Diagnostics.DiagLog.Error("page", "chat render failed", ex);
             _chat.Children.Clear();
-            _chat.Children.Add(Line("Could not render this conversation: " + ex.Message));
+            _chat.Children.Add(Line(NxErrors.ForException("Nexus couldn't show this conversation. Reopen it to try again.", ex, "chat")));
         }
         _paintedAt = Environment.TickCount64;
+        _ = LoadTranscriptImagesAsync();
         _ = RefreshSubagentCountAsync();
         // A sub-agent chat with no meta description is named from its first
         // request, which exists only now.
@@ -1310,7 +1312,7 @@ public sealed partial class SessionPage : NexusPage
             catch (Exception ex)
             {
                 Nexus.Core.Diagnostics.DiagLog.Error("page", "earlier turns render failed", ex);
-                _chat.Children.Insert(ChatContentInsertIndex(), Line("Could not render earlier turns: " + ex.Message));
+                _chat.Children.Insert(ChatContentInsertIndex(), Line(NxErrors.ForException("Nexus couldn't show the earlier messages. Scroll up again to retry.", ex, "chat")));
             }
             if (_olderCursor.Length == 0) DiscardUnshownCommands();
             UpdateEarlierTurnsButton();
@@ -1360,7 +1362,7 @@ public sealed partial class SessionPage : NexusPage
             {
                 Nexus.Core.Diagnostics.DiagLog.Error("page", "earlier turns render failed", ex);
                 _earlierPageIndex++;
-                _chat.Children.Insert(ChatContentInsertIndex(), Line("Could not render earlier turns: " + ex.Message));
+                _chat.Children.Insert(ChatContentInsertIndex(), Line(NxErrors.ForException("Nexus couldn't show the earlier messages. Scroll up again to retry.", ex, "chat")));
             }
         }
         UpdateEarlierTurnsButton();
@@ -1689,13 +1691,14 @@ public sealed partial class SessionPage : NexusPage
             empty.Tag = EmptyChatTag;
             AddChatElement(empty);
         }
+        PlaceTranscriptImages();
     }
 
     private void RenderSavedContinuations(NxResponse response, bool cloudTurnsAvailable, bool appendContext = true)
     {
         if (!response.Ok)
         {
-            SetComposerStatus("Saved Nexus replies could not be loaded: " + (response.Error ?? "unknown error"));
+            SetComposerStatus(response.Error is { Length: > 0 } why && !why.StartsWith(NxErrors.GenericFailure, StringComparison.Ordinal) ? why : "Nexus couldn't load the replies it saved for this chat. Reopen the chat to try again.");
             return;
         }
         var saved = NxJson.Items(response.Result).ToList();
@@ -1822,6 +1825,7 @@ public sealed partial class SessionPage : NexusPage
         {
             _chat.Children.Insert(insertAt++, element);
         }
+        PlaceTranscriptImages();
     }
 
     private const string EmptyChatTag = "empty-chat";
@@ -2356,10 +2360,10 @@ public sealed partial class SessionPage : NexusPage
         if (XamlRoot is null) return false;
         var dialog = new ContentDialog
         {
-            Title = "Allow Cursor CLI in this folder?",
+            Title = "Allow Cursor in this folder?",
             Content = new TextBlock
             {
-                Text = "Cursor CLI can read files and run commands in:\n" + normalized +
+                Text = "Cursor can read files and run commands in:\n" + normalized +
                        "\n\nOnly allow this for a project you trust. Nexus will remember your choice until the app closes.",
                 TextWrapping = TextWrapping.Wrap,
                 IsTextSelectionEnabled = true
@@ -2477,16 +2481,8 @@ public sealed partial class SessionPage : NexusPage
             var exists = path.Length > 0 && SafeFileExists(path);
             if (attachment.IsImage && exists)
             {
-                var bitmap = new BitmapImage { DecodePixelWidth = 128, UriSource = new Uri(System.IO.Path.GetFullPath(path)) };
-                var thumb = new Border
-                {
-                    Width = 64, Height = 64, CornerRadius = new CornerRadius(8),
-                    BorderThickness = new Thickness(1), BorderBrush = NexusPalette.AccentBorder,
-                    Child = new Image { Source = bitmap, Width = 62, Height = 62, Stretch = Stretch.UniformToFill }
-                };
-                ToolTipService.SetToolTip(thumb, attachment.Label + "\n" + path);
-                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(thumb, attachment.Label);
-                row.Children.Add(thumb);
+                // Click opens it full size.
+                row.Children.Add(ChatImages.Thumbnail(path, attachment.Label));
                 continue;
             }
             var label = attachment.Label + (path.Length > 0 && !exists ? " (no longer on disk)" : "");
@@ -2887,7 +2883,7 @@ public sealed partial class SessionPage : NexusPage
         _resume.IsEnabled = _sessionLoaded && !_legacy && _nativeID.Length > 0 && _agent.Length > 0 && _agent.Trim().ToLowerInvariant() is not "cursor";
         var selected = SelectedHarness();
         _sendHere.IsEnabled = _sessionLoaded && !_legacy && SupportsInAppReply(selected) && !_sendInFlight && System.IO.Directory.Exists(_workspace.Text.Trim());
-        _attachImage.IsEnabled = _sendHere.IsEnabled && selected is "opencode" or "codex";
+        _attachImage.IsEnabled = _sendHere.IsEnabled;
         _prompt.IsEnabled = _sessionLoaded && !_legacy;
         _prompt.IsReadOnly = false;
         // Offline: the reply could not be saved, so the composer waits
@@ -2909,7 +2905,7 @@ public sealed partial class SessionPage : NexusPage
         _harness.IsEnabled = !offline;
         _model.IsEnabled = !offline;
         ToolTipService.SetToolTip(_sendHere, _legacy ? "Archived snapshots are read-only" : !System.IO.Directory.Exists(_workspace.Text.Trim()) ? "Choose a local project folder first" : "Send to " + selected + " using this project's context");
-        ToolTipService.SetToolTip(_resume, _legacy ? "Archived snapshots cannot resume natively" : _nativeID.Length == 0 ? "No native session ID was captured" : "Copies a command for an installed local agent; it does not open a terminal");
+        ToolTipService.SetToolTip(_resume, _legacy ? "Older saved chats can only be read" : _nativeID.Length == 0 ? "This chat can't be picked up in the agent itself, but you can continue it here" : "Copies a command that picks this chat up in the agent itself");
         ToolTipService.SetToolTip(_teleport, _legacy ? "Archived snapshots cannot be teleported" : !_hasTransferableVersion ? "A complete or transcript-only version is required" : _workspaceHint.Length == 0 ? "This chat has no mapped workspace to package code from" : null);
         ToolTipService.SetToolTip(_fork, _legacy ? "Archived snapshots cannot be forked" : "Clone the captured conversation into a separate chat. The next message starts a new local agent session.");
     }
@@ -2991,21 +2987,44 @@ public sealed partial class SessionPage : NexusPage
         return _harnessFitWidth = widest > 0 ? Math.Ceiling(widest + 8 + 6 + 32 + 6) : 132;
     }
 
+    // Only agents that can run here are offered (installed, startable and,
+    // where that is cheap to tell, signed in). The list refreshes in the
+    // background when the window regains focus; Settings › Agents shows the
+    // others with a "Set up" action.
     private void ConfigureHarness()
     {
-        _harness.Items.Clear();
-        var choices = new (string Name, string Value)[] { ("OpenCode", "opencode"), ("Codex", "codex"), ("Cursor", "cursor"), ("Claude Code", "claude"), ("Gemini", "gemini"), ("Kimi", "kimi") };
-        foreach (var (name, value) in choices) _harness.Items.Add(new ComboBoxItem { Content = name, Tag = value });
-        var source = _agent.Trim().ToLowerInvariant();
-        if (source is "agent" or "cursor-cli" or "cursor ide") source = "cursor";
-        if (source is "claude-code" or "claude_code") source = "claude";
-        var index = Array.FindIndex(choices, item => item.Value == source);
-        _harness.SelectedIndex = index >= 0 ? index : 1;
-        ToolTipService.SetToolTip(_harness, index >= 0
-            ? "New local continuation in " + choices[index].Name + ". The captured chat provides context; the original native session is not required."
-            : "This source harness cannot chat here yet. Codex is selected as a local fallback.");
-        SetComposerStatus(index >= 0 ? "" : "This source harness cannot chat here yet. Codex is selected as a local fallback.");
+        var source = AgentAvailability.Normalize(_agent);
+        var keep = SelectedHarness();
+        var choices = AgentAvailabilityService.PickerChoices();
+        var shown = _harness.Items.OfType<ComboBoxItem>().Select(i => i.Tag as string ?? "").ToList();
+        var pick = AgentAvailability.Choose(choices, keep.Length > 0 ? keep : source);
+        if (!shown.SequenceEqual(choices.Select(c => c.Value)))
+        {
+            _harness.Items.Clear();
+            foreach (var (value, name) in choices) _harness.Items.Add(new ComboBoxItem { Content = name, Tag = value });
+        }
+        var index = choices.ToList().FindIndex(c => c.Value == pick);
+        if (_harness.SelectedIndex != index) _harness.SelectedIndex = index;
+        _harness.PlaceholderText = choices.Count == 0 ? "No agent ready" : "Agent";
+        ToolTipService.SetToolTip(_harness, choices.Count == 0 ? AgentAvailability.NoneReady : "Agent that replies in this chat, on this computer");
+        if (keep.Length > 0 && keep == pick) return;
+        if (choices.Count == 0) { SetComposerStatus(AgentAvailability.NoneReady); return; }
+        if (source.Length > 0 && pick != source)
+        {
+            var from = AgentAvailability.DisplayName(source);
+            var to = AgentAvailability.DisplayName(pick);
+            SetComposerStatus(AgentAvailabilityService.For(source) is { Usable: false }
+                ? $"{from} isn't ready on this computer, so {to} will continue this chat."
+                : $"{from} can't continue chats in Nexus yet, so {to} will.");
+        }
+        else if (keep.Length == 0) SetComposerStatus("");
     }
+
+    private void OnAgentsChanged() => DispatcherQueue.TryEnqueue(() =>
+    {
+        if (_sendInFlight || _preparingHarness || _harness.Items.Count == 0 && _id.Length == 0) return;
+        ConfigureHarness();
+    });
 
     private static string BuildContinuationContext(JsonElement? turns, JsonElement? summary)
     {
@@ -3029,153 +3048,14 @@ public sealed partial class SessionPage : NexusPage
         return joined.Length > 6000 ? joined[^6000..] : joined;
     }
 
-    private async Task AttachImageAsync()
-    {
-        if (MainWindow.Current is not { } window) return;
-        var picker = new FileOpenPicker { SuggestedStartLocation = PickerLocationId.PicturesLibrary };
-        picker.FileTypeFilter.Add(".png"); picker.FileTypeFilter.Add(".jpg"); picker.FileTypeFilter.Add(".jpeg"); picker.FileTypeFilter.Add(".webp");
-        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(window));
-        var file = await picker.PickSingleFileAsync();
-        if (file is null) return;
-        try { await AddImageAsync(file); }
-        catch (Exception ex) { SetComposerStatus("Could not attach the image: " + ex.Message); }
-    }
-
-    private static bool ClipboardHasImage(DataPackageView content) => content.Contains(StandardDataFormats.Bitmap) ||
-        (content.Contains(StandardDataFormats.StorageItems) && !content.Contains(StandardDataFormats.Text));
-
-    private async void Prompt_Paste(object sender, TextControlPasteEventArgs e)
-    {
-        try
-        {
-            var content = Clipboard.GetContent();
-            if (!ClipboardHasImage(content)) return;
-            e.Handled = true;
-            await PasteClipboardImageAsync(content);
-        }
-        catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
-    }
-
-    /// True when the clipboard held an image and the composer took it.
-    private async Task<bool> TryPasteClipboardImageAsync()
-    {
-        try
-        {
-            var content = Clipboard.GetContent();
-            if (!ClipboardHasImage(content)) return false;
-            await PasteClipboardImageAsync(content);
-        }
-        catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
-        return true;
-    }
-
-    private async Task PasteClipboardImageAsync(DataPackageView content)
-    {
-        try
-        {
-            var hasBitmap = content.Contains(StandardDataFormats.Bitmap);
-            if (_sendInFlight) { SetComposerStatus("Wait for this reply before attaching another image."); return; }
-            if (_images.Count >= 4) { SetComposerStatus("Attach at most four images."); return; }
-            if (SelectedHarness() is not ("opencode" or "codex"))
-            {
-                SetComposerStatus("This harness does not accept images here. Choose Codex or OpenCode to attach an image.");
-                return;
-            }
-            if (hasBitmap)
-            {
-                var cachePath = System.IO.Path.Combine(Nexus.Core.ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData), "Nexus", "Chat images");
-                System.IO.Directory.CreateDirectory(cachePath);
-                var cache = await Windows.Storage.StorageFolder.GetFolderFromPathAsync(cachePath);
-                var file = await cache.CreateFileAsync("Pasted-" + Guid.NewGuid().ToString("N") + ".png");
-                using var source = await (await content.GetBitmapAsync()).OpenReadAsync();
-                var decoder = await Windows.Graphics.Imaging.BitmapDecoder.CreateAsync(source);
-                using var bitmap = await decoder.GetSoftwareBitmapAsync();
-                using (var target = await file.OpenAsync(Windows.Storage.FileAccessMode.ReadWrite))
-                {
-                    var encoder = await Windows.Graphics.Imaging.BitmapEncoder.CreateAsync(Windows.Graphics.Imaging.BitmapEncoder.PngEncoderId, target);
-                    encoder.SetSoftwareBitmap(bitmap);
-                    await encoder.FlushAsync();
-                }
-                await AddImageAsync(file);
-            }
-            else
-            {
-                foreach (var item in await content.GetStorageItemsAsync())
-                    if (item is Windows.Storage.StorageFile file && new[] { ".png", ".jpg", ".jpeg", ".webp" }.Contains(file.FileType.ToLowerInvariant()))
-                        await AddImageAsync(file);
-            }
-        }
-        catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
-    }
-
-    private async Task AddImageAsync(Windows.Storage.StorageFile file)
-    {
-        var session = _id;
-        if (_images.Count >= 4) { SetComposerStatus("Attach at most four images."); return; }
-        if (_images.Contains(file.Path, StringComparer.OrdinalIgnoreCase)) return;
-        if ((await file.GetBasicPropertiesAsync()).Size > 20 * 1024 * 1024)
-        {
-            SetComposerStatus("Choose an image smaller than 20 MB.");
-            return;
-        }
-        var bitmap = new BitmapImage();
-        using (var stream = await file.OpenAsync(Windows.Storage.FileAccessMode.Read)) await bitmap.SetSourceAsync(stream);
-        // Loading is asynchronous: do not attach into a different chat or
-        // mutate a request that has already started sending.
-        if (_id != session || _sendInFlight || SelectedHarness() is not ("codex" or "opencode")) return;
-        if (_images.Contains(file.Path, StringComparer.OrdinalIgnoreCase)) return;
-        if (_images.Count >= 4) { SetComposerStatus("Attach at most four images."); return; }
-        _images.Add(file.Path);
-        var name = System.IO.Path.GetFileName(file.Path);
-        var preview = new Grid { Width = 64, Height = 64 };
-        preview.Children.Add(new Border { CornerRadius = new CornerRadius(8), BorderThickness = new Thickness(1), BorderBrush = NexusPalette.AccentBorder, Child = new Image { Source = bitmap, Width = 62, Height = 62, Stretch = Stretch.UniformToFill } });
-        ToolTipService.SetToolTip(preview, name);
-        var remove = new Button
-        {
-            Content = new FontIcon { Glyph = "\uE711", FontSize = 10 },
-            Width = 24, Height = 24, MinWidth = 24, MinHeight = 24,
-            Padding = new Thickness(0), CornerRadius = new CornerRadius(12),
-            HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Top,
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 28, 36, 48)),
-            Foreground = new SolidColorBrush(Microsoft.UI.Colors.White),
-            BorderBrush = NexusPalette.AccentBorder, BorderThickness = new Thickness(1)
-        };
-        ToolTipService.SetToolTip(remove, "Remove " + name);
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(remove, "Remove attachment " + name);
-        remove.Click += (_, _) =>
-        {
-            if (_sendInFlight) return;
-            _images.Remove(file.Path);
-            _imagePreviews.Children.Remove(preview);
-            RefreshImageAttachments();
-            _prompt.Focus(FocusState.Programmatic);
-        };
-        preview.Children.Add(remove);
-        _imagePreviews.Children.Add(preview);
-        RefreshImageAttachments();
-    }
-
-    private void ClearImageAttachments()
-    {
-        _images.Clear();
-        _imagePreviews.Children.Clear();
-        RefreshImageAttachments();
-    }
-
-    private void RefreshImageAttachments()
-    {
-        _attachmentsLabel.Text = string.Join(" · ", _images.Select(System.IO.Path.GetFileName));
-        _attachmentStrip.Visibility = _images.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-    }
-
     private async Task SendHereAsync()
     {
         if (_sendInFlight || _preparingHarness)
         {
             return;
         }
-        var prompt = _prompt.Text.Trim();
-        if (prompt.Length == 0) { SetComposerStatus("Write a follow-up first."); return; }
+        var typed = _prompt.Text.Trim();
+        if (typed.Length == 0) { SetComposerStatus(_images.Count + _files.Count > 0 ? "Add a message to send with your attachments." : "Write a follow-up first."); return; }
         if (_viewingHistoricalPage)
         {
             await ReturnToLatestAsync();
@@ -3191,7 +3071,12 @@ public sealed partial class SessionPage : NexusPage
         AppPrefs.Data.ChatModels ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         AppPrefs.Data.ChatModels[agent] = model;
         AppPrefs.Save();
-        if (!SupportsInAppReply(agent)) { SetComposerStatus("Select a supported local harness."); return; }
+        if (!SupportsInAppReply(agent)) { SetComposerStatus("Choose an agent that can chat in Nexus: Claude Code, Codex, Cursor, OpenCode, Gemini or Kimi."); return; }
+        if (_images.Count > 0 && ComposerAttachments.ImageProblem(agent, _images[0], 1) is { } imageProblem) { SetComposerStatus(imageProblem); return; }
+        // Images go to the agent as images; other files are named by path.
+        var images = _images.ToArray();
+        var prompt = ComposerAttachments.WithFiles(typed, _files);
+        var useLive = SupportsLive(agent) && (images.Length == 0 || ComposerAttachments.SendsImagesLive(agent));
         if (!System.IO.Directory.Exists(_workspace.Text.Trim())) { SetComposerStatus("Select an existing local project folder before sending."); return; }
         ProjectFolders.Remember(_projectID, _workspace.Text.Trim());
         var preparingSession = _id;
@@ -3202,18 +3087,18 @@ public sealed partial class SessionPage : NexusPage
         {
             if (await HarnessStatusAsync(agent) is null) return;
             // One-shot Cursor runs need --trust up front; live chats ask per action instead.
-            var needsTrust = agent == "cursor" && !(SupportsLive(agent) && _images.Count == 0);
+            var needsTrust = agent == "cursor" && !useLive;
             trustWorkspace = needsTrust && await ConfirmCursorWorkspaceAsync(preparingWorkspace);
             if (needsTrust && !trustWorkspace) return;
         }
         finally { _preparingHarness = false; }
-        if (preparingSession != _id || agent != SelectedHarness() || model != SelectedModel() || preparingWorkspace != _workspace.Text.Trim() || prompt != _prompt.Text.Trim()) { SetComposerStatus("The chat, model, or message changed. Review your selection and send again."); return; }
+        if (preparingSession != _id || agent != SelectedHarness() || model != SelectedModel() || preparingWorkspace != _workspace.Text.Trim() || typed != _prompt.Text.Trim()) { SetComposerStatus("The chat, model, or message changed. Review your selection and send again."); return; }
         _sendInFlight = true;
         SetSending(true);
         SetComposerStatus("Connecting to " + agent + "…");
         // Captured IDs may originate on another device or in an IDE store that
         // the CLI cannot resume. Seed from readable chat, never from shell ops.
-        var resumeNative = _images.Count == 0 && _localNativeID.Length > 0 && string.Equals(_localNativeAgent, agent, StringComparison.OrdinalIgnoreCase);
+        var resumeNative = (images.Length == 0 || useLive) && _localNativeID.Length > 0 && string.Equals(_localNativeAgent, agent, StringComparison.OrdinalIgnoreCase);
         var resume = resumeNative ? "native" : "seeded";
         var context = resumeNative ? "" : _continuationContext;
         var nativeID = resumeNative ? _localNativeID : "";
@@ -3225,7 +3110,10 @@ public sealed partial class SessionPage : NexusPage
         var liveUserKey = "live:" + requestID;
         var liveTime = DateTimeOffset.Now.ToString("O");
         _conversation.Add(new ConversationEntry(liveUserKey, "user", prompt, liveTime, -1, _conversation.NextOrder));
-        var userBubble = IndexedChatMessage("user", prompt, liveUserKey);
+        // The bubble shows the images right away, from the same markers the
+        // saved message carries.
+        var shownPrompt = HarnessMessage.Parse(ComposerAttachments.WithImageTags(prompt, images));
+        var userBubble = IndexedChatMessage("user", shownPrompt.Text, liveUserKey, null, shownPrompt.Attachments.Count > 0 ? shownPrompt : null);
         var streamText = new TextBlock
         {
             Text = "Thinking…", TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true,
@@ -3256,9 +3144,9 @@ public sealed partial class SessionPage : NexusPage
         var hadStreamText = false;
         try
         {
-            response = SupportsLive(agent) && _images.Count == 0
-                ? await SendLiveAsync(sessionID, agent, model, prompt, _continuationContext, nativeID, _workspace.Text.Trim())
-                : await Call(NxMethods.ContinueHere, new { session_id = sessionID, project_id = _projectID, native_id = nativeID, agent, model, resume, prompt, context, images = _images.ToArray(), workspace_root = _workspace.Text.Trim(), trust_workspace = trustWorkspace, request_id = requestID });
+            response = useLive
+                ? await SendLiveAsync(sessionID, agent, model, prompt, _continuationContext, nativeID, _workspace.Text.Trim(), images)
+                : await Call(NxMethods.ContinueHere, new { session_id = sessionID, project_id = _projectID, native_id = nativeID, agent, model, resume, prompt, context, images, workspace_root = _workspace.Text.Trim(), trust_workspace = trustWorkspace, request_id = requestID });
         }
         finally
         {
@@ -3279,7 +3167,7 @@ public sealed partial class SessionPage : NexusPage
             _chat.Children.Remove(userBubble);
             _conversation.Remove(liveUserKey); _messageAnchors.Remove(liveUserKey);
             RefreshConversationNavigation();
-            var failureMessage = "Request stopped · " + (response.Error ?? "No final reply was received.");
+            var failureMessage = "Request stopped · " + NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent));
             if (hadStreamText)
                 streamStack.Children.Add(new TextBlock { Text = failureMessage, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, Foreground = NexusPalette.Amber, Margin = new Thickness(0, 8, 0, 0) });
             else
@@ -3293,8 +3181,8 @@ public sealed partial class SessionPage : NexusPage
             streamBubble.CornerRadius = new CornerRadius(8);
             streamBubble.Padding = new Thickness(12);
             activityView.View.IsExpanded = activityView.Count > 0;
-            if (_prompt.Text.Length == 0) _prompt.Text = prompt;
-            SetComposerStatus(response.Error ?? "The agent did not return a reply.");
+            if (_prompt.Text.Length == 0) _prompt.Text = typed;
+            SetComposerStatus(NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent)));
             if ((response.RawError ?? "").Contains("model", StringComparison.OrdinalIgnoreCase)) _model.Focus(FocusState.Programmatic);
             return;
         }
@@ -3305,7 +3193,7 @@ public sealed partial class SessionPage : NexusPage
             _conversation.Remove(liveUserKey); _messageAnchors.Remove(liveUserKey);
             RefreshConversationNavigation();
             _chat.Children.Remove(streamBubble);
-            if (_prompt.Text.Length == 0) _prompt.Text = prompt;
+            if (_prompt.Text.Length == 0) _prompt.Text = typed;
             SetComposerStatus("The agent returned no readable reply.");
             return;
         }
@@ -3397,7 +3285,7 @@ public sealed partial class SessionPage : NexusPage
         }
         catch (Exception ex)
         {
-            SetComposerStatus("Could not stop this reply: " + ex.Message);
+            SetComposerStatus(NxErrors.ForException("Nexus couldn't stop this reply. Try again.", ex, "chat"));
             if (_sendInFlight) _cancelHere.IsEnabled = true;
         }
     }
@@ -3739,7 +3627,7 @@ public sealed partial class SessionPage : NexusPage
         var data = new DataPackage();
         data.SetText(text);
         Clipboard.SetContent(data);
-        _notice.Text = "Command Prompt resume command copied, using the installed CLI's full path. The original local session must still be available. Nexus did not open a terminal.";
+        _notice.Text = "Copied. Paste it into Command Prompt to pick this chat up in the agent itself. The agent needs its original chat on this computer.";
     }
 
     private static string QuoteArgument(string value) => value.Any(char.IsWhiteSpace) ? "\"" + value.Replace("\"", "\\\"") + "\"" : value;

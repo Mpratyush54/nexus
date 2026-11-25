@@ -24,15 +24,15 @@ func commandForInAppTurn(ctx context.Context, plan LaunchPlan, lookPath func(str
 		return nil, fmt.Errorf("continue: empty argv")
 	}
 	if lookPath == nil {
-		lookPath = exec.LookPath
+		lookPath = lookAgent
 	}
 	path, err := lookPath(plan.Argv[0])
 	if err != nil {
-		return nil, fmt.Errorf("continue: look path %q: %w", plan.Argv[0], err)
+		return nil, agentErrorf(plan.Agent, "not_installed", "continue: look path %q: %v", plan.Argv[0], err)
 	}
 	path, prefix, err := directExecutable(path, plan.Agent)
 	if err != nil {
-		return nil, err
+		return nil, AsAgentError(plan.Agent, "cannot_start", err)
 	}
 	cmd := exec.CommandContext(ctx, path, append(prefix, plan.Argv[1:]...)...)
 	cmd.WaitDelay = 5 * time.Second
