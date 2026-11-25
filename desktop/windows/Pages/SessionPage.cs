@@ -322,6 +322,7 @@ public sealed partial class SessionPage : NexusPage
         _attachmentsLabel.Visibility = Visibility.Collapsed;
         _composer.Children.Add(_composerStatus);
         InitLiveComposer();
+        InitComposer();
         UpdateWorkspaceFlyoutVisibility();
         _chatTabBtn = SessionTabButton("Chat");
         _activityTabBtn = SessionTabButton("Activity");
@@ -557,6 +558,7 @@ public sealed partial class SessionPage : NexusPage
             return;
         }
         var generation = ++_loadGeneration;
+        StashDraft();
         if (nextId != _id)
         {
             // The agent keeps working in the core; this page just stops showing it.
@@ -589,6 +591,7 @@ public sealed partial class SessionPage : NexusPage
         _prompt.Text = "";
         _continuationContext = "";
         ClearImageAttachments();
+        RestoreDraft();
         _harness.Items.Clear();
         _workspace.Text = "";
         _agent = "";
@@ -637,6 +640,7 @@ public sealed partial class SessionPage : NexusPage
             System.Diagnostics.Trace.WriteLine($"[perf] session {_id}: open-to-first-message {watch.ElapsedMilliseconds} ms (from memory)");
         }
         _ = LoadThenStartAsync(generation, quiet: painted);
+        FocusComposerSoon(force: true);
     }
 
     // Set by Home's "start a chat" composer: once the new chat has loaded,
@@ -659,6 +663,7 @@ public sealed partial class SessionPage : NexusPage
         // A turn still running (or stopped by a restart) shows up again.
         await AttachLiveAsync();
         if (generation != _loadGeneration) return;
+        FocusComposerSoon(force: false);
         if (PendingStart is not { } start || start.SessionId != _id) return;
         PendingStart = null;
         if (!_sessionLoaded) return;
@@ -2923,6 +2928,7 @@ public sealed partial class SessionPage : NexusPage
         ToolTipService.SetToolTip(_resume, _legacy ? "Older saved chats can only be read" : _nativeID.Length == 0 ? "This chat can't be picked up in the agent itself, but you can continue it here" : "Copies a command that picks this chat up in the agent itself");
         ToolTipService.SetToolTip(_teleport, _legacy ? "Archived snapshots cannot be teleported" : !_hasTransferableVersion ? "A complete or transcript-only version is required" : _workspaceHint.Length == 0 ? "This chat has no mapped workspace to package code from" : null);
         ToolTipService.SetToolTip(_fork, _legacy ? "Archived snapshots cannot be forked" : "Clone the captured conversation into a separate chat. The next message starts a new local agent session.");
+        UpdateComposerButton();
     }
 
     private async Task ForkChatAsync()
@@ -3063,80 +3069,8 @@ public sealed partial class SessionPage : NexusPage
         return joined.Length > 6000 ? joined[^6000..] : joined;
     }
 
-    private async Task SendHereAsync()
-    {
-        // While the agent works, a message waits for its turn.
-        if (LiveTurnActive && !_preparingHarness)
-        {
-            await SendFollowupAsync(now: false);
-            return;
-        }
-        if (_sendInFlight || _preparingHarness)
-        {
-            return;
-        }
-        var typed = _prompt.Text.Trim();
-        if (typed.Length == 0) { SetComposerStatus(_images.Count + _files.Count > 0 ? "Add a message to send with your attachments." : "Write a follow-up first."); return; }
-        if (_viewingHistoricalPage)
-        {
-            await ReturnToLatestAsync();
-            if (_viewingHistoricalPage)
-            {
-                SetComposerStatus("Could not return to the latest messages. Use “↓ Back to latest”, then send again.");
-                return;
-            }
-        }
-        var agent = SelectedHarness();
-        var model = SelectedModel();
-        _modelByHarness[agent] = model;
-        AppPrefs.Data.ChatModels ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        AppPrefs.Data.ChatModels[agent] = model;
-        AppPrefs.Save();
-        if (!SupportsInAppReply(agent)) { SetComposerStatus("Choose an agent that can chat in Nexus: Claude Code, Codex, Cursor, OpenCode, Gemini or Kimi."); return; }
-        if (_images.Count > 0 && ComposerAttachments.ImageProblem(agent, _images[0], 1) is { } imageProblem) { SetComposerStatus(imageProblem); return; }
-        // Images go to the agent as images; other files are named by path.
-        var images = _images.ToArray();
-        var prompt = ComposerAttachments.WithFiles(typed, _files);
-        var useLive = SupportsLive(agent) && (images.Length == 0 || ComposerAttachments.SendsImagesLive(agent));
-        if (!System.IO.Directory.Exists(_workspace.Text.Trim())) { SetComposerStatus("Select an existing local project folder before sending."); return; }
-        ProjectFolders.Remember(_projectID, _workspace.Text.Trim());
-        var preparingSession = _id;
-        var preparingWorkspace = _workspace.Text.Trim();
-        var trustWorkspace = false;
-        _preparingHarness = true;
-        try
-        {
-            if (await HarnessStatusAsync(agent) is null) return;
-            // One-shot Cursor runs need --trust up front; live chats ask per action instead.
-            var needsTrust = agent == "cursor" && !useLive;
-            trustWorkspace = needsTrust && await ConfirmCursorWorkspaceAsync(preparingWorkspace);
-            if (needsTrust && !trustWorkspace) return;
-        }
-        finally { _preparingHarness = false; }
-        if (preparingSession != _id || agent != SelectedHarness() || model != SelectedModel() || preparingWorkspace != _workspace.Text.Trim() || typed != _prompt.Text.Trim()) { SetComposerStatus("The chat, model, or message changed. Review your selection and send again."); return; }
-        _sendInFlight = true;
-        SetSending(true);
-        SetComposerStatus("Connecting to " + agent + "…");
-        // Captured IDs may originate on another device or in an IDE store that
-        // the CLI cannot resume. Seed from readable chat, never from shell ops.
-        var resumeNative = (images.Length == 0 || useLive) && _localNativeID.Length > 0 && string.Equals(_localNativeAgent, agent, StringComparison.OrdinalIgnoreCase);
-        var resume = resumeNative ? "native" : "seeded";
-        var context = resumeNative ? "" : _continuationContext;
-        var nativeID = resumeNative ? _localNativeID : "";
-        var sessionID = _id;
-        var requestID = Guid.NewGuid().ToString("N");
-        var view = BeginTurnView(agent, prompt, images, requestID);
-        _prompt.Text = "";
-        NxResponse response;
-        try
-        {
-            response = useLive
-                ? await SendLiveAsync(view, sessionID, agent, model, prompt, _continuationContext, nativeID, _workspace.Text.Trim(), images)
-                : await Call(NxMethods.ContinueHere, new { session_id = sessionID, project_id = _projectID, native_id = nativeID, agent, model, resume, prompt, context, images, workspace_root = _workspace.Text.Trim(), trust_workspace = trustWorkspace, request_id = requestID });
-        }
-        finally { EndTurnStreaming(view); }
-        FinishTurnView(view, response, sessionID, typed);
-    }
+    /// <summary>Send from the composer (SessionPage.Composer.cs): the bubble first, the checks after.</summary>
+    private Task SendHereAsync() => SendFromComposerAsync();
 
     private async Task NameNewChatAsync(string sessionID, string title)
     {
@@ -3150,9 +3084,11 @@ public sealed partial class SessionPage : NexusPage
 
     private async Task CancelHereAsync()
     {
+        // Stopped during the checks: the message is kept, not sent.
+        if (_preparingHarness) { NoteStopRequested(); return; }
         if (!_sendInFlight || _streamRequestID.Length == 0) return;
         _cancelHere.IsEnabled = false;
-        SetComposerStatus("Stopping the agent…");
+        NoteStopRequested();
         if (_liveTurn is not null)
         {
             // Live chats stop the current turn but keep the session open.
@@ -3238,17 +3174,16 @@ public sealed partial class SessionPage : NexusPage
             if (kind == "activity")
             {
                 _streamActivity?.Apply(text);
-                SetComposerStatus(_streamAgent + " is running tools…");
-                if (!_streamHasText) _streamText.Text = "Working in your workspace…";
+                TurnStatusProgress(kind, text);
                 return;
             }
             if (kind == "status")
             {
-                SetComposerStatus(text);
-                if (!_streamHasText) _streamText.Text = text;
+                TurnStatusProgress(kind, text);
                 return;
             }
             if (kind != "text") return;
+            TurnStatusProgress(kind, text);
             // Each progress event carries the full text so far; render it
             // through the same throttle as live chats.
             _liveText.Clear();
@@ -3273,11 +3208,7 @@ public sealed partial class SessionPage : NexusPage
         _refreshModels.IsEnabled = !sending && !_loadingModelAgents.Contains(SelectedHarness());
         foreach (var remove in _imagePreviews.Children.OfType<Grid>().SelectMany(preview => preview.Children.OfType<Button>()))
             remove.IsEnabled = !sending;
-        _cancelHere.Visibility = sending ? Visibility.Visible : Visibility.Collapsed;
-        _cancelHere.IsEnabled = sending;
-        _sendProgress.IsActive = sending;
-        _sendProgress.Visibility = sending ? Visibility.Visible : Visibility.Collapsed;
-        _sendGlyph.Visibility = sending ? Visibility.Collapsed : Visibility.Visible;
+        // Send and Stop morph in UpdateComposerButton (via UpdateActions).
         UpdateActions();
         if (sending)
         {
@@ -3397,42 +3328,7 @@ public sealed partial class SessionPage : NexusPage
         return leaf.Length > 0 && leaf.Length < 40 ? "…" + System.IO.Path.DirectorySeparatorChar + leaf : "…" + path[^41..];
     }
 
-    private void AnimateInputFocus(bool focused)
-    {
-        var storyboard = new Storyboard();
-        var borderAnim = new ColorAnimation
-        {
-            Duration = new Duration(TimeSpan.FromMilliseconds(focused ? 180 : 220)),
-            EnableDependentAnimation = true
-        };
-        Storyboard.SetTarget(borderAnim, _inputFrame);
-        Storyboard.SetTargetProperty(borderAnim, "(Border.BorderBrush).(SolidColorBrush.Color)");
-        borderAnim.To = focused
-            ? Microsoft.UI.Colors.Transparent
-            : Microsoft.UI.Colors.Transparent;
-        if (_inputFrame.BorderBrush is SolidColorBrush borderBrush)
-        {
-            borderAnim.From = borderBrush.Color;
-        }
-        storyboard.Children.Add(borderAnim);
-        if (_inputFrame.Background is SolidColorBrush fillBrush)
-        {
-            var fillAnim = new ColorAnimation
-            {
-                Duration = borderAnim.Duration,
-                EnableDependentAnimation = true,
-                From = fillBrush.Color,
-                To = focused
-                    ? Microsoft.UI.Colors.Transparent
-                    : Microsoft.UI.Colors.Transparent
-            };
-            Storyboard.SetTarget(fillAnim, _inputFrame);
-            Storyboard.SetTargetProperty(fillAnim, "(Border.Background).(SolidColorBrush.Color)");
-            storyboard.Children.Add(fillAnim);
-        }
-        storyboard.Begin();
-        _inputFrame.BorderThickness = new Thickness(0);
-    }
+    private void AnimateInputFocus(bool focused) => AnimateComposerFocus(focused);
 
     private static Button SessionTabButton(string label) => new()
     {

@@ -46,8 +46,9 @@ public sealed partial class SessionPage
         var userBubble = IndexedChatMessage("user", shownPrompt.Text, userKey, null, shownPrompt.Attachments.Count > 0 ? shownPrompt : null);
         var streamText = new TextBlock
         {
-            Text = "Thinking…", TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true,
-            FontSize = 14, MaxWidth = 820, Opacity = 0.9
+            // Empty until the first words: the status line below says what is happening.
+            Text = "", TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true,
+            FontSize = 14, MaxWidth = 820, Opacity = 0.9, Visibility = Visibility.Collapsed
         };
         var streamStack = new StackPanel { Spacing = 7 };
         streamStack.Children.Add(SessionChatRender.RoleLabel(ChatTitles.AgentName(agent)));
@@ -58,6 +59,7 @@ public sealed partial class SessionPage
         var fileChangesHost = new Border { Visibility = Visibility.Collapsed };
         _streamFileChanges = fileChangesHost;
         streamStack.Children.Add(fileChangesHost);
+        AttachTurnStatus(streamStack, agent);
         var streamBubble = new Border
         {
             Child = streamStack, Padding = SessionChatRender.AssistantPad,
@@ -68,7 +70,9 @@ public sealed partial class SessionPage
         AddChatElement(userBubble);
         AddChatElement(streamBubble);
         RefreshConversationNavigation();
-        ScrollChatToEnd();
+        // Sending follows the message down; a turn that started on its own
+        // (a queued follow-up) doesn't pull someone reading further up.
+        if (_attaching) KeepLatestInView(); else ScrollChatToEnd();
         var view = new TurnView
         {
             Agent = agent, Prompt = prompt, RequestId = requestID, LiveTime = liveTime, UserBubble = userBubble,
@@ -89,6 +93,7 @@ public sealed partial class SessionPage
         _streamFileChanges = null;
         _streamHasText = false;
         _sendInFlight = false;
+        DetachTurnStatus();
         if (ReferenceEquals(_turnView, view)) _turnView = null;
         ClearApprovalCards();
         SetSending(false);
@@ -114,26 +119,8 @@ public sealed partial class SessionPage
         if (_id != sessionID) return;
         if (!response.Ok || response.Result is not { } result)
         {
-            _chat.Children.Remove(userBubble);
-            _conversation.Remove(view.UserKey); _messageAnchors.Remove(view.UserKey);
-            RefreshConversationNavigation();
-            var failureMessage = "Request stopped · " + NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent));
-            if (view.HadStreamText)
-                streamStack.Children.Add(new TextBlock { Text = failureMessage, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, Foreground = NexusPalette.Amber, Margin = new Thickness(0, 8, 0, 0) });
-            else
-            {
-                if (streamStack.Children[0] is TextBlock roleLabel) roleLabel.Text = "Nexus · request stopped";
-                view.StreamText.Text = failureMessage + (activityView.Count > 0 ? "\nWorkspace changes may already have been applied; review the activity before retrying." : "");
-            }
-            streamBubble.Background = SessionChatRender.SubtleFill;
-            streamBubble.BorderBrush = NexusPalette.Amber;
-            streamBubble.BorderThickness = new Thickness(1);
-            streamBubble.CornerRadius = new CornerRadius(8);
-            streamBubble.Padding = new Thickness(12);
-            activityView.View.IsExpanded = activityView.Count > 0;
-            if (_prompt.Text.Length == 0 && typed.Length > 0) _prompt.Text = typed;
-            SetComposerStatus(NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent)));
-            if ((response.RawError ?? "").Contains("model", StringComparison.OrdinalIgnoreCase)) _model.Focus(FocusState.Programmatic);
+            // The message stays, with Retry and Edit (SessionPage.Composer.cs).
+            ShowTurnFailed(view, response, agent, userBubble, streamBubble, streamStack, view.StreamText, view.HadStreamText || activityView.Count > 0, view.UserKey);
             return;
         }
         var answer = NxJson.Text(result, "text");
@@ -146,12 +133,7 @@ public sealed partial class SessionPage
                 _ = RevalidateAsync();
                 return;
             }
-            _chat.Children.Remove(userBubble);
-            _conversation.Remove(view.UserKey); _messageAnchors.Remove(view.UserKey);
-            RefreshConversationNavigation();
-            _chat.Children.Remove(streamBubble);
-            if (_prompt.Text.Length == 0) _prompt.Text = typed;
-            SetComposerStatus("The agent returned no readable reply.");
+            ShowTurnFailed(view, new NxResponse(false, "The agent returned no readable reply.", null), agent, userBubble, streamBubble, streamStack, view.StreamText, view.HadStreamText || activityView.Count > 0, view.UserKey);
             return;
         }
         var liveUserKey = view.UserKey;
@@ -189,13 +171,9 @@ public sealed partial class SessionPage
         }
         _continuationContext += "\n\nuser: " + prompt + "\n\nassistant: " + answer;
         if (_continuationContext.Length > 11000) _continuationContext = _continuationContext[^11000..];
-        if (typed.Length > 0) ClearImageAttachments();
-        SetComposerStatus(result.TryGetProperty("saved_locally", out var saved) && saved.ValueKind == JsonValueKind.True
-            ? (result.TryGetProperty("cloud_saved", out var cloudSaved) && cloudSaved.ValueKind == JsonValueKind.True
-                ? "Reply saved in this chat and synced."
-                : "Reply saved in this chat on this device; cloud sync is unavailable right now.")
-            : "Reply received but could not be saved: " + NxJson.Text(result, "save_error"));
-        ScrollChatToEnd();
+        // Success is silent; a reply that couldn't save or sync says so on itself.
+        OnTurnSaved(view, answerKey, result);
+        KeepLatestInView();
         RefreshConversationNavigation();
         _ = RefreshActivityAsync(sessionID);
         if (_header.Text == "New chat" && _projectID.Length > 0 && _nativeID.StartsWith("nexus-", StringComparison.Ordinal))
