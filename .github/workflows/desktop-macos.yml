@@ -72,7 +72,7 @@ jobs:
         run: |
           set -euo pipefail
           dotnet publish Nexus.Uno.csproj -c Release -f net10.0-desktop -r osx-arm64 \
-            -p:TargetFrameworks=net10.0-desktop -p:PackageFormat=app -p:CodesignKey=- \
+            --self-contained true -p:TargetFrameworks=net10.0-desktop -p:PackageFormat=app -p:CodesignKey=- \
             > "$GITHUB_WORKSPACE/dist/publish.log" 2>&1 || { tail -80 "$GITHUB_WORKSPACE/dist/publish.log"; exit 1; }
           grep -E 'warning NU|error|->' "$GITHUB_WORKSPACE/dist/publish.log" | tail -20 || true
           built=$(find bin/Release/net10.0-desktop/osx-arm64/publish -maxdepth 1 -name '*.app' | head -1)

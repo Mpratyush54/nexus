@@ -101,10 +101,16 @@ public sealed partial class MainWindow : Window
         ExtendsContentIntoTitleBar = true;
         // Mica only behind the sidebar (its tint is translucent); the reading
         // canvas stays solid so content never sits on a grey wash.
+#if HAS_UNO
+        // Uno draws no Mica, and a transparent root lets stale frames show
+        // through where nothing repaints: always use the solid canvas.
+        RootGrid.Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
+#else
         if (Microsoft.UI.Composition.SystemBackdrops.MicaController.IsSupported())
             SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base };
         else
             RootGrid.Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
+#endif
         ThemeService.Apply(this);
         ThemeService.Watch(this);
         // After the handler that changed the theme has returned (Settings'
