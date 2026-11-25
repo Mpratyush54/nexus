@@ -418,6 +418,9 @@ public sealed partial class SettingsPage
         var plus = info.IndexOf('+');
         var version = plus > 0 ? info[..plus] : info;
         var commit = plus > 0 ? info[(plus + 1)..] : "";
+        // macOS: the installed release (as in Updates above and in reports),
+        // not the build's assembly version, which said "0.4.0-beta.3".
+        if (AppDiagnostics.Version is { Length: > 0 } installed) version = installed;
         return "Nexus " + version + (commit.Length > 0 ? " · commit " + commit[..Math.Min(10, commit.Length)] : "") + " · .NET " + Environment.Version;
     }
 

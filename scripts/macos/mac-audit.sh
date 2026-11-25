@@ -254,7 +254,7 @@ for theme in light dark; do
   # A Codex chat (row 4): its composer takes images.
   click 140 377; sleep 6; shot "14b-codex-chat-$theme"
   click 650 557; sleep 1
-  keys 'keystroke "Hello from the macOS audit"' > /dev/null; sleep 1; shot "15-composer-typed-$theme"
+  ./dist/keys type "Hello from the macOS audit"; sleep 1; shot "15-composer-typed-$theme"
   screencapture -x -R0,0,320,200 "$RUNNER_TEMP/clip.png"
   osascript -e "set the clipboard to (read (POSIX file \"$RUNNER_TEMP/clip.png\") as «class PNGf»)" > /dev/null 2>&1
   keys 'keystroke "v" using command down' > /dev/null; sleep 4; shot "16-composer-pasted-$theme"
