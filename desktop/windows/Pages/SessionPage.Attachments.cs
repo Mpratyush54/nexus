@@ -11,7 +11,7 @@ using WinRT.Interop;
 namespace Nexus.Pages;
 
 // The composer's 📎: images (sent to the agent as images) and other files
-// (named in the message by path). Pick, paste (Ctrl+V) or drop them; each
+// (named in the message by path). Pick, paste (Ctrl+V / Cmd+V) or drop them; each
 // shows as a thumbnail or chip with a remove ×.
 public sealed partial class SessionPage
 {
@@ -112,6 +112,13 @@ public sealed partial class SessionPage
         var problem = ComposerAttachments.ImageProblem(SelectedHarness(), "Pasted.png", 1);
         if (problem is not null) { SetComposerStatus(problem); return; }
         var cache = await StorageFolder.GetFolderFromPathAsync(ChatImageCache());
+#if HAS_UNO
+        // Uno has no BitmapDecoder/BitmapEncoder: save the pasteboard's bytes
+        // and let macOS's own sips make a PNG of them.
+        await AddAttachmentAsync(await StorageFile.GetFileFromPathAsync(
+            await MacImages.SavePastedAsync(await (await content.GetBitmapAsync()).OpenReadAsync(), ChatImageCache())));
+        return;
+#else
         var pasted = await cache.CreateFileAsync("Pasted-" + Guid.NewGuid().ToString("N") + ".png");
         using (var source = await (await content.GetBitmapAsync()).OpenReadAsync())
         {
@@ -123,6 +130,7 @@ public sealed partial class SessionPage
             await encoder.FlushAsync();
         }
         await AddAttachmentAsync(pasted);
+#endif
     }
 
     private Task AddAttachmentAsync(StorageFile file) =>
@@ -229,6 +237,10 @@ public sealed partial class SessionPage
     // is never changed.
     private static async Task<StorageFile> ShrinkImageAsync(StorageFile file)
     {
+#if HAS_UNO
+        return await StorageFile.GetFileFromPathAsync(await MacImages.ShrinkAsync(file.Path, ChatImageCache(),
+            new[] { ComposerAttachments.ShrinkLongestSide, 1600, 1200 }, ComposerAttachments.MaxInlineImageBytes));
+#else
         var cache = await StorageFolder.GetFolderFromPathAsync(ChatImageCache());
         var baseName = System.IO.Path.GetFileNameWithoutExtension(file.Name);
         foreach (var side in new[] { ComposerAttachments.ShrinkLongestSide, 1600, 1200 })
@@ -254,6 +266,7 @@ public sealed partial class SessionPage
             await target.DeleteAsync();
         }
         throw new InvalidOperationException("the image is still over 5 MB after resizing");
+#endif
     }
 
     private void ClearImageAttachments()

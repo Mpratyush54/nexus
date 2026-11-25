@@ -87,6 +87,12 @@ internal static partial class Motion
     public static void FadeIn(UIElement element, double rise = 8, int delayMs = 0, TimeSpan? duration = null)
     {
         if (!Enabled) return;
+#if HAS_UNO
+        // On Uno an opacity animation started before the element is in the
+        // tree (chat rows handed to the ItemsRepeater) stayed at its first
+        // key frame: the rows were there but invisible on macOS.
+        if (element is FrameworkElement { IsLoaded: false }) return;
+#endif
         try
         {
             var visual = ElementCompositionPreview.GetElementVisual(element);

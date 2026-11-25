@@ -2612,9 +2612,14 @@ public sealed partial class SessionPage : NexusPage
                 var rows = new List<string> { line };
                 var end = at + 2;
                 while (end < lines.Length && SessionChatRender.IsTableRow(lines[end].TrimEnd())) rows.Add(lines[end++].TrimEnd());
+#if HAS_UNO
+                // Uno has no InlineUIContainer; the shim takes the table as a block.
+                document.AddElement(SessionChatRender.Table(rows, AddInlineFormatting));
+#else
                 var table = new Paragraph { Margin = new Thickness(0, 4, 0, 10) };
                 table.Inlines.Add(new InlineUIContainer { Child = SessionChatRender.Table(rows, AddInlineFormatting) });
                 document.Blocks.Add(table);
+#endif
                 at = end - 1;
                 continue;
             }
@@ -3508,7 +3513,7 @@ public sealed partial class SessionPage : NexusPage
     {
         if (path.Length <= 44) return path;
         var leaf = System.IO.Path.GetFileName(path.TrimEnd('\\', '/'));
-        return leaf.Length > 0 && leaf.Length < 40 ? "…\\" + leaf : "…" + path[^41..];
+        return leaf.Length > 0 && leaf.Length < 40 ? "…" + System.IO.Path.DirectorySeparatorChar + leaf : "…" + path[^41..];
     }
 
     private void AnimateInputFocus(bool focused)
