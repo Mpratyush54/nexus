@@ -87,6 +87,22 @@ public class ChatListRetryTests
         // All projects keep the old behaviour: the banner speaks for itself.
         Assert.Equal("", ChatListRetry.Status(false, 30, true, false, null));
     }
+
+    [Fact]
+    public void AnEmptyListSaysWhyAtOnceInsteadOfLoadingThroughTheRetries()
+    {
+        // Unreachable with nothing to show: the outage message right away,
+        // while retries continue in the background.
+        Assert.Equal(ChatListRetry.UnreachableEmpty, ChatListRetry.Status(project: false, shown: 0, unreachable: true, willRetry: true, error: null));
+        Assert.Equal(ChatListRetry.UnreachableEmpty, ChatListRetry.Status(project: true, shown: 0, unreachable: true, willRetry: true, error: null));
+        // Signed out: the sign-in sentence, and no pointless retries.
+        Assert.Equal(NxErrors.SignedOutMessage, ChatListRetry.Status(false, 0, false, true, NxErrors.SignedOutMessage));
+        Assert.False(ChatListRetry.ShouldRetry("Not signed in to Nexus on this computer"));
+        Assert.True(ChatListRetry.ShouldRetry("context deadline exceeded"));
+        // A slow server (not known to be down) still says it is loading.
+        Assert.Equal("Loading your chats…", ChatListRetry.Status(false, 0, false, true, "context deadline exceeded"));
+        Assert.True(ChatListRetry.FirstAnswer <= TimeSpan.FromSeconds(3));
+    }
 }
 
 public class NxErrorsPlainLanguageTests
