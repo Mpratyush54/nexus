@@ -78,6 +78,20 @@ public sealed partial class SessionPage
         catch (Exception ex) { SetComposerStatus(NxErrors.ForException("Nexus couldn't paste that image. Try saving it and attaching the file.", ex, "attach")); }
     }
 
+    /// True when the clipboard held an image and the composer took it. The
+    /// macOS Edit menu's Paste (and Cmd+V there) comes through this.
+    private async Task<bool> TryPasteClipboardImageAsync()
+    {
+        try
+        {
+            var content = Clipboard.GetContent();
+            if (!ClipboardHasImage(content)) return false;
+            await PasteClipboardImageAsync(content);
+        }
+        catch (Exception ex) { SetComposerStatus(NxErrors.ForException("Nexus couldn't paste that image. Try saving it and attaching the file.", ex, "attach")); }
+        return true;
+    }
+
     private async Task PasteClipboardImageAsync(DataPackageView content)
     {
         try { await AddFromDataAsync(content); }

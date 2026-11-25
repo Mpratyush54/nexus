@@ -538,6 +538,12 @@ a.nx-shot-win { display: block; color: inherit; cursor: zoom-in; }
 .nx-final-link { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; padding: 0 8px; }
 .nx-final h2 { font-size: clamp(40px, 6.4vw, 88px); line-height: 0.98; max-width: 14ch; }
 .nx-final p { margin: 24px 0 32px; font-size: 18px; color: var(--nx-ink-2); max-width: 56ch; }
+.nx-mac-note { margin-top: 40px; padding-top: 20px; border-top: 1px solid var(--nx-rule); max-width: 64ch; }
+.nx-final .nx-mac-note p { margin: 0; font-size: 15px; }
+.nx-final .nx-mac-note p + p { margin-top: 8px; }
+.nx-final .nx-mac-note .nx-mac-note-small { font-size: 13.5px; }
+.nx-mac-note a { color: var(--nx-ink); text-decoration: underline; text-underline-offset: 3px; }
+.nx-mac-note strong { color: var(--nx-ink); }
 @media (max-width: 600px) {
   .nx-final { padding: 88px 0; }
 }

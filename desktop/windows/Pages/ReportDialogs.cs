@@ -15,9 +15,9 @@ namespace Nexus.Pages;
 /// </summary>
 internal static class ReportDialogs
 {
-    public const string WhatIsSent =
-        "A report has the error, where in Nexus's code it happened, your Nexus and Windows versions, and recent lines from Nexus's own log. " +
-        "It never has your chats, memories, prompts, files or sign-in tokens. Email addresses and your Windows user name are removed before anything leaves this computer.";
+    public static string WhatIsSent =>
+        $"A report has the error, where in Nexus's code it happened, your Nexus and {PlatformText.Os} versions, and recent lines from Nexus's own log. " +
+        $"It never has your chats, memories, prompts, files or sign-in tokens. Email addresses and your {(PlatformText.IsMac ? "Mac" : "Windows")} user name are removed before anything leaves this computer.";
 
     private static bool s_open;
 

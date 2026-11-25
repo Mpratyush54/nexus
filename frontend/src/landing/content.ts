@@ -1,6 +1,9 @@
 export const SITE_URL = 'https://nexus.pratyushes.dev'
 // Redirects (Cloudflare rule) to releases/latest/download/Nexus-Setup.exe.
 export const DOWNLOAD_URL = 'https://nexus.pratyushes.dev/download'
+// macOS beta (Apple silicon): the fixed-name DMG on the newest release
+// (release-desktop.yml). Unsigned until Developer ID signing is set up.
+export const MAC_DOWNLOAD_URL = 'https://github.com/Mpratyush54/nexus/releases/latest/download/Nexus.dmg'
 export const GITHUB_URL = 'https://github.com/Mpratyush54/nexus'
 export const WEB_APP_PATH = '/app'
 export const SIGN_IN_PATH = '/login'

@@ -1,0 +1,93 @@
+<Project Sdk="Uno.Sdk">
+  <!--
+    Nexus for macOS (and a Windows preview of the same UI) on Uno Platform's
+    Skia desktop head. This project owns no UI code: it compiles the WinUI
+    sources in ../windows. Windows-only pieces are excluded below and replaced
+    by the files in Platform/; the shared files use #if HAS_UNO where a
+    smaller change was enough.
+
+    Windows preview:  dotnet build -c Debug
+    macOS .app (on a Mac / CI):
+      dotnet publish -c Release -f net10.0-desktop -r osx-arm64 -p:PackageFormat=app
+    The Go core (libnexuscore.dylib / nexuscore.dll) and, on macOS, the
+    system-integration helper (libnexusmac.dylib, built with clang from
+    macos/native/NexusMac.m) are copied next to the executable separately;
+    see .github/workflows/desktop-macos.yml. Without libnexusmac the app runs
+    with no menu bar item and closing the window quits.
+  -->
+  <PropertyGroup>
+    <TargetFrameworks>net10.0-desktop</TargetFrameworks>
+    <OutputType>Exe</OutputType>
+    <UnoSingleProject>true</UnoSingleProject>
+    <AssemblyName>Nexus</AssemblyName>
+    <RootNamespace>Nexus</RootNamespace>
+    <ApplicationTitle>Nexus</ApplicationTitle>
+    <ApplicationId>com.nexus.desktop</ApplicationId>
+    <ApplicationDisplayVersion>0.4.0</ApplicationDisplayVersion>
+    <ApplicationVersion>3</ApplicationVersion>
+    <ApplicationPublisher>Nexus</ApplicationPublisher>
+    <Version>0.4.0-beta.3</Version>
+    <AssemblyVersion>0.4.0.0</AssemblyVersion>
+    <FileVersion>0.4.0.3</FileVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <!-- Keep the head small: no Material/Toolkit/Extensions, Skia renderer. -->
+    <UnoFeatures>SkiaRenderer;Mvvm</UnoFeatures>
+    <!-- The shared WinUI code is written for Windows; Uno flags APIs it does
+         not implement (Uno0001). Those are reviewed per feature, not per build. -->
+    <NoWarn>$(NoWarn);Uno0001;CA1416;CS8002;NU1507</NoWarn>
+    <WindowsSources>$(MSBuildThisFileDirectory)..\windows\</WindowsSources>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Updates: the Windows head's Velopack UpdateService, shared. On macOS
+         `vpk pack` adds UpdateMac and sq.version to the .app; see
+         scripts/macos/package-macos.sh. Same version as desktop/windows. -->
+    <PackageReference Include="Velopack" Version="1.2.161" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Shared sources, linked (not copied). -->
+    <Compile Include="$(WindowsSources)**\*.cs"
+             Exclude="$(WindowsSources)bin\**;$(WindowsSources)obj\**;
+                      $(WindowsSources)Program.cs;
+                      $(WindowsSources)InstallerHooks.cs;
+                      $(WindowsSources)UninstallPrompt.cs;
+                      $(WindowsSources)SingleInstance.cs;
+                      $(WindowsSources)Platform\WindowsDesktopIntegration.cs"
+             Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
+    <Compile Include="..\..\bindings\csharp\NxMethods.g.cs" Link="Shared\Core\NxMethods.g.cs" />
+
+    <ApplicationDefinition Include="$(WindowsSources)App.xaml" Link="App.xaml" SubType="Designer" Generator="MSBuild:Compile" />
+    <!-- MainWindow.xaml minus the Windows tray icon (H.NotifyIcon), generated
+         from the Windows file before the build; see StripTrayFromMainWindow. -->
+    <Page Include="$(IntermediateOutputPath)shared\MainWindow.xaml" Link="MainWindow.xaml" SubType="Designer" Generator="MSBuild:Compile" />
+
+    <!-- App icon (Resizetizer). Uno's macOS .app packager builds the .icns
+         from outputs named icon16x16@1x.png and so on, so the Windows
+         Assets/Nexus.png is copied to obj/.../icon.png first (Resizetizer
+         also wants lowercase names); see StripTrayFromMainWindow. -->
+    <UnoIcon Include="$(IntermediateOutputPath)shared\icon.png" />
+
+    <Content Include="$(WindowsSources)Assets\**" Exclude="$(WindowsSources)Assets\InstallerSplash.gif"
+             Link="Assets\%(RecursiveDir)%(Filename)%(Extension)"
+             CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!-- Writes obj/.../shared/MainWindow.xaml at evaluation time so the XAML
+       source generator sees it. The tray block and its namespace are removed;
+       everything else is the Windows file, byte for byte. -->
+  <PropertyGroup>
+    <_NxMainXamlSource>$(WindowsSources)MainWindow.xaml</_NxMainXamlSource>
+    <_NxMainXamlText>$([System.IO.File]::ReadAllText($(_NxMainXamlSource)))</_NxMainXamlText>
+    <_NxMainXamlText>$([System.Text.RegularExpressions.Regex]::Replace($(_NxMainXamlText), '\s*&lt;tb:TaskbarIcon[\s\S]*?&lt;/tb:TaskbarIcon&gt;', ''))</_NxMainXamlText>
+    <_NxMainXamlText>$([System.Text.RegularExpressions.Regex]::Replace($(_NxMainXamlText), '\s*xmlns:tb="using:H.NotifyIcon"', ''))</_NxMainXamlText>
+  </PropertyGroup>
+  <Target Name="StripTrayFromMainWindow" BeforeTargets="PrepareForBuild;CoreCompile;_UnoSourceGenerator;GenerateMSBuildEditorConfigFileCore;UnoResizetizeCollectItems;UnoResizetizeImages">
+    <MakeDir Directories="$(IntermediateOutputPath)shared" />
+    <Copy SourceFiles="$(WindowsSources)Assets\Nexus.png" DestinationFiles="$(IntermediateOutputPath)shared\icon.png" SkipUnchangedFiles="true" />
+    <WriteLinesToFile File="$(IntermediateOutputPath)shared\MainWindow.xaml" Lines="$([MSBuild]::Escape($(_NxMainXamlText)))" Overwrite="true" WriteOnlyWhenDifferent="true" Encoding="utf-8" />
+  </Target>
+</Project>

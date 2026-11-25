@@ -59,6 +59,11 @@ internal static partial class AppDiagnostics
 
     public static string AppVersion()
     {
+#if HAS_UNO
+        // macOS: the installed release (Velopack's sq.version), like the
+        // Windows installer's version, not the build's assembly version.
+        if (OperatingSystem.IsMacOS() && UpdateService.Shared.CurrentVersion is { Length: > 0 } installed) return installed;
+#endif
         var info = typeof(App).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
             ?? typeof(App).Assembly.GetName().Version?.ToString() ?? "unknown";
         var plus = info.IndexOf('+');

@@ -429,7 +429,7 @@ public sealed class TimelinePage : NexusPage
                 ? "No chats from this agent in this project. Clear the filter or pick another agent."
                 : subagentsHidden
                     ? "Sessions exist for this project but are all sub-agent runs. Enable Include sub-agents to list them."
-                    : "Chats appear here once Nexus saves them. Check that chat saving is on in Settings and not paused in the tray.";
+                    : $"Chats appear here once Nexus saves them. Check that chat saving is on in Settings and not paused in {PlatformText.TrayPlace}.";
             _list.Items.Add(EmptyStateCard(_pageIndex == 0 ? "No sessions yet" : "No sessions on this page", emptyBody));
         }
         if (reset)

@@ -8,6 +8,12 @@ namespace Nexus;
 /// update is applied the next time Nexus starts, or at once from Settings.
 /// Development builds and unzipped copies without Update.exe are not
 /// "installed" and never check.
+///
+/// The Uno head (macOS) compiles this same file. There the feed is the same
+/// folder with its own channels (releases.osx.json / releases.osx-beta.json,
+/// pack id NexusMac), UpdateMac inside Nexus.app swaps the whole bundle, and
+/// a copy that can't be replaced in place (still on the disk image, or run
+/// translocated from Downloads) doesn't check; see Platform/MacInstall.cs.
 /// </summary>
 public sealed class UpdateService
 {
@@ -35,7 +41,21 @@ public sealed class UpdateService
         }
     }
 
-    public bool IsAvailable => _manager?.IsInstalled == true;
+    public bool IsAvailable => _manager?.IsInstalled == true && CanReplaceInPlace;
+
+#if HAS_UNO
+    private static bool CanReplaceInPlace => Nexus.Platform.MacInstall.CanSelfUpdate;
+#else
+    private static bool CanReplaceInPlace => true;
+#endif
+
+    /// <summary>Settings › Updates when <see cref="IsAvailable"/> is false: why, in one sentence.</summary>
+    public string UnavailableText =>
+        _manager?.IsInstalled == true && !CanReplaceInPlace
+            ? "Move Nexus to your Applications folder to get updates automatically."
+            : OperatingSystem.IsMacOS()
+                ? "Updates come with the Nexus download for Mac. This copy wasn't installed from it, so it doesn't update itself."
+                : "Updates are installed by the Nexus installer. This copy was not installed with it, so it does not update itself.";
 
     public string CurrentVersion => _manager?.CurrentVersion?.ToString() ?? "";
 
@@ -51,7 +71,9 @@ public sealed class UpdateService
         if (info is null) return "";
         await _manager.DownloadUpdatesAsync(info, null, ct).ConfigureAwait(false);
         _staged = info;
-        return info.TargetFullRelease.Version.ToString();
+        var version = info.TargetFullRelease.Version.ToString();
+        Nexus.Core.Diagnostics.DiagLog.Info("update", $"version {version} downloaded; it is applied when Nexus restarts (running {CurrentVersion})");
+        return version;
     }
 
     /// <summary>
@@ -62,7 +84,11 @@ public sealed class UpdateService
     /// </summary>
     public void CheckInBackground(TimeSpan delay)
     {
+        Nexus.Core.Diagnostics.DiagLog.Info("update", IsAvailable
+            ? $"installed version {CurrentVersion}; checking in {delay.TotalSeconds:0}s"
+            : "not an installed copy; no update checks");
         if (!IsAvailable) return;
+        if (OperatingSystem.IsMacOS()) Console.Error.WriteLine($"[nexus-mac] update: installed version {CurrentVersion}");
         _ = Task.Run(async () =>
         {
             await Task.Delay(delay).ConfigureAwait(false);

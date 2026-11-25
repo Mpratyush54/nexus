@@ -129,7 +129,7 @@
                         <Button x:Name="ProjectFilterButton" Grid.Column="2" Background="Transparent" BorderThickness="0" Padding="7" MinWidth="30" MinHeight="30" ToolTipService.ToolTip="Filter by tag" AutomationProperties.Name="Filter chats by tag">
                             <FontIcon Glyph="&#xE71C;" FontSize="13" Opacity="0.7"/>
                         </Button>
-                        <Button x:Name="NewChatButton" Grid.Column="3" Background="Transparent" BorderThickness="0" Padding="7" MinWidth="30" MinHeight="30" Click="NewChatButton_Click" ToolTipService.ToolTip="New chat (Ctrl+N)" AutomationProperties.Name="New chat">
+                        <Button x:Name="NewChatButton" Grid.Column="3" Background="Transparent" BorderThickness="0" Padding="7" MinWidth="30" MinHeight="30" Click="NewChatButton_Click" AutomationProperties.Name="New chat">
                             <FontIcon Glyph="&#xE70F;" FontSize="13" Opacity="0.85"/>
                         </Button>
                     </Grid>

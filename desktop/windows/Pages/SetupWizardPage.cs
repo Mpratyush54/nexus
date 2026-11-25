@@ -441,7 +441,7 @@ public sealed class SetupWizardPage : NexusPage
             {
                 IsOpen = true, IsClosable = false, Severity = InfoBarSeverity.Informational,
                 Title = "Environment variables in use",
-                Message = "NEXUS_SERVER or NEXUS_TOKEN is set for your Windows account. Those take precedence over what you save here."
+                Message = $"NEXUS_SERVER or NEXUS_TOKEN is set for your {PlatformText.UserAccount}. Those take precedence over what you save here."
             });
         }
         return panel;
@@ -727,7 +727,7 @@ public sealed class SetupWizardPage : NexusPage
         // Privacy in two sentences above the list, and the list kept short,
         // so the consent and the crash-report choice are in view without
         // scrolling.
-        _workspaceHost.Children.Add(Para("Nexus saves your agents' chats and what they did (including bits of code they read or changed) from these folders only, and syncs them to your private account. Nothing outside these folders is read, and you can pause capture from the tray at any time.", 0.75, NexusTokens.FontCaption));
+        _workspaceHost.Children.Add(Para("Nexus saves your agents' chats and what they did (including bits of code they read or changed) from these folders only, and syncs them to your private account. Nothing outside these folders is read, and you can pause capture from " + PlatformText.TrayPlace + " at any time.", 0.75, NexusTokens.FontCaption));
         _workspaceHost.Children.Add(new ScrollViewer { Content = _chooser.View, MaxHeight = 210, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
         _workspaceHost.Children.Add(_consent);
         _workspaceHost.Children.Add(_workspaceState);
@@ -814,7 +814,7 @@ public sealed class SetupWizardPage : NexusPage
             _loginStartWired = true;
             _loginStart.Toggled += (_, _) => ApplyToggle(_loginStart, on => DesktopIntegration.Current.SetStartsAtLogin(on));
         }
-        return ToggleRow("Start Nexus when I sign in to Windows", "Nexus waits in the system tray so capture keeps running.", _loginStart);
+        return ToggleRow($"Start Nexus when I sign in to {PlatformText.Os}", $"Nexus waits in {PlatformText.TrayPlace} so capture keeps running.", _loginStart);
     }
 
     private void SyncStartup()
@@ -839,7 +839,7 @@ public sealed class SetupWizardPage : NexusPage
             _startupSync = true;
             toggle.IsOn = !toggle.IsOn;
             _startupSync = false;
-            ToolTipService.SetToolTip(toggle, "Windows didn't allow this change. Try again from Settings.");
+            ToolTipService.SetToolTip(toggle, $"{PlatformText.Os} didn't allow this change. Try again from Settings.");
         }
     }
 

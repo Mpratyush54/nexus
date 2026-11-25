@@ -1,7 +1,9 @@
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using CommunityToolkit.Mvvm.Input;
+#if !HAS_UNO
 using H.NotifyIcon;
+#endif
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -68,6 +70,9 @@ public sealed partial class MainWindow : Window
         TrayQuitCommand = new AsyncRelayCommand(QuitAsync);
         TrayReportCommand = new RelayCommand(() => { RestoreWindow(); ShowReportProblem(); });
         InitializeComponent();
+        // Ctrl+K / Ctrl+P / Ctrl+N become Command+K / P / N on macOS.
+        Shortcuts.UseCommandKey(RootGrid);
+        ToolTipService.SetToolTip(NewChatButton, $"New chat ({PlatformText.Shortcut("N")})");
         // One memory line a minute in the desktop log (Core/Diagnostics/DesktopMemoryLog.cs).
         Nexus.Core.Diagnostics.UiStats.Sidebar = () => (_chatEntries.Count, _chatRows.Count);
         Nexus.Core.Diagnostics.DesktopMemoryLog.Start(DispatcherQueue);
@@ -90,17 +95,29 @@ public sealed partial class MainWindow : Window
         filterMenu.Opening += (_, _) => BuildProjectFilterMenu(filterMenu);
         ProjectFilterButton.Flyout = filterMenu;
         ChatTags.Changed += (_, _) => { _chatRows.Clear(); RenderChats(); };
-        Tray.ForceCreate();
+#if !HAS_UNO
+        Tray.ForceCreate(); // Uno/macOS: the menu bar item replaces the tray (desktop/uno strips it from the XAML)
+#endif
         Current = this;
+#if HAS_UNO
+        // macOS: menu bar status item, app menu, Dock reopen and nexus:// links.
+        Nexus.Platform.MacShell.Attach(this);
+#endif
         ResizeForDisplay(1240, 820);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Nexus.ico"));
         ExtendsContentIntoTitleBar = true;
         // Mica only behind the sidebar (its tint is translucent); the reading
         // canvas stays solid so content never sits on a grey wash.
+#if HAS_UNO
+        // Uno draws no Mica, and a transparent root lets stale frames show
+        // through where nothing repaints: always use the solid canvas.
+        RootGrid.Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
+#else
         if (Microsoft.UI.Composition.SystemBackdrops.MicaController.IsSupported())
             SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base };
         else
             RootGrid.Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
+#endif
         ThemeService.Apply(this);
         ThemeService.Watch(this);
         // After the handler that changed the theme has returned (Settings'
@@ -130,6 +147,11 @@ public sealed partial class MainWindow : Window
         _ = Task.Run(UpdateService.Shared.SyncDisplayVersion);
         if (!AppPrefs.SetupCompleted) ShowSetup();
         else DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ShowUpdatedToast);
+#if HAS_UNO
+        // macOS first run: "You're all set" over the setup guide, or the
+        // "Move to Applications" offer when running from the disk image.
+        Nexus.Platform.MacWelcome.MaybeShow(this);
+#endif
         // A crash in an earlier run left a report: ask once the window is up
         // (not over the setup guide, not while hidden in the tray).
         Activated += (_, _) => DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, OfferCrashReports);
@@ -262,6 +284,9 @@ public sealed partial class MainWindow : Window
     {
         if (Content is Grid root && _setup is not null) root.Children.Remove(_setup);
         _setup = null;
+        // The shell comes in with the saved theme (the macOS first run held
+        // dark through the welcome and the guide).
+        ThemeService.Release(this);
         Nav.Visibility = Visibility.Visible;
         OfflineBar.Visibility = Visibility.Visible;
         ApplyConnectivity();
@@ -291,6 +316,11 @@ public sealed partial class MainWindow : Window
     // page. Capped to 90% of the work area.
     private void ResizeForDisplay(int width, int height)
     {
+#if HAS_UNO
+        // Uno sizes windows in layout pixels already. TODO(mac): cap to the
+        // screen's visible frame like the Windows path does.
+        AppWindow.Resize(new SizeInt32 { Width = width, Height = height });
+#else
         try
         {
             var scale = GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)) / 96.0;
@@ -304,6 +334,7 @@ public sealed partial class MainWindow : Window
         {
             AppWindow.Resize(new SizeInt32(width, height));
         }
+#endif
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -720,8 +751,11 @@ public sealed partial class MainWindow : Window
     private void NewChat_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
-        NewChatButton_Click(NewChatButton, new RoutedEventArgs());
+        StartNewChat();
     }
+
+    /// Ctrl+N, and File > New Chat in the macOS menu bar.
+    public void StartNewChat() => NewChatButton_Click(NewChatButton, new RoutedEventArgs());
 
     /// Projects in the account (id, name), for pickers outside the sidebar.
     public IReadOnlyList<(string Id, string Name)> Projects => SwitcherProjects();
@@ -766,8 +800,11 @@ public sealed partial class MainWindow : Window
     private void ProjectSwitch_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
-        _projectSwitcher.Open(Nav.IsPaneOpen ? null : ProjectCompactButton);
+        OpenProjectSwitcher();
     }
+
+    /// Ctrl+P, and File > Switch Project in the macOS menu bar.
+    public void OpenProjectSwitcher() => _projectSwitcher.Open(Nav.IsPaneOpen ? null : ProjectCompactButton);
 
     /// Turn count the chat list reported for a chat (-1 when unknown).
     public long ChatTurnCountFor(string sessionId) =>
@@ -1108,7 +1145,7 @@ public sealed partial class MainWindow : Window
         if (_chatStatus.Length > 0)
             items.Add(new ChatListNotice(NxErrors.IsSignedOut(_chatStatus) ? NxErrors.SignedOutMessage : _chatStatus));
         else if (seen.Count == 0)
-            items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press Ctrl+N."));
+            items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press " + Shortcuts.Label("N") + "."));
         _chatItems = items;
         ChatList.ItemTemplate ??= new ChatRowFactory(this);
         ChatList.ItemsSource = items;
@@ -1170,9 +1207,19 @@ public sealed partial class MainWindow : Window
     {
         private readonly MainWindow _owner;
         public ChatRowFactory(MainWindow owner) => _owner = owner;
-        public UIElement GetElement(ElementFactoryGetArgs args) => _owner.ChatListElement(args.Data);
-        public void RecycleElement(ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
+        public UIElement GetElement(Microsoft.UI.Xaml.ElementFactoryGetArgs args) => _owner.ChatListElement(args.Data);
+        public void RecycleElement(Microsoft.UI.Xaml.ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
     }
+
+#if HAS_UNO
+    // Uno's ItemsRepeater takes custom factories only through its
+    // IElementFactoryShim (Microsoft.UI.Xaml.Controls); same behaviour.
+    private sealed partial class ChatRowFactory : Microsoft.UI.Xaml.Controls.IElementFactoryShim
+    {
+        public UIElement GetElement(Microsoft.UI.Xaml.Controls.ElementFactoryGetArgs args) => _owner.ChatListElement(args.Data);
+        public void RecycleElement(Microsoft.UI.Xaml.Controls.ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
+    }
+#endif
 
     private static void ApplyChatRowSelection((Button Button, TextBlock Title) row, bool selected)
     {
@@ -1583,7 +1630,15 @@ public sealed partial class MainWindow : Window
             return;
         }
         args.Cancel = true;
+#if HAS_UNO
+        // macOS: the menu bar item and the Dock bring a hidden window back, so
+        // closing hides it, as the tray does on Windows. Without the native
+        // helper (or on the Win32 preview) nothing could, so closing quits.
+        if (Nexus.Platform.MacShell.HasStatusItem) WindowExtensions.Hide(this);
+        else _ = QuitAsync();
+#else
         WindowExtensions.Hide(this);
+#endif
     }
 
     private void Nav_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
@@ -1615,11 +1670,15 @@ public sealed partial class MainWindow : Window
         await UiThread.Resume(DispatcherQueue);
         if (!response.Ok)
         {
+#if !HAS_UNO
             PauseItem.Text = response.Error ?? "Pause capture";
+#endif
             return;
         }
         State.CapturePaused = !State.CapturePaused;
+#if !HAS_UNO
         PauseItem.Text = State.CapturePaused ? "Resume capture" : "Pause capture";
+#endif
     }
 
     private async Task QuitAsync()
@@ -1641,7 +1700,9 @@ public sealed partial class MainWindow : Window
         try
         {
             _chatSearchTimer?.Stop();
+#if !HAS_UNO
             try { Tray.Dispose(); } catch (Exception ex) { DiagLog.Warn("shutdown", "tray dispose failed", ex); }
+#endif
             try { SingleInstance.Stop(); } catch (Exception ex) { DiagLog.Warn("shutdown", "single-instance stop failed", ex); }
         }
         finally { uiCleaned.TrySetResult(); }
@@ -1651,6 +1712,12 @@ public sealed partial class MainWindow : Window
     private async void Search_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        await ShowSearchAsync();
+    }
+
+    /// Ctrl+K, and File > Search in the macOS menu bar.
+    public async Task ShowSearchAsync()
+    {
         var box = new TextBox { PlaceholderText = "Sessions, memories, files, projects" };
         var dialog = new ContentDialog
         {

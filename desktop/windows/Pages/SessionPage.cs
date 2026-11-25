@@ -143,7 +143,7 @@ public sealed partial class SessionPage : NexusPage
         _cancelHere.Click += async (_, _) => await CancelHereAsync();
         _attachImage.Click += async (_, _) => await AttachImageAsync();
         _prompt.Paste += Prompt_Paste;
-        var imagePaste = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.V, Modifiers = Windows.System.VirtualKeyModifiers.Control };
+        var imagePaste = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.V, Modifiers = Shortcuts.Primary };
         imagePaste.Invoked += async (_, e) =>
         {
             try
@@ -157,6 +157,8 @@ public sealed partial class SessionPage : NexusPage
         };
         _prompt.KeyboardAccelerators.Add(imagePaste);
         WireAttachmentDrop();
+        // The macOS Edit menu's Paste (and Cmd+V there) comes through this.
+        Shortcuts.SetPasteHandler(_prompt, TryPasteClipboardImageAsync);
         _harness.SelectionChanged += (_, _) => {
             if (_lastHarness.Length > 0) _modelByHarness[_lastHarness] = SelectedModel();
             _lastHarness = SelectedHarness();
@@ -197,7 +199,7 @@ public sealed partial class SessionPage : NexusPage
         _model.TextSubmitted += (_, _) => DispatcherQueue.TryEnqueue(RememberModelChoice);
         _model.LostFocus += (_, _) => RememberModelChoice();
         _attachImage.Content = new FontIcon { Glyph = "\uE723", FontSize = 15, Opacity = 0.72 };
-        ToolTipService.SetToolTip(_attachImage, "Attach images or files" + Environment.NewLine + "You can also paste (Ctrl+V) or drop them here.");
+        ToolTipService.SetToolTip(_attachImage, "Attach images or files" + Environment.NewLine + $"You can also paste ({PlatformText.Shortcut("V")}) or drop them here.");
         _attachImage.Padding = new Thickness(6);
         _attachImage.MinWidth = 32;
         _attachImage.MinHeight = 32;
@@ -447,7 +449,7 @@ public sealed partial class SessionPage : NexusPage
         _forkButton.Click += async (_, _) => await ForkChatAsync();
         ToolTipService.SetToolTip(_forkButton, "Start a separate chat from this conversation");
         var find = new Button { Content = new FontIcon { Glyph = "\uE721", FontSize = 15 }, MinWidth = 34 };
-        ToolTipService.SetToolTip(find, "Find in this chat · Ctrl+F");
+        ToolTipService.SetToolTip(find, "Find in this chat · " + Shortcuts.Label("F"));
         find.Click += (_, _) => OpenFind();
         // Token usage sits beside the actions while the title fits; when it
         // would squeeze the title it moves to a small line under it.
@@ -528,7 +530,7 @@ public sealed partial class SessionPage : NexusPage
             _notice.Visibility = string.IsNullOrWhiteSpace(_notice.Text) ? Visibility.Collapsed : Visibility.Visible);
 
         var root = new Grid { Padding = new Thickness(20, 14, 20, 12), RowSpacing = 6 };
-        var findShortcut = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.F, Modifiers = Windows.System.VirtualKeyModifiers.Control };
+        var findShortcut = new Microsoft.UI.Xaml.Input.KeyboardAccelerator { Key = Windows.System.VirtualKey.F, Modifiers = Shortcuts.Primary };
         findShortcut.Invoked += (_, e) => { e.Handled = true; OpenFind(); };
         root.KeyboardAccelerators.Add(findShortcut);
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });

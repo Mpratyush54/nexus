@@ -44,10 +44,10 @@ internal static class AccessibleNames
                 return "";
             case ComboBox combo:
                 return First(combo.Header as string, combo.PlaceholderText, Tip(combo));
-            case TextBox box:
-                return First(box.Header as string, box.PlaceholderText, Tip(box));
             case PasswordBox password:
                 return First(password.Header as string, password.PlaceholderText, Tip(password));
+            case TextBox box:
+                return First(box.Header as string, box.PlaceholderText, Tip(box));
             case ToggleSwitch toggle:
                 return First(toggle.Header as string, Tip(toggle));
         }

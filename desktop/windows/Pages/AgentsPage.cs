@@ -108,7 +108,7 @@ public sealed class AgentsPage : NexusPage
             _cards.Children.Add(Card(
                 Line("No captured agents yet", title: true),
                 Line("An agent shows up here once Nexus has saved its first chat in this project."),
-                Line("Check that chat saving is on in Settings and not paused in the tray, then use Cursor, Codex, Claude Code or another supported agent in this project.")));
+                Line($"Check that chat saving is on in Settings and not paused in {PlatformText.TrayPlace}, then use Cursor, Codex, Claude Code or another supported agent in this project.")));
             _cards.Children.Add(SectionHeader("Supported harnesses"));
             foreach (var harness in AgentCatalog.All.Take(8))
             {

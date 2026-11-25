@@ -961,9 +961,9 @@ public sealed partial class AgentSetupPage : NexusPage
         try
         {
             if (System.IO.File.Exists(path))
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = false });
+                PlatformText.Reveal(path);
             else if (System.IO.Path.GetDirectoryName(path) is { } dir && System.IO.Directory.Exists(dir))
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + dir + "\"") { UseShellExecute = false });
+                PlatformText.Reveal(dir);
             else _status.Text = "That file no longer exists.";
         }
         catch (Exception e) { _status.Text = NxErrors.ForException("Nexus couldn't open that folder.", e, "agents"); }
@@ -1120,7 +1120,11 @@ public sealed partial class AgentSetupPage : NexusPage
 
         public RowFactory(Func<object, UIElement> build) => _build = build;
 
-        public UIElement GetElement(ElementFactoryGetArgs args)
+        public UIElement GetElement(Microsoft.UI.Xaml.ElementFactoryGetArgs args) => Realize(args.Data);
+
+        public void RecycleElement(Microsoft.UI.Xaml.ElementFactoryRecycleArgs args) => Release(args.Element);
+
+        private UIElement Realize(object data)
         {
             // A recycled host stays a (hidden) child of the repeater, as with
             // the framework's own recycle pool, and is handed back here.
@@ -1128,17 +1132,27 @@ public sealed partial class AgentSetupPage : NexusPage
             {
                 HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, IsTabStop = false
             };
-            host.Content = _build(args.Data);
+            host.Content = _build(data);
             _live.Add(host);
             return host;
         }
 
-        public void RecycleElement(ElementFactoryRecycleArgs args)
+        private void Release(UIElement element)
         {
-            if (args.Element is not ContentControl host) return;
+            if (element is not ContentControl host) return;
             host.Content = null;
             _live.Remove(host);
             _pool.Push(host);
         }
     }
+
+#if HAS_UNO
+    // Uno's ItemsRepeater takes custom factories only through its
+    // IElementFactoryShim (Microsoft.UI.Xaml.Controls); same behaviour.
+    private sealed partial class RowFactory : Microsoft.UI.Xaml.Controls.IElementFactoryShim
+    {
+        public UIElement GetElement(Microsoft.UI.Xaml.Controls.ElementFactoryGetArgs args) => Realize(args.Data);
+        public void RecycleElement(Microsoft.UI.Xaml.Controls.ElementFactoryRecycleArgs args) => Release(args.Element);
+    }
+#endif
 }
