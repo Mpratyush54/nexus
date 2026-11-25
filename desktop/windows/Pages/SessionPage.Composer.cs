@@ -609,6 +609,8 @@ public sealed partial class SessionPage
         }
         if (notSent is not null)
         {
+            // Never reached the agent: "Not sent" with Retry and Edit, not "Stopped · Continue".
+            _stopRequested = false;
             EndTurnStreaming(view);
             FinishTurnView(view, new NxResponse(false, notSent, null), sessionID, message.Text);
             return;
@@ -752,7 +754,7 @@ public sealed partial class SessionPage
         ToolTipService.SetToolTip(line, message.Reason);
         var retry = InlineAction("Retry", "Retry sending this message");
         var edit = InlineAction("Edit", "Edit this message in the composer");
-        ToolTipService.SetToolTip(retry, "Send the same message again");
+        ToolTipService.SetToolTip(retry, partial is null ? "Send the same message again" : "Send the same message again. The agent may already have changed files; check its steps above first.");
         ToolTipService.SetToolTip(edit, "Put it back in the message box");
         line.Children.Add(retry);
         line.Children.Add(edit);
