@@ -18,9 +18,13 @@ public sealed partial class AgentSetupPage
     private const string InstallAllMethod = "agents.install_all";
     private const string UninstallAllMethod = "agents.uninstall_all";
 
+    private Button? _installButton;
+
     private UIElement InstallBar()
     {
-        var install = new Button { Content = "Connect Nexus to your agents", Padding = new Thickness(14, 6, 14, 7) };
+        // Hidden once every installed agent is connected (see LoadAsync);
+        // "Disconnect" stays in the ... menu.
+        var install = _installButton = new Button { Content = "Connect Nexus to your agents", Padding = new Thickness(14, 6, 14, 7) };
         ToolTipService.SetToolTip(install, "Adds Nexus to every coding agent on this computer so they share memory and chats. You review the changes first.");
         if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style)
             install.Style = style;

@@ -66,6 +66,13 @@ public sealed partial class SettingsPage : NexusPage
     protected override void OnEnter(object? parameter) =>
         ShowSection(parameter is string { Length: > 0 } key ? key : _section.Length > 0 ? _section : s_lastSection, forceLoad: true);
 
+    private static string FolderCount(string count) => count switch
+    {
+        "" or "0" => "No project folders allowed yet",
+        "1" => "1 project folder allowed",
+        _ => count + " project folders allowed"
+    };
+
     private async Task RefreshBrowserExecutionAsync()
     {
         var response = await Call("desktop.execution.status");
@@ -81,7 +88,7 @@ public sealed partial class SettingsPage : NexusPage
             ? "Not available yet: your Nexus server does not support browser-to-desktop execution." +
               (stored ? " Your choice to allow it is kept for when it does." : "")
             : response.Ok && response.Result is { } status
-            ? $"{NxJson.Text(status, "mapped_projects")} mapped projects · Approval required for every turn. {NxJson.Text(status, "problem")}"
+            ? $"{FolderCount(NxJson.Text(status, "mapped_projects"))} · You approve every message. {NxJson.Text(status, "problem")}".TrimEnd()
             : response.Error ?? "Browser execution is unavailable in this core build.";
         _browserExecution.Visibility = Visibility.Visible;
         _browserExecution.IsEnabled = response.Ok && !unsupported;
