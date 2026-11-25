@@ -88,3 +88,66 @@ func TestBlobChunkMemoryLimitsReturn413And429(t *testing.T) {
 		t.Fatalf("second upload while the first holds the quota: %d, want 429 with Retry-After", rec.Code)
 	}
 }
+
+// Assembled size is capped: an upload declared over the cap is refused at
+// its first piece, before anything is decoded into memory or stored, and
+// assembly refuses pieces that add up to more.
+func TestBlobAssembledSizeCap(t *testing.T) {
+	s := newBlobServer(t)
+	old := maxAssembledBytes
+	maxAssembledBytes = 100
+	t.Cleanup(func() { maxAssembledBytes = old })
+	projectID := claimFolder(t, s, "blob-size-cap", "owner")
+	tok := loginAs(t, s, "owner")
+
+	piece := make([]byte, 40)
+	// 4 pieces of 40 bytes declared: over 100 before the first is stored.
+	if code := postPiece(t, s, tok, projectID, shaHex([]byte("big")), 0, 4, piece); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("declared over the cap: %d, want 413", code)
+	}
+	if total, _ := store.BlobChunkBytes("owner"); total != 0 {
+		t.Fatalf("%d bytes stored for a refused upload", total)
+	}
+	// Uneven pieces that only add up to too much: refused as they arrive.
+	parent := shaHex([]byte("uneven"))
+	if code := postPiece(t, s, tok, projectID, parent, 2, 3, make([]byte, 60)); code != http.StatusCreated {
+		t.Fatalf("last piece: %d", code)
+	}
+	if code := postPiece(t, s, tok, projectID, parent, 1, 3, make([]byte, 10)); code != http.StatusCreated {
+		t.Fatalf("small piece: %d", code)
+	}
+	if code := postPiece(t, s, tok, projectID, parent, 0, 3, make([]byte, 10)); code != http.StatusCreated {
+		t.Fatalf("small piece: %d", code)
+	}
+	if code := postPiece(t, s, tok, projectID, shaHex([]byte("x")), 1, 2, make([]byte, 101)); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("one piece over the cap: %d, want 413", code)
+	}
+	// Assembly checks the sha256 of the joined pieces.
+	rec := doJSON(t, s, http.MethodPost, "/v1/blobs/"+parent+"/assemble", tok, map[string]any{"project_id": projectID, "purpose": "transcript"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("pieces not matching the sha: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBlobAssembleConcurrencyIsBounded(t *testing.T) {
+	s := newBlobServer(t)
+	projectID := claimFolder(t, s, "blob-slots", "owner")
+	tok := loginAs(t, s, "owner")
+	for i := 0; i < cap(assembleSlots); i++ {
+		assembleSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for len(assembleSlots) > 0 {
+			<-assembleSlots
+		}
+	})
+	body := []byte("one piece")
+	parent := shaHex(body)
+	if code := postPiece(t, s, tok, projectID, parent, 0, 1, body); code != http.StatusCreated {
+		t.Fatalf("piece: %d", code)
+	}
+	rec := doJSON(t, s, http.MethodPost, "/v1/blobs/"+parent+"/assemble", tok, map[string]any{"project_id": projectID})
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("assembly with every slot busy: %d, want 429", rec.Code)
+	}
+}

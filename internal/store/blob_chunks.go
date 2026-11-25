@@ -237,3 +237,65 @@ func ResetBlobChunks() {
 	blobChunks.total = 0
 	blobChunks.secrets = map[secretKey]secretRecord{}
 }
+
+// ErrAssembleTooLarge means an upload's pieces add up to more than the
+// assembled-size limit.
+var ErrAssembleTooLarge = errors.New("store: assembled file is larger than the limit")
+
+// ErrAssembleMissing means a piece of the upload is missing or inconsistent.
+var ErrAssembleMissing = errors.New("store: missing chunk")
+
+// ErrAssembleSHA means the pieces do not add up to the declared sha256.
+var ErrAssembleSHA = errors.New("store: assembled bytes do not match sha256")
+
+// AssembleBlobChunks joins an upload's pieces in index order, checking the
+// assembled sha256 against parentSHA256 as it goes. The size is checked
+// before anything is copied (ErrAssembleTooLarge over maxBytes), and the
+// result is built once at its exact size: no per-piece copies and no
+// growing buffer (this used to take several times the file in memory).
+func AssembleBlobChunks(projectID, parentSHA256 string, maxBytes int64) (data []byte, pieces int, err error) {
+	blobChunks.mu.Lock()
+	blobChunks.expireLocked(chunkNow())
+	set := blobChunks.sets[chunkSetKey{Project: projectID, Parent: parentSHA256}]
+	if set == nil || set.total < 1 || len(set.pieces) != set.total {
+		blobChunks.mu.Unlock()
+		return nil, 0, ErrAssembleMissing
+	}
+	// Piece bodies are never modified once stored (a re-sent piece replaces
+	// the map entry), so they can be read after the lock is released.
+	bodies := make([][]byte, set.total)
+	var size int64
+	for i := 0; i < set.total; i++ {
+		p, ok := set.pieces[i]
+		if !ok {
+			blobChunks.mu.Unlock()
+			return nil, 0, ErrAssembleMissing
+		}
+		bodies[i] = p.Body
+		size += int64(len(p.Body))
+	}
+	blobChunks.mu.Unlock()
+	if maxBytes > 0 && size > maxBytes {
+		return nil, 0, ErrAssembleTooLarge
+	}
+	h := sha256.New()
+	out := make([]byte, 0, size)
+	for _, b := range bodies {
+		h.Write(b)
+		out = append(out, b...)
+	}
+	if hex.EncodeToString(h.Sum(nil)) != strings.ToLower(strings.TrimSpace(parentSHA256)) {
+		return nil, 0, ErrAssembleSHA
+	}
+	return out, len(bodies), nil
+}
+
+// BlobChunkSetBytes is the size of an upload's stored pieces so far.
+func BlobChunkSetBytes(projectID, parentSHA256 string) int64 {
+	blobChunks.mu.Lock()
+	defer blobChunks.mu.Unlock()
+	if set := blobChunks.sets[chunkSetKey{Project: projectID, Parent: parentSHA256}]; set != nil {
+		return set.bytes
+	}
+	return 0
+}
