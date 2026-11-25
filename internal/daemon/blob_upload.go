@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -132,10 +133,18 @@ func (s *HTTPMemoryStore) uploadChunked(ctx context.Context, client *http.Client
 		}
 		s.setChunkProgress(projectID, hash, index+1)
 	}
+	// purpose "transcript" keeps the blob out of the plan's file storage,
+	// as with a plain PUT. Servers before that field reject unknown fields
+	// with a 400; they get the request again without it.
+	body := map[string]any{"project_id": projectID, "purpose": "transcript"}
 	var status int
 	err = retryPiece(ctx, func() error {
 		var err error
-		status, err = mirrorJSON(ctx, client, http.MethodPost, endpoint+"/assemble", token, map[string]any{"project_id": projectID}, nil)
+		status, err = mirrorJSON(ctx, client, http.MethodPost, endpoint+"/assemble", token, body, nil)
+		if status == http.StatusBadRequest && body["purpose"] != nil && strings.Contains(err.Error(), "unknown field") {
+			delete(body, "purpose")
+			status, err = mirrorJSON(ctx, client, http.MethodPost, endpoint+"/assemble", token, body, nil)
+		}
 		if status == http.StatusConflict {
 			return nil // not transient: handled below
 		}

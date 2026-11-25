@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // writeHugeJSONL makes a transcript of more than 64 MB cheaply: a sparse run
@@ -272,5 +273,62 @@ func TestSubagentSnapshotUsesRunTranscript(t *testing.T) {
 	}
 	if n := cloud.count("PUT /v1/blobs"); n != 1 {
 		t.Fatalf("sub-agent run uploads = %d, want 1", n)
+	}
+}
+
+func TestLargeSnapshotCadence(t *testing.T) {
+	if LargeSnapshotBytes != 8<<20 || DefaultLargeSnapshotMinInterval != 30*time.Minute || DefaultSnapshotMinInterval != 5*time.Minute {
+		t.Fatalf("snapshot cadence constants changed: %d bytes, %s large, %s small",
+			LargeSnapshotBytes, DefaultLargeSnapshotMinInterval, DefaultSnapshotMinInterval)
+	}
+	home := t.TempDir()
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	proj := filepath.Join(home, ".claude", "projects", claudeProjectEncoded(root))
+	const big, small = "0b9f2b7e-3c41-4d0a-8f6e-5a7d9c1e2f31", "0b9f2b7e-3c41-4d0a-8f6e-5a7d9c1e2f32"
+	bigPath, smallPath := filepath.Join(proj, big+".jsonl"), filepath.Join(proj, small+".jsonl")
+	writeHugeJSONL(t, bigPath, LargeSnapshotBytes+(1<<20), claudeUserLine(1, "long chat"))
+	writeLinesMkdir(t, smallPath, claudeUserLine(1, "short chat"))
+
+	cloud := &countingCloud{calls: map[string]int{}, bytes: map[string]int64{}}
+	srv := httptest.NewServer(cloud)
+	defer srv.Close()
+	d, err := NewDaemon(root, "local-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.ServerURL, d.ServerToken = srv.URL, "tok"
+	r := NewRuntime(d, "p", NewStaticDesignation(true))
+	r.SetServerProjectID("11111111-2222-4333-8444-555555555555")
+	r.SnapshotMinInterval = time.Nanosecond // periodic spacing out of the way
+	uploads := func() int {
+		return cloud.count("PUT /v1/blobs") + cloud.count("POST /v1/blobs/assemble")
+	}
+	ctx := t.Context()
+	step := func(sid, path string, force bool) {
+		writeLines(t, path, claudeUserLine(2, "more"))
+		r.noteSessionTurns(sid, "claude", 1)
+		r.maybePushSnapshot(ctx, sid, force)
+	}
+	step(big, bigPath, false) // first periodic: published
+	step(big, bigPath, false) // changed, but within the large interval
+	step(big, bigPath, false)
+	if n := uploads(); n != 1 {
+		t.Fatalf("large live transcript: %d uploads, want 1 within the interval", n)
+	}
+	step(big, bigPath, true) // idle / end: always published
+	if n := uploads(); n != 2 {
+		t.Fatalf("large transcript idle snapshot: %d uploads, want 2", n)
+	}
+	r.LargeSnapshotMinInterval = time.Nanosecond
+	step(big, bigPath, false)
+	if n := uploads(); n != 3 {
+		t.Fatalf("large transcript after the interval: %d uploads, want 3", n)
+	}
+	step(small, smallPath, false)
+	step(small, smallPath, false)
+	if n := uploads(); n != 5 {
+		t.Fatalf("small transcript keeps its cadence: %d uploads, want 5", n)
 	}
 }

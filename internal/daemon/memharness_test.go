@@ -121,6 +121,22 @@ func (f *fakeCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// uploadMB is the transcript upload volume so far: version blobs (plain PUT
+// and chunks) and legacy snapshot pushes.
+func (f *fakeCloud) uploadMB() (blobs, legacy float64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for route, n := range f.bytes {
+		switch {
+		case strings.HasPrefix(route, "PUT /v1/blobs/") || strings.HasSuffix(route, "/chunks"):
+			blobs += float64(n) / (1 << 20)
+		case strings.HasPrefix(route, "POST /sessions/") && strings.HasSuffix(route, "/snapshot"):
+			legacy += float64(n) / (1 << 20)
+		}
+	}
+	return blobs, legacy
+}
+
 type memSample struct {
 	cycle                        int
 	elapsed                      float64
@@ -244,6 +260,9 @@ func TestMemHarness(t *testing.T) {
 	rt.Shared = shared
 	d.SetPipeline(rt)
 	rt.SetServerProjectID("11111111-2222-4333-8444-555555555555")
+	if large := envDur("MEMH_SNAP_LARGE"); large > 0 {
+		rt.LargeSnapshotMinInterval = large
+	}
 	if snap := envDur("MEMH_SNAP"); snap > 0 {
 		rt.SnapshotMinInterval = snap
 	}
@@ -308,6 +327,8 @@ func TestMemHarness(t *testing.T) {
 		appended += n
 		s := readMem(c, start, appended)
 		samples = append(samples, s)
+		blobMB, legacyMB := cloud.uploadMB()
+		t.Logf("UPLOAD cycle=%d t=%.0fs version_blobs=%.1fMB legacy_snapshots=%.1fMB", c, s.elapsed, blobMB, legacyMB)
 		if c == envInt("MEMH_HEAP_AT", -1) {
 			if f, err := os.Create(filepath.Join(outDir, fmt.Sprintf("%s-heap-c%d.pprof", tag, c))); err == nil {
 				_ = pprof.Lookup("heap").WriteTo(f, 0)

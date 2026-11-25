@@ -74,11 +74,11 @@ func CollectSnapshot(root, conversationID, harness, machineID string) (*store.Se
 
 // snapshotTranscriptStamp identifies the transcript a snapshot of
 // conversationID would pack (size and modification time), or "" when it
-// cannot tell (no transcript file, SQLite-only harnesses).
-func snapshotTranscriptStamp(root, conversationID, harness string) string {
+// cannot tell (no transcript file, SQLite-only harnesses), and its size.
+func snapshotTranscriptStamp(root, conversationID, harness string) (stamp string, size int64) {
 	layout, err := ResolveSnapshotLayout(normalizeHarness(harness), conversationID, root)
 	if err != nil || layout.TranscriptFile == "" || layout.SQLiteSource != "" {
-		return ""
+		return "", 0
 	}
 	path := layout.TranscriptFile
 	if layout.Harness == "antigravity" {
@@ -88,9 +88,9 @@ func snapshotTranscriptStamp(root, conversationID, harness string) string {
 	}
 	st, err := os.Stat(path)
 	if err != nil || st.IsDir() {
-		return ""
+		return "", 0
 	}
-	return path + "\x00" + strconv.FormatInt(st.Size(), 10) + ":" + strconv.FormatInt(st.ModTime().UnixNano(), 10)
+	return path + "\x00" + strconv.FormatInt(st.Size(), 10) + ":" + strconv.FormatInt(st.ModTime().UnixNano(), 10), st.Size()
 }
 
 // snapshotDiffBundle is the redacted, gzipped uncommitted diff of a snapshot.

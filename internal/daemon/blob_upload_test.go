@@ -44,6 +44,9 @@ type strictBlobServer struct {
 	failChunk map[int][]int
 	// dropBeforeAssemble loses the stored pieces once (server restart).
 	dropBeforeAssemble bool
+	// oldAssemble behaves like a server without assemble's purpose field.
+	oldAssemble bool
+	purposes    []string
 }
 
 func newStrictBlobServer() *strictBlobServer {
@@ -170,12 +173,22 @@ func (s *strictBlobServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case route == "POST /v1/blobs/{sha}/assemble":
 		var body struct {
 			ProjectID string `json:"project_id"`
+			Purpose   string `json:"purpose"`
 		}
-		if !s.decode(w, r, serverChunkCap, &body) {
+		var oldBody struct {
+			ProjectID string `json:"project_id"`
+		}
+		if s.oldAssemble {
+			// Servers before the purpose field reject unknown fields.
+			if !s.decode(w, r, serverChunkCap, &oldBody) {
+				return
+			}
+		} else if !s.decode(w, r, serverChunkCap, &body) {
 			return
 		}
 		s.mu.Lock()
 		defer s.mu.Unlock()
+		s.purposes = append(s.purposes, body.Purpose)
 		if s.dropBeforeAssemble {
 			s.dropBeforeAssemble = false
 			delete(s.pieces, parts[2])
@@ -383,5 +396,28 @@ func TestStrictServerRejectsLargePlainPut(t *testing.T) {
 	snap, _ := transcriptSnapshot(t, 3<<20)
 	if err := publishTo(t, srv, snap); err == nil || !strings.Contains(err.Error(), "400") {
 		t.Fatalf("plain PUT of 3 MB: err = %v, want a 400 from the 2 MB cap", err)
+	}
+}
+
+func TestAssembleDeclaresTranscriptPurpose(t *testing.T) {
+	for _, old := range []bool{false, true} {
+		fake := newStrictBlobServer()
+		fake.oldAssemble = old
+		srv := httptest.NewServer(fake)
+		snap, raw := transcriptSnapshot(t, 6<<20)
+		err := publishTo(t, srv, snap)
+		srv.Close()
+		if err != nil {
+			t.Fatalf("old=%v: %v", old, err)
+		}
+		if !bytes.Equal(fake.blobs[sha(raw)], raw) {
+			t.Fatalf("old=%v: blob not assembled", old)
+		}
+		if !old && (len(fake.purposes) != 1 || fake.purposes[0] != "transcript") {
+			t.Fatalf("assemble purposes = %q, want [transcript]", fake.purposes)
+		}
+		if old && fake.count("POST /v1/blobs/{sha}/assemble") != 2 {
+			t.Fatalf("old server: %d assemble requests, want 2 (retry without purpose)", fake.count("POST /v1/blobs/{sha}/assemble"))
+		}
 	}
 }

@@ -149,6 +149,10 @@ type Runtime struct {
 	sessionHarness        map[string]string // session_id -> harvest agent/harness
 	lastSnapshotAttempt   map[string]time.Time
 	lastSnapshotStamp     map[string]string // session_id -> transcript size:mtime at last upload
+	lastSnapshotUpload    map[string]time.Time
+	// LargeSnapshotMinInterval spaces periodic snapshots of a transcript
+	// over LargeSnapshotBytes; <=0 selects DefaultLargeSnapshotMinInterval.
+	LargeSnapshotMinInterval time.Duration
 	// SnapshotMinInterval spaces periodic (non-idle) snapshots of one
 	// session; <=0 selects DefaultSnapshotMinInterval.
 	SnapshotMinInterval time.Duration
@@ -561,6 +565,21 @@ func (r *Runtime) pushDueSnapshots(ctx context.Context) {
 // of one live session.
 const DefaultSnapshotMinInterval = 5 * time.Minute
 
+// A transcript over LargeSnapshotBytes is published at most every
+// DefaultLargeSnapshotMinInterval while it is live, plus when it goes idle:
+// every version uploads the whole transcript.
+const (
+	LargeSnapshotBytes              = 8 << 20
+	DefaultLargeSnapshotMinInterval = 30 * time.Minute
+)
+
+func (r *Runtime) largeSnapshotMinInterval() time.Duration {
+	if r.LargeSnapshotMinInterval > 0 {
+		return r.LargeSnapshotMinInterval
+	}
+	return DefaultLargeSnapshotMinInterval
+}
+
 func (r *Runtime) snapshotMinInterval() time.Duration {
 	if r.SnapshotMinInterval > 0 {
 		return r.SnapshotMinInterval
@@ -611,15 +630,21 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	// and re-uploads the whole chat (an idle snapshot right after a periodic
 	// one did exactly that). The stamp is taken before reading, so a write
 	// that lands during the read still differs next time.
-	stamp := snapshotTranscriptStamp(r.Daemon.Root, sessionID, harness)
+	stamp, size := snapshotTranscriptStamp(r.Daemon.Root, sessionID, harness)
 	if stamp != "" {
 		r.snapshotMu.Lock()
 		unchanged := r.lastSnapshotStamp[sessionID] == stamp
 		if unchanged && r.lastSnapshotTurnCount != nil {
 			r.lastSnapshotTurnCount[sessionID] = turns
 		}
+		// Each version uploads the whole transcript. A large live chat is
+		// published at most every LargeSnapshotMinInterval (it used to be
+		// every few minutes: a gzip copy of tens of megabytes each time);
+		// the idle snapshot (force) still always runs.
+		tooSoon := !force && size > LargeSnapshotBytes && !r.lastSnapshotUpload[sessionID].IsZero() &&
+			now.Sub(r.lastSnapshotUpload[sessionID]) < r.largeSnapshotMinInterval()
 		r.snapshotMu.Unlock()
-		if unchanged {
+		if unchanged || tooSoon {
 			return
 		}
 	}
@@ -630,7 +655,7 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	if err != nil {
 		// Retry once with auto-detect when the hinted harness has no files yet.
 		if alt := DetectHarnessForConversation(sessionID, r.Daemon.Root); alt != "" && alt != harness {
-			stamp = snapshotTranscriptStamp(r.Daemon.Root, sessionID, alt)
+			stamp, _ = snapshotTranscriptStamp(r.Daemon.Root, sessionID, alt)
 			snap, err = CollectSnapshot(r.Daemon.Root, sessionID, alt, r.Daemon.MachineID)
 			harness = alt
 		}
@@ -672,6 +697,10 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 		}
 		r.lastSnapshotStamp[sessionID] = stamp
 	}
+	if r.lastSnapshotUpload == nil {
+		r.lastSnapshotUpload = map[string]time.Time{}
+	}
+	r.lastSnapshotUpload[sessionID] = now
 	r.snapshotMu.Unlock()
 }
 
