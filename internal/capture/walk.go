@@ -55,6 +55,14 @@ type Manifest struct {
 // and stores bytes in store (BYTEA local S3 stand-in). A second capture of
 // an unchanged tree reports NewUploads == 0.
 func CaptureWalk(root string, store blobs.BlobStore) (*Manifest, error) {
+	return CaptureWalkLimited(root, store, 0, 0)
+}
+
+// CaptureWalkLimited uses the same secret and regenerable-file exclusions as
+// CaptureWalk, but refuses files that would exceed an explicit transfer
+// budget before reading them. The caller must inspect Refuse and must not
+// describe a partial manifest as a complete code transfer.
+func CaptureWalkLimited(root string, store blobs.BlobStore, maxFile, maxTotal int64) (*Manifest, error) {
 	if store == nil {
 		return nil, fmt.Errorf("capture: BlobStore is required")
 	}
@@ -63,7 +71,7 @@ func CaptureWalk(root string, store blobs.BlobStore) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	return captureFromEntries(root, entries, markers, store, func(rel string) ([]byte, error) {
+	return captureFromEntriesLimited(root, entries, markers, store, maxFile, maxTotal, func(rel string) ([]byte, error) {
 		return os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
 	})
 }
@@ -77,8 +85,37 @@ func captureFromEntries(
 	store blobs.BlobStore,
 	readFile func(rel string) ([]byte, error),
 ) (*Manifest, error) {
+	return captureFromEntriesLimited(root, entries, markers, store, 0, 0, readFile)
+}
+
+func captureFromEntriesLimited(
+	root string,
+	entries []FileEntry,
+	markers Markers,
+	store blobs.BlobStore,
+	maxFile, maxTotal int64,
+	readFile func(rel string) ([]byte, error),
+) (*Manifest, error) {
 	_ = root
 	plan := PlanTree(entries, markers)
+	if maxFile > 0 || maxTotal > 0 {
+		sizes := make(map[string]int64, len(entries))
+		for _, entry := range entries {
+			sizes[entry.Rel] = entry.Size
+		}
+		kept := make([]string, 0, len(plan.Include))
+		var total int64
+		for _, rel := range plan.Include {
+			size := sizes[rel]
+			if (maxFile > 0 && size > maxFile) || (maxTotal > 0 && size > maxTotal-total) {
+				plan.Refuse = append(plan.Refuse, rel)
+				continue
+			}
+			total += size
+			kept = append(kept, rel)
+		}
+		plan.Include = kept
+	}
 	man := &Manifest{
 		Files:   []FileRecord{},
 		Exclude: NormalizeExcludePaths(plan.Exclude),
@@ -124,6 +161,11 @@ func listWorkspace(root string) ([]FileEntry, Markers, error) {
 			return err
 		}
 		if rel == "." {
+			return nil
+		}
+		// A link can escape the selected workspace even when its path is
+		// inside it. Never follow or upload symlink targets.
+		if d.Type()&os.ModeSymlink != 0 {
 			return nil
 		}
 		base := path.Base(rel)

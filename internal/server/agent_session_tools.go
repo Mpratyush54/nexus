@@ -42,7 +42,7 @@ func (s *Server) registerAgentSessionToolRoutes() {
 // and q filters turns by text or tool calls; see the branch below.
 func (s *Server) handleAgentSessionFetch(w http.ResponseWriter, r *http.Request) {
 	sessionID := strings.TrimSpace(r.PathValue("id"))
-	row, ok := s.requireAgentRead(w, r, sessionID)
+	row, ok := s.requireAgentLive(w, r, sessionID)
 	if !ok {
 		return
 	}
@@ -217,6 +217,21 @@ func (s *Server) handleAgentSessionSummary(w http.ResponseWriter, r *http.Reques
 	row, ok := s.requireAgentRead(w, r, strings.TrimSpace(r.PathValue("id")))
 	if !ok {
 		return
+	}
+	if row.LineageKind != "legacy_snapshot" {
+		if cs, ok := s.agentCloud(); ok {
+			live, err := cs.CanReadAgentSessionLive(r.Context(), authSubject(r), row.ID)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "could not check live access")
+				return
+			}
+			if !live {
+				// Stored and extracted summaries may describe turns created after
+				// the shared version. They are live content, not pinned metadata.
+				writeJSON(w, http.StatusOK, map[string]any{"summary": "", "version_limited": true})
+				return
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"summary": s.sessionSummaryText(r.Context(), row)})
 }

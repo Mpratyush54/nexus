@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"os"
 
+	"central-memory/internal/buildinfo"
 	"central-memory/internal/core"
+	"central-memory/internal/diagnostics"
 )
 
 func main() {
+	defer diagnostics.Capture("", buildinfo.Version)()
 	var req struct {
 		Method string          `json:"method"`
 		Args   json.RawMessage `json:"args"`

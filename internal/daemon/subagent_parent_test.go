@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestSubagentParentNativeID(t *testing.T) {
+func TestSubagentParentNativeIDCases(t *testing.T) {
 	cases := map[string]string{
 		`C:\Users\me\.claude\projects\D--repo\0f8e2c1a-6d2b-4f6e-9a51-3b7c2d1e0f9a\subagents\agent-a1b2c3d4e5f6a7b8c.jsonl`: "0f8e2c1a-6d2b-4f6e-9a51-3b7c2d1e0f9a",
 		"/home/me/.claude/projects/-repo/parent-1/subagents/agent-0123456789abcdef.jsonl":                                   "parent-1",

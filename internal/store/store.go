@@ -630,7 +630,7 @@ func (s *MemStore) SearchMemory(ctx context.Context, projectID string, query str
 }
 
 // SearchMemoryPage pages MemStore keyword results and returns total matches.
-func (s *MemStore) SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int) ([]*MemoryItem, int, error) {
+func (s *MemStore) SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int, level string) ([]*MemoryItem, int, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -640,6 +640,15 @@ func (s *MemStore) SearchMemoryPage(ctx context.Context, projectID string, query
 	all, err := s.SearchMemory(ctx, projectID, query, tags, offset+limit+10_000)
 	if err != nil {
 		return nil, 0, err
+	}
+	if level = strings.ToLower(strings.TrimSpace(level)); level != "" {
+		filtered := make([]*MemoryItem, 0, len(all))
+		for _, item := range all {
+			if item != nil && strings.EqualFold(item.Level, level) {
+				filtered = append(filtered, item)
+			}
+		}
+		all = filtered
 	}
 	total := len(all)
 	if offset >= total {
@@ -673,6 +682,11 @@ func (s *MemStore) SearchMemoryVector(ctx context.Context, projectID string, que
 	return s.SearchMemoryVectorModel(ctx, projectID, VectorQuery{Vec: queryVec}, limit)
 }
 
+// SearchMemoryVectorPage mirrors PostgresStore.SearchMemoryVectorPage.
+func (s *MemStore) SearchMemoryVectorPage(ctx context.Context, projectID string, queryVec []float32, limit, offset int, level string) ([]*MemoryItem, error) {
+	return s.SearchMemoryVectorModel(ctx, projectID, VectorQuery{Vec: queryVec, Offset: offset, Level: level}, limit)
+}
+
 // SearchMemoryVectorModel mirrors PostgresStore.SearchMemoryVectorModel.
 func (s *MemStore) SearchMemoryVectorModel(ctx context.Context, projectID string, q VectorQuery, limit int) ([]*MemoryItem, error) {
 	queryVec := q.Vec
@@ -686,6 +700,11 @@ func (s *MemStore) SearchMemoryVectorModel(ctx context.Context, projectID string
 	if limit <= 0 {
 		limit = 20
 	}
+	offset := q.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	level := strings.ToLower(strings.TrimSpace(q.Level))
 	viewerID := ViewerFrom(ctx)
 	// Membership checked outside the memory lock (RWMutex is not reentrant).
 	isMember := false
@@ -705,6 +724,9 @@ func (s *MemStore) SearchMemoryVectorModel(ctx context.Context, projectID string
 	var ranked []scored
 	for _, item := range s.memories {
 		if !memoryVisibleToProject(item, projectID) {
+			continue
+		}
+		if level != "" && !strings.EqualFold(item.Level, level) {
 			continue
 		}
 		if item.Status != StatusConfirmed && item.Status != StatusProposed {
@@ -742,11 +764,16 @@ func (s *MemStore) SearchMemoryVectorModel(ctx context.Context, projectID string
 		}
 		return ranked[i].sim > ranked[j].sim
 	})
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
+	if offset >= len(ranked) {
+		return []*MemoryItem{}, nil
 	}
-	out := make([]*MemoryItem, 0, len(ranked))
-	for _, r := range ranked {
+	end := offset + limit
+	if end > len(ranked) {
+		end = len(ranked)
+	}
+	page := ranked[offset:end]
+	out := make([]*MemoryItem, 0, len(page))
+	for _, r := range page {
 		out = append(out, cloneMemoryItem(r.item))
 	}
 	return out, nil

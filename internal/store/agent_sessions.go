@@ -136,6 +136,7 @@ type AgentCloudStore interface {
 	UpsertAgentSession(ctx context.Context, in *AgentSession) (*AgentSession, error)
 	GetAgentSession(ctx context.Context, id string) (*AgentSession, error)
 	CanReadAgentSession(ctx context.Context, userID, sessionID string) (bool, error)
+	CanReadAgentSessionLive(ctx context.Context, userID, sessionID string) (bool, error)
 	GrantAgentSession(ctx context.Context, sessionID, granteeUserID, grantedBy string) error
 	GrantAgentSessionOpts(ctx context.Context, sessionID, granteeUserID, grantedBy string, opts SessionGrantOpts) error
 	ListVisibleSessionVersions(ctx context.Context, sessionID, userID string) ([]SessionVersion, error)
@@ -297,6 +298,18 @@ func (m *MemStore) CanReadAgentSession(ctx context.Context, userID, sessionID st
 	return m.agentVisibleLocked(userID, row), nil
 }
 
+func (m *MemStore) CanReadAgentSessionLive(ctx context.Context, userID, sessionID string) (bool, error) {
+	_ = ctx
+	userID = strings.TrimSpace(userID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	row := m.agentSessions[strings.TrimSpace(sessionID)]
+	if row == nil {
+		return false, ErrNotFound
+	}
+	return m.agentLiveVisibleLocked(userID, row), nil
+}
+
 func (m *MemStore) agentVisibleLocked(userID string, row *AgentSession) bool {
 	if row.OwnerUserID == userID {
 		return true
@@ -306,6 +319,25 @@ func (m *MemStore) agentVisibleLocked(userID string, row *AgentSession) bool {
 			continue
 		}
 		if g.Grantee != "" && g.Grantee == userID {
+			return true
+		}
+	}
+	if row.Visibility == "team" && m.projectMemberLocked(userID, row.ProjectID) {
+		return true
+	}
+	return false
+}
+
+func (m *MemStore) agentLiveVisibleLocked(userID string, row *AgentSession) bool {
+	if row.OwnerUserID == userID {
+		return true
+	}
+	for _, g := range m.agentGrants[row.ID] {
+		if g.Revoked || g.Grantee == "" || g.Grantee != userID {
+			continue
+		}
+		// A grant without a pin predates point-in-time sharing and remains live.
+		if g.Live || g.VersionID == "" {
 			return true
 		}
 	}
@@ -851,10 +883,17 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 			continue
 		}
 		var matchTurn *SessionTurn
+		live := m.agentLiveVisibleLocked(q.UserID, row)
 		if q.Query != "" {
 			needle := strings.ToLower(q.Query)
-			matched := strings.Contains(strings.ToLower(row.Title+" "+row.Summary+" "+row.NativeID), needle)
+			matched := strings.Contains(strings.ToLower(row.Title+" "+row.NativeID), needle)
+			if live && strings.Contains(strings.ToLower(row.Summary), needle) {
+				matched = true
+			}
 			for _, turn := range m.sessionTurns[row.ID] {
+				if !live {
+					break
+				}
 				if (turn.Role == "user" || turn.Role == "assistant") && strings.Contains(strings.ToLower(turn.TextPreview), needle) {
 					matched = true
 					copy := turn
@@ -894,12 +933,17 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 				item.SubagentCount++
 			}
 		}
+		if !live {
+			item.Summary = ""
+		}
 		if matchTurn != nil {
 			idx := matchTurn.Idx
 			item.MatchTurnIdx, item.MatchRole = &idx, matchTurn.Role
 			item.MatchPreview = TimelineMatchPreview(matchTurn.TextPreview, q.Query)
 		}
-		if strings.TrimSpace(item.Summary) == "" || IsPlaceholderTitle(item.Title) {
+		// A version-limited grantee sees neither summary nor turn previews:
+		// both describe the chat as it is now, not the shared version.
+		if live && (strings.TrimSpace(item.Summary) == "" || IsPlaceholderTitle(item.Title)) {
 			var users []SessionTurn
 			for _, turn := range m.sessionTurns[row.ID] {
 				if turn.Role == "user" && strings.TrimSpace(turn.TextPreview) != "" {
@@ -1100,6 +1144,37 @@ func (s *PostgresStore) CanReadAgentSession(ctx context.Context, userID, session
 		    OR EXISTS (
 		      SELECT 1 FROM session_grants g
 		      WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid
+		    )
+		    OR (
+		      s.visibility = 'team' AND (
+		        EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
+		        OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		        OR EXISTS (
+		          SELECT 1 FROM projects p
+		          JOIN organization_members om ON om.org_id = p.org_id
+		          WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER')
+		        )
+		      )
+		    )
+		  )
+		)`, userID, sessionID).Scan(&ok)
+	return ok, err
+}
+
+func (s *PostgresStore) CanReadAgentSessionLive(ctx context.Context, userID, sessionID string) (bool, error) {
+	if !looksLikeUUID(sessionID) || !looksLikeUUID(userID) {
+		return false, nil
+	}
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM agent_sessions s
+		  WHERE s.id = $2::uuid AND (
+		    s.owner_user_id = $1::uuid
+		    OR EXISTS (
+		      SELECT 1 FROM session_grants g
+		      WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid
+		        AND g.live
 		    )
 		    OR (
 		      s.visibility = 'team' AND (
@@ -1459,29 +1534,108 @@ func (s *PostgresStore) PutBlob(ctx context.Context, projectID, sum, kind, purpo
 	if purpose == "" {
 		purpose = "file"
 	}
-	if purpose == "file" {
-		var used, cap int64
-		var state string
-		err := s.pool.QueryRow(ctx, `
-			SELECT bytes_used, bytes_cap, state FROM storage_usage WHERE plan_scope = $1`, "project:"+projectID).Scan(&used, &cap, &state)
-		if err != nil || cap <= 0 {
-			planCap, _ := s.planCapForScope(ctx, "project:"+projectID)
-			if cap <= 0 {
-				cap = planCap
-			}
-		}
-		if state == "full" || (cap > 0 && used >= cap) {
-			return fmt.Errorf("store: %w", ErrStorageFull)
-		}
+	if purpose != "file" {
+		_, err := s.pool.Exec(ctx, `
+			INSERT INTO blobs (project_id, sha256, size, kind, purpose, verified_at, body)
+			VALUES ($1::uuid, $2, $3, $4, $5, now(), $6)
+			ON CONFLICT (project_id, sha256) DO UPDATE
+			SET size = EXCLUDED.size, kind = EXCLUDED.kind, purpose = EXCLUDED.purpose,
+			    verified_at = now(), body = EXCLUDED.body`,
+			projectID, sum, len(body), kind, purpose, body)
+		return err
 	}
-	_, err := s.pool.Exec(ctx, `
+
+	scope, _, cap, err := s.fileStorageScope(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO storage_usage (plan_scope, bytes_used, bytes_cap, state)
+		VALUES ($1, 0, $2, $3)
+		ON CONFLICT (plan_scope) DO NOTHING`, scope, cap, capture.UsageState(0, cap)); err != nil {
+		return err
+	}
+	var used, storedCap int64
+	if err := tx.QueryRow(ctx, `
+		SELECT bytes_used, bytes_cap FROM storage_usage WHERE plan_scope = $1 FOR UPDATE`, scope).Scan(&used, &storedCap); err != nil {
+		return err
+	}
+	if storedCap <= 0 {
+		storedCap = cap
+	}
+	var oldSize int64
+	oldPurpose := ""
+	err = tx.QueryRow(ctx, `
+		SELECT size, purpose FROM blobs WHERE project_id = $1::uuid AND sha256 = $2`,
+		projectID, sum).Scan(&oldSize, &oldPurpose)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	delta := int64(len(body))
+	if oldPurpose == "file" {
+		delta -= oldSize
+	}
+	if storedCap > 0 && delta > 0 && used+delta > storedCap {
+		return fmt.Errorf("store: %w", ErrStorageFull)
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO blobs (project_id, sha256, size, kind, purpose, verified_at, body)
 		VALUES ($1::uuid, $2, $3, $4, $5, now(), $6)
 		ON CONFLICT (project_id, sha256) DO UPDATE
 		SET size = EXCLUDED.size, kind = EXCLUDED.kind, purpose = EXCLUDED.purpose,
 		    verified_at = now(), body = EXCLUDED.body`,
-		projectID, sum, len(body), kind, purpose, body)
-	return err
+		projectID, sum, len(body), kind, purpose, body); err != nil {
+		return err
+	}
+	if delta != 0 {
+		used += delta
+		if used < 0 {
+			used = 0
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE storage_usage SET bytes_used = $2, bytes_cap = $3, state = $4 WHERE plan_scope = $1`,
+		scope, used, storedCap, capture.UsageState(used, storedCap)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) fileStorageScope(ctx context.Context, projectID string) (string, int64, int64, error) {
+	owner := ""
+	_ = s.pool.QueryRow(ctx, `SELECT COALESCE(created_by::text, '') FROM projects WHERE id = $1::uuid`, projectID).Scan(&owner)
+	candidates := []string{"project:" + projectID, projectID}
+	if owner != "" {
+		candidates = append(candidates, "user:"+owner)
+	}
+	for _, scope := range candidates {
+		var used, cap int64
+		err := s.pool.QueryRow(ctx, `
+			SELECT bytes_used, bytes_cap FROM storage_usage WHERE plan_scope = $1`, scope).Scan(&used, &cap)
+		if err == nil {
+			return scope, used, cap, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, 0, err
+		}
+	}
+	scope := "project:" + projectID
+	if owner != "" {
+		scope = "user:" + owner
+	}
+	cap, err := s.planCapForScope(ctx, scope)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if cap <= 0 {
+		cap = PlanStorageBytes(PlanFree)
+	}
+	return scope, 0, cap, nil
 }
 
 func (s *PostgresStore) MissingBlobs(ctx context.Context, projectID string, hashes []string) ([]string, error) {
@@ -1617,12 +1771,14 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	}
 	rows, err := s.pool.Query(ctx, with+`
 		SELECT s.id::text, s.project_id::text, s.harness, s.native_id, COALESCE(s.title,''),
-		       COALESCE(s.summary,''),
+		       -- A version-limited grantee (can_read_live false) sees neither the
+		       -- summary nor turn previews: both describe the chat as it is now.
+		       CASE WHEN s.can_read_live THEN COALESCE(s.summary,'') ELSE '' END,
 		       -- Fallback preview and title source, only when there is no
 		       -- summary or the title is a placeholder: the raw first user
 		       -- turns. Go removes harness wrapper and skips envelope-only
 		       -- turns (timelineFirstRequestPreview, PresentTitle).
-		       CASE WHEN NULLIF(s.summary,'') IS NULL OR NULLIF(BTRIM(s.title),'') IS NULL OR s.title ~* $9 THEN ARRAY(
+		       CASE WHEN s.can_read_live AND (NULLIF(s.summary,'') IS NULL OR NULLIF(BTRIM(s.title),'') IS NULL OR s.title ~* $9) THEN ARRAY(
 		         SELECT LEFT(t.text_preview, 4000)
 		         FROM session_turns t WHERE t.session_id = s.id AND t.role = 'user'
 		           AND NULLIF(BTRIM(t.text_preview), '') IS NOT NULL
@@ -1663,8 +1819,22 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		  SELECT s.id, s.project_id, s.harness, s.native_id, s.title, s.summary,
 		         s.visibility, s.owner_user_id, s.last_active_at,
 		         s.origin_machine_id, s.parent_native_id,
-		         `+subagentSQL(11, 12, 13)+` AS is_subagent
+		         `+subagentSQL(11, 12, 13)+` AS is_subagent,
+		         acl.can_read_live
 		  FROM agent_sessions s
+		  -- Live read: owner, a live grant, or team access. A grant pinned to a
+		  -- version lists the chat but not its live summary or turns.
+		  CROSS JOIN LATERAL (SELECT (
+		    s.owner_user_id = $1::uuid
+		    OR EXISTS (SELECT 1 FROM session_grants g WHERE g.session_id = s.id
+		      AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid AND g.live)
+		    OR (s.visibility = 'team' AND (
+		      EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
+		      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		      OR EXISTS (SELECT 1 FROM projects p JOIN organization_members om ON om.org_id = p.org_id
+		        WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER'))
+		    ))
+		  ) AS can_read_live) acl
 		  WHERE (
 		    s.owner_user_id = $1::uuid
 		    OR EXISTS (
@@ -1675,6 +1845,8 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		      s.visibility = 'team' AND (
 		        EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
 		        OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		        OR EXISTS (SELECT 1 FROM projects p JOIN organization_members om ON om.org_id = p.org_id
+		          WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER'))
 		      )
 		    )
 		  )
@@ -1683,9 +1855,10 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		  -- Sub-agent runs are left out before LIMIT, so the page and its
 		  -- cursor count only listed rows.
 		  AND ($14::bool OR NOT `+subagentSQL(11, 12, 13)+`)
-		  AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0 OR STRPOS(LOWER(s.summary), LOWER($7)) > 0
+		  AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0
+		       OR (acl.can_read_live AND STRPOS(LOWER(s.summary), LOWER($7)) > 0)
 		       OR STRPOS(LOWER(s.native_id), LOWER($7)) > 0
-		       OR `+turnMatch+`)
+		       OR (acl.can_read_live AND `+turnMatch+`))
 		  AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
 		  AND (NOT $8::bool
 		    OR EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = s.id)
@@ -1699,7 +1872,7 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		  SELECT t.idx, t.role,
 		    t.text_preview AS preview
 		  FROM session_turns t
-		  WHERE t.session_id = s.id AND $7 <> '' AND t.role IN ('user', 'assistant')
+		  WHERE t.session_id = s.id AND s.can_read_live AND $7 <> '' AND t.role IN ('user', 'assistant')
 		    AND STRPOS(LOWER(t.text_preview), LOWER($7)) > 0
 		  ORDER BY t.idx LIMIT 1
 		) hit ON TRUE

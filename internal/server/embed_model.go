@@ -98,6 +98,37 @@ func (s *Server) modelVectorSearch() vectorSearchFunc {
 	return modelVectorSearchFor(s.Store, s.EmbedProvider)
 }
 
+// vectorPageFunc is a vectorSearchFunc with an offset over visible ranked
+// rows and an optional level filter.
+type vectorPageFunc func(ctx context.Context, projectID string, vec []float32, limit, offset int, level string) ([]*store.MemoryItem, error)
+
+// modelVectorSearchPage is modelVectorSearch with paging and a level filter.
+// Stores without SearchMemoryVectorModel use searchMemoryVector (unfiltered
+// by model), which refuses offset/level it cannot honour; nil when the store
+// has no vector path at all.
+func (s *Server) modelVectorSearchPage() vectorPageFunc {
+	if ms, ok := s.Store.(interface {
+		SearchMemoryVectorModel(ctx context.Context, projectID string, q store.VectorQuery, limit int) ([]*store.MemoryItem, error)
+	}); ok {
+		p := s.EmbedProvider
+		return func(ctx context.Context, projectID string, vec []float32, limit, offset int, level string) ([]*store.MemoryItem, error) {
+			q := vectorQueryFor(p, vec)
+			q.Offset = offset
+			q.Level = level
+			return ms.SearchMemoryVectorModel(ctx, projectID, q, limit)
+		}
+	}
+	if _, ok := s.Store.(memoryVectorPager); !ok {
+		if _, ok := s.Store.(memoryVectorSearcher); !ok {
+			return nil
+		}
+	}
+	return func(ctx context.Context, projectID string, vec []float32, limit, offset int, level string) ([]*store.MemoryItem, error) {
+		items, _, err := s.searchMemoryVector(ctx, projectID, vec, limit, offset, level)
+		return items, err
+	}
+}
+
 // queryEmbedder is the MCP query seam: the provider's query-prefixed,
 // fallback-safe embedder, or nil (MCP then uses Config.Embedder).
 func (s *Server) queryEmbedder() memctx.Embedder {

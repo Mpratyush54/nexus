@@ -2,10 +2,12 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestHTTPCloudAddsBearerAndPreservesMethodBody(t *testing.T) {
@@ -26,6 +28,32 @@ func TestHTTPCloudAddsBearerAndPreservesMethodBody(t *testing.T) {
 	raw, err := (&HTTPCloud{BaseURL: srv.URL, Token: "token"}).Do(context.Background(), http.MethodPost, "/v1/test", []byte(`{"ok":true}`))
 	if err != nil || string(raw) != `{"items":[]}` {
 		t.Fatalf("raw=%s err=%v", raw, err)
+	}
+}
+
+func TestHTTPCloudTimeoutPerRequest(t *testing.T) {
+	// The route that projects.brief_refresh maps to must get the long limit.
+	method, path, _, err := cloudRequest("projects.brief_refresh", json.RawMessage(`{"project_id":"p 1"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cloudTimeout(method, path); got != 120*time.Second {
+		t.Fatalf("brief refresh timeout = %v", got)
+	}
+	cases := []struct {
+		method, path string
+		want         time.Duration
+	}{
+		{http.MethodGet, "/v1/projects/p1/brief", 30 * time.Second},
+		{http.MethodGet, "/v1/projects/p1/brief/refresh", 30 * time.Second},
+		{http.MethodPost, "/v1/projects/p1/memories", 30 * time.Second},
+		{http.MethodPost, "/v1/test", 30 * time.Second},
+		{http.MethodGet, "/v1/blobs/abc", 2 * time.Minute},
+	}
+	for _, c := range cases {
+		if got := cloudTimeout(c.method, c.path); got != c.want {
+			t.Fatalf("%s %s timeout = %v, want %v", c.method, c.path, got, c.want)
+		}
 	}
 }
 

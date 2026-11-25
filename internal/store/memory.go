@@ -324,18 +324,19 @@ func (s *PostgresStore) ConfirmMemory(ctx context.Context, id string, confirmedB
 // explicitly organization-level. Sharing visibility (issue #164): WithViewer
 // filters private/shared rows; empty viewer returns project+public only.
 func (s *PostgresStore) SearchMemory(ctx context.Context, projectID string, query string, tags []string, limit int) ([]*MemoryItem, error) {
-	items, _, err := s.SearchMemoryPage(ctx, projectID, query, tags, limit, 0)
+	items, _, err := s.SearchMemoryPage(ctx, projectID, query, tags, limit, 0, "")
 	return items, err
 }
 
 // SearchMemoryPage returns a page of keyword matches plus the total visible count.
-func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int) ([]*MemoryItem, int, error) {
+func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int, level string) ([]*MemoryItem, int, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 	if offset < 0 {
 		offset = 0
 	}
+	level = strings.ToLower(strings.TrimSpace(level))
 	viewerID := ViewerFrom(ctx)
 	// Over-fetch before visibility filter, then page in Go. For large libraries
 	// this is still bounded by limit+offset+buffer.
@@ -356,9 +357,10 @@ func (s *PostgresStore) SearchMemoryPage(ctx context.Context, projectID string, 
 		    AND ($2 = '' OR content ILIKE '%'||$2||'%'
 		         OR "key" ILIKE '%'||$2||'%' OR $2 = ANY(tags))
 		    AND ($3::text[] IS NULL OR tags && $3)
+		    AND ($5 = '' OR level = $5)
 		  ORDER BY confidence DESC, created_at DESC
 		  LIMIT $4`,
-		nullText(projectID), query, nilTextArray(tags), fetch)
+		nullText(projectID), query, nilTextArray(tags), fetch, level)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -463,10 +465,17 @@ func (s *PostgresStore) SearchMemoryVector(ctx context.Context, projectID string
 	return s.SearchMemoryVectorModel(ctx, projectID, VectorQuery{Vec: queryVec}, limit)
 }
 
+// SearchMemoryVectorPage is SearchMemoryVector with an offset over the
+// visible, ranked rows and an optional exact level filter ("" = all).
+func (s *PostgresStore) SearchMemoryVectorPage(ctx context.Context, projectID string, queryVec []float32, limit, offset int, level string) ([]*MemoryItem, error) {
+	return s.SearchMemoryVectorModel(ctx, projectID, VectorQuery{Vec: queryVec, Offset: offset, Level: level}, limit)
+}
+
 // SearchMemoryVectorModel is SearchMemoryVector restricted to rows embedded
 // by q.Model (NULL embedding_model counts as "hash"), with q.MinSimilarity
 // as the floor (0 = MinVectorSimilarity). Vectors from different models
 // share the vector(1536) column but not a space, so they are never compared.
+// q.Level filters by tier and q.Offset skips that many visible rows.
 func (s *PostgresStore) SearchMemoryVectorModel(ctx context.Context, projectID string, q VectorQuery, limit int) ([]*MemoryItem, error) {
 	queryVec := q.Vec
 	if len(queryVec) == 0 {
@@ -478,8 +487,13 @@ func (s *PostgresStore) SearchMemoryVectorModel(ctx context.Context, projectID s
 	if limit <= 0 {
 		limit = 20
 	}
+	offset := q.Offset
+	if offset < 0 {
+		offset = 0
+	}
+	level := strings.ToLower(strings.TrimSpace(q.Level))
 	// Over-fetch so rows hidden by visibility do not shrink the page.
-	fetch := limit * 4
+	fetch := (offset + limit) * 4
 	rows, err := s.pool.Query(ctx,
 		`SELECT `+memoryColumns+` FROM memory_items
 		  WHERE (project_id = $1::uuid OR (project_id IS NULL AND level = 'organization'))
@@ -489,9 +503,10 @@ func (s *PostgresStore) SearchMemoryVectorModel(ctx context.Context, projectID s
 		    AND embedding IS NOT NULL
 		    AND 1 - (embedding <=> $2::vector) >= $4
 		    AND ($5 = '' OR COALESCE(embedding_model, 'hash') = $5)
-		  ORDER BY (CASE WHEN 'pinned' = ANY(tags) THEN 0 ELSE 1 END), embedding <=> $2::vector
+		    AND ($6 = '' OR level = $6)
+		  ORDER BY (CASE WHEN 'pinned' = ANY(tags) THEN 0 ELSE 1 END), embedding <=> $2::vector, id
 		  LIMIT $3`,
-		nullText(projectID), encodeEmbedding(queryVec), fetch, q.floor(), strings.TrimSpace(q.Model))
+		nullText(projectID), encodeEmbedding(queryVec), fetch, q.floor(), strings.TrimSpace(q.Model), level)
 	if err != nil {
 		return nil, err
 	}
@@ -519,6 +534,7 @@ func (s *PostgresStore) SearchMemoryVectorModel(ctx context.Context, projectID s
 		isMember = ok
 	}
 	out := make([]*MemoryItem, 0, limit)
+	skipped := 0
 	for _, m := range candidates {
 		if len(out) >= limit {
 			break
@@ -539,6 +555,10 @@ func (s *PostgresStore) SearchMemoryVectorModel(ctx context.Context, projectID s
 			if !CanViewMemory(m, viewerID, isMember, hasShare) {
 				continue
 			}
+		}
+		if skipped < offset {
+			skipped++
+			continue
 		}
 		out = append(out, m)
 	}

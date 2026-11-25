@@ -152,7 +152,7 @@ func TestPublishAgentSessionVersionUploadsTranscriptAndCompletes(t *testing.T) {
 	if transcript["blob"] != "sha256:"+hash || complete["native_id"] != "native-1" {
 		t.Fatalf("manifest = %#v", complete)
 	}
-	want := "POST /v1/agent-sessions,PUT /v1/blobs/" + hash + ",POST /v1/agent-sessions/cloud-session/versions,POST /v1/agent-sessions/cloud-session/versions/3/complete"
+	want := "POST /v1/agent-sessions,POST /v1/blobs/missing,PUT /v1/blobs/" + hash + ",POST /v1/agent-sessions/cloud-session/versions,POST /v1/agent-sessions/cloud-session/versions/3/complete"
 	if got := strings.Join(calls, ","); got != want {
 		t.Fatalf("calls = %s\nwant = %s", got, want)
 	}

@@ -71,3 +71,51 @@ func TestMemStoreSearchMemoryVector(t *testing.T) {
 		t.Fatal("PROPOSED rows are active on write and must appear in vector search")
 	}
 }
+
+func TestMemStoreSearchMemoryVectorPagination(t *testing.T) {
+	s := NewMemStore()
+	ctx := context.Background()
+	p, err := s.ResolveProject(ctx, "https://example.com/page.git", "abc", "embed-page")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scores := []float32{1, 0.8, 0.6}
+	for i, score := range scores {
+		vec := make([]float32, EmbeddingDim)
+		vec[0] = score
+		vec[1] = 1 - score
+		item := &MemoryItem{
+			ProjectID: p.ID, Key: "page/" + string(rune('0'+i)), Content: "pagination fixture content for vector ordering checks",
+			Level: LevelProject, Scope: "fact", Status: StatusConfirmed, Confidence: 0.9, Embedding: vec,
+		}
+		if err := s.CreateMemoryItem(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	query := make([]float32, EmbeddingDim)
+	query[0] = 1
+	for offset, want := range []string{"page/0", "page/1", "page/2"} {
+		got, err := s.SearchMemoryVectorPage(ctx, p.ID, query, 1, offset, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Key != want {
+			t.Fatalf("offset %d = %v, want %s", offset, keys(got), want)
+		}
+	}
+	got, err := s.SearchMemoryVectorPage(ctx, p.ID, query, 1, len(scores), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("offset past end returned %v", keys(got))
+	}
+}
+
+func keys(items []*MemoryItem) []string {
+	out := make([]string, len(items))
+	for i, item := range items {
+		out[i] = item.Key
+	}
+	return out
+}

@@ -1,9 +1,12 @@
 #Requires -Version 5.1
 param(
   [string]$Version = "0.1.0",
-  [switch]$Upload,
-  [switch]$Inno
+  [switch]$Upload
 )
+
+# The installer (Setup.exe, portable zip, update feed) is built by
+# scripts/package-windows.ps1 (Velopack). This script only builds the
+# framework-dependent app zip for local checks.
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -44,29 +47,21 @@ foreach ($resource in @("App.xbf", "MainWindow.xbf", "Microsoft.UI.pri", "Micros
 # stale core impossible even if dotnet cleans its destination.
 $env:CGO_ENABLED = "1"
 go build -tags nexuscorelib -trimpath -ldflags $ld -buildmode=c-shared -o "$app\nexuscore.dll" ./cmd/nexuscore
+if ($LASTEXITCODE -ne 0) { throw "nexuscore build failed" }
+# Bundled stdio MCP proxy for Antigravity: the app must not need the CLI.
+$env:CGO_ENABLED = "0"
+go build -trimpath -ldflags "-s -w" -o "$app\nexus-mcp-proxy.exe" ./cmd/nexus-mcp-proxy
+if ($LASTEXITCODE -ne 0) { throw "nexus-mcp-proxy build failed" }
 
 Compress-Archive -Path "$app\*" -DestinationPath "$dist\nexus-desktop-windows-amd64.zip" -Force
 Copy-Item "$root\scripts\install-windows.ps1" "$dist\install-windows.ps1" -Force
-
-if ($Inno) {
-  $iscc = @(
-    "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
-    "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
-  ) | Where-Object { Test-Path $_ } | Select-Object -First 1
-  if (-not $iscc) {
-    Write-Warning "Inno Setup 6 not found — skipping NexusSetup.exe"
-  } else {
-    & $iscc "$root\scripts\nexus.iss"
-  }
-}
 
 if ($Upload) {
   aws s3 sync $dist "s3://central-memory-releases/desktop/$Version/" `
     --exclude "*" `
     --include "nexus-windows-amd64.exe" `
     --include "nexus-desktop-windows-amd64.zip" `
-    --include "install-windows.ps1" `
-    --include "NexusSetup-*"
+    --include "install-windows.ps1"
 }
 
 Get-ChildItem $dist | Format-Table Name, Length, LastWriteTime

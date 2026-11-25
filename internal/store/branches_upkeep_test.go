@@ -2,7 +2,7 @@ package store
 
 // Pure + MemStore tests for branch upkeep (issue #44): archive eligibility
 // and staleness flags. Postgres paths share the same predicates and SQL
-// shapes; live-DB coverage runs gated on TEST_POSTGRES_DSN.
+// shapes; live-DB coverage uses the shared Postgres test database.
 
 import (
 	"context"

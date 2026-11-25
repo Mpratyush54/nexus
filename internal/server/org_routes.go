@@ -204,9 +204,29 @@ func (s *Server) handleOrgGet(w http.ResponseWriter, r *http.Request) {
 	if projects == nil {
 		projects = []*store.Project{}
 	}
+	// Only organization members can reach this endpoint. Return display labels
+	// alongside stable IDs so native clients never need to ask users for UUIDs.
+	type namedMember struct {
+		*store.OrganizationMember
+		Name string `json:"name"`
+	}
+	named := make([]namedMember, 0, len(members))
+	for _, member := range members {
+		name := member.UserID
+		if s.Accounts != nil {
+			if account, err := s.Accounts.GetByID(r.Context(), member.UserID); err == nil && account != nil {
+				if label, ok := account.Settings["display_name"].(string); ok && strings.TrimSpace(label) != "" {
+					name = strings.TrimSpace(label)
+				} else if account.Username != "" {
+					name = account.Username
+				}
+			}
+		}
+		named = append(named, namedMember{member, name})
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"organization": o,
-		"members":      members,
+		"members":      named,
 		"projects":     projects,
 	})
 }

@@ -1,0 +1,165 @@
+name: macos
+
+# Evidence that the Go core works on macOS: the whole module builds and vets,
+# the DB-free test suite passes, libnexuscore.dylib builds for arm64 and
+# x86_64, loads through dlopen like a desktop host loads it, and the
+# harvester finds Claude Code / Codex / Cursor transcripts in a macOS home.
+#
+# Postgres: the TEST_POSTGRES_DSN / embedded-Postgres tests cover the cloud
+# server's store, which runs on Linux and is already exercised against a
+# real Postgres in ci.yml. The desktop core never talks to Postgres, so this
+# workflow runs the suite with -short (as ci.yml's test-race job does).
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-macos:
+    name: go on macOS (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - name: Machine facts (arch, descriptor limits)
+        run: |
+          sw_vers
+          uname -m
+          echo "ulimit -n (shell soft): $(ulimit -n)"
+          echo "ulimit -Hn (shell hard): $(ulimit -Hn)"
+          launchctl limit maxfiles || true
+          sysctl kern.maxfiles kern.maxfilesperproc
+          xcode-select -p || echo "no command line tools"
+          which git && git --version
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Vet the C-ABI library build
+        run: go vet -tags nexuscorelib ./cmd/nexuscore/
+
+      # Later steps still run when this fails, so one unrelated test failure
+      # does not hide the dylib and smoke-test evidence; the job stays red.
+      - name: Test (DB-free suite)
+        if: ${{ !cancelled() }}
+        run: go test -short -count=1 ./...
+
+      - name: macOS-specific checks, verbose
+        if: ${{ !cancelled() }}
+        run: >
+          go test -short -count=1 -v
+          -run 'FakeHome|ResolveSourcesUsesOSAppDataDir|WorkspaceJSONPosix|AppDataDir|AugmentGUIPath|AugmentedPath|RaiseFileLimit|LeavesSkipsMacHome|ResolveSources'
+          ./internal/daemon/ ./internal/platform/ ./internal/project/
+
+      - name: kqueue descriptor cost of the project watcher (isolated process)
+        if: ${{ !cancelled() }}
+        run: NEXUS_FD_PROBE=1 go test -count=1 -v -run DescriptorBudget ./internal/daemon/
+
+      - name: Build libnexuscore.dylib (arm64 + x86_64, universal)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          CGO_ENABLED=1 GOARCH=arm64 CC="clang -arch arm64" \
+            go build -tags nexuscorelib -trimpath -buildmode=c-shared -o dist/arm64/libnexuscore.dylib ./cmd/nexuscore
+          CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" \
+            go build -tags nexuscorelib -trimpath -buildmode=c-shared -o dist/amd64/libnexuscore.dylib ./cmd/nexuscore
+          lipo -create -output dist/libnexuscore.dylib dist/arm64/libnexuscore.dylib dist/amd64/libnexuscore.dylib
+          cp dist/arm64/libnexuscore.h dist/libnexuscore.h
+          lipo -info dist/libnexuscore.dylib
+          ls -la dist dist/arm64 dist/amd64
+          otool -L dist/libnexuscore.dylib
+          echo "--- exported nx_ symbols"
+          nm -gU dist/arm64/libnexuscore.dylib | grep ' _nx_'
+          echo "--- generated header vs bindings/nexuscore.h"
+          for fn in nx_init nx_call nx_subscribe nx_free nx_shutdown; do
+            grep -q "$fn" dist/libnexuscore.h || { echo "missing $fn in generated header"; exit 1; }
+          done
+
+      - name: Build smoke host
+        if: ${{ !cancelled() }}
+        run: |
+          clang -Wall -Werror -arch arm64 -o dist/nxsmoke scripts/macos/nxsmoke.c
+          clang -Wall -Werror -arch x86_64 -o dist/nxsmoke-x86_64 scripts/macos/nxsmoke.c
+
+      - name: Smoke - dlopen + nx_call from a Finder-like environment
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          FAKE_HOME="$RUNNER_TEMP/fakehome"
+          rm -rf "$FAKE_HOME"
+          mkdir -p "$FAKE_HOME/.claude/projects" "$FAKE_HOME/.codex/sessions" "$FAKE_HOME/.local/bin"
+          printf '#!/bin/sh\necho 9.9.9\n' > "$FAKE_HOME/.local/bin/claude"
+          chmod +x "$FAKE_HOME/.local/bin/claude"
+          # A GUI app gets launchd's PATH, not the shell's, and launchd's
+          # default soft descriptor limit of 256 (launchctl limit maxfiles).
+          ulimit -Sn 256
+          env -i HOME="$FAKE_HOME" USER="$USER" TMPDIR="$TMPDIR" \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin NXSMOKE_EXPECT_CLAUDE=1 \
+            ./dist/nxsmoke "$PWD/dist/libnexuscore.dylib"
+          echo "--- files the core wrote under the fake home"
+          find "$FAKE_HOME" -maxdepth 4 -not -path '*/.local/bin*' | sed "s#$FAKE_HOME#~#" | sort
+
+      - name: Smoke - x86_64 slice under Rosetta (informational)
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          if ! arch -x86_64 /usr/bin/true 2>/dev/null; then echo "Rosetta not installed on this runner"; exit 0; fi
+          FAKE_HOME="$RUNNER_TEMP/fakehome-x86"
+          mkdir -p "$FAKE_HOME"
+          env -i HOME="$FAKE_HOME" TMPDIR="$TMPDIR" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            arch -x86_64 ./dist/nxsmoke-x86_64 "$PWD/dist/libnexuscore.dylib"
+
+      - name: Code signing - hardened runtime host vs ad-hoc dylib
+        if: ${{ !cancelled() }}
+        # Shows which entitlement a hardened-runtime app needs to load the
+        # library when the two are not signed by the same Team ID.
+        run: |
+          set -uo pipefail
+          FAKE_HOME="$RUNNER_TEMP/fakehome-sign"; mkdir -p "$FAKE_HOME"
+          cp dist/libnexuscore.dylib dist/libnexuscore-adhoc.dylib
+          codesign --force -s - dist/libnexuscore-adhoc.dylib
+          codesign -dv dist/libnexuscore-adhoc.dylib 2>&1 | grep -E 'Signature|flags' || true
+
+          cp dist/nxsmoke dist/host-hardened
+          codesign --force -s - -o runtime dist/host-hardened
+          echo "=== hardened host, no entitlements"
+          env -i HOME="$FAKE_HOME" TMPDIR="$TMPDIR" PATH=/usr/bin:/bin ./dist/host-hardened "$PWD/dist/libnexuscore-adhoc.dylib"             && echo "loaded: exit=0" || echo "refused or failed: exit=$?"
+
+          cat > dist/dlv.entitlements <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>com.apple.security.cs.disable-library-validation</key><true/>
+          </dict></plist>
+          PLIST
+          cp dist/nxsmoke dist/host-dlv
+          codesign --force -s - -o runtime --entitlements dist/dlv.entitlements dist/host-dlv
+          echo "=== hardened host + disable-library-validation"
+          env -i HOME="$FAKE_HOME" TMPDIR="$TMPDIR" PATH=/usr/bin:/bin ./dist/host-dlv "$PWD/dist/libnexuscore-adhoc.dylib"             && echo "loaded: exit=0" || echo "refused or failed: exit=$?"
+          exit 0
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: libnexuscore-macos-universal
+          path: |
+            dist/libnexuscore.dylib
+            dist/libnexuscore.h
+          retention-days: 7

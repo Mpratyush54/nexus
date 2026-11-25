@@ -8,9 +8,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -83,6 +80,34 @@ func mirrorJSON(ctx context.Context, client *http.Client, method, endpoint, toke
 	if err != nil {
 		return 0, err
 	}
+	return mirrorDo(client, req, token, out)
+}
+
+// mirrorStream is mirrorJSON for a body too large to build in memory.
+func mirrorStream(ctx context.Context, client *http.Client, method, endpoint, token string, length int64, open func() (io.ReadCloser, error), out any) (int, error) {
+	body, err := open()
+	if err != nil {
+		return 0, err
+	}
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, body)
+	if err != nil {
+		body.Close()
+		return 0, err
+	}
+	req.ContentLength = length
+	req.GetBody = open
+	return mirrorDo(client, req, token, out)
+}
+
+// mirrorStatusError is a non-2xx response from the cloud.
+type mirrorStatusError struct {
+	status int
+	msg    string
+}
+
+func (e *mirrorStatusError) Error() string { return e.msg }
+
+func mirrorDo(client *http.Client, req *http.Request, token string, out any) (int, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := client.Do(req)
@@ -95,7 +120,8 @@ func mirrorJSON(ctx context.Context, client *http.Client, method, endpoint, toke
 		return resp.StatusCode, err
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return resp.StatusCode, fmt.Errorf("daemon: cloud session mirror: %s %s", resp.Status, strings.TrimSpace(string(data)))
+		return resp.StatusCode, &mirrorStatusError{status: resp.StatusCode,
+			msg: fmt.Sprintf("daemon: cloud session mirror: %s %s", resp.Status, strings.TrimSpace(string(data)))}
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -105,18 +131,56 @@ func mirrorJSON(ctx context.Context, client *http.Client, method, endpoint, toke
 	return resp.StatusCode, nil
 }
 
+// mirroredSession is what the last successful upsert of a session sent.
+type mirroredSession struct {
+	id, title, parent string
+}
+
+// maxMirroredSessions bounds the upsert cache; it is cleared when full.
+const maxMirroredSessions = 4096
+
+func mirroredSessionKey(base, projectID, harness, nativeID, machineID, workspaceRoot string) string {
+	return strings.Join([]string{base, projectID, harness, nativeID, strings.TrimSpace(machineID), strings.TrimSpace(workspaceRoot)}, "\x00")
+}
+
+// forgetMirroredSession drops a cached session (after an upload against it
+// failed, the session may be gone on the server; the next batch upserts).
+func (s *HTTPMemoryStore) forgetMirroredSession(key string) {
+	if key == "" {
+		return
+	}
+	s.mu.Lock()
+	delete(s.mirrored, key)
+	s.mu.Unlock()
+}
+
 // upsertMirroredSession creates or touches the cloud session with a stable
 // (project, harness, native id, machine) identity. parentNativeID links a
 // sub-agent run to the session that started it ("" when not one).
-func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, nativeID, machineID, workspaceRoot, title, parentNativeID string) (string, error) {
+//
+// The upsert only sets the title and the parent link (the server never
+// clears either), so it is sent only when one of them changes: the first
+// time a session is seen in this process, or when it gains a new title or
+// parent. Every flush used to upsert every session it touched, again for
+// each snapshot. The returned key identifies the cache entry.
+func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, nativeID, machineID, workspaceRoot, title, parentNativeID string) (id, key string, err error) {
 	base, token, projectID, client, err := s.mirrorConnection()
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	harness = normalizeHarness(harness)
 	nativeID = strings.TrimSpace(nativeID)
 	if harness == "" || nativeID == "" {
-		return "", fmt.Errorf("daemon: cloud session mirror: harness and native id are required")
+		return "", "", fmt.Errorf("daemon: cloud session mirror: harness and native id are required")
+	}
+	title = strings.TrimSpace(title)
+	parentNativeID = strings.TrimSpace(parentNativeID)
+	key = mirroredSessionKey(base, projectID, harness, nativeID, machineID, workspaceRoot)
+	s.mu.Lock()
+	cached, known := s.mirrored[key]
+	s.mu.Unlock()
+	if known && (title == "" || title == cached.title) && (parentNativeID == "" || parentNativeID == cached.parent) {
+		return cached.id, key, nil
 	}
 	var out struct {
 		ID string `json:"id"`
@@ -127,10 +191,9 @@ func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, na
 		"native_id":           nativeID,
 		"origin_machine_id":   strings.TrimSpace(machineID),
 		"workspace_root_hint": strings.TrimSpace(workspaceRoot),
-		"title":               strings.TrimSpace(title),
+		"title":               title,
 		"visibility":          "private",
 	}
-	parentNativeID = strings.TrimSpace(parentNativeID)
 	if parentNativeID != "" {
 		body["parent_native_id"] = parentNativeID
 	}
@@ -142,37 +205,54 @@ func (s *HTTPMemoryStore) upsertMirroredSession(ctx context.Context, harness, na
 		_, err = mirrorJSON(ctx, client, http.MethodPost, base+"/v1/agent-sessions", token, body, &out)
 	}
 	if err != nil {
-		return "", err
+		return "", key, err
 	}
 	if strings.TrimSpace(out.ID) == "" {
-		return "", fmt.Errorf("daemon: cloud session mirror: server returned no session id")
+		return "", key, fmt.Errorf("daemon: cloud session mirror: server returned no session id")
 	}
-	return out.ID, nil
+	next := mirroredSession{id: out.ID, title: cached.title, parent: cached.parent}
+	if title != "" {
+		next.title = title
+	}
+	if parentNativeID != "" {
+		next.parent = parentNativeID
+	}
+	s.mu.Lock()
+	if s.mirrored == nil || len(s.mirrored) >= maxMirroredSessions {
+		s.mirrored = map[string]mirroredSession{}
+	}
+	s.mirrored[key] = next
+	s.mu.Unlock()
+	return out.ID, key, nil
 }
 
 // MirrorAgentSessionTurns makes a captured conversation visible in Timeline
 // immediately.  Indexes are deterministic source positions: a retry that
 // reaches an already-written turn receives 409 and is therefore idempotent.
 func (s *HTTPMemoryStore) MirrorAgentSessionTurns(ctx context.Context, harness, nativeID, machineID, workspaceRoot string, turns []MirroredTurn, title ...string) (string, error) {
-	t := ""
+	name := ""
 	if len(title) > 0 {
-		t = title[0]
+		name = title[0]
 	}
-	return s.MirrorAgentSessionTurnsWithParent(ctx, harness, nativeID, machineID, workspaceRoot, "", turns, t)
+	return s.MirrorAgentSessionTurnsWithParent(ctx, harness, nativeID, machineID, workspaceRoot, "", turns, name)
 }
 
 // MirrorAgentSessionTurnsWithParent is MirrorAgentSessionTurns for a session
 // that may be a sub-agent run: parentNativeID is the native id of the
 // session that started it, or "".
-func (s *HTTPMemoryStore) MirrorAgentSessionTurnsWithParent(ctx context.Context, harness, nativeID, machineID, workspaceRoot, parentNativeID string, turns []MirroredTurn, title string) (string, error) {
-	name := "Captured " + normalizeHarness(harness) + " session"
-	if strings.TrimSpace(title) != "" {
-		name = strings.TrimSpace(title)
-	}
-	sessionID, err := s.upsertMirroredSession(ctx, harness, nativeID, machineID, workspaceRoot, name, parentNativeID)
+func (s *HTTPMemoryStore) MirrorAgentSessionTurnsWithParent(ctx context.Context, harness, nativeID, machineID, workspaceRoot, parentNativeID string, turns []MirroredTurn, title string) (sessionID string, err error) {
+	// No title in this batch: send none, so the server keeps the name it has
+	// (a placeholder here overwrote a real title on every later batch). The
+	// apps name untitled chats from their first message.
+	sessionID, key, err := s.upsertMirroredSession(ctx, harness, nativeID, machineID, workspaceRoot, title, parentNativeID)
 	if err != nil || len(turns) == 0 {
 		return sessionID, err
 	}
+	defer func() {
+		if err != nil {
+			s.forgetMirroredSession(key)
+		}
+	}()
 	base, token, _, client, err := s.mirrorConnection()
 	if err != nil {
 		return sessionID, err
@@ -287,34 +367,33 @@ func (s *HTTPMemoryStore) postUsage(ctx context.Context, client *http.Client, ba
 // existing redacted snapshot payload but the modern blob/version endpoints,
 // so Teleport and restore readiness are based on a complete, immutable
 // version rather than an opaque legacy snapshot.
-func (s *HTTPMemoryStore) PublishAgentSessionVersion(ctx context.Context, snap *store.SessionSnapshot, workspaceRoot string) error {
+func (s *HTTPMemoryStore) PublishAgentSessionVersion(ctx context.Context, snap *store.SessionSnapshot, workspaceRoot string) (err error) {
 	if snap == nil {
 		return fmt.Errorf("daemon: cloud session mirror: nil snapshot")
 	}
-	sessionID, err := s.upsertMirroredSession(ctx, snap.Harness, snap.ConversationID, snap.SourceMachineID, workspaceRoot, "", "")
+	sessionID, key, err := s.upsertMirroredSession(ctx, snap.Harness, snap.ConversationID, snap.SourceMachineID, workspaceRoot, "", "")
 	if err != nil {
 		return err
 	}
-	transcript, err := ungzipBytes(snap.TranscriptPayload)
+	defer func() {
+		if err != nil {
+			s.forgetMirroredSession(key)
+		}
+	}()
+	// Hash and upload stream from the gzip payload: the decompressed
+	// transcript is never held in memory (snapshot_stream.go).
+	hash, size, err := gzipDigest(snap.TranscriptPayload)
 	if err != nil {
 		return fmt.Errorf("daemon: cloud session mirror: decode transcript: %w", err)
 	}
-	if len(transcript) == 0 {
+	if size == 0 {
 		return fmt.Errorf("daemon: cloud session mirror: empty transcript")
 	}
 	base, token, projectID, client, err := s.mirrorConnection()
 	if err != nil {
 		return err
 	}
-	sum := sha256.Sum256(transcript)
-	hash := hex.EncodeToString(sum[:])
-	if _, err := mirrorJSON(ctx, client, http.MethodPut,
-		base+"/v1/blobs/"+hash, token, map[string]any{
-			"project_id": projectID,
-			"body_b64":   base64.StdEncoding.EncodeToString(transcript),
-			"kind":       "plain",
-			"purpose":    "transcript",
-		}, nil); err != nil {
+	if err := s.uploadTranscriptBlob(ctx, client, base, token, projectID, snap.TranscriptPayload, hash, size); err != nil {
 		return err
 	}
 	var version struct {

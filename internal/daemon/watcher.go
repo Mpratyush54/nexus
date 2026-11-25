@@ -195,10 +195,15 @@ func (s *FileHashStore) SetHash(workspaceID, path, hash string) error {
 	return s.saveLocked()
 }
 
-// DeleteHash drops the stored hash and rewrites the file.
+// DeleteHash drops the stored hash and rewrites the file. Dropping a hash
+// that is not stored is a no-op: the watcher calls this for every missing
+// instruction file on every 5 s poll, and each rewrite fsyncs.
 func (s *FileHashStore) DeleteHash(workspaceID, path string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if _, ok := s.hashes[workspaceID][path]; !ok {
+		return nil
+	}
 	delete(s.hashes[workspaceID], path)
 	if len(s.hashes[workspaceID]) == 0 {
 		delete(s.hashes, workspaceID)

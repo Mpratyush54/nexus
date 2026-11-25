@@ -114,8 +114,7 @@ type Tool struct {
 
 func schema(required []string, props map[string]any) map[string]any {
 	// JSON Schema requires "required" to be an array. A nil slice encoded as
-	// null made strict MCP clients (Claude Code, Codex, Cursor) reject the
-	// whole tools/list.
+	// null made strict MCP clients (Claude Code) reject the whole tools/list.
 	if required == nil {
 		required = []string{}
 	}

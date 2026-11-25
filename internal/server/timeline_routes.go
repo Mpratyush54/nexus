@@ -127,6 +127,31 @@ func (s *Server) requireAgentRead(w http.ResponseWriter, r *http.Request, sessio
 	return row, true
 }
 
+func (s *Server) requireAgentLive(w http.ResponseWriter, r *http.Request, sessionID string) (*store.AgentSession, bool) {
+	row, ok := s.requireAgentRead(w, r, sessionID)
+	if !ok {
+		return nil, false
+	}
+	if row.LineageKind == "legacy_snapshot" {
+		return row, true
+	}
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return nil, false
+	}
+	allowed, err := cs.CanReadAgentSessionLive(r.Context(), authSubject(r), sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "session content is only shared as a point-in-time version")
+		return nil, false
+	}
+	return row, true
+}
+
 func (s *Server) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
 	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
 	if !ok {
@@ -143,6 +168,19 @@ func (s *Server) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if row.LineageKind != "legacy_snapshot" {
+		cs, _ := s.agentCloud()
+		live, err := cs.CanReadAgentSessionLive(r.Context(), authSubject(r), row.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not check live access")
+			return
+		}
+		if !live {
+			copy := *row
+			copy.Summary = ""
+			row = &copy
+		}
+	}
 	writeJSON(w, http.StatusOK, row)
 }
 
@@ -152,7 +190,7 @@ func (s *Server) handleAgentSessionForks(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+	if _, ok := s.requireAgentOwner(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	items, err := cs.ListAgentSessionForks(r.Context(), r.PathValue("id"))
@@ -173,7 +211,7 @@ func (s *Server) handleAgentSessionFork(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	parent, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	parent, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -194,7 +232,7 @@ func (s *Server) handleAgentSessionMergeCode(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	target, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	target, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -209,7 +247,7 @@ func (s *Server) handleAgentSessionMergeCode(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "from_session_id is required")
 		return
 	}
-	from, ok := s.requireAgentRead(w, r, fromID)
+	from, ok := s.requireAgentOwner(w, r, fromID)
 	if !ok {
 		return
 	}
@@ -310,7 +348,7 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -358,7 +396,7 @@ func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -409,7 +447,7 @@ func (s *Server) handleAgentTurnList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+	if _, ok := s.requireAgentLive(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	turns, err := cs.ListSessionTurns(r.Context(), r.PathValue("id"))
@@ -495,7 +533,7 @@ func (s *Server) handleAgentVersionCreate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -516,7 +554,7 @@ func (s *Server) handleAgentVersionComplete(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
