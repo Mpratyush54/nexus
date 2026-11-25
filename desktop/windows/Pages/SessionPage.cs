@@ -322,6 +322,7 @@ public sealed partial class SessionPage : NexusPage
         _attachmentsLabel.FontSize = 11;
         _attachmentsLabel.Visibility = Visibility.Collapsed;
         _composer.Children.Add(_composerStatus);
+        VoiceInput.Attach(_prompt, _sendHere);
         UpdateWorkspaceFlyoutVisibility();
         _chatTabBtn = SessionTabButton("Chat");
         _activityTabBtn = SessionTabButton("Activity");

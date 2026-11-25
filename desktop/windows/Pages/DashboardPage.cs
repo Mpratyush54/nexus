@@ -167,6 +167,7 @@ public sealed class DashboardPage : NexusPage
         bar.Children.Add(_startStatus);
         Grid.SetColumn(_startSend, 3);
         bar.Children.Add(_startSend);
+        VoiceInput.Attach(_startPrompt, _startSend);
         _startAgent.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         _startAgent.BorderThickness = new Thickness(0);
         _startAgent.FontSize = 12.5;

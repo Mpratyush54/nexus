@@ -35,6 +35,7 @@ import {
   isToolOnlyTurn,
 } from "@/components/ChatMessage";
 import { ChatDiff } from "@/components/ChatDiff";
+import { VoiceInputButton } from "@/components/voice";
 import { ProjectSwitcher } from "@/components/ProjectSwitcher";
 import { NexusMark } from "@/components/NexusBrand";
 import { AccessibleModal } from "@/components/ui/AccessibleModal";
@@ -1227,6 +1228,7 @@ function Conversation({
               <p className="chat-muted">{modelJob.result.warning}</p>
             )}
           </details>
+          <VoiceInputButton />
           {busy ? (
             <button
               type="button"

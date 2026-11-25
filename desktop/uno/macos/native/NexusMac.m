@@ -21,7 +21,7 @@
 // Build (universal):
 //   clang -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -fobjc-arc -dynamiclib \
 //     -framework AppKit -framework CoreServices -install_name @rpath/libnexusmac.dylib \
-//     -o libnexusmac.dylib NexusMac.m
+//     -framework Speech -framework AVFoundation -o libnexusmac.dylib NexusMac.m NexusDictation.m
 
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>

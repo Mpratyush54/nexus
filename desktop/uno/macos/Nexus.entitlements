@@ -5,8 +5,10 @@
   .NET needs JIT and writable+executable memory; the bundled native libraries
   (SkiaSharp, the Go core, the AppKit helper) are not signed by the same team
   as the runtime until Developer ID signing is on, hence library validation
-  is off. Nothing else: no sandbox (Nexus reads the project folders you
-  approve), no camera, no network server entitlement needed.
+  is off. audio-input: the hardened runtime blocks the microphone without
+  it; voice input (dictation) uses it only while the mic button is on.
+  Nothing else: no sandbox (Nexus reads the project folders you approve),
+  no camera, no network server entitlement needed.
   https://learn.microsoft.com/dotnet/core/install/macos-notarization-issues
 -->
 <plist version="1.0">
@@ -14,5 +16,6 @@
   <key>com.apple.security.cs.allow-jit</key><true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
   <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.device.audio-input</key><true/>
 </dict>
 </plist>

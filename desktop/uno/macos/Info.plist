@@ -23,6 +23,12 @@
   <string>Nexus reads the projects you choose on the Desktop to capture your coding-agent sessions.</string>
   <key>NSDownloadsFolderUsageDescription</key>
   <string>Nexus reads the projects you choose in Downloads to capture your coding-agent sessions.</string>
+  <!-- Voice input in the chat box (desktop/uno/macos/native/NexusDictation.m):
+       macOS asks for both the first time the microphone button is used. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Nexus listens only while you dictate a message with the microphone button. Audio is never recorded or uploaded by Nexus.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>Nexus turns what you say into text in the chat box when you use the microphone button.</string>
   <key>CFBundleURLTypes</key>
   <array>
     <dict>

@@ -52,7 +52,7 @@ public sealed partial class SettingsPage
             SettingRow(RowText("Updates", _updateStatus), _updateButton));
         _updateButton.Click += async (_, _) => await UpdateAsync();
         RenderUpdateState();
-        return new StackPanel { Children = { appearance, startup, setup } };
+        return new StackPanel { Children = { appearance, startup, BuildVoiceInputGroup(), setup } };
     }
 
     // ---- General: updates (installed copies only; see UpdateService)

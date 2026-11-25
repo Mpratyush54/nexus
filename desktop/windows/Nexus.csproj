@@ -32,6 +32,8 @@
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageReference Include="H.NotifyIcon.WinUI" Version="2.2.0" />
     <PackageReference Include="Velopack" Version="1.2.161" />
+    <!-- Voice input: the on-device SAPI recognizer (Platform/WindowsDictation.cs). -->
+    <PackageReference Include="System.Speech" Version="8.0.0" />
   </ItemGroup>
 
   <ItemGroup>
