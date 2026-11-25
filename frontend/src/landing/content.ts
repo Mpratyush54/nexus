@@ -1,5 +1,6 @@
 export const SITE_URL = 'https://nexus.pratyushes.dev'
-export const DOWNLOAD_URL = 'https://github.com/Mpratyush54/nexus/releases/latest'
+// Redirects (Cloudflare rule) to releases/latest/download/Nexus-Setup.exe.
+export const DOWNLOAD_URL = 'https://nexus.pratyushes.dev/download'
 export const GITHUB_URL = 'https://github.com/Mpratyush54/nexus'
 export const WEB_APP_PATH = '/app'
 export const SIGN_IN_PATH = '/login'
