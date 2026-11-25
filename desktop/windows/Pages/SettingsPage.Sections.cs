@@ -394,7 +394,7 @@ public sealed partial class SettingsPage
         }
         await LoadUploadsAsync();
         var cloud = await Call(NxMethods.ProjectsList);
-        _connection.Text = cloud.Ok ? "Cloud API reachable. Captured sessions sync to your signed-in account." : cloud.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
+        _connection.Text = cloud.Ok ? "Connected. Your chats sync to your Nexus account." : cloud.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
     }
 
     private async Task LoadUploadsAsync()

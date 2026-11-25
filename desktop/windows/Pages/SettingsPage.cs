@@ -382,7 +382,7 @@ public sealed partial class SettingsPage : NexusPage
         _projects.Children.Add(NoteRow("Loading project policies…"));
         var response = await Call(NxMethods.ProjectsList);
         _projects.Children.Clear();
-        _connection.Text = response.Ok ? "Cloud API reachable. Captured sessions sync to your signed-in account." : response.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
+        _connection.Text = response.Ok ? "Connected. Your chats sync to your Nexus account." : response.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
         if (!response.Ok) { _projects.Children.Add(NoteRow(response.Error ?? "Project policies unavailable.")); return; }
         using var limit = new SemaphoreSlim(4);
         var pending = NxJson.Items(response.Result).Select(async project =>

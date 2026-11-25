@@ -527,7 +527,7 @@ public sealed class GraphPage : NexusPage
         {
             _status.Text = "";
             ShowEmpty("Nothing to draw yet",
-                "Memories appear here once chats are harvested. Files show up when agents edit code in a captured chat.");
+                "Memories appear here once Nexus has learned from your chats. Files show up when agents edit code in a saved chat.");
             return;
         }
         HideEmpty();

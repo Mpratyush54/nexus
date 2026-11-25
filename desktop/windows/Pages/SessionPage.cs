@@ -131,7 +131,7 @@ public sealed partial class SessionPage : NexusPage
         _railSearch.TextChanged += (_, _) => RenderRail();
         var back = new Button { Content = "← Chats" };
         back.Click += (_, _) => MainWindow.Current?.ShowTimeline();
-        _resume = new MenuFlyoutItem { Text = "Copy native resume command" };
+        _resume = new MenuFlyoutItem { Text = "Copy command to continue in a terminal" };
         _resume.Click += async (_, _) => await CopyResumeAsync();
         _share = new MenuFlyoutItem { Text = "Share access…" };
         _share.Click += async (_, _) => await ShareAsync();
@@ -2058,14 +2058,14 @@ public sealed partial class SessionPage : NexusPage
                 }
                 if (count == 0)
                 {
-                    turns.Children.Add(Muted("No preview turns yet."));
+                    turns.Children.Add(Muted("No messages yet."));
                 }
                 body.Children.Add(turns);
             }
         }
         else
         {
-            body.Children.Add(Muted("Session id not linked yet — open from timeline when it appears."));
+            body.Children.Add(Muted("This sub-agent's chat hasn't synced yet. Try again in a moment."));
         }
         var scroll = new ScrollViewer { MaxHeight = 360, Content = body };
         var dialog = new ContentDialog
@@ -2924,7 +2924,7 @@ public sealed partial class SessionPage : NexusPage
         var childID = NxJson.Text(child, "id", "session_id");
         if (childID.Length == 0)
         {
-            _notice.Text = "The fork was created but its session ID was not returned.";
+            _notice.Text = "The new chat was made, but Nexus couldn't open it. Find it at the top of the sidebar.";
             return;
         }
         MainWindow.Current?.OpenSession(childID);
@@ -3602,7 +3602,7 @@ public sealed partial class SessionPage : NexusPage
         if (_id != session) return;
         if (!response.Ok || response.Result is not { } result || !result.TryGetProperty("command", out var command) || command.ValueKind != JsonValueKind.Array)
         {
-            _notice.Text = response.Error ?? "A native resume command is not available for this session.";
+            _notice.Text = response.Error ?? "This chat can't be continued from a terminal.";
             return;
         }
         var argv = command.EnumerateArray().Select(v => v.ToString()).ToList();
