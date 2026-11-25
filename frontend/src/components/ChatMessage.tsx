@@ -1,15 +1,17 @@
-import { useState } from "react";
+import type { ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  AlertCircle,
   Bell,
   Bot,
-  Check,
   ChevronRight,
-  Copy,
   FileText,
+  GitBranch,
   History,
   Image as ImageIcon,
+  Pencil,
+  RotateCcw,
   Wrench,
 } from "lucide-react";
 import type { ChatTurn } from "@/api/chats";
@@ -21,6 +23,8 @@ import {
   type Envelope,
 } from "@/lib/harness-message";
 import { ChatDiff } from "./ChatDiff";
+import { CodeBlock, CopyButton } from "./CodeBlock";
+import { shortReason } from "@/lib/outbox";
 
 const markdownComponents = {
   a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
@@ -39,6 +43,7 @@ const markdownComponents = {
       referrerPolicy="no-referrer"
     />
   ),
+  pre: CodeBlock,
 };
 
 function Markdown({ children }: { children: string }) {
@@ -86,35 +91,6 @@ function TimeStamp({ at }: { at: Date | null }) {
         minute: "2-digit",
       })}
     </time>
-  );
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [state, setState] = useState<"idle" | "copied" | "denied">("idle");
-  return (
-    <>
-      <button
-        type="button"
-        title={state === "copied" ? "Copied" : "Copy message"}
-        aria-label={state === "copied" ? "Message copied" : "Copy message"}
-        onClick={() => {
-          void navigator.clipboard
-            .writeText(text)
-            .then(() => {
-              setState("copied");
-              setTimeout(() => setState("idle"), 1500);
-            })
-            .catch(() => setState("denied"));
-        }}
-      >
-        {state === "copied" ? <Check size={13} /> : <Copy size={13} />}
-      </button>
-      {state === "denied" && (
-        <small className="chat-turn-note" role="status">
-          Copy was blocked. Select the text to copy it.
-        </small>
-      )}
-    </>
   );
 }
 
@@ -256,37 +232,153 @@ export function ChatWorkLog({
   );
 }
 
+/** Actions under a message. Each is shown only when it can run. */
+export type MessageActions = {
+  /** Assistant: run the prompt before this reply again. */
+  onRetry?: () => void;
+  /** User: put this message in the composer to change and send again. */
+  onEdit?: () => void;
+  /** Assistant: copy the chat up to here into a new one. */
+  onFork?: () => void;
+  /** Keep the row visible (the latest reply), instead of on hover only. */
+  always?: boolean;
+};
+
+/** A message that hasn't reached the server: sending, or not sent with Retry and Edit. */
+export type OutgoingState = {
+  state: "sending" | "failed";
+  error?: string;
+  onRetry: () => void;
+  onEdit: () => void;
+};
+
+function SendFailure({ out }: { out: OutgoingState }) {
+  const reason = shortReason(out.error || "Something went wrong.");
+  return (
+    <div className="chat-not-sent" role="alert">
+      <p>
+        <AlertCircle size={13} aria-hidden />
+        <span>Not sent · {reason.short}</span>
+      </p>
+      <span className="chat-not-sent-actions">
+        <button type="button" onClick={out.onRetry}>
+          Retry
+        </button>
+        <button type="button" onClick={out.onEdit}>
+          Edit
+        </button>
+      </span>
+      {reason.more && (
+        <details>
+          <summary>Details</summary>
+          <p>{reason.more}</p>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function ActionRow({
+  text,
+  isUser,
+  actions,
+  at,
+}: {
+  text: string;
+  isUser: boolean;
+  actions: MessageActions;
+  at: Date | null;
+}) {
+  return (
+    <div
+      className={`chat-actions ${actions.always ? "is-always" : ""}`}
+      role="group"
+      aria-label={isUser ? "Your message" : "Reply actions"}
+    >
+      {text && <CopyButton text={text} label={isUser ? "Copy message" : "Copy reply"} />}
+      {actions.onEdit && (
+        <button type="button" onClick={actions.onEdit} title="Edit and send again" aria-label="Edit and send again">
+          <Pencil size={13} />
+        </button>
+      )}
+      {actions.onRetry && (
+        <button type="button" onClick={actions.onRetry} title="Retry: ask again" aria-label="Retry">
+          <RotateCcw size={13} />
+        </button>
+      )}
+      {actions.onFork && (
+        <button
+          type="button"
+          onClick={actions.onFork}
+          title="Fork from here: continue in a new chat"
+          aria-label="Fork from here"
+        >
+          <GitBranch size={13} />
+        </button>
+      )}
+      {at && (
+        <time className="chat-actions-time" dateTime={at.toISOString()}>
+          {at.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+        </time>
+      )}
+    </div>
+  );
+}
+
 export function ChatMessage({
   turn,
   harness,
   match = "",
   images = [],
+  actions,
+  outgoing,
+  status,
+  isNew = false,
+  toolsFirst = false,
 }: {
   turn: ChatTurn;
   harness: string;
   match?: string;
   /** Images this browser just sent with the message (shown until the chat syncs). */
   images?: ChatImage[];
+  actions?: MessageActions;
+  outgoing?: OutgoingState;
+  /** A live reply's status line (elapsed time, what it's doing). */
+  status?: ReactNode;
+  /** Fade and rise in: a message that just arrived, not history. */
+  isNew?: boolean;
+  /** Steps above the words (a live reply: the agent works, then writes). */
+  toolsFirst?: boolean;
 }) {
   const parsed = parseTurnText(turn.text_preview ?? "");
   const tools = toolViews(turn.tool_calls);
   const { text, envelopes, attachments, context, compaction } = parsed;
-  if (!text && !tools.length && !envelopes.length && !compaction && !attachments.length && !images.length)
+  if (!text && !tools.length && !envelopes.length && !compaction && !attachments.length && !images.length && !status)
     return null;
   // A user turn made only of envelopes was written by the harness, not the person.
   const isUser = turn.role === "user" && (!!text || attachments.length > 0 || images.length > 0);
   const matched =
     !!match && text.toLocaleLowerCase().includes(match.toLocaleLowerCase());
+  const at = turnTime(turn);
+  const showActions = !outgoing && !status && (!!text || !!actions);
   return (
     <article
       id={`turn-${turn.cursor_idx || turn.idx}-${turn.role}`}
-      className={`chat-turn ${isUser ? "is-user" : "is-agent"} ${matched ? "is-match" : ""}`}
+      className={[
+        "chat-turn",
+        isUser ? "is-user" : "is-agent",
+        matched ? "is-match" : "",
+        isNew ? "is-new" : "",
+        outgoing ? `is-${outgoing.state}` : "",
+      ].join(" ")}
+      aria-busy={outgoing?.state === "sending" || !!status || undefined}
     >
       <div className="chat-turn-role">
         <span>{isUser ? "You" : agentName(harness)}</span>
-        <TimeStamp at={turnTime(turn)} />
-        {text && <CopyButton text={text} />}
+        <TimeStamp at={at} />
+        {outgoing?.state === "sending" && <small className="chat-sending">Sending…</small>}
       </div>
+      <div className="chat-turn-body">
       {compaction && (
         <details className="chat-envelope is-summary">
           <summary>
@@ -300,6 +392,7 @@ export function ChatMessage({
       {envelopes.map((envelope, i) => (
         <EnvelopeCard key={i} envelope={envelope} />
       ))}
+      {toolsFirst && tools.length > 0 && <ToolList tools={tools} />}
       {text && <Markdown>{text}</Markdown>}
       {images.length > 0 && <ChatImages images={images} />}
       {attachments.length > 0 && (
@@ -329,7 +422,11 @@ export function ChatMessage({
           <pre>{context.join("\n\n")}</pre>
         </details>
       )}
-      {tools.length > 0 && <ToolList tools={tools} />}
+      {!toolsFirst && tools.length > 0 && <ToolList tools={tools} />}
+      {status}
+      </div>
+      {outgoing?.state === "failed" && <SendFailure out={outgoing} />}
+      {showActions && <ActionRow text={text} isUser={isUser} actions={actions ?? {}} at={at} />}
     </article>
   );
 }

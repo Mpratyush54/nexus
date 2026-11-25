@@ -1,6 +1,7 @@
 @import 'tailwindcss';
 @import './fonts.css';
 @import './conversation.css';
+@import './chat-ux.css';
 @import './theme.css';
 
 .nexus-brand { display: inline-flex; align-items: center; gap: 9px; font-size: 18px; font-weight: 650; letter-spacing: -.045em; color: var(--brand-fg); }

@@ -69,5 +69,7 @@ export const chatsApi = {
   memory(id: string, signal?: AbortSignal) { return apiRequest<{ items: unknown[] }>(`/v1/agent-sessions/${encodeURIComponent(id)}/memories`, { signal }) },
   fork(id: string) { return apiRequest<ChatSession>(`/v1/agent-sessions/${encodeURIComponent(id)}/fork`, { method: 'POST', body: {} }) },
   recipients(project: string) { return apiRequest<{ people?: ShareRecipient[]; items?: ShareRecipient[] }>(`/v1/sharing/recipients?project_id=${encodeURIComponent(project)}`) },
+  /** Owner only: deletes the chat, its turns and shares. Memories made from it stay. */
+  remove(id: string) { return apiRequest(`/v1/agent-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }) },
   share(id: string, userId: string) { return apiRequest(`/v1/agent-sessions/${encodeURIComponent(id)}/grants`, { method: 'POST', body: { user_id: userId } }) },
 }

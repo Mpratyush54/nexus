@@ -20,8 +20,8 @@ export function ChatDiff({
   const added = rows.filter((row) => row.kind === "added").length;
   const removed = rows.filter((row) => row.kind === "removed").length;
   return (
-    <section className="chat-diff" aria-label={`Changes in ${path}`}>
-      <header>
+    <div className="chat-diff" role="group" aria-label={`Changes in ${path}`}>
+      <header role="none">
         <FileCode2 size={15} />
         <strong>{path || "File change"}</strong>
         {diff && (
@@ -72,6 +72,6 @@ export function ChatDiff({
           {notice ? "" : "No patch was saved for this earlier file change."}
         </p>
       )}
-    </section>
+    </div>
   );
 }

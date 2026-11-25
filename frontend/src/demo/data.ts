@@ -293,7 +293,7 @@ export const CHATS: Chat[] = [
   chat(CHECKOUT, 'claude', 'Add a test for declined captures', 1 * MIN, [
     { role: 'user', text: 'Add a test proving a declined (402) capture is never retried.' },
     { role: 'assistant', tools: [{ name: 'Read', args: { file_path: 'src/payments/retry.ts' } }, { name: 'Write', args: { file_path: 'src/payments/declined.test.ts', content: "it('never retries a 402', async () => { ... })" } }, { name: 'Bash', args: { command: 'npm run test:payments -- declined' }, result: 'Tests: 1 passed, 1 total' }] },
-    { role: 'assistant', text: 'Added `declined.test.ts`: a 402 from the provider throws `Declined` on the first attempt and `provider.capture` is called exactly once. It passes.\n\nWant me to cover 409 (`refund_exceeds_capture`) the same way?' },
+    { role: 'assistant', text: "Added `declined.test.ts`: a 402 from the provider throws `Declined` on the first attempt and `provider.capture` is called exactly once. It passes.\n\n```ts\nit('never retries a 402', async () => {\n  provider.capture.mockResolvedValue({ ok: false, status: 402 })\n  await expect(captureWithRetry(card)).rejects.toThrow(Declined)\n  // One call: a declined card is final\n  expect(provider.capture).toHaveBeenCalledTimes(1)\n})\n```\n\nWant me to cover 409 (`refund_exceeds_capture`) the same way?" },
   ], 'Test that declined captures are never retried; asked whether to cover 409 too.'),
   // A long session, so "Load earlier messages" (backward paging) has something to page.
   chat(CHECKOUT, 'codex', 'Ledger writer refactor (long session)', 7 * DAY, LONG, 'A long refactor of the ledger writer, step by step.'),
