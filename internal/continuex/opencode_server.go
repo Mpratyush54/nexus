@@ -575,7 +575,7 @@ subscribed:
 			// Only time out the initial response if there is no real activity;
 			// the outer turn deadline still bounds active work.
 			if tracker.reported == "" && !tracker.active && time.Since(started) > policy.firstText {
-				return TurnOutput{}, errors.New("OpenCode produced no text or tool activity before the initial response timeout. Check the saved model, provider sign-in, and pending permissions. The request was stopped; retry explicitly after fixing the cause.")
+				return TurnOutput{}, errors.New("OpenCode didn't respond, so Nexus stopped it. Check the model you picked and that you're signed in to its provider, then send again.")
 			}
 			if onProgress != nil && tracker.reported == "" && retryNotice == "" {
 				seconds := int(time.Since(started).Seconds())
@@ -636,7 +636,7 @@ func validOpenCodeSessionID(id string) bool {
 	return true
 }
 
-var errOpenCodeNoReply = errors.New("OpenCode ended without a written assistant reply or readable tool result. Check its native session before retrying; this does not necessarily mean the provider failed.")
+var errOpenCodeNoReply = errors.New("OpenCode finished without writing a reply. Check your files for any changes it made, then send again.")
 
 func finishOpenCodeTurn(ctx context.Context, client *http.Client, base, password, session, previous string, tracker *openCodeTextTracker) (TurnOutput, error) {
 	readFinal := false

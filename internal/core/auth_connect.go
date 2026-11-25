@@ -129,7 +129,7 @@ func fetchIdentity(ctx context.Context, client *http.Client, server, token strin
 		return identity, err
 	}
 	if status != http.StatusOK {
-		return identity, fmt.Errorf("users/me answered %d", status)
+		return identity, fmt.Errorf("That address didn't answer like a Nexus server (status %d). Check the address and try again", status)
 	}
 	if err := json.Unmarshal(body, &identity); err != nil {
 		return identity, err
@@ -137,7 +137,7 @@ func fetchIdentity(ctx context.Context, client *http.Client, server, token strin
 	identity.ID = strings.TrimSpace(identity.ID)
 	identity.Username = strings.TrimSpace(identity.Username)
 	if identity.ID == "" {
-		return identity, errors.New("users/me returned no id")
+		return identity, errors.New("That address didn't answer like a Nexus server. Check the address and try again")
 	}
 	return identity, nil
 }
