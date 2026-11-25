@@ -2,6 +2,7 @@ import { ArrowLeft, Download, Moon, Sun } from 'lucide-react'
 import type { ReactNode } from 'react'
 import {
   CONTACT_EMAIL,
+  PRIVACY_EMAIL,
   DOWNLOAD_URL,
   GITHUB_URL,
   ISSUES_URL,
@@ -49,21 +50,22 @@ export const LEGAL_META: Record<LegalKind, { path: string; title: string; headin
   },
 }
 
-function Contact() {
+function Contact({ kind }: { kind: LegalKind }) {
   return (
     <ul>
+      {kind === 'privacy' && (
+        <li>
+          Privacy and data requests (access, export, deletion): email <a href={`mailto:${PRIVACY_EMAIL}`}>{PRIVACY_EMAIL}</a> from the address
+          on your account, so we can confirm it is you.
+        </li>
+      )}
       <li>
-        Questions, requests and deletion: open an issue at <a href={ISSUES_URL}>github.com/Mpratyush54/nexus/issues</a>. Please don’t post
-        personal details there; say what you need and we will follow up privately to confirm it is your account.
+        Questions and support: email <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>, or open an issue at{' '}
+        <a href={ISSUES_URL}>github.com/Mpratyush54/nexus/issues</a> (please don’t post personal details there).
       </li>
       <li>
         Security problems: report them privately through a <a href={SECURITY_URL}>GitHub security advisory</a>, not a public issue.
       </li>
-      {CONTACT_EMAIL && (
-        <li>
-          Email: <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>
-        </li>
-      )}
     </ul>
   )
 }
@@ -218,7 +220,7 @@ function Privacy() {
       </Sec>
 
       <Sec id="contact" title="Contact">
-        <Contact />
+        <Contact kind="privacy" />
       </Sec>
     </>
   )
@@ -307,7 +309,7 @@ function Terms() {
       </Sec>
 
       <Sec id="contact" title="Contact">
-        <Contact />
+        <Contact kind="terms" />
       </Sec>
     </>
   )

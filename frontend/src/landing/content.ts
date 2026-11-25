@@ -1,5 +1,5 @@
 export const SITE_URL = 'https://nexus.pratyushes.dev'
-export const DOWNLOAD_URL = 'https://github.com/Mpratyush54/nexus/releases'
+export const DOWNLOAD_URL = 'https://github.com/Mpratyush54/nexus/releases/latest'
 export const GITHUB_URL = 'https://github.com/Mpratyush54/nexus'
 export const WEB_APP_PATH = '/app'
 export const SIGN_IN_PATH = '/login'
@@ -10,12 +10,13 @@ export const DEMO_PATH = '/demo'
 export const PRIVACY_PATH = '/privacy'
 export const TERMS_PATH = '/terms'
 export const LEGAL_UPDATED = '25 November 2026'
-// Public contact points. There is no support mailbox yet: questions go to
-// GitHub issues and security reports to a private GitHub security advisory.
+// Public contact points. Both mailboxes forward (Cloudflare Email Routing) to
+// the owner; security reports go to a private GitHub security advisory.
 export const ISSUES_URL = 'https://github.com/Mpratyush54/nexus/issues'
 export const SECURITY_URL = 'https://github.com/Mpratyush54/nexus/security/advisories/new'
-// Set to a real, monitored address to also show it on the legal pages and footer.
-export const CONTACT_EMAIL = ''
+export const CONTACT_EMAIL = 'support@pratyushes.dev'
+// Privacy and data requests (access, export, deletion).
+export const PRIVACY_EMAIL = 'privacy@pratyushes.dev'
 // Full product film: 1 min 26 s, music only (captions describe the sound).
 export const FILM_DURATION = '1:26'
 
