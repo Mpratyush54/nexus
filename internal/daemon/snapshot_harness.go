@@ -321,6 +321,15 @@ func resolveClaudeLayout(home, conversationID, workspaceRoot string) (SnapshotLa
 			}, nil
 		}
 	}
+	if isClaudeSubagentID(conversationID) {
+		// A sub-agent run lives under its parent chat's folder. Its snapshot
+		// is the run's own transcript; the parent folder's files belong to
+		// the parent chat, so there are no artifacts.
+		if tr := findClaudeSubagentTranscript(candidates, conversationID); tr != "" {
+			return SnapshotLayout{Harness: "claude", ConversationID: conversationID, TranscriptFile: tr}, nil
+		}
+		return SnapshotLayout{}, errSubagentTranscriptGone
+	}
 	targetProj := filepath.Join(projectsRoot, "nexus-restored")
 	if encoded != "" {
 		targetProj = filepath.Join(projectsRoot, encoded)

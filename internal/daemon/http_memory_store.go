@@ -27,6 +27,9 @@ type HTTPMemoryStore struct {
 
 	mu    sync.Mutex
 	local []MemoryRecord // recent saves for in-process dedup
+	// mirrored caches what each cloud session was last upserted with, so a
+	// session is upserted only when its title or parent link changes.
+	mirrored map[string]mirroredSession
 }
 
 // NewHTTPMemoryStore builds a portal-backed store. projectID must be the

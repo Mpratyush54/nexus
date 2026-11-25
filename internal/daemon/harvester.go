@@ -2033,7 +2033,8 @@ const (
 	maxWalkFiles = 2000
 	// maxWalkDepth caps directory depth below each source dir.
 	maxWalkDepth = 8
-	// maxWalkFileBytes skips sqlite/jsonl files larger than 64MB.
+	// maxWalkFileBytes caps whole-file formats (single-object JSON, IDE
+	// SQLite stores other than OpenCode's). JSONL transcripts are uncapped.
 	maxWalkFileBytes = 64 << 20
 )
 
@@ -2199,11 +2200,6 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 // walk and by file-change notifications so both follow identical rules.
 // ok=false means the file is not a transcript this harvester captures.
 func (h *Harvester) considerFile(src TranscriptSource, p string, info os.FileInfo) (hit HarvestFileHit, turns int, ok bool) {
-	// SQLite extractors query by SQL — allow large DBs (OpenCode ~GB).
-	tooBig := info.Size() > maxWalkFileBytes
-	if tooBig && !(src.Format == FormatSQLite && strings.EqualFold(filepath.Base(p), "opencode.db")) {
-		return hit, 0, false
-	}
 	if adapters.ClassifyPath(p) == adapters.Never {
 		return hit, 0, false
 	}
@@ -2253,6 +2249,14 @@ func (h *Harvester) considerFile(src TranscriptSource, p string, info os.FileInf
 			return hit, 0, false
 		}
 	} else if !src.Global && !h.MatchesTranscript(p, src.CwdMatch) {
+		return hit, 0, false
+	}
+	// JSONL transcripts have no size cap: TailFile streams them from the
+	// saved offset, so a long chat costs only its new lines. (A cap here used
+	// to drop every chat past 64 MB without a word.) Whole-file formats keep
+	// the cap, and a skipped file is logged once and shown in capture status.
+	if fileTooBigToCapture(src, p, info.Size()) {
+		noteSkippedTranscript(src.Agent, p, info.Size())
 		return hit, 0, false
 	}
 	hit = HarvestFileHit{Agent: src.Agent, Format: src.Format, Path: p, Name: filepath.Base(p)}

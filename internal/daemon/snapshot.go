@@ -184,6 +184,9 @@ func gzipBytes(raw []byte) ([]byte, error) {
 // separately in TranscriptPayload — skip them and ephemeral dirs.
 func tarGzipArtifacts(layout SnapshotLayout) ([]byte, error) {
 	brainDir := layout.ArtifactDir
+	if brainDir == "" {
+		return nil, nil // e.g. a sub-agent run: no artifacts of its own
+	}
 	st, err := os.Stat(brainDir)
 	if err != nil || !st.IsDir() {
 		return nil, err

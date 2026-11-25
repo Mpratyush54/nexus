@@ -286,6 +286,22 @@ func TestMemHarness(t *testing.T) {
 	}
 	close(stopPeak)
 
+	// Live chats: how far capture has read each one (they cross 64 MB).
+	shared.mu.Lock()
+	engine := shared.engine
+	shared.mu.Unlock()
+	for _, ls := range sessions {
+		if !ls.Live || engine == nil {
+			continue
+		}
+		st, _ := os.Stat(ls.Path)
+		engine.mu.Lock()
+		off := engine.offsets[ls.Path]
+		engine.mu.Unlock()
+		t.Logf("LIVE %s %s size=%.1fMB read_to=%.1fMB", ls.Agent, filepath.Base(ls.Path), float64(st.Size())/(1<<20), float64(off)/(1<<20))
+	}
+	t.Logf("SKIPPED %d", len(skippedForHarness()))
+
 	if f, err := os.Create(filepath.Join(outDir, tag+"-heap.pprof")); err == nil {
 		_ = pprof.Lookup("heap").WriteTo(f, 0)
 		f.Close()
@@ -331,3 +347,7 @@ func TestMemHarness(t *testing.T) {
 		t.Logf("cloud %s", r)
 	}
 }
+
+// skippedForHarness lists transcripts capture reports as not read (the
+// registry exists from the large-transcript fix on; empty before it).
+func skippedForHarness() []SkippedTranscript { return SkippedTranscripts() }

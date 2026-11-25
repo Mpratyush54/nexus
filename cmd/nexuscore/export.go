@@ -502,6 +502,8 @@ func (embeddedCaptureController) Status() any {
 		details = append(details, row)
 	}
 	status["workspace_details"] = details
+	// Owned transcripts that capture does not read (size caps), never silent.
+	status["skipped_files"] = daemon.SkippedTranscripts()
 	sources := []map[string]string{}
 	seenSources := map[string]bool{}
 	for _, source := range daemon.ResolveSources() {
