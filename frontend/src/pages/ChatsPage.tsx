@@ -12,6 +12,7 @@ import {
   GitFork,
   Monitor,
   MoreHorizontal,
+  Paperclip,
   Plus,
   RefreshCw,
   Search,
@@ -44,6 +45,15 @@ import { DESKTOP_RELAY } from "@/lib/env";
 import { agentName, chatTitle, composerHarness } from "@/lib/harness-message";
 import { chatStatus, setLiveChat, useLiveChats } from "@/lib/live-chats";
 import { ApiError } from "@/types/api";
+import {
+  MAX_IMAGES,
+  attachBlocker,
+  fileProblem,
+  pastedImages,
+  prepareImage,
+  relayErrorMessage,
+  type DraftImage,
+} from "@/lib/image-attach";
 import { formatRelative } from "@/utils/format";
 
 const message = (error: unknown) =>
@@ -367,6 +377,19 @@ function Conversation({
     [streamNonce, setStreamNonce] = useState(0);
   const [modelJob, setModelJob] = useState<DesktopJob | null>(null);
   const [sending, setSending] = useState(false);
+  // Images waiting in the composer, and the ones shown under the message
+  // just sent (object URLs; the bytes leave this tab only in the send).
+  const [images, setImages] = useState<DraftImage[]>([]);
+  const [sentImages, setSentImages] = useState<DraftImage[]>([]);
+  const [readingImages, setReadingImages] = useState(0);
+  // Image problems are said next to the 📎, not at the top of the chat.
+  const [attachNote, setAttachNote] = useState("");
+  const fileInput = useRef<HTMLInputElement>(null);
+  const objectUrls = useRef(new Set<string>());
+  useEffect(() => {
+    const urls = objectUrls.current;
+    return () => urls.forEach((url) => URL.revokeObjectURL(url));
+  }, []);
   const sendingLock = useRef(false);
   const sentPrompt = useRef("");
   const [requestParams, setRequestParams] = useSearchParams();
@@ -428,6 +451,7 @@ function Conversation({
     ) ?? [];
   const device = available.find((d) => d.id === deviceId) ?? available[0];
   const busy = sending || (!!job && !isFinished(job.state));
+  const imageBlocker = device ? attachBlocker(agent, device.protocol) : "";
   // Reply from here only when it can actually run: relay on, your chat, a computer online for it.
   const steerable = DESKTOP_RELAY && owned && !!device;
   const knownComputer = devices.data?.items.find((d) => d.projects?.includes(session.project_id));
@@ -551,9 +575,14 @@ function Conversation({
       discoveringModels ||
       modelLock.current ||
       sendingLock.current ||
-      !draft.trim()
+      !draft.trim() ||
+      readingImages > 0
     )
       return;
+    if (images.length > 0 && imageBlocker) {
+      setAttachNote(imageBlocker);
+      return;
+    }
     sendingLock.current = true;
     setSending(true);
     setError("");
@@ -567,17 +596,66 @@ function Conversation({
         agent,
         model,
         prompt: draft.trim(),
+        ...(images.length > 0 && {
+          attachments: images.map((image) => ({
+            name: image.name,
+            media_type: image.mediaType,
+            data: image.data,
+          })),
+        }),
       });
       sentPrompt.current = draft.trim();
       setLiveChat(session.id, next.state);
       setJob(next);
       setDraft("");
+      setSentImages(images);
+      setImages([]);
+      setAttachNote("");
     } catch (e) {
-      setError(message(e));
+      setError(relayErrorMessage(message(e)));
     } finally {
       sendingLock.current = false;
       setSending(false);
     }
+  }
+  async function addImages(files: File[]) {
+    if (!files.length) return;
+    if (imageBlocker) {
+      setAttachNote(imageBlocker);
+      return;
+    }
+    setAttachNote("");
+    let count = images.length;
+    for (const file of files) {
+      const problem = fileProblem(file, count);
+      if (problem) {
+        setAttachNote(problem);
+        continue;
+      }
+      count++;
+      setReadingImages((n) => n + 1);
+      try {
+        const image = await prepareImage(file);
+        objectUrls.current.add(image.url);
+        setImages((current) =>
+          current.length >= MAX_IMAGES ? current : [...current, image],
+        );
+      } catch (e) {
+        setAttachNote(message(e));
+      } finally {
+        setReadingImages((n) => n - 1);
+      }
+    }
+  }
+  function removeImage(id: string) {
+    setImages((current) => {
+      const gone = current.find((image) => image.id === id);
+      if (gone) {
+        URL.revokeObjectURL(gone.url);
+        objectUrls.current.delete(gone.url);
+      }
+      return current.filter((image) => image.id !== id);
+    });
   }
   async function models() {
     if (
@@ -897,6 +975,11 @@ function Conversation({
                 key={turn.idx}
                 turn={turn}
                 harness={job?.agent || agent}
+                images={
+                  turn.role === "user" && job?.attachments?.length
+                    ? sentImages.map((image) => ({ url: image.url, name: image.name }))
+                    : []
+                }
               />
             ))}
             {files.map((file) => (
@@ -967,11 +1050,40 @@ function Conversation({
           void send();
         }}
       >
+        {attachNote && (
+          <p className="composer-note" role="alert">
+            {attachNote}
+          </p>
+        )}
+        {images.length > 0 && (
+          <ul className="composer-images" aria-label="Images to send">
+            {images.map((image) => (
+              <li key={image.id}>
+                <img src={image.url} alt={image.name} />
+                <button
+                  type="button"
+                  aria-label={"Remove " + image.name}
+                  title={"Remove " + image.name}
+                  disabled={sending}
+                  onClick={() => removeImage(image.id)}
+                >
+                  <X size={12} />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         <textarea
           rows={2}
           maxLength={16000}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
+          onPaste={(e) => {
+            const files = pastedImages(e.clipboardData);
+            if (!files.length) return;
+            e.preventDefault();
+            void addImages(files);
+          }}
           placeholder={`Reply to ${agentName(agent)}…`}
           aria-label="Message the agent"
           onKeyDown={(e) => {
@@ -986,6 +1098,32 @@ function Conversation({
           }}
         />
         <div className="conversation-composer-footer">
+          <input
+            ref={fileInput}
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp"
+            multiple
+            hidden
+            onChange={(e) => {
+              const files = Array.from(e.target.files ?? []);
+              e.target.value = "";
+              void addImages(files);
+            }}
+          />
+          <button
+            type="button"
+            className="composer-attach"
+            aria-label="Attach images"
+            title={imageBlocker || "Attach images (or paste them)"}
+            aria-disabled={!!imageBlocker || busy || images.length >= MAX_IMAGES}
+            onClick={() => {
+              if (imageBlocker) setAttachNote(imageBlocker);
+              else if (images.length >= MAX_IMAGES) setAttachNote("Attach at most " + MAX_IMAGES + " images.");
+              else if (!busy) fileInput.current?.click();
+            }}
+          >
+            <Paperclip size={16} />
+          </button>
           <details className="composer-more">
             <summary aria-label="Agent, model and computer">
               <MoreHorizontal size={15} />
@@ -1001,6 +1139,7 @@ function Conversation({
                 disabled={busy || discoveringModels}
                 onChange={(e) => {
                   setAgent(e.target.value);
+                  setAttachNote("");
                   setModel("");
                   setModelJob(null);
                 }}
@@ -1126,7 +1265,9 @@ function Conversation({
                 !device ||
                 discoveringModels ||
                 !device.harnesses.includes(agent) ||
-                !draft.trim()
+                !draft.trim() ||
+                readingImages > 0 ||
+                (images.length > 0 && !!imageBlocker)
               }
             >
               <Send size={15} />

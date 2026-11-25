@@ -9,6 +9,16 @@ export type DesktopDevice = {
   projects: string[];
   harnesses: string[];
   last_seen_at: string;
+  /** Relay version the desktop speaks; 2+ accepts images. */
+  protocol?: number;
+};
+/** An image sent with a turn. data (base64) only goes up; responses carry metadata. */
+export type DesktopAttachment = {
+  name: string;
+  media_type: string;
+  data?: string;
+  size?: number;
+  sha256?: string;
 };
 export type DesktopActivity = {
   id: string;
@@ -39,6 +49,7 @@ export type DesktopJob = {
   agent: string;
   model?: string;
   prompt?: string;
+  attachments?: DesktopAttachment[];
   state: string;
   revision: number;
   status?: string;
@@ -65,6 +76,7 @@ export const desktopApi = {
     agent: string;
     model?: string;
     prompt?: string;
+    attachments?: DesktopAttachment[];
   }) {
     return apiRequest<DesktopJob>("/v1/desktop/jobs", { method: "POST", body });
   },

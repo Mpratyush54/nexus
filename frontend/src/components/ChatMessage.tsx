@@ -13,6 +13,7 @@ import {
   Wrench,
 } from "lucide-react";
 import type { ChatTurn } from "@/api/chats";
+import { ChatImages, type ChatImage } from "./ChatImages";
 import { toolViews, type ToolView } from "@/lib/chat-content";
 import {
   agentName,
@@ -27,11 +28,14 @@ const markdownComponents = {
       {children}
     </a>
   ),
+  // react-markdown drops data: URLs, so a base64 image in a message is
+  // never decoded here; capture keeps image bytes off the server anyway.
   img: ({ src, alt }: { src?: string | Blob; alt?: string }) => (
     <img
       src={typeof src === "string" ? src : undefined}
       alt={alt || "Conversation attachment"}
       loading="lazy"
+      decoding="async"
       referrerPolicy="no-referrer"
     />
   ),
@@ -256,18 +260,21 @@ export function ChatMessage({
   turn,
   harness,
   match = "",
+  images = [],
 }: {
   turn: ChatTurn;
   harness: string;
   match?: string;
+  /** Images this browser just sent with the message (shown until the chat syncs). */
+  images?: ChatImage[];
 }) {
   const parsed = parseTurnText(turn.text_preview ?? "");
   const tools = toolViews(turn.tool_calls);
   const { text, envelopes, attachments, context, compaction } = parsed;
-  if (!text && !tools.length && !envelopes.length && !compaction && !attachments.length)
+  if (!text && !tools.length && !envelopes.length && !compaction && !attachments.length && !images.length)
     return null;
   // A user turn made only of envelopes was written by the harness, not the person.
-  const isUser = turn.role === "user" && (!!text || attachments.length > 0);
+  const isUser = turn.role === "user" && (!!text || attachments.length > 0 || images.length > 0);
   const matched =
     !!match && text.toLocaleLowerCase().includes(match.toLocaleLowerCase());
   return (
@@ -294,12 +301,18 @@ export function ChatMessage({
         <EnvelopeCard key={i} envelope={envelope} />
       ))}
       {text && <Markdown>{text}</Markdown>}
+      {images.length > 0 && <ChatImages images={images} />}
       {attachments.length > 0 && (
         <ul className="chat-attachments" aria-label="Attachments">
           {attachments.map((file) => {
             const label = file.name || file.path.split(/[\\/]/).pop() || "Attachment";
+            // Image bytes are never uploaded with a chat: the picture stays
+            // on the computer it was sent from, so the web shows a chip.
             return (
-              <li key={file.path || file.name} title={file.path}>
+              <li
+                key={file.path || file.name}
+                title={file.isImage ? "Image kept on the computer it was sent from" : file.path}
+              >
                 {file.isImage ? <ImageIcon size={13} aria-hidden /> : <FileText size={13} aria-hidden />}
                 {label}
               </li>

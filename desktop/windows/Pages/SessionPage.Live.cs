@@ -76,7 +76,7 @@ public sealed partial class SessionPage
 
     // Sends one message through the live session and completes once the core
     // has recorded the finished turn (same result shape as continue.here).
-    private async Task<NxResponse> SendLiveAsync(string sessionID, string agent, string model, string prompt, string context, string resumeID, string workspace)
+    private async Task<NxResponse> SendLiveAsync(string sessionID, string agent, string model, string prompt, string context, string resumeID, string workspace, string[]? images = null)
     {
         var mode = AccessMode();
         if (_liveID.Length > 0 && (_liveSessionID != sessionID || _liveAgent != agent || _liveModel != model || _liveWorkspace != workspace || _liveMode != mode))
@@ -94,7 +94,7 @@ public sealed partial class SessionPage
         _liveToolInfo.Clear();
         var turn = new TaskCompletionSource<NxResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         _liveTurn = turn;
-        var sent = await Call("live.send", new { live_id = _liveID, text = prompt });
+        var sent = await Call("live.send", new { live_id = _liveID, text = prompt, images = images ?? Array.Empty<string>() });
         if (!sent.Ok)
         {
             _liveTurn = null;
@@ -112,7 +112,7 @@ public sealed partial class SessionPage
             _localNativeID = "";
             await CloseLiveAsync();
             SetComposerStatus("Starting a fresh " + ChatTitles.AgentName(agent) + " session with the conversation so far…");
-            return await SendLiveAsync(sessionID, agent, model, prompt, context, "", workspace);
+            return await SendLiveAsync(sessionID, agent, model, prompt, context, "", workspace, images);
         }
         return outcome;
     }

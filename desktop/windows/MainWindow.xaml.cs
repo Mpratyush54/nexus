@@ -1696,6 +1696,21 @@ public sealed partial class MainWindow : Window
             var model = NxJson.Text(body, "model");
             content.Children.Add(new TextBlock { Text = "Model: " + (model.Length > 0 ? model : "the agent's default"), TextWrapping = TextWrapping.Wrap });
             content.Children.Add(new ScrollViewer { MaxHeight = 240, Content = new TextBlock { Text = prompt, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } });
+            // Images sent from the browser, already checked and saved here:
+            // shown before anything runs so the person sees what goes in.
+            if (body.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array && images.GetArrayLength() > 0)
+            {
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+                foreach (var image in images.EnumerateArray().Take(4))
+                {
+                    var path = image.GetString() ?? "";
+                    if (path.Length == 0 || !System.IO.File.Exists(path)) continue;
+                    var bitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage { DecodePixelWidth = 144, UriSource = new Uri(path) };
+                    row.Children.Add(new Border { Width = 72, Height = 72, CornerRadius = new CornerRadius(8), Child = new Image { Source = bitmap, Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill } });
+                }
+                content.Children.Add(new TextBlock { Text = images.GetArrayLength() == 1 ? "With 1 image:" : $"With {images.GetArrayLength()} images:", Opacity = 0.75 });
+                content.Children.Add(row);
+            }
             content.Children.Add(new TextBlock { Text = "Allowing this turn lets the agent read and modify this workspace using its installed permissions. Approval applies only to this message.", TextWrapping = TextWrapping.Wrap });
             _desktopApproval = new ContentDialog { Title = "Allow browser request?", Content = content, PrimaryButtonText = "Allow this turn", CloseButtonText = "Decline", DefaultButton = ContentDialogButton.Close, XamlRoot = Content.XamlRoot };
             var answer = await _desktopApproval.ShowThemedAsync();
