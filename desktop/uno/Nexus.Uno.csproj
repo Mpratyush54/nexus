@@ -31,7 +31,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <!-- Keep the head small: no Material/Toolkit/Extensions, Skia renderer. -->
-    <UnoFeatures>SkiaRenderer;Mvvm</UnoFeatures>
+    <UnoFeatures>SkiaRenderer;Mvvm;Resizetizer</UnoFeatures>
     <!-- The shared WinUI code is written for Windows; Uno flags APIs it does
          not implement (Uno0001). Those are reviewed per feature, not per build. -->
     <NoWarn>$(NoWarn);Uno0001;CA1416;CS8002;NU1507</NoWarn>
@@ -56,9 +56,10 @@
          from the Windows file before the build; see StripTrayFromMainWindow. -->
     <Page Include="$(IntermediateOutputPath)shared\MainWindow.xaml" Link="MainWindow.xaml" SubType="Designer" Generator="MSBuild:Compile" />
 
-    <!-- macOS bundle icon, required by Uno's .app packager. desktop-macos.yml
-         makes it from Assets/Nexus.png (sips + iconutil) before publishing. -->
-    <IcnsFiles Include="macos\Nexus.icns" Condition="Exists('macos\Nexus.icns')" />
+    <!-- App icon (Resizetizer). Uno's macOS .app packager builds the .icns
+         from it. Resizetizer wants a lowercase file name, so the Windows
+         Assets/Nexus.png is copied to obj/ first (see StripTrayFromMainWindow). -->
+    <UnoIcon Include="$(IntermediateOutputPath)shared\nexusicon.png" />
 
     <Content Include="$(WindowsSources)Assets\**" Exclude="$(WindowsSources)Assets\InstallerSplash.gif"
              Link="Assets\%(RecursiveDir)%(Filename)%(Extension)"
@@ -74,8 +75,9 @@
     <_NxMainXamlText>$([System.Text.RegularExpressions.Regex]::Replace($(_NxMainXamlText), '\s*&lt;tb:TaskbarIcon[\s\S]*?&lt;/tb:TaskbarIcon&gt;', ''))</_NxMainXamlText>
     <_NxMainXamlText>$([System.Text.RegularExpressions.Regex]::Replace($(_NxMainXamlText), '\s*xmlns:tb="using:H.NotifyIcon"', ''))</_NxMainXamlText>
   </PropertyGroup>
-  <Target Name="StripTrayFromMainWindow" BeforeTargets="PrepareForBuild;CoreCompile;_UnoSourceGenerator;GenerateMSBuildEditorConfigFileCore">
+  <Target Name="StripTrayFromMainWindow" BeforeTargets="PrepareForBuild;CoreCompile;_UnoSourceGenerator;GenerateMSBuildEditorConfigFileCore;UnoResizetizeCollectItems;UnoResizetizeImages">
     <MakeDir Directories="$(IntermediateOutputPath)shared" />
+    <Copy SourceFiles="$(WindowsSources)Assets\Nexus.png" DestinationFiles="$(IntermediateOutputPath)shared\nexusicon.png" SkipUnchangedFiles="true" />
     <WriteLinesToFile File="$(IntermediateOutputPath)shared\MainWindow.xaml" Lines="$([MSBuild]::Escape($(_NxMainXamlText)))" Overwrite="true" WriteOnlyWhenDifferent="true" Encoding="utf-8" />
   </Target>
 </Project>
