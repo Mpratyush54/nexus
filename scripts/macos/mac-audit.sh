@@ -168,10 +168,10 @@ on run argv
   tell application "System Events" to tell (first process whose unix id is pid)
     repeat with e in (entire contents of window 1)
       try
-        if (name of e as text) is wanted then
+        if (name of e as text) is wanted or (description of e as text) is wanted or (title of e as text) is wanted then
           set p to position of e
           set z to size of e
-          return ((item 1 of p) + (item 1 of z) div 2) & " " & ((item 2 of p) + (item 2 of z) div 2) as text
+          return (((item 1 of p) + (item 1 of z) div 2) as text) & " " & (((item 2 of p) + (item 2 of z) div 2) as text)
         end if
       end try
     end repeat
@@ -186,7 +186,15 @@ OSA
   esac
   ./dist/pointer click ${at% *} ${at#* }
 }
-nav() { ax_click "$1" || true; sleep 4; }
+# The bottom navigation (window points, 39 pt above the bottom edge).
+nav() {
+  local x
+  case $1 in Home) x=32;; Inbox) x=83;; Agents) x=134;; Memory) x=185;; Settings) x=236;; esac
+  local b; b=$(win); [ -n "$b" ] || return 1
+  set -- $b
+  ./dist/pointer click $(( $2 + x )) $(( $3 + $5 - 39 ))
+  sleep 4
+}
 dismiss() { keys 'key code 53' > /dev/null; sleep 0.8; }
 
 # ---- 1. First run: welcome, setup guide, sign-in -------------------------------
@@ -228,25 +236,28 @@ for theme in light dark; do
   keys 'keystroke "sync"' > /dev/null; sleep 3; shot "12-search-$theme"
   dismiss; sleep 1
   # The chat list: open the first chat by its name.
-  ax_click "Fix sync conflict when two devices edit the same note" && { sleep 6; shot "13-chat-open-$theme"; ax_dump "chat-$theme"; }
+  # The fifth chat row (newest first): "Fix sync conflict…", the one with an image.
+  click 140 437; sleep 6; shot "13-chat-open-$theme"; ax_dump "chat-$theme"
   scroll_at 0.6 0.45 -12; sleep 1.5; shot "14-chat-scrolled-$theme"
   # The composer: agent picker, typing, a pasted image.
-  ax_click "Ask anything…" || click_frac 0.6 0.82
+  # A Codex chat (row 4): its composer takes images.
+  click 140 377; sleep 6; shot "14b-codex-chat-$theme"
+  click 650 557; sleep 1
   keys 'keystroke "Hello from the macOS audit"' > /dev/null; sleep 1; shot "15-composer-typed-$theme"
   screencapture -x -R0,0,320,200 "$RUNNER_TEMP/clip.png"
   osascript -e "set the clipboard to (read (POSIX file \"$RUNNER_TEMP/clip.png\") as «class PNGf»)" > /dev/null 2>&1
   keys 'keystroke "v" using command down' > /dev/null; sleep 4; shot "16-composer-pasted-$theme"
-  ax_click "Claude Code" && { sleep 2; shot "17-agent-picker-$theme"; dismiss; }
+  click 495 610; sleep 2; shot "17-agent-picker-$theme"; dismiss
   # New chat (Cmd+N).
   keys 'keystroke "n" using command down' > /dev/null; sleep 3; shot "18-new-chat-$theme"
   # Memory, the graph, Agents, Inbox, Settings.
-  nav "Memory"; shot "20-memory-$theme"; ax_dump "memory-$theme"
-  ax_click "Graph" && { sleep 6; shot "21-graph-$theme"; ax_dump "graph-$theme"; }
-  nav "Agents"; shot "22-agents-$theme"; ax_dump "agents-$theme"
-  nav "Chats sent to you"; shot "23-inbox-$theme"
-  nav "Settings"; shot "24-settings-$theme"; ax_dump "settings-$theme"
+  nav Memory; shot "20-memory-$theme"; ax_dump "memory-$theme"
+  ax_click "Graph" && { sleep 6; shot "21-graph-$theme"; }
+  nav Agents; shot "22-agents-$theme"; ax_dump "agents-$theme"
+  nav Inbox; shot "23-inbox-$theme"
+  nav Settings; shot "24-settings-$theme"; ax_dump "settings-$theme"
   for i in 1 2 3 4 5 6 7 8 9 10; do scroll_at 0.65 0.6 -8; sleep 1; shot "25-settings-$i-$theme"; done
-  nav "Home"
+  nav Home
   stop
 done
 
