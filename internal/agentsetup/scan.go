@@ -197,6 +197,17 @@ func stripJSONComments(b []byte) []byte {
 				out[i] = ' '
 				i++
 			}
+		} else if c == '/' && i+1 < len(out) && out[i+1] == '*' {
+			for i < len(out) && !(out[i] == '*' && i+1 < len(out) && out[i+1] == '/') {
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+				i++
+			}
+			if i+1 < len(out) {
+				out[i], out[i+1] = ' ', ' '
+				i++
+			}
 		}
 	}
 	return out
@@ -211,18 +222,10 @@ func (r roots) config(p string) (map[string]any, error) {
 	if strings.HasSuffix(p, ".toml") {
 		_, e = toml.Decode(string(b), &m)
 	} else {
-		if strings.HasSuffix(p, ".jsonc") {
-			b = stripJSONComments(b)
-		}
-		dec := json.NewDecoder(bytes.NewReader(b))
-		dec.UseNumber()
-		e = dec.Decode(&m)
-		if e == nil {
-			var extra any
-			if dec.Decode(&extra) != io.EOF {
-				e = fmt.Errorf("trailing JSON content")
-			}
-		}
+		// Gemini CLI, Cursor and OpenCode all read settings with comments
+		// (and tolerate trailing commas), so a commented settings.json is
+		// valid, not broken.
+		m, e = decodeJSONC(b)
 	}
 	if e != nil || m == nil {
 		return nil, fmt.Errorf("invalid configuration")

@@ -66,7 +66,7 @@ func openCodeInputFromPlan(plan LaunchPlan) (openCodeInput, error) {
 		case "--model":
 			i++
 			if i >= len(plan.Argv)-1 || !strings.Contains(plan.Argv[i], "/") {
-				return openCodeInput{}, errors.New("OpenCode model must be provider/model")
+				return openCodeInput{}, errors.New("Choose an OpenCode model written as provider/model, for example anthropic/claude-sonnet-4")
 			}
 			input.model = plan.Argv[i]
 		default:
@@ -85,13 +85,13 @@ func openCodeServerTurn(ctx context.Context, plan LaunchPlan, workspace string, 
 	if err != nil {
 		return TurnOutput{}, err
 	}
-	path, err := exec.LookPath("opencode")
+	path, err := lookAgent("opencode")
 	if err != nil {
-		return TurnOutput{}, errors.New("OpenCode is not installed or is not on PATH")
+		return TurnOutput{}, agentErrorf("opencode", "not_installed", "OpenCode is not installed or is not on PATH")
 	}
 	path, prefix, err := directExecutable(path, "opencode")
 	if err != nil {
-		return TurnOutput{}, err
+		return TurnOutput{}, AsAgentError("opencode", "cannot_start", err)
 	}
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {

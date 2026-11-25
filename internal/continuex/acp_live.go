@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-var acpLookPath = exec.LookPath
+var acpLookPath = lookAgent
 
 // ACPAgents lists agents with an ACP driver, keyed by normalized agent name.
 var ACPAgents = map[string]bool{"cursor": true, "opencode": true, "gemini": true, "kimi": true}
@@ -153,11 +153,11 @@ func StartACPLive(ctx context.Context, agent string, opts LiveOptions) (LiveSess
 		}
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s ACP is not installed or not on PATH: %w", agent, err)
+		return nil, agentErrorf(agent, "not_installed", "%s ACP is not installed or not on PATH: %v", agent, err)
 	}
 	path, prefix, err := acpExecutable(path, agent)
 	if err != nil {
-		return nil, err
+		return nil, AsAgentError(agent, "cannot_start", err)
 	}
 	cmd := exec.Command(path, append(prefix, argv[1:]...)...)
 	cmd.Dir = opts.Workspace

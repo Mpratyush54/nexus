@@ -61,7 +61,7 @@ func SeededPlanTrusted(agent, prompt, context string, images []string, trustWork
 		argv = append(argv, seed)
 	case "cursor", "agent":
 		if len(images) != 0 {
-			return LaunchPlan{}, errors.New("Cursor CLI image attachments are not supported here")
+			return LaunchPlan{}, errors.New("Cursor can't take images in Nexus yet. Remove the image, or pick another agent")
 		}
 		argv = []string{"cursor-agent", "--disable-auto-update", "-p", "--output-format", "stream-json", "--stream-partial-output"}
 		if trustWorkspace {
@@ -91,7 +91,7 @@ func SeededPlanTrusted(agent, prompt, context string, images []string, trustWork
 		}
 		argv = []string{"claude", "-p", seed, "--output-format", "stream-json", "--verbose", "--include-partial-messages"}
 	default:
-		return LaunchPlan{}, errors.New("continue: no in-app chat driver for " + agent)
+		return LaunchPlan{}, errors.New(AgentDisplayName(agent) + " can't reply inside Nexus yet")
 	}
 	return LaunchPlan{Agent: agent, Mode: "here", Native: false, Argv: argv}, nil
 }
@@ -105,10 +105,10 @@ func WithModel(plan LaunchPlan, model string) (LaunchPlan, error) {
 	}
 	if len(model) > 160 || strings.HasPrefix(model, "-") || strings.IndexFunc(model, unicode.IsSpace) >= 0 ||
 		strings.IndexFunc(model, unicode.IsControl) >= 0 {
-		return LaunchPlan{}, errors.New("continue: invalid model name")
+		return LaunchPlan{}, errors.New("That model name isn't valid. Pick a model from the list")
 	}
 	if normalizeAgent(plan.Agent) == "opencode" && !strings.Contains(model, "/") {
-		return LaunchPlan{}, errors.New("OpenCode model must be provider/model")
+		return LaunchPlan{}, errors.New("Choose an OpenCode model written as provider/model, for example anthropic/claude-sonnet-4")
 	}
 	if len(plan.Argv) == 0 {
 		return LaunchPlan{}, errors.New("continue: empty launch plan")

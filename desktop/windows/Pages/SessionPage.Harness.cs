@@ -22,25 +22,25 @@ public sealed partial class SessionPage
 
     private async Task<JsonElement?> HarnessStatusAsync(string agent)
     {
+        if (agent.Length == 0) { SetComposerStatus(AgentAvailability.NoneReady); return null; }
+        var name = AgentAvailability.DisplayName(agent);
         var response = await Call(NxMethods.HarnessStatus, new { agent });
-        if (!response.Ok || response.Result is not { } status) { SetComposerStatus(response.Error ?? "Could not check the local agent installation."); return null; }
-        if (NxJson.Text(status, "installed") == "true") return status;
-        var url = NxJson.Text(status, "install_url");
-        var dialog = new ContentDialog
+        if (!response.Ok || response.Result is not { } status) { SetComposerStatus($"Nexus couldn't check {name} on this computer. Try again."); return null; }
+        var state = AgentAvailability.FromStatus(status);
+        if (state is null || state.Usable) return status;
+        // The pickers should not have offered it; re-check them in the background.
+        AgentAvailabilityService.Refresh(force: true);
+        var others = AgentAvailabilityService.PickerChoices().Where(c => c.Value != state.Agent).ToList();
+        var choice = await AgentProblemDialog.ShowAsync(XamlRoot, state, others.Count > 0);
+        if (choice == AgentProblemDialog.Choice.UseAnother && others.Count > 0 && SelectedHarness() == agent)
         {
-            XamlRoot = XamlRoot, Title = "Install " + NxJson.Text(status, "name"),
-            Content = new TextBlock
-            {
-                Text = NxJson.Text(status, "problem") + "\n\nCaptured chats can be read without the CLI. To continue or resume, install the agent CLI and sign in. Installing its desktop app alone may not add the CLI to PATH.",
-                TextWrapping = TextWrapping.Wrap
-            },
-            PrimaryButtonText = url.Length > 0 ? "Installation guide" : "OK", CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Close
-        };
-        if (await dialog.ShowThemedAsync() == ContentDialogResult.Primary && Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.Scheme == "https")
+            var next = _harness.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (i.Tag as string) == others[0].Value);
+            if (next is not null) _harness.SelectedItem = next;
+            SetComposerStatus($"Switched to {others[0].Name}. Send again when you're ready.");
+        }
+        else if (choice == AgentProblemDialog.Choice.Fix)
         {
-            try { Process.Start(new ProcessStartInfo(uri.ToString()) { UseShellExecute = true }); }
-            catch (Exception ex) { SetComposerStatus("Could not open the installation guide: " + ex.Message); }
+            SetComposerStatus(AgentAvailability.FixSentence(state));
         }
         return null;
     }
@@ -62,7 +62,7 @@ public sealed partial class SessionPage
         var hadCatalog = _modelCatalogs.ContainsKey(agent);
         _refreshModels.IsEnabled = false;
         if (!hadCatalog) _model.PlaceholderText = "Loading models…";
-        if (openPicker) SetComposerStatus("Loading models from " + agent + "…");
+        if (openPicker) SetComposerStatus("Loading models from " + AgentAvailability.DisplayName(agent) + "…");
         var session = _id;
         try
         {
@@ -72,10 +72,11 @@ public sealed partial class SessionPage
             var response = await Call(NxMethods.HarnessModels, new { agent, refresh });
             if (!response.Ok || response.Result is not { } result)
             {
-                var reason = (response.Error is { Length: > 0 } e ? e : "the harness did not answer").Trim().TrimEnd('.');
+                var name = AgentAvailability.DisplayName(agent);
                 _modelLoadErrors[agent] = hadCatalog
-                    ? "Couldn't refresh models: " + reason + ". Showing the last loaded list."
-                    : "Couldn't load models: " + reason + ", using defaults.";
+                    ? $"Couldn't refresh {name}'s models, so the last list is shown."
+                    : $"Couldn't get {name}'s models, so its default model is used.";
+                if (response.RawError is { Length: > 0 } raw) Nexus.Core.Diagnostics.DiagLog.Warn("models", $"{agent}: {raw}");
                 if (SelectedHarness() == agent && session == _id) UpdateModelCatalogNotice();
                 if (openPicker) SetComposerStatus("");
                 return;
@@ -96,7 +97,8 @@ public sealed partial class SessionPage
         }
         catch (Exception ex)
         {
-            _modelLoadErrors[agent] = (hadCatalog ? "Couldn't refresh models: " : "Couldn't load models: ") + ex.Message.TrimEnd('.') + (hadCatalog ? ". Showing the last loaded list." : ", using defaults.");
+            var name = AgentAvailability.DisplayName(agent);
+            _modelLoadErrors[agent] = NxErrors.ForException(hadCatalog ? $"Couldn't refresh {name}'s models, so the last list is shown." : $"Couldn't get {name}'s models, so its default model is used.", ex, "models");
             if (SelectedHarness() == agent && session == _id) UpdateModelCatalogNotice();
         }
         finally

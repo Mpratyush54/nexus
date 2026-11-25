@@ -60,7 +60,7 @@ func TestLiveSendRefusesImagesTheAgentCannotTake(t *testing.T) {
 	liveSessions.Store(entry.id, entry)
 	defer liveSessions.Delete(entry.id)
 	args, _ := json.Marshal(map[string]any{"live_id": entry.id, "text": "hi", "images": []string{image}})
-	if _, err := liveCall("live.send", args); err == nil || !strings.Contains(err.Error(), "does not accept images") {
+	if _, err := liveCall("live.send", args); err == nil || !strings.Contains(err.Error(), "can't take images") {
 		t.Fatalf("want a clear refusal, got %v", err)
 	}
 	args, _ = json.Marshal(map[string]any{"live_id": entry.id, "text": "hi", "images": []string{filepath.Join(t.TempDir(), "x.exe")}})

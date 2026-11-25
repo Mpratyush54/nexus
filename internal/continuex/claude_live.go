@@ -18,7 +18,7 @@ import (
 	"central-memory/internal/usage"
 )
 
-var claudeLookPath = exec.LookPath
+var claudeLookPath = lookAgent
 
 const liveLineLimit = 8 * 1024 * 1024
 
@@ -63,11 +63,11 @@ func StartClaudeLive(ctx context.Context, opts LiveOptions) (LiveSession, error)
 	}
 	path, err := claudeLookPath("claude")
 	if err != nil {
-		return nil, fmt.Errorf("Claude Code is not installed or not on PATH: %w", err)
+		return nil, agentErrorf("claude", "not_installed", "Claude Code is not installed or not on PATH: %v", err)
 	}
 	path, prefix, err := directExecutable(path, "claude")
 	if err != nil {
-		return nil, err
+		return nil, AsAgentError("claude", "cannot_start", err)
 	}
 	// Verified against the real CLI (2026-11-22): without
 	// --permission-prompt-tool stdio, "host" prompts are denied on the spot

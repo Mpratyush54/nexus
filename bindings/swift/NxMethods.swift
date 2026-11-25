@@ -27,6 +27,7 @@ public enum NxMethods {
     public static let filesDiff = "files.diff"
     public static let continueStart = "continue.start"
     public static let harnessStatus = "harness.status"
+    public static let harnessAvailable = "harness.available"
     public static let harnessModels = "harness.models"
     public static let continueHere = "continue.here"
     public static let transcriptImages = "transcript.images"

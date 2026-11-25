@@ -125,7 +125,7 @@ func Methods() []string {
 		"files.read",
 		"files.diff",
 		"continue.start",
-		"harness.status", "harness.models",
+		"harness.status", "harness.available", "harness.models",
 		"continue.here",
 		"transcript.images", "transcript.image",
 		"continue.cancel",
@@ -259,6 +259,10 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		return map[string]any{"cancelled": deps.ContinueCancel(requestID)}, nil
 	case "harness.status":
 		return continuex.DetectHarness(argString(args, "agent")), nil
+	case "harness.available":
+		// Every chat agent at once, for the agent pickers. Read-only: PATH
+		// lookups, file stats and launcher reads; no agent is started.
+		return map[string]any{"agents": continuex.DetectHarnesses()}, nil
 	case "harness.models":
 		// Cached per harness (memory + disk, 24h, background refresh) so the
 		// picker does not spawn a CLI each time it opens.
@@ -272,7 +276,7 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		// native session id the only argv is `nexus continue …`, which needs
 		// the separate CLI the desktop app does not ship.
 		if strings.TrimSpace(req.Mode) == "open_in_agent" && strings.TrimSpace(req.NativeID) == "" {
-			return nil, errors.New("this session has no native agent session id, so it cannot be resumed in the agent")
+			return nil, errors.New("This chat can't be picked up in the agent itself. You can still continue it here in Nexus")
 		}
 		argv, err := continuex.Command(req)
 		if strings.TrimSpace(req.NativeID) != "" && req.Mode == "open_in_agent" {
@@ -306,18 +310,18 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 			return nil, err
 		}
 		if strings.TrimSpace(req.WorkspaceRoot) == "" {
-			return nil, errors.New("select a local workspace before sending")
+			return nil, errors.New("Choose a project folder on this computer before sending")
 		}
 		source, err := filepath.Abs(req.WorkspaceRoot)
 		if err != nil {
 			return nil, err
 		}
 		if info, err := os.Stat(source); err != nil || !info.IsDir() {
-			return nil, errors.New("the selected workspace does not exist on this machine")
+			return nil, errors.New("That project folder isn't on this computer. Choose one that is, then send again")
 		}
 		prompt := strings.TrimSpace(req.Prompt)
 		if prompt == "" || len(prompt) > 16000 {
-			return nil, errors.New("enter a message of up to 16,000 characters")
+			return nil, errors.New("Write a message of up to 16,000 characters")
 		}
 		req.Context = continuex.SafeContinuationContext(req.Context)
 		if len(req.Context) > 12000 {
