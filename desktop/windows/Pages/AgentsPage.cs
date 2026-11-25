@@ -108,7 +108,7 @@ public sealed class AgentsPage : NexusPage
             _cards.Children.Add(Card(
                 Line("No captured agents yet", title: true),
                 Line("Nexus lists a harness here after its first session is harvested for this project."),
-                Line("Confirm capture is on in Settings (per project) and resumed from the tray, then run a session in Cursor, Codex, Claude Code, or another supported harness.")));
+                Line($"Confirm capture is on in Settings (per project) and resumed from {PlatformText.TrayPlace}, then run a session in Cursor, Codex, Claude Code, or another supported harness.")));
             _cards.Children.Add(SectionHeader("Supported harnesses"));
             foreach (var harness in AgentCatalog.All.Take(8))
             {

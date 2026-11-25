@@ -940,9 +940,9 @@ public sealed partial class AgentSetupPage : NexusPage
         try
         {
             if (System.IO.File.Exists(path))
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = false });
+                PlatformText.Reveal(path);
             else if (System.IO.Path.GetDirectoryName(path) is { } dir && System.IO.Directory.Exists(dir))
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + dir + "\"") { UseShellExecute = false });
+                PlatformText.Reveal(dir);
             else _status.Text = "That file no longer exists.";
         }
         catch (Exception e) { _status.Text = "Could not open the folder: " + e.Message; }

@@ -28,6 +28,10 @@ internal static class Shortcuts
     public static void UseCommandKey(UIElement element)
     {
         if (!UseCommand) return;
+        // Uno renders an accelerator's automatic tooltip with the raw modifier
+        // name ("Windows+K" for Command+K) over the whole element; shortcut
+        // hints are written out where they belong instead (PlatformText.Shortcut).
+        element.KeyboardAcceleratorPlacementMode = Microsoft.UI.Xaml.Input.KeyboardAcceleratorPlacementMode.Hidden;
         foreach (var accelerator in element.KeyboardAccelerators)
         {
             if ((accelerator.Modifiers & VirtualKeyModifiers.Control) != 0)

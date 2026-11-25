@@ -229,9 +229,12 @@ BV=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$INSTALLED/Contents/In
 [ "$BV" = "$BUNDLE_B" ] && pass "Info.plist CFBundleVersion is $BUNDLE_B (B)" || fail "CFBundleVersion is $BV, expected $BUNDLE_B"
 if xattr -p com.apple.quarantine "$INSTALLED" > /dev/null 2>&1; then note "updated bundle carries com.apple.quarantine"; else pass "updated bundle has no quarantine flag (no Gatekeeper prompt for B)"; fi
 codesign --verify --deep --strict --verbose=2 "$INSTALLED" > logs-install/codesign-after-update.txt 2>&1 \
-  && pass "updated bundle's signature verifies" || note "updated bundle's signature: $(tail -2 logs-install/codesign-after-update.txt | tr '\n' ' ')"
+  && pass "updated bundle's signature verifies (codesign --verify --deep --strict)" \
+  || fail "updated bundle's signature: $(tail -3 logs-install/codesign-after-update.txt | tr '\n' ' ')"
+ls -l "$INSTALLED/Contents/MacOS" > logs-install/macos-dir-after-update.txt 2>&1 || true
 UPLOGS=$(find "$PROFILE_ROOT" -path '*logs*' -name '*.log' -exec cat {} + 2>/dev/null)
 if echo "$UPLOGS" | grep -q "installed version $VERSION_B"; then pass "the running app reports version $VERSION_B"; else fail "no 'installed version $VERSION_B' in the app log"; fi
+if echo "$UPLOGS" | grep -q "startup: Nexus $VERSION_B starting"; then pass "the startup log line names the installed version ($VERSION_B)"; else fail "startup log: $(echo "$UPLOGS" | grep 'startup: Nexus' | tail -1)"; fi
 quit_all
 # If UpdateMac's relaunch didn't carry the profile, show the toast from a launch that does.
 if ! [ -f shots-install/06-update-after.png ]; then

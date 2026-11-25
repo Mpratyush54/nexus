@@ -98,6 +98,22 @@ cp "$OUT/libnexuscore.dylib" "$dest/libnexuscore.dylib"
 cp "$OUT/libnexusmac.dylib" "$dest/libnexusmac.dylib"
 echo "core and mac helper -> ${dest#$APP/}"
 
+# Only code in Contents/MacOS. codesign signs any other file there (Uno puts
+# Nexus.deps.json and Nexus.runtimeconfig.json next to the executable)
+# through extended attributes, and Velopack's update packages don't carry
+# those, so an updated bundle would fail `codesign --verify`. The files move
+# to Resources with a symlink left in MacOS, as vpk does for sq.version: the
+# .NET host opens them through the link, and symlinks need no signature.
+for f in "$APP/Contents/MacOS"/*; do
+  { [ -f "$f" ] && [ ! -L "$f" ]; } || continue
+  file -b "$f" | grep -q 'Mach-O' && continue
+  name=$(basename "$f")
+  test ! -e "$APP/Contents/Resources/$name" || { echo "Resources already has $name" >&2; exit 1; }
+  mv "$f" "$APP/Contents/Resources/$name"
+  ln -s "../Resources/$name" "$f"
+  echo "MacOS/$name -> Resources/$name"
+done
+
 echo "--- ad-hoc codesign"
 for lib in libnexuscore.dylib libnexusmac.dylib; do
   codesign --force --sign - --timestamp=none "$dest/$lib"

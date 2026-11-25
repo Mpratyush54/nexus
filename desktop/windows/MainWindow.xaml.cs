@@ -72,6 +72,7 @@ public sealed partial class MainWindow : Window
         InitializeComponent();
         // Ctrl+K / Ctrl+P / Ctrl+N become Command+K / P / N on macOS.
         Shortcuts.UseCommandKey(RootGrid);
+        ToolTipService.SetToolTip(NewChatButton, $"New chat ({PlatformText.Shortcut("N")})");
         // One memory line a minute in the desktop log (Core/Diagnostics/DesktopMemoryLog.cs).
         Nexus.Core.Diagnostics.UiStats.Sidebar = () => (_chatEntries.Count, _chatRows.Count);
         Nexus.Core.Diagnostics.DesktopMemoryLog.Start(DispatcherQueue);
@@ -280,6 +281,9 @@ public sealed partial class MainWindow : Window
     {
         if (Content is Grid root && _setup is not null) root.Children.Remove(_setup);
         _setup = null;
+        // The shell comes in with the saved theme (the macOS first run held
+        // dark through the welcome and the guide).
+        ThemeService.Release(this);
         Nav.Visibility = Visibility.Visible;
         OfflineBar.Visibility = Visibility.Visible;
         ApplyConnectivity();

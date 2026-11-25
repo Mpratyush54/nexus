@@ -55,6 +55,10 @@ internal sealed class MacWelcome : Grid
         else if (!AppPrefs.SetupCompleted && !AppPrefs.Data.MacWelcomeSeen) mode = Mode.Welcome;
         if (mode is null) return;
         MacShell.Log($"first-run screen: {mode}");
+        // One continuous look, like the DMG and the Windows installer: the
+        // setup guide underneath stays on the same dark canvas until setup
+        // ends, whatever the system theme (nothing is saved).
+        if (!AppPrefs.SetupCompleted) ThemeService.Hold(window, ThemeService.Dark);
         var screen = new MacWelcome(window, mode.Value);
         Grid.SetRowSpan(screen, 2);
         root.Children.Add(screen);

@@ -429,7 +429,7 @@ public sealed class TimelinePage : NexusPage
                 ? "No sessions match this agent filter. Clear the filter or pick another harness."
                 : subagentsHidden
                     ? "Sessions exist for this project but are all sub-agent runs. Enable Include sub-agents to list them."
-                    : "Captured harness sessions appear here after harvest. Confirm capture is on in Settings and resume from the tray if paused.";
+                    : $"Captured harness sessions appear here after harvest. Confirm capture is on in Settings and resume from {PlatformText.TrayPlace} if paused.";
             _list.Items.Add(EmptyStateCard(_pageIndex == 0 ? "No sessions yet" : "No sessions on this page", emptyBody));
         }
         if (reset)
