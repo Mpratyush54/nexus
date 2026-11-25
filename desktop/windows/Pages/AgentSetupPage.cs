@@ -276,6 +276,7 @@ public sealed partial class AgentSetupPage : NexusPage
             });
         }
         var connected = _agents.Count(a => Flag(a, "installed") && Flag(a, "nexus_mcp"));
+        if (_installButton is not null) _installButton.Visibility = _installed.Count > 0 && connected == _installed.Count ? Visibility.Collapsed : Visibility.Visible;
         _status.Text = _installed.Count == 0 ? "No coding agents found on this computer yet."
             : connected == _installed.Count ? $"All {_installed.Count} agents on this computer are connected to Nexus."
             : $"{connected} of {_installed.Count} agents on this computer are connected to Nexus.";
@@ -354,7 +355,8 @@ public sealed partial class AgentSetupPage : NexusPage
                 text.Children.Add(line);
             }
 
-            var counts = Sections.Select(s => (s.Short, N: Arr(agent, s.Key).Count())).Where(c => c.N > 0).Select(c => c.N + " " + c.Short).ToList();
+            // "1 tool", not "1 tools": every short label is a plain -s plural.
+            var counts = Sections.Select(s => (s.Short, N: Arr(agent, s.Key).Count())).Where(c => c.N > 0).Select(c => c.N + " " + (c.N == 1 ? c.Short[..^1] : c.Short)).ToList();
             text.Children.Add(Tiny(counts.Count > 0 ? string.Join(" · ", counts) : "No skills or tools yet"));
 
             var button = RowButton(text, id == _selectedAgent);
@@ -1034,7 +1036,7 @@ public sealed partial class AgentSetupPage : NexusPage
                 body.Children.Add(new TextBlock { Text = "Changed files are backed up next to the original first (.nexus-backup-…).", FontSize = 12, Opacity = 0.6, TextWrapping = TextWrapping.Wrap });
         }
         foreach (var reason in skipped.Where(r => r.Length > 0))
-            body.Children.Add(new TextBlock { Text = "Skipped: " + reason, FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
+            body.Children.Add(new TextBlock { Text = "Skipped: " + PlainReason(reason), FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
         if (writes.Count == 0 && skipped.Count == 0)
             body.Children.Add(new TextBlock { Text = "Nothing to do.", FontSize = 12.5 });
 

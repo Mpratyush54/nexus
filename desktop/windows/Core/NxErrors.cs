@@ -20,10 +20,13 @@ internal static partial class NxErrors
             e.Contains("401 Unauthorized", StringComparison.OrdinalIgnoreCase) ||
             e.Contains("token expired", StringComparison.OrdinalIgnoreCase) ||
             e.Contains("not signed in", StringComparison.OrdinalIgnoreCase) ||
-            e.Contains("You're signed out of Nexus", StringComparison.Ordinal);
+            // Older engines said "offline" when there was simply no sign-in.
+            e.Contains("Nexus is offline; memory unavailable", StringComparison.OrdinalIgnoreCase) ||
+            e.Contains("You're signed out of Nexus", StringComparison.Ordinal) ||
+            e.Contains("You're not signed in to Nexus", StringComparison.Ordinal);
     }
 
-    internal const string SignedOutMessage = "You're signed out of Nexus on this computer (the sign-in may have expired). Sign in again in Settings > Account.";
+    internal const string SignedOutMessage = "You're not signed in to Nexus on this computer. Sign in from Settings > Account.";
     internal const string UnreachableMessage = "Can't reach the Nexus server right now. Nexus keeps trying and reconnects by itself.";
     internal const string UnsupportedMessage = "Your Nexus server doesn't support this yet.";
 
@@ -37,7 +40,7 @@ internal static partial class NxErrors
             e.Contains("actively refused") || e.Contains("no such host") || e.Contains("i/o timeout") ||
             e.Contains("context deadline exceeded") || e.Contains("client.timeout") || e.Contains("tls handshake timeout") ||
             e.Contains("connection reset") || e.Contains("forcibly closed") || e.Contains("network is unreachable") ||
-            e.Contains("nexus is offline") || e.Contains("unexpected eof") || e.EndsWith(": eof") ||
+            e.Contains("unexpected eof") || e.EndsWith(": eof") ||
             e.Contains("502 bad gateway") || e.Contains("503 service unavailable") || e.Contains("504 gateway");
     }
 
@@ -66,7 +69,8 @@ internal static partial class NxErrors
         "shim", "%path%", " on path", "path to", "not on path", "refresh path", "executable", "exec:", "look path",
         "lookpath", " cli ", " cli.", " cli,", "cli to", "stderr", "stdout", "stdin", "argv", ".exe", ".cmd", ".ps1",
         "file not found", "the system cannot find", "access is denied", "exit code", "signal:", "nx_call", "acp ",
-        "app-server", "native id", "native session", "headless", "harness", "workspace_root", "op_id", "<nil>"
+        "app-server", "native id", "native session", "headless", "harness", "workspace_root", "op_id", "<nil>",
+        "core response", "adapter", "catalog"
     ];
 
     /// True when a message talks about programs, paths or plumbing instead

@@ -317,7 +317,9 @@ func (s *acpLive) protocolError(e *acpError) error {
 	}
 	low := strings.ToLower(text + " " + string(e.Data))
 	if e.Code == -32000 || strings.Contains(low, "auth") || strings.Contains(low, "sign in") || strings.Contains(low, "login") || strings.Contains(low, "log in") || strings.Contains(low, "unauthorized") {
-		text = fmt.Sprintf("Sign in to %s in its own app or CLI first: %s", s.agent, text)
+		// No "CLI" here: the desktop hides messages that talk about
+		// programs, and this one carries the action that fixes it.
+		text = fmt.Sprintf("Sign in to %s first (open it once on its own and sign in), then send again: %s", AgentDisplayName(s.agent), text)
 	}
 	return errors.New(liveText(text, 64*1024))
 }

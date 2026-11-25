@@ -52,6 +52,12 @@ internal sealed class ProblemReport
 
     public static bool ValidId(string? id) => id is not null && IdPattern.IsMatch(id);
 
+    /// Held reports written before this run started. A problem from this
+    /// run is offered at the next launch, never in a dialog popping up while
+    /// the person is working (it used to say "last time" mid-session too).
+    public static IReadOnlyList<ProblemReport> FromEarlierRuns(IEnumerable<ProblemReport> held, DateTimeOffset runStarted) =>
+        held.Where(r => r.Timestamp is not { } at || at < runStarted).ToList();
+
     /// A crash or error report for an exception. message is
     /// "{ExceptionType}: {Message}" and stack is exception.ToString(),
     /// which includes inner exceptions.

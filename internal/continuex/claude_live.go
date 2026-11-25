@@ -398,7 +398,7 @@ func (s *claudeLive) parse(line []byte) {
 		s.nativeID = m.SessionID
 		s.mu.Unlock()
 		if first {
-			s.emit(LiveEvent{Kind: "status", Text: "Claude Code session initialized", NativeID: m.SessionID})
+			s.emit(LiveEvent{Kind: "status", Text: "Claude Code is ready", NativeID: m.SessionID})
 		}
 	}
 	switch m.Type {

@@ -38,7 +38,10 @@ import (
 )
 
 // ErrOffline is returned when a data method has no cloud client (D6, D7).
-var ErrOffline = errors.New("Nexus is offline; memory unavailable")
+// The desktop always starts the engine online, so the only way to get here
+// is having no saved sign-in: say that, not "offline", so the app asks the
+// person to sign in instead of waiting for a connection that is fine.
+var ErrOffline = errors.New("Not signed in to Nexus on this computer")
 
 // ErrUnknownMethod is an nx_call name this build does not implement.
 var ErrUnknownMethod = errors.New("unknown nx_call method")

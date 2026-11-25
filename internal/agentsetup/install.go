@@ -568,7 +568,7 @@ func ShareAll(o ShareAllOptions) (ShareAllResult, error) {
 				sort.Strings(to)
 				out, e := Share(ShareOptions{Home: o.Home, Workspace: o.Workspace, Item: i, From: a.Agent, To: to, Scope: scope, DryRun: o.DryRun})
 				if e != nil {
-					note(fmt.Sprintf("%s %s from %s: %v", i.Kind, i.Name, a.Agent, e))
+					note(agentLabel(a.Agent) + " " + strings.TrimSuffix(kindLabel(i.Kind), "s") + " " + i.Name + ": " + e.Error())
 					continue
 				}
 				res.Writes = append(res.Writes, out.Writes...)

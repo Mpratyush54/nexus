@@ -33,6 +33,24 @@ internal sealed class ModelPickerCatalog
         return new(choices, NxJson.Text(root, "source"), NxJson.Text(root, "warning"));
     }
 
+    /// The engine's catalog warning as one line people can act on, or ""
+    /// when it describes a normal state (a cached list, an agent that only
+    /// lists the models set up in it). The raw text talks about adapters,
+    /// catalogs and quota; it never reaches the composer.
+    public static string Notice(string? warning, string agentName)
+    {
+        var w = (warning ?? "").Trim();
+        if (w.Length == 0) return "";
+        if (w.StartsWith("Cached model catalog", StringComparison.Ordinal) ||
+            w.StartsWith("This harness has no supported", StringComparison.Ordinal)) return "";
+        if (w.StartsWith("Couldn't refresh models", StringComparison.Ordinal) ||
+            w.StartsWith("Live Codex discovery failed", StringComparison.Ordinal))
+            return $"Couldn't refresh {agentName}'s models, so the last list is shown.";
+        if (w.StartsWith("Couldn't load models", StringComparison.Ordinal))
+            return $"Couldn't get {agentName}'s models, so its usual ones are shown.";
+        return NxErrors.Friendly(w).Ref.Length > 0 ? $"{agentName}'s model list may be incomplete. You can type a model name." : w;
+    }
+
     // A background refresh that returns the same list must not rebuild the
     // picker under the user (it would reset typed text and close the popup).
     public bool SameAs(ModelPickerCatalog other)

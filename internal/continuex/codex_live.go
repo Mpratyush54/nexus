@@ -329,7 +329,7 @@ func (s *codexLive) run(ctx context.Context, opts LiveOptions) {
 	s.nativeID = response.Thread.ID
 	s.model = response.Model
 	s.mu.Unlock()
-	s.emit(LiveEvent{Kind: "status", Text: "Codex session initialized", NativeID: response.Thread.ID})
+	s.emit(LiveEvent{Kind: "status", Text: "Codex is ready", NativeID: response.Thread.ID})
 	s.signal(s.work)
 	for {
 		select {

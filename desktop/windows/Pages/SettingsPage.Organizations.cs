@@ -169,7 +169,9 @@ public sealed partial class SettingsPage
             if (userID == _orgUser) name += " (you)";
             var role = NxJson.Text(member, "role");
             StackPanel? actions = null;
-            if (manages && (owner || role != "OWNER"))
+            // Your own row has no role or remove buttons: removing yourself
+            // (or demoting the only owner) here would lock you out.
+            if (manages && userID != _orgUser && (owner || role != "OWNER"))
             {
                 var label = name;
                 var change = OrgAction("Change role", () => ChangeOrganizationRoleAsync(orgID, userID, label, role, owner));

@@ -55,6 +55,24 @@ public class NxErrorsTests
         Assert.Equal("", reference);
         Assert.True(NxErrors.IsSignedOut(message));
     }
+
+    [Theory]
+    [InlineData("Not signed in to Nexus on this computer")]
+    [InlineData("Nexus is offline; memory unavailable")]
+    public void NoSignInIsNotAnOutage(string engine)
+    {
+        // No saved sign-in must ask the person to sign in, never wait for a
+        // connection that is fine.
+        Assert.False(NxErrors.IsUnreachable(engine));
+        Assert.Equal(NxErrors.SignedOutMessage, NxErrors.Friendly(engine).Message);
+    }
+
+    [Fact]
+    public void EngineTransportTextIsNotShown()
+    {
+        Assert.DoesNotContain("core response", NxErrors.Friendly("empty core response").Message);
+        Assert.DoesNotContain("adapter", NxErrors.Friendly("This harness has no supported account-wide model-list adapter here").Message);
+    }
 }
 
 public class FriendlyTimeTests

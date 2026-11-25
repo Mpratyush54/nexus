@@ -203,7 +203,7 @@ func TestACPLive(t *testing.T) {
 		s := start(t, context.Background(), "")
 		_ = s.Send(context.Background(), "auth")
 		e := acpUntil(t, s, "turn_done")
-		if !e.IsError || !strings.Contains(e.Text, "Sign in to cursor in its own app or CLI first") {
+		if !e.IsError || !strings.Contains(e.Text, "Sign in to Cursor first") {
 			t.Fatal(e)
 		}
 		_ = s.Send(context.Background(), "refusal")

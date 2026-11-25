@@ -195,10 +195,11 @@ public sealed partial class SettingsPage
     // ---- Agents
 
     private readonly TextBlock _mcpStatus = Muted("Checking your agents…");
+    private Button? _mcpConnect;
 
     private UIElement BuildAgentsSection()
     {
-        var install = new Button { Content = "Connect Nexus to your agents" };
+        var install = _mcpConnect = new Button { Content = "Connect Nexus to your agents" };
         if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style) install.Style = style;
         AutomationProperties.SetName(install, "Connect Nexus to your agents (opens the Agents page)");
         install.Click += (_, _) => OpenShellDestination("FooterAgents", "Agents");
@@ -247,6 +248,8 @@ public sealed partial class SettingsPage
             _mcpStatus.Text = "No supported agents were found on this computer.";
             return;
         }
+        // Nothing left to connect: no call to action for a finished job.
+        if (_mcpConnect is not null) _mcpConnect.Visibility = missing.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         var text = connected.Count > 0 ? "Connected in " + string.Join(", ", connected) + "." : "Not connected to any agent yet.";
         if (missing.Count > 0) text += " Not yet in " + string.Join(", ", missing) + ".";
         _mcpStatus.Text = text + " Each agent gets its own revocable token (see Account).";
@@ -393,7 +396,7 @@ public sealed partial class SettingsPage
         }
         await LoadUploadsAsync();
         var cloud = await Call(NxMethods.ProjectsList);
-        _connection.Text = cloud.Ok ? "Cloud API reachable. Captured sessions sync to your signed-in account." : cloud.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
+        _connection.Text = cloud.Ok ? "Connected. Your chats sync to your Nexus account." : cloud.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
     }
 
     private async Task LoadUploadsAsync()

@@ -295,6 +295,9 @@ public sealed partial class MainWindow : Window
         Nav.Visibility = Visibility.Visible;
         OfflineBar.Visibility = Visibility.Visible;
         ApplyConnectivity();
+        // Setup may have signed in: re-read the engine's state so the shell
+        // never keeps a signed-out banner or an empty chat list.
+        _ = RefreshBannerAsync();
         // The shell rises in as the guide fades out.
         ContentFrame.Transitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection
         {
@@ -1540,12 +1543,12 @@ public sealed partial class MainWindow : Window
         ShowPage(PageCache.HomeHub, new HubNavigation(HomeHubPage.SegmentSessions, filter));
     }
 
-    public void ShowSettings()
+    public void ShowSettings(string? section = null)
     {
         _navLock = true;
         Nav.SelectedItem = SettingsItem;
         _navLock = false;
-        ShowPage(PageCache.Settings);
+        ShowPage(PageCache.Settings, section);
     }
 
     public void OpenTeleport(string? teleportId = null)
@@ -1857,7 +1860,9 @@ public sealed partial class MainWindow : Window
         await Task.WhenAll(netTask, uploadsTask);
         var net = netTask.Result; var uploads = uploadsTask.Result;
         await UiThread.Resume(DispatcherQueue);
-        _networkDown = net.Ok && net.Result is { } netBody && netBody.TryGetProperty("online", out var flag) && flag.ValueKind == JsonValueKind.False;
+        // The desktop always starts the engine online, so "online": false
+        // means there is no saved sign-in, not a network problem.
+        _signedOut = net.Ok && net.Result is { } netBody && netBody.TryGetProperty("online", out var flag) && flag.ValueKind == JsonValueKind.False;
         var pending = 0;
         if (uploads.Ok && uploads.Result is { } uploadBody &&
             uploadBody.TryGetProperty("pending", out var pendingEl) &&
@@ -1869,7 +1874,7 @@ public sealed partial class MainWindow : Window
         ApplyConnectivity();
     }
 
-    private bool _networkDown;
+    private bool _signedOut;
     private bool _wasOffline;
     private Button? _retryNow;
 
@@ -1879,23 +1884,31 @@ public sealed partial class MainWindow : Window
     // and clears by itself when the server answers again.
     private void ApplyConnectivity()
     {
-        var offline = _networkDown || Connectivity.Offline;
+        var signedOut = _signedOut;
+        var offline = signedOut || Connectivity.Offline;
         var pending = State.PendingUploads;
         var waiting = pending > 0 ? $" {pending} item{(pending == 1 ? "" : "s")} will upload then." : "";
         State.Banner = !offline ? ""
-            : _networkDown ? "You're offline. Your chats on this computer are still here; Nexus reconnects when you're back." + waiting
+            : signedOut ? "Sign in to see your chats and memories and keep them in sync."
             : $"Can't reach the Nexus server{(Connectivity.Host.Length > 0 ? " (" + Connectivity.Host + ")" : "")}. Nexus keeps trying and reconnects by itself." + waiting;
+        State.SignedOut = signedOut;
         State.Offline = offline;
         OfflineBar.Severity = InfoBarSeverity.Informational;
-        OfflineBar.Title = offline ? "Offline" : "";
+        OfflineBar.Title = signedOut ? "Not signed in" : offline ? "Offline" : "";
         OfflineBar.Message = State.Banner;
         if (_retryNow is null)
         {
-            _retryNow = new Button { Content = "Try now" };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_retryNow, "Try to reconnect now");
-            _retryNow.Click += (_, _) => { Connectivity.ProbeNow(); _ = RefreshBannerAsync(); };
+            _retryNow = new Button();
+            _retryNow.Click += (_, _) =>
+            {
+                if (_signedOut) { ShowSettings("account"); return; }
+                Connectivity.ProbeNow();
+                _ = RefreshBannerAsync();
+            };
             OfflineBar.ActionButton = _retryNow;
         }
+        _retryNow.Content = signedOut ? "Sign in" : "Try now";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_retryNow, signedOut ? "Sign in to Nexus" : "Try to reconnect now");
         OfflineBar.IsOpen = offline && _setup is null;
         if (_wasOffline && !offline) OnReconnected();
         _wasOffline = offline;

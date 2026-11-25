@@ -116,7 +116,9 @@ public sealed partial class SettingsPage
         _usageBody.Children.Add(UsageList("By model (30 days)", models.Result, t => t.Key.Length > 0 ? t.Key : "Unknown model"));
     }
 
+    // "Claude Code" and "OpenCode", as everywhere else, not "Claude" and "Opencode".
     private static string AgentCatalogName(string harness) => harness.Length == 0 ? "Unknown agent"
+        : AgentAvailability.DisplayName(harness) is var known && !known.Equals(harness, StringComparison.Ordinal) ? known
         : char.ToUpperInvariant(harness[0]) + harness[1..];
 
     private static Border UsageTile(string label, UsageTotal t)
