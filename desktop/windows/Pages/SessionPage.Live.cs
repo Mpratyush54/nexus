@@ -73,15 +73,7 @@ public sealed partial class SessionPage
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_accessWarning, "Full access is on");
         _composer.Children.Insert(0, _followupBar);
         _composer.Children.Insert(0, _resumeBanner);
-        // Ctrl/Cmd+Enter sends now: while the agent works, it stops the
-        // current reply and goes next. Send (the button) queues instead.
-        _prompt.AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler(async (_, e) =>
-        {
-            if (e.Key != Windows.System.VirtualKey.Enter || !Shortcuts.IsPrimaryDown()) return;
-            e.Handled = true;
-            if (LiveTurnActive) await SendFollowupAsync(now: true);
-            else await SendHereAsync();
-        }), true);
+        // Enter, Ctrl/Cmd+Enter and Esc: SessionPage.Composer.cs (ComposerKeys).
     }
 
     private void OnPermissionModeChanged()
@@ -174,7 +166,6 @@ public sealed partial class SessionPage
         _liveTurn = turn;
         _liveSeq = 0;
         ApplyLiveComposerState();
-        SetComposerStatus("Starting " + ChatTitles.AgentName(agent) + "…");
         var title = _header.Text is "New chat" or "Opening chat…" or "Session" ? "" : _header.Text;
         var sent = await Call("live.send", new
         {
@@ -186,10 +177,9 @@ public sealed partial class SessionPage
             if (ReferenceEquals(_liveTurn, turn)) _liveTurn = null;
             return sent;
         }
+        OutgoingAccepted(view);
         if (sent.Result is { } r && r.TryGetProperty("queued", out var q) && q.ValueKind == JsonValueKind.True)
-            SetComposerStatus("Waiting for a free slot · " + LiveSessions.Current.Running + " agents are working. This starts when one finishes.");
-        else
-            SetComposerStatus("Waiting for " + ChatTitles.AgentName(agent) + "…");
+            TurnStatusQueued();
         var outcome = await turn.Task;
         var problem = outcome.Error ?? "";
         if (!ReferenceEquals(outcome, Detached) && !outcome.Ok && resumeID.Length > 0 && _id == sessionID &&
@@ -199,29 +189,14 @@ public sealed partial class SessionPage
             // an unknown --resume id). Continue once in a fresh session.
             _localNativeID = "";
             await Core.CallAsync("live.close", new { session_id = sessionID });
-            SetComposerStatus("Starting a fresh " + ChatTitles.AgentName(agent) + " session with the conversation so far…");
+            TurnStatusNotice("Starting a fresh " + ChatTitles.AgentName(agent) + " session with the conversation so far");
             return await SendLiveAsync(view, sessionID, agent, model, prompt, context, "", workspace, images);
         }
         return outcome;
     }
 
     /// <summary>A message sent while the agent works waits for its turn, or stops it with "now".</summary>
-    private async Task SendFollowupAsync(bool now)
-    {
-        var text = ComposerAttachments.WithFiles(_prompt.Text.Trim(), _files);
-        if (_prompt.Text.Trim().Length == 0) { SetComposerStatus("Write a follow-up first."); return; }
-        var images = _images.ToArray();
-        var response = await Call("live.send", new
-        {
-            session_id = _id, project_id = _projectID, agent = _liveAgent.Length > 0 ? _liveAgent : SelectedHarness(),
-            workspace_root = _workspace.Text.Trim(), model = SelectedModel(), mode = PermissionMode(),
-            context = _continuationContext, text, images, when = now ? "now" : "queue"
-        });
-        if (!response.Ok) { SetComposerStatus(response.Error ?? "Could not queue that message."); return; }
-        _prompt.Text = "";
-        ClearImageAttachments();
-        SetComposerStatus(now ? "Stopping this reply to send yours next…" : "Queued · it sends when this reply finishes.");
-    }
+    private Task SendFollowupAsync(bool now) => SendFollowupFromComposerAsync(now);
 
     private async Task InterruptLiveAsync()
     {
@@ -288,14 +263,15 @@ public sealed partial class SessionPage
         var turn = new TaskCompletionSource<NxResponse>(TaskCreationOptions.RunContinuationsAsynchronously);
         _liveTurn = turn;
         ApplyLiveComposerState();
-        SetComposerStatus(status == "queued" ? "Waiting for a free slot · this starts when another agent finishes." : ChatTitles.AgentName(agent) + " is still working…");
+        if (status == "queued") TurnStatusQueued();
+        TurnStatusStartedAt(NxJson.Text(snap, "started_at"));
         _liveSeq = snap.TryGetProperty("seq", out var seq) && seq.TryGetUInt64(out var s) ? s : 0;
         if (snap.TryGetProperty("events", out var events) && events.ValueKind == JsonValueKind.Array)
             foreach (var e in events.EnumerateArray()) ApplyLiveEvent(e, replay: true);
         _attaching = false;
         foreach (var json in _attachBuffer.ToList()) HandleLiveEvent(json);
         _attachBuffer.Clear();
-        ScrollChatToEnd();
+        KeepLatestInView();
         NxResponse outcome;
         try { outcome = await turn.Task; }
         finally { EndTurnStreaming(view); }
@@ -362,6 +338,7 @@ public sealed partial class SessionPage
         }
         var kind = NxJson.Text(root, "kind");
         var text = NxJson.Text(root, "text");
+        TurnStatusEvent(kind, root);
         switch (kind)
         {
             case "text_delta":
@@ -375,8 +352,7 @@ public sealed partial class SessionPage
                 QueueLiveRender();
                 break;
             case "thinking_delta":
-                if (!_streamHasText && _streamText is not null) _streamText.Text = "Thinking…";
-                SetComposerStatus(LiveAgentName + " is thinking…");
+                // The status line says "Thinking"; the words are the renderer's (B4).
                 break;
             case "tool_start":
             {
@@ -388,8 +364,6 @@ public sealed partial class SessionPage
                 var parent = NxJson.Text(root, "parent_tool_id");
                 _liveToolInfo[id] = (input, parent);
                 _streamActivity?.Apply(ActivityJson(id, tool, "running", input, "", parent));
-                SetComposerStatus(LiveAgentName + " is running " + tool + "…");
-                if (!_streamHasText && _streamText is not null) _streamText.Text = "Working in your project…";
                 break;
             }
             case "tool_end":
@@ -408,7 +382,6 @@ public sealed partial class SessionPage
                 if (!_liveTools.TryGetValue(id, out var tool)) break;
                 var info = _liveToolInfo.GetValueOrDefault(id);
                 _streamActivity?.Apply(ActivityJson(id, tool, "running", info.Input, text, info.Parent));
-                SetComposerStatus("Sub-agent working…");
                 break;
             }
             case "approval":
@@ -417,14 +390,10 @@ public sealed partial class SessionPage
             case "approval_resolved":
                 ResolveApprovalCard(NxJson.Text(root, "request_id"), NxJson.Text(root, "decision"));
                 break;
-            case "auto_approved":
-                if (NxJson.Text(root, "summary") is { Length: > 0 } summary) SetComposerStatus("Allowed by this chat's permissions · " + summary);
-                break;
             case "status":
             case "error":
-                if (kind == "error" && text.Length > 0) text = AppDiagnostics.Friendly("live", text);
-                if (text.Length > 0) SetComposerStatus(text);
-                if (kind == "error" && text.Length > 0) _liveLastError = text;
+                // Shown in the reply's status line; an error that ends the turn shows under the message.
+                if (kind == "error" && text.Length > 0) _liveLastError = AppDiagnostics.Friendly("live", text);
                 break;
             case "exited":
                 var pending = _liveTurn;
@@ -442,11 +411,11 @@ public sealed partial class SessionPage
         var text = _liveText.ToString().TrimEnd();
         if (text.Length == 0) return;
         _streamHasText = true;
-        var nearBottom = _chatScroll.ScrollableHeight - _chatScroll.VerticalOffset < 120;
+        _streamText.Visibility = Visibility.Visible;
         _streamText.Text = text.Length <= 24000 ? text : text[^24000..];
-        SetComposerStatus("Replying with " + (_liveAgent.Length > 0 ? LiveAgentName : ChatTitles.AgentName(_streamAgent)) + "…");
-        // Stuck to the bottom, the SizeChanged re-pin follows the stream.
-        if (nearBottom && !_stickToBottom) ScrollChatToEnd();
+        // Pinned to the bottom, the SizeChanged re-pin follows the stream.
+        // Someone reading further up stays put; the jump button counts it.
+        if (_turnView is { } turnView) NoteNewBelow(turnView);
     }
 
     private static string ActivityJson(string id, string tool, string status, string input, string output, string parent = "")
@@ -592,9 +561,8 @@ public sealed partial class SessionPage
         var at = Math.Max(0, view.StreamStack.Children.Count - 1);
         view.StreamStack.Children.Insert(at, card);
         if (focus) Motion.FadeSlideIn(card, dy: 8, durationMs: 260);
-        SetComposerStatus("Waiting for your approval · " + summary);
         if (focus && IsLoaded && _prompt.Text.Length == 0) allow.Focus(FocusState.Programmatic);
-        if (focus) ScrollChatToEnd();
+        if (focus) { NoteNewBelow(view); KeepLatestInView(); }
     }
 
     /// <summary>Collapses an answered card to one quiet line.</summary>
@@ -621,7 +589,6 @@ public sealed partial class SessionPage
         card.Padding = new Thickness(2, 0, 2, 0);
         card.BorderThickness = new Thickness(0);
         card.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
-        if (_approvalCards.Count == 0 && LiveTurnActive) SetComposerStatus(LiveAgentName + " is working…");
     }
 
     private void ClearApprovalCards()

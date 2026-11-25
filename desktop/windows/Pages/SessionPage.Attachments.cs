@@ -159,7 +159,6 @@ public sealed partial class SessionPage
         ToolTipService.SetToolTip(chip, file.Path + "\nThe agent gets this path and opens the file itself.");
         remove.Click += (_, _) =>
         {
-            if (_sendInFlight) return;
             _files.Remove(file.Path);
             _imagePreviews.Children.Remove(chip);
             RefreshImageAttachments();
@@ -190,7 +189,8 @@ public sealed partial class SessionPage
         using (var stream = await file.OpenAsync(FileAccessMode.Read)) await bitmap.SetSourceAsync(stream);
         // Loading is asynchronous: do not attach into a different chat or
         // mutate a request that has already started sending.
-        if (_id != session || _sendInFlight || !ComposerAttachments.AcceptsImages(SelectedHarness())) return;
+        // A sent message took its attachments with it, so these belong to the next one.
+        if (_id != session || !ComposerAttachments.AcceptsImages(SelectedHarness())) return;
         if (_images.Contains(file.Path, StringComparer.OrdinalIgnoreCase)) return;
         if (_images.Count >= ComposerAttachments.MaxImages) { SetComposerStatus($"Attach at most {ComposerAttachments.MaxImages} images."); return; }
         _images.Add(file.Path);
@@ -204,7 +204,6 @@ public sealed partial class SessionPage
         remove.VerticalAlignment = VerticalAlignment.Top;
         remove.Click += (_, _) =>
         {
-            if (_sendInFlight) return;
             _images.Remove(file.Path);
             _imagePreviews.Children.Remove(preview);
             RefreshImageAttachments();

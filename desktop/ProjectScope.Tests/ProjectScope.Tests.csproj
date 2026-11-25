@@ -43,5 +43,9 @@
     <Compile Include="../windows/Core/AgentAvailability.cs" Link="AgentAvailability.cs" />
     <Compile Include="../windows/Core/ChatListRetry.cs" Link="ChatListRetry.cs" />
     <Compile Include="../windows/Core/LiveSessions.cs" Link="LiveSessions.cs" />
+    <Compile Include="../windows/Core/ComposerDrafts.cs" Link="ComposerDrafts.cs" />
+    <Compile Include="../windows/Core/ComposerKeys.cs" Link="ComposerKeys.cs" />
+    <Compile Include="../windows/Core/OutgoingMessage.cs" Link="OutgoingMessage.cs" />
+    <Compile Include="../windows/Core/TurnStatus.cs" Link="TurnStatus.cs" />
   </ItemGroup>
 </Project>
