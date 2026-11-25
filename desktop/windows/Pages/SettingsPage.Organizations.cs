@@ -56,7 +56,7 @@ public sealed partial class SettingsPage
         {
             button.IsEnabled = false;
             try { await action(); }
-            catch (Exception ex) { Notify(ex.Message, true); }
+            catch (Exception ex) { Notify(NxErrors.ForException("That didn't work. Try again.", ex, "orgs"), true); }
             finally { button.IsEnabled = true; }
         };
         return button;

@@ -41,7 +41,7 @@ public sealed partial class SessionPage
             if (!_attachImage.IsEnabled) return;
             var deferral = e.GetDeferral();
             try { await AddFromDataAsync(e.DataView); }
-            catch (Exception ex) { SetComposerStatus("Could not attach that: " + ex.Message); }
+            catch (Exception ex) { SetComposerStatus(NxErrors.ForException("Nexus couldn't attach that. Try attaching the file instead.", ex, "attach")); }
             finally { deferral.Complete(); }
         };
     }
@@ -59,7 +59,7 @@ public sealed partial class SessionPage
         foreach (var file in files)
         {
             try { await AddAttachmentAsync(file); }
-            catch (Exception ex) { SetComposerStatus("Could not attach " + file.Name + ": " + ex.Message); }
+            catch (Exception ex) { SetComposerStatus(NxErrors.ForException("Nexus couldn't attach " + file.Name + ". Check that it isn't open in another app, then try again.", ex, "attach")); }
         }
     }
 
@@ -75,13 +75,13 @@ public sealed partial class SessionPage
             e.Handled = true;
             await PasteClipboardImageAsync(content);
         }
-        catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
+        catch (Exception ex) { SetComposerStatus(NxErrors.ForException("Nexus couldn't paste that image. Try saving it and attaching the file.", ex, "attach")); }
     }
 
     private async Task PasteClipboardImageAsync(DataPackageView content)
     {
         try { await AddFromDataAsync(content); }
-        catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
+        catch (Exception ex) { SetComposerStatus(NxErrors.ForException("Nexus couldn't paste that image. Try saving it and attaching the file.", ex, "attach")); }
     }
 
     // A screenshot (bitmap) or copied/dropped files.

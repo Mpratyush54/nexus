@@ -43,7 +43,7 @@ public sealed class AgentsPage : NexusPage
         {
             var header = PageHeader(
                 "Agents & harnesses",
-                "Capture status and session history for the project selected in the shell. Resume behavior follows each harness.");
+                "Which agents Nexus has saved chats from in this project, and how each one continues a chat.");
             Grid.SetRow(header, row++);
             root.Children.Add(header);
         }
@@ -107,8 +107,8 @@ public sealed class AgentsPage : NexusPage
         {
             _cards.Children.Add(Card(
                 Line("No captured agents yet", title: true),
-                Line("Nexus lists a harness here after its first session is harvested for this project."),
-                Line("Confirm capture is on in Settings (per project) and resumed from the tray, then run a session in Cursor, Codex, Claude Code, or another supported harness.")));
+                Line("An agent shows up here once Nexus has saved its first chat in this project."),
+                Line("Check that chat saving is on in Settings and not paused in the tray, then use Cursor, Codex, Claude Code or another supported agent in this project.")));
             _cards.Children.Add(SectionHeader("Supported harnesses"));
             foreach (var harness in AgentCatalog.All.Take(8))
             {

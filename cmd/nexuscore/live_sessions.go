@@ -118,28 +118,28 @@ func liveCall(name string, args json.RawMessage) (any, error) {
 	}
 	value, ok := liveSessions.Load(body.LiveID)
 	if !ok {
-		return nil, errors.New("this chat is no longer running; send again to restart it")
+		return nil, errors.New("This chat stopped running. Send your message again to restart it")
 	}
 	entry := value.(*liveEntry)
 	switch name {
 	case "live.send":
 		text := strings.TrimSpace(body.Text)
 		if text == "" || len(text) > 16000 {
-			return nil, errors.New("enter a message of up to 16,000 characters")
+			return nil, errors.New("Write a message of up to 16,000 characters")
 		}
 		if len(body.Images) > continuex.MaxImages {
-			return nil, errors.New("attach at most four images")
+			return nil, errors.New("Attach up to four images at a time")
 		}
 		for _, path := range body.Images {
 			if !continuex.AllowedImage(path) {
-				return nil, errors.New("attach a local PNG, JPEG, GIF, or WebP image under 20 MB")
+				return nil, errors.New("Attach a PNG, JPEG, GIF or WebP image under 20 MB")
 			}
 		}
 		var sender continuex.ImageSender
 		if len(body.Images) > 0 {
 			var ok bool
 			if sender, ok = entry.session.(continuex.ImageSender); !ok {
-				return nil, errors.New(entry.agent + " does not accept images in chat yet")
+				return nil, errors.New(continuex.AgentDisplayName(entry.agent) + " can't take images in Nexus yet. Remove the image, or pick another agent")
 			}
 		}
 		entry.mu.Lock()
@@ -197,18 +197,18 @@ func nexusMemoryServer(projectID string) []continuex.MCPServer {
 func startLive(sessionID, projectID, agent, workspace, resumeID, model, permissionMode, seed string) (any, error) {
 	start, ok := liveStarters[agent]
 	if !ok {
-		return nil, errors.New(agent + " does not support live chat yet")
+		return nil, errors.New(continuex.AgentDisplayName(agent) + " can't chat inside Nexus yet")
 	}
 	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
-		return nil, errors.New("select the project folder before sending")
+		return nil, errors.New("Choose a project folder on this computer before sending")
 	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
 		return nil, err
 	}
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
-		return nil, errors.New("the project folder does not exist on this machine")
+		return nil, errors.New("That project folder isn't on this computer. Choose one that is, then send again")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	session, err := start(ctx, continuex.LiveOptions{
@@ -218,7 +218,7 @@ func startLive(sessionID, projectID, agent, workspace, resumeID, model, permissi
 	})
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, continuex.AsAgentError(agent, "cannot_start", err)
 	}
 	entry := &liveEntry{id: newLiveID(), sessionID: sessionID, projectID: projectID, agent: agent, workspace: abs, session: session, cancel: cancel, resumeID: strings.TrimSpace(resumeID)}
 	entry.markOwned(session.NativeID())

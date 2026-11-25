@@ -202,7 +202,11 @@ public sealed partial class AgentSetupPage : NexusPage
         root.Children.Add(bodyFrame);
         Content = root;
         WatchShellProject(() => LoadAsync());
+        Loaded += (_, _) => { AgentAvailabilityService.Changed += AgentsChanged; AgentAvailabilityService.Refresh(); };
+        Unloaded += (_, _) => AgentAvailabilityService.Changed -= AgentsChanged;
     }
+
+    private void AgentsChanged() => DispatcherQueue.TryEnqueue(() => { if (_agents.Count > 0) RenderAgents(); });
 
     protected override void OnEnter(object? parameter)
     {
@@ -332,6 +336,23 @@ public sealed partial class AgentSetupPage : NexusPage
             }
             else if (installed) state.Children.Add(Tiny("· Not connected"));
             text.Children.Add(state);
+            // Agents that can't run chats here are left out of the chat
+            // pickers; this is where they get set up.
+            if (AgentAvailabilityService.For(id) is { Usable: false } chat)
+            {
+                var setup = new HyperlinkButton { Content = "Set up for chats", Padding = new Thickness(0), FontSize = 11, MinHeight = 0 };
+                ToolTipService.SetToolTip(setup, chat.Problem);
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(setup, "Set up " + chat.Name + " for chats");
+                setup.Click += async (_, _) =>
+                {
+                    if (await AgentProblemDialog.ShowAsync(XamlRoot, chat, canUseAnother: false) == AgentProblemDialog.Choice.Fix)
+                        _status.Text = AgentAvailability.FixSentence(chat);
+                };
+                var line = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
+                line.Children.Add(Tiny(chat.State == "signed_out" ? "Not signed in ·" : "Can't run chats yet ·"));
+                line.Children.Add(setup);
+                text.Children.Add(line);
+            }
 
             var counts = Sections.Select(s => (s.Short, N: Arr(agent, s.Key).Count())).Where(c => c.N > 0).Select(c => c.N + " " + c.Short).ToList();
             text.Children.Add(Tiny(counts.Count > 0 ? string.Join(" · ", counts) : "No skills or tools yet"));
@@ -945,7 +966,7 @@ public sealed partial class AgentSetupPage : NexusPage
                 System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + dir + "\"") { UseShellExecute = false });
             else _status.Text = "That file no longer exists.";
         }
-        catch (Exception e) { _status.Text = "Could not open the folder: " + e.Message; }
+        catch (Exception e) { _status.Text = NxErrors.ForException("Nexus couldn't open that folder.", e, "agents"); }
     }
 
     private async Task RemoveMcpAsync(string agent, string name, string path)

@@ -153,7 +153,7 @@ public sealed partial class SessionPage : NexusPage
                 e.Handled = true;
                 await PasteClipboardImageAsync(content);
             }
-            catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
+            catch (Exception ex) { SetComposerStatus(NxErrors.ForException("Nexus couldn't paste that image. Try saving it and attaching the file.", ex, "attach")); }
         };
         _prompt.KeyboardAccelerators.Add(imagePaste);
         WireAttachmentDrop();
@@ -180,7 +180,7 @@ public sealed partial class SessionPage : NexusPage
         _model.MaxWidth = 260;
         _model.Padding = new Thickness(8, 3, 6, 3);
         SetModelTip("Choose a model, or type a model ID supported by the selected agent. Leave blank for its default.");
-        ToolTipService.SetToolTip(_refreshModels, "Refresh models from the selected harness (does not start a chat)");
+        ToolTipService.SetToolTip(_refreshModels, "Refresh this agent's model list (doesn't start a chat)");
         _refreshModels.Click += async (_, _) => await RefreshHarnessModelsAsync();
         _model.DropDownOpened += async (_, _) =>
         {
@@ -540,8 +540,8 @@ public sealed partial class SessionPage : NexusPage
         root.Children.Add(head);
         root.Children.Add(body);
         Content = root;
-        Loaded += (_, _) => { ShellState.Changed += HandleShellChanged; App.Core.EventReceived += HandleCoreEvent; UpdateActions(); };
-        Unloaded += (_, _) => { ShellState.Changed -= HandleShellChanged; App.Core.EventReceived -= HandleCoreEvent; _ = CloseLiveAsync(); };
+        Loaded += (_, _) => { ShellState.Changed += HandleShellChanged; App.Core.EventReceived += HandleCoreEvent; UpdateActions(); AgentAvailabilityService.Changed += OnAgentsChanged; AgentAvailabilityService.Refresh(); };
+        Unloaded += (_, _) => { ShellState.Changed -= HandleShellChanged; App.Core.EventReceived -= HandleCoreEvent; AgentAvailabilityService.Changed -= OnAgentsChanged; _ = CloseLiveAsync(); };
         UpdateActions();
     }
 
@@ -842,7 +842,7 @@ public sealed partial class SessionPage : NexusPage
         {
             Nexus.Core.Diagnostics.DiagLog.Error("page", "chat render failed", ex);
             _chat.Children.Clear();
-            _chat.Children.Add(Line("Could not render this conversation: " + ex.Message));
+            _chat.Children.Add(Line(NxErrors.ForException("Nexus couldn't show this conversation. Reopen it to try again.", ex, "chat")));
         }
         _paintedAt = Environment.TickCount64;
         _ = LoadTranscriptImagesAsync();
@@ -1310,7 +1310,7 @@ public sealed partial class SessionPage : NexusPage
             catch (Exception ex)
             {
                 Nexus.Core.Diagnostics.DiagLog.Error("page", "earlier turns render failed", ex);
-                _chat.Children.Insert(ChatContentInsertIndex(), Line("Could not render earlier turns: " + ex.Message));
+                _chat.Children.Insert(ChatContentInsertIndex(), Line(NxErrors.ForException("Nexus couldn't show the earlier messages. Scroll up again to retry.", ex, "chat")));
             }
             if (_olderCursor.Length == 0) DiscardUnshownCommands();
             UpdateEarlierTurnsButton();
@@ -1360,7 +1360,7 @@ public sealed partial class SessionPage : NexusPage
             {
                 Nexus.Core.Diagnostics.DiagLog.Error("page", "earlier turns render failed", ex);
                 _earlierPageIndex++;
-                _chat.Children.Insert(ChatContentInsertIndex(), Line("Could not render earlier turns: " + ex.Message));
+                _chat.Children.Insert(ChatContentInsertIndex(), Line(NxErrors.ForException("Nexus couldn't show the earlier messages. Scroll up again to retry.", ex, "chat")));
             }
         }
         UpdateEarlierTurnsButton();
@@ -1696,7 +1696,7 @@ public sealed partial class SessionPage : NexusPage
     {
         if (!response.Ok)
         {
-            SetComposerStatus("Saved Nexus replies could not be loaded: " + (response.Error ?? "unknown error"));
+            SetComposerStatus(response.Error is { Length: > 0 } why && !why.StartsWith(NxErrors.GenericFailure, StringComparison.Ordinal) ? why : "Nexus couldn't load the replies it saved for this chat. Reopen the chat to try again.");
             return;
         }
         var saved = NxJson.Items(response.Result).ToList();
@@ -2358,10 +2358,10 @@ public sealed partial class SessionPage : NexusPage
         if (XamlRoot is null) return false;
         var dialog = new ContentDialog
         {
-            Title = "Allow Cursor CLI in this folder?",
+            Title = "Allow Cursor in this folder?",
             Content = new TextBlock
             {
-                Text = "Cursor CLI can read files and run commands in:\n" + normalized +
+                Text = "Cursor can read files and run commands in:\n" + normalized +
                        "\n\nOnly allow this for a project you trust. Nexus will remember your choice until the app closes.",
                 TextWrapping = TextWrapping.Wrap,
                 IsTextSelectionEnabled = true
@@ -2903,7 +2903,7 @@ public sealed partial class SessionPage : NexusPage
         _harness.IsEnabled = !offline;
         _model.IsEnabled = !offline;
         ToolTipService.SetToolTip(_sendHere, _legacy ? "Archived snapshots are read-only" : !System.IO.Directory.Exists(_workspace.Text.Trim()) ? "Choose a local project folder first" : "Send to " + selected + " using this project's context");
-        ToolTipService.SetToolTip(_resume, _legacy ? "Archived snapshots cannot resume natively" : _nativeID.Length == 0 ? "No native session ID was captured" : "Copies a command for an installed local agent; it does not open a terminal");
+        ToolTipService.SetToolTip(_resume, _legacy ? "Older saved chats can only be read" : _nativeID.Length == 0 ? "This chat can't be picked up in the agent itself, but you can continue it here" : "Copies a command that picks this chat up in the agent itself");
         ToolTipService.SetToolTip(_teleport, _legacy ? "Archived snapshots cannot be teleported" : !_hasTransferableVersion ? "A complete or transcript-only version is required" : _workspaceHint.Length == 0 ? "This chat has no mapped workspace to package code from" : null);
         ToolTipService.SetToolTip(_fork, _legacy ? "Archived snapshots cannot be forked" : "Clone the captured conversation into a separate chat. The next message starts a new local agent session.");
     }
@@ -2985,21 +2985,44 @@ public sealed partial class SessionPage : NexusPage
         return _harnessFitWidth = widest > 0 ? Math.Ceiling(widest + 8 + 6 + 32 + 6) : 132;
     }
 
+    // Only agents that can run here are offered (installed, startable and,
+    // where that is cheap to tell, signed in). The list refreshes in the
+    // background when the window regains focus; Settings › Agents shows the
+    // others with a "Set up" action.
     private void ConfigureHarness()
     {
-        _harness.Items.Clear();
-        var choices = new (string Name, string Value)[] { ("OpenCode", "opencode"), ("Codex", "codex"), ("Cursor", "cursor"), ("Claude Code", "claude"), ("Gemini", "gemini"), ("Kimi", "kimi") };
-        foreach (var (name, value) in choices) _harness.Items.Add(new ComboBoxItem { Content = name, Tag = value });
-        var source = _agent.Trim().ToLowerInvariant();
-        if (source is "agent" or "cursor-cli" or "cursor ide") source = "cursor";
-        if (source is "claude-code" or "claude_code") source = "claude";
-        var index = Array.FindIndex(choices, item => item.Value == source);
-        _harness.SelectedIndex = index >= 0 ? index : 1;
-        ToolTipService.SetToolTip(_harness, index >= 0
-            ? "New local continuation in " + choices[index].Name + ". The captured chat provides context; the original native session is not required."
-            : "This source harness cannot chat here yet. Codex is selected as a local fallback.");
-        SetComposerStatus(index >= 0 ? "" : "This source harness cannot chat here yet. Codex is selected as a local fallback.");
+        var source = AgentAvailability.Normalize(_agent);
+        var keep = SelectedHarness();
+        var choices = AgentAvailabilityService.PickerChoices();
+        var shown = _harness.Items.OfType<ComboBoxItem>().Select(i => i.Tag as string ?? "").ToList();
+        var pick = AgentAvailability.Choose(choices, keep.Length > 0 ? keep : source);
+        if (!shown.SequenceEqual(choices.Select(c => c.Value)))
+        {
+            _harness.Items.Clear();
+            foreach (var (value, name) in choices) _harness.Items.Add(new ComboBoxItem { Content = name, Tag = value });
+        }
+        var index = choices.ToList().FindIndex(c => c.Value == pick);
+        if (_harness.SelectedIndex != index) _harness.SelectedIndex = index;
+        _harness.PlaceholderText = choices.Count == 0 ? "No agent ready" : "Agent";
+        ToolTipService.SetToolTip(_harness, choices.Count == 0 ? AgentAvailability.NoneReady : "Agent that replies in this chat, on this computer");
+        if (keep.Length > 0 && keep == pick) return;
+        if (choices.Count == 0) { SetComposerStatus(AgentAvailability.NoneReady); return; }
+        if (source.Length > 0 && pick != source)
+        {
+            var from = AgentAvailability.DisplayName(source);
+            var to = AgentAvailability.DisplayName(pick);
+            SetComposerStatus(AgentAvailabilityService.For(source) is { Usable: false }
+                ? $"{from} isn't ready on this computer, so {to} will continue this chat."
+                : $"{from} can't continue chats in Nexus yet, so {to} will.");
+        }
+        else if (keep.Length == 0) SetComposerStatus("");
     }
+
+    private void OnAgentsChanged() => DispatcherQueue.TryEnqueue(() =>
+    {
+        if (_sendInFlight || _preparingHarness || _harness.Items.Count == 0 && _id.Length == 0) return;
+        ConfigureHarness();
+    });
 
     private static string BuildContinuationContext(JsonElement? turns, JsonElement? summary)
     {
@@ -3046,7 +3069,7 @@ public sealed partial class SessionPage : NexusPage
         AppPrefs.Data.ChatModels ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         AppPrefs.Data.ChatModels[agent] = model;
         AppPrefs.Save();
-        if (!SupportsInAppReply(agent)) { SetComposerStatus("Select a supported local harness."); return; }
+        if (!SupportsInAppReply(agent)) { SetComposerStatus("Choose an agent that can chat in Nexus: Claude Code, Codex, Cursor, OpenCode, Gemini or Kimi."); return; }
         if (_images.Count > 0 && ComposerAttachments.ImageProblem(agent, _images[0], 1) is { } imageProblem) { SetComposerStatus(imageProblem); return; }
         // Images go to the agent as images; other files are named by path.
         var images = _images.ToArray();
@@ -3142,7 +3165,7 @@ public sealed partial class SessionPage : NexusPage
             _chat.Children.Remove(userBubble);
             _conversation.Remove(liveUserKey); _messageAnchors.Remove(liveUserKey);
             RefreshConversationNavigation();
-            var failureMessage = "Request stopped · " + (response.Error ?? "No final reply was received.");
+            var failureMessage = "Request stopped · " + NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent));
             if (hadStreamText)
                 streamStack.Children.Add(new TextBlock { Text = failureMessage, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, Foreground = NexusPalette.Amber, Margin = new Thickness(0, 8, 0, 0) });
             else
@@ -3157,7 +3180,7 @@ public sealed partial class SessionPage : NexusPage
             streamBubble.Padding = new Thickness(12);
             activityView.View.IsExpanded = activityView.Count > 0;
             if (_prompt.Text.Length == 0) _prompt.Text = typed;
-            SetComposerStatus(response.Error ?? "The agent did not return a reply.");
+            SetComposerStatus(NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent)));
             if ((response.RawError ?? "").Contains("model", StringComparison.OrdinalIgnoreCase)) _model.Focus(FocusState.Programmatic);
             return;
         }
@@ -3260,7 +3283,7 @@ public sealed partial class SessionPage : NexusPage
         }
         catch (Exception ex)
         {
-            SetComposerStatus("Could not stop this reply: " + ex.Message);
+            SetComposerStatus(NxErrors.ForException("Nexus couldn't stop this reply. Try again.", ex, "chat"));
             if (_sendInFlight) _cancelHere.IsEnabled = true;
         }
     }
@@ -3602,7 +3625,7 @@ public sealed partial class SessionPage : NexusPage
         var data = new DataPackage();
         data.SetText(text);
         Clipboard.SetContent(data);
-        _notice.Text = "Command Prompt resume command copied, using the installed CLI's full path. The original local session must still be available. Nexus did not open a terminal.";
+        _notice.Text = "Copied. Paste it into Command Prompt to pick this chat up in the agent itself. The agent needs its original chat on this computer.";
     }
 
     private static string QuoteArgument(string value) => value.Any(char.IsWhiteSpace) ? "\"" + value.Replace("\"", "\\\"") + "\"" : value;

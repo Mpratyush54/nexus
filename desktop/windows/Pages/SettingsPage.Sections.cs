@@ -38,7 +38,7 @@ public sealed partial class SettingsPage
         {
             if (_loginStartSync) return;
             try { LoginStart.SetEnabled(_loginStart.IsOn); }
-            catch (Exception ex) { Notify(ex.Message, true); }
+            catch (Exception ex) { Notify(NxErrors.ForException("Windows didn't let Nexus change whether it starts when you sign in.", ex, "settings"), true); }
         };
         var startup = SettingsGroup("Startup & window",
             SettingRow(RowText("Start Nexus when I sign in", "Starts Nexus with Windows so capture keeps running in the background."), _loginStart),
@@ -429,6 +429,6 @@ public sealed partial class SettingsPage
             Clipboard.SetContent(data);
             Notify(done);
         }
-        catch (Exception ex) { Notify(ex.Message, true); }
+        catch (Exception ex) { Notify(NxErrors.ForException("Nexus couldn't copy that. Try again.", ex, "settings"), true); }
     }
 }

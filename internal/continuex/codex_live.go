@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-var codexLookPath = exec.LookPath
+var codexLookPath = lookAgent
 
 type codexRPC struct {
 	ID     json.RawMessage `json:"id"`
@@ -95,11 +95,11 @@ func StartCodexLive(ctx context.Context, opts LiveOptions) (LiveSession, error) 
 	}
 	path, err := codexLookPath("codex")
 	if err != nil {
-		return nil, fmt.Errorf("Codex is not installed or not on PATH: %w", err)
+		return nil, agentErrorf("codex", "not_installed", "Codex is not installed or not on PATH: %v", err)
 	}
 	path, prefix, err := directExecutable(path, "codex")
 	if err != nil {
-		return nil, err
+		return nil, AsAgentError("codex", "cannot_start", err)
 	}
 	cmd := exec.Command(path, append(prefix, "app-server")...)
 	cmd.Dir = opts.Workspace
