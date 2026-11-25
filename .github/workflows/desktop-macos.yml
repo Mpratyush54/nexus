@@ -65,98 +65,119 @@ jobs:
           lipo -info dist/libnexuscore.dylib
           nm -gU dist/arm64/libnexuscore.dylib | grep ' _nx_'
 
-      - name: Publish the Uno app (osx-arm64, self-contained)
+      # Uno's own bundler lays the .app out the way codesign wants it (managed
+      # assemblies outside Contents/MacOS) and signs it; CodesignKey=- is ad hoc.
+      - name: Publish Nexus.app with Uno (osx-arm64, self-contained)
         working-directory: desktop/uno
         run: |
           set -euo pipefail
           dotnet publish Nexus.Uno.csproj -c Release -f net10.0-desktop -r osx-arm64 \
-            --self-contained true -p:TargetFrameworks=net10.0-desktop \
-            -o "$GITHUB_WORKSPACE/dist/publish" 2>&1 | tee "$GITHUB_WORKSPACE/dist/publish.log" \
-            | grep -E 'error|warning NU|->' || true
-          test "${PIPESTATUS[0]}" -eq 0
-          ls -la "$GITHUB_WORKSPACE/dist/publish" | head -60
-          ls "$GITHUB_WORKSPACE/dist/publish" | wc -l
+            -p:TargetFrameworks=net10.0-desktop -p:PackageFormat=app -p:CodesignKey=- \
+            > "$GITHUB_WORKSPACE/dist/publish.log" 2>&1 || { tail -80 "$GITHUB_WORKSPACE/dist/publish.log"; exit 1; }
+          grep -E 'warning NU|error|->' "$GITHUB_WORKSPACE/dist/publish.log" | tail -20 || true
+          built=$(find bin/Release/net10.0-desktop/osx-arm64/publish -maxdepth 1 -name '*.app' | head -1)
+          test -n "$built" || { echo "no .app produced"; find bin/Release -maxdepth 4 | head -50; exit 1; }
+          rm -rf "$APP"; cp -R "$built" "$APP"
+          echo "--- bundle layout"
+          find "$APP" -maxdepth 3 | sed "s#$APP#Nexus.app#" | head -40
+          find "$APP" -type f | wc -l
 
-      - name: Bundle Nexus.app
+      - name: Info.plist, icon and the Go core
         run: |
           set -euo pipefail
-          rm -rf "$APP"
-          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-          # The .NET host resolves everything next to the executable.
-          cp -R dist/publish/. "$APP/Contents/MacOS/"
-          cp dist/libnexuscore.dylib "$APP/Contents/MacOS/libnexuscore.dylib"
+          PL="$APP/Contents/Info.plist"
+          echo "--- Uno's Info.plist"; plutil -p "$PL"
           short=$(sed -n 's:.*<ApplicationDisplayVersion>\(.*\)</ApplicationDisplayVersion>.*:\1:p' desktop/uno/Nexus.Uno.csproj)
-          sed -e "s/__SHORT_VERSION__/${short}/" -e "s/__BUILD_VERSION__/${GITHUB_RUN_NUMBER}/" \
-            desktop/uno/macos/Info.plist > "$APP/Contents/Info.plist"
-          plutil -lint "$APP/Contents/Info.plist"
-          # Icon from the Windows PNG.
-          set +e
+          sed -e "s/__SHORT_VERSION__/${short}/" -e "s/__BUILD_VERSION__/${GITHUB_RUN_NUMBER}/"             desktop/uno/macos/Info.plist > "$RUNNER_TEMP/nexus.plist"
+          # Our keys win over Uno's defaults, except the executable name Uno chose.
+          exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PL")
+          for key in CFBundleIdentifier CFBundleName CFBundleDisplayName CFBundleShortVersionString CFBundleVersion                      CFBundleIconFile LSMinimumSystemVersion LSApplicationCategoryType NSHighResolutionCapable                      NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription CFBundleURLTypes; do
+            /usr/libexec/PlistBuddy -c "Delete :$key" "$PL" 2>/dev/null || true
+          done
+          /usr/libexec/PlistBuddy -c "Merge $RUNNER_TEMP/nexus.plist" "$PL"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $exe" "$PL"
+          plutil -lint "$PL"; plutil -p "$PL"
+          # Icon from the Windows PNG (non-fatal).
           ICONSET="$RUNNER_TEMP/Nexus.iconset"; mkdir -p "$ICONSET"
           for s in 16 32 128 256 512; do
-            sips -z $s $s desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
-            sips -z $((s*2)) $((s*2)) desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+            sips -z $s $s desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null || true
+            sips -z $((s*2)) $((s*2)) desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null || true
           done
+          mkdir -p "$APP/Contents/Resources"
           iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Nexus.icns" || echo "icon conversion failed (non-fatal)"
-          set -e
-          chmod +x "$APP/Contents/MacOS/Nexus"
-          file "$APP/Contents/MacOS/Nexus"
+          # The core goes where the other native libraries (SkiaSharp) are,
+          # which is where [LibraryImport("nexuscore")] probes.
+          skia=$(find "$APP" -name 'libSkiaSharp.dylib' | head -1)
+          dest=$(dirname "$skia")
+          cp dist/libnexuscore.dylib "$dest/libnexuscore.dylib"
+          echo "core -> ${dest#$APP/}"
           du -sh "$APP"
 
       - name: Ad-hoc codesign
         run: |
           set -euo pipefail
-          # Sign nested code first, then the bundle (no --deep: it is deprecated
-          # and signs in the wrong order for some layouts).
-          find "$APP/Contents/MacOS" -type f \( -name '*.dylib' -o -name '*.so' \) -print0 \
-            | xargs -0 -n 20 codesign --force --sign - --timestamp=none
+          core=$(find "$APP" -name libnexuscore.dylib)
+          codesign --force --sign - --timestamp=none "$core"
+          # The outer signature seals Info.plist and the new library.
           codesign --force --sign - --timestamp=none "$APP"
           codesign --verify --strict --verbose=2 "$APP"
-          codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Signature|Format'
+          codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Signature|Format|Info.plist'
 
       - name: Build the window probe
         run: swiftc -O -o dist/winlist scripts/macos/winlist.swift
 
+      # Two launches in isolated profiles with no server and no credentials:
+      # a fresh one (first-run setup guide), then one seeded past setup (the
+      # main shell). Each waits for a window, captures the screen and the
+      # window alone, and records whether the app was still alive.
       - name: Launch, wait for the window, screenshot
-        timeout-minutes: 6
+        timeout-minutes: 8
         run: |
           set -uo pipefail
           mkdir -p shots logs
-          PROFILE_ROOT="$RUNNER_TEMP/nexus-profile-ci-mac"
-          rm -rf "$PROFILE_ROOT"
-          # Isolated profile, no server, no credentials.
-          env -u NEXUS_SERVER -u CENTRAL_SERVER_URL -u NEXUS_TOKEN -u CENTRAL_MEMORY_TOKEN \
-            NEXUS_PROFILE=ci-mac NEXUS_PROFILE_ROOT="$PROFILE_ROOT" \
-            "$APP/Contents/MacOS/Nexus" > logs/stdout.log 2>&1 &
-          PID=$!
-          echo "pid=$PID"
+          EXE="$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
           screencapture -x shots/00-desktop-before.png || true
-          seen=0
-          for i in $(seq 1 60); do
-            sleep 2
-            if ! kill -0 $PID 2>/dev/null; then echo "Nexus exited early"; break; fi
-            out=$(./dist/winlist $PID 2>/dev/null || echo 0)
-            wins=$(echo "$out" | head -1)
-            echo "t=$((i*2))s windows=$wins"
-            if [ "${wins:-0}" -gt 0 ] 2>/dev/null; then seen=1; echo "$out"; break; fi
-          done
-          # Give the first page time to paint, then capture.
-          sleep 12
-          screencapture -x shots/01-screen.png || echo "screencapture failed"
-          # Window-only capture of the largest Nexus window, when there is one.
-          wid=$(./dist/winlist $PID | tail -n +2 | sort -k5 -n -r | head -1 | cut -d' ' -f1)
-          [ -n "$wid" ] && screencapture -x -o -l "$wid" shots/01-main-window.png || echo "no window id to capture"
-          sleep 15
-          screencapture -x shots/02-main-window-later.png || true
-          if kill -0 $PID 2>/dev/null; then alive=1; else alive=0; fi
-          echo "window_seen=$seen alive=$alive"
-          kill $PID 2>/dev/null; sleep 3; kill -9 $PID 2>/dev/null || true
-          echo "--- stdout/stderr (tail)"; tail -80 logs/stdout.log || true
-          cp -R "$PROFILE_ROOT/AppData/Local/Nexus" logs/profile-local 2>/dev/null || true
-          find "$PROFILE_ROOT" -name '*.log' -maxdepth 6 -exec cp {} logs/ \; 2>/dev/null || true
+          ok=1
+          run_case() {
+            local name=$1 seeded=$2
+            local root="$RUNNER_TEMP/nexus-profile-$name"
+            rm -rf "$root"
+            if [ "$seeded" = 1 ]; then
+              mkdir -p "$root/AppData/Local/Nexus"
+              printf '{ "SetupCompleted": true, "LastNav": "timeline", "Theme": "dark" }\n' > "$root/AppData/Local/Nexus/ui-prefs.json"
+            fi
+            env -u NEXUS_SERVER -u CENTRAL_SERVER_URL -u NEXUS_TOKEN -u CENTRAL_MEMORY_TOKEN \
+              NEXUS_PROFILE="$name" NEXUS_PROFILE_ROOT="$root" \
+              "$EXE" > "logs/$name-stdout.log" 2>&1 &
+            local pid=$! seen=0 alive=0 out wins wid
+            echo "== $name pid=$pid"
+            for i in $(seq 1 45); do
+              sleep 2
+              if ! kill -0 $pid 2>/dev/null; then echo "$name exited early"; break; fi
+              out=$(./dist/winlist $pid 2>/dev/null || echo 0)
+              wins=$(echo "$out" | head -1)
+              if [ "${wins:-0}" -gt 0 ] 2>/dev/null; then seen=1; echo "t=$((i*2))s"; echo "$out"; break; fi
+            done
+            sleep 15
+            screencapture -x "shots/$name-screen.png" || echo "screencapture failed"
+            wid=$(./dist/winlist $pid 2>/dev/null | tail -n +2 | sort -k5 -n -r | head -1 | cut -d' ' -f1)
+            if [ -n "$wid" ]; then screencapture -x -o -l "$wid" "shots/$name-window.png" || true; fi
+            sleep 10
+            screencapture -x "shots/$name-screen-later.png" || true
+            kill -0 $pid 2>/dev/null && alive=1
+            echo "$name: window_seen=$seen alive=$alive"
+            kill $pid 2>/dev/null; sleep 3; kill -9 $pid 2>/dev/null || true
+            echo "--- $name stdout/stderr (tail)"; tail -60 "logs/$name-stdout.log" || true
+            mkdir -p "logs/$name"
+            find "$root" -maxdepth 6 -name '*.log' -exec cp {} "logs/$name/" \; 2>/dev/null || true
+            find "$root" -maxdepth 6 -path '*reports*' -type f -exec cp {} "logs/$name/" \; 2>/dev/null || true
+            [ $seen = 1 ] && [ $alive = 1 ] || ok=0
+          }
+          run_case ci-mac-fresh 0
+          run_case ci-mac-shell 1
           ls -la shots logs
-          # Crash reports, if any.
-          ls ~/Library/Logs/DiagnosticReports 2>/dev/null | grep -i nexus && cp ~/Library/Logs/DiagnosticReports/*Nexus* logs/ 2>/dev/null || true
-          test "$alive" = 1 && test "$seen" = 1
+          for f in ~/Library/Logs/DiagnosticReports/*; do case "$f" in *Nexus*) cp "$f" logs/ ;; esac; done 2>/dev/null || true
+          test $ok = 1
 
       - name: Zip the app
         if: ${{ !cancelled() }}

@@ -1162,6 +1162,16 @@ public sealed partial class MainWindow : Window
         public void RecycleElement(Microsoft.UI.Xaml.ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
     }
 
+#if HAS_UNO
+    // Uno's ItemsRepeater takes custom factories only through its
+    // IElementFactoryShim (Microsoft.UI.Xaml.Controls); same behaviour.
+    private sealed partial class ChatRowFactory : Microsoft.UI.Xaml.Controls.IElementFactoryShim
+    {
+        public UIElement GetElement(Microsoft.UI.Xaml.Controls.ElementFactoryGetArgs args) => _owner.ChatListElement(args.Data);
+        public void RecycleElement(Microsoft.UI.Xaml.Controls.ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
+    }
+#endif
+
     private static void ApplyChatRowSelection((Button Button, TextBlock Title) row, bool selected)
     {
         row.Button.Background = selected ? NexusPalette.UserFill : TransparentRow;

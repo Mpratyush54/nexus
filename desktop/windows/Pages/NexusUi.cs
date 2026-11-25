@@ -307,7 +307,15 @@ internal static class Skeleton
         host.SizeChanged += (_, _) => Size();
         host.Unloaded += (_, _) =>
         {
+#if HAS_UNO
+            // Uno 6.7 throws on a null child visual: hide it and let the next
+            // Loaded replace it (disposing an attached visual is not safe there).
+            if (sprite is not null) sprite.IsVisible = false;
+            sprite = null; brush = null;
+            return;
+#else
             ElementCompositionPreview.SetElementChildVisual(host, null);
+#endif
             sprite?.Dispose(); brush?.Dispose();
             sprite = null; brush = null;
         };
