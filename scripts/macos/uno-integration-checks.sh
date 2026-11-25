@@ -25,9 +25,9 @@ ROOT="$RUNNER_TEMP/nexus-profile-$NAME"
 OUT="logs/$NAME-stdout.log"
 FAILS=0
 
-pass() { echo "PASS: $*" | tee -a logs/integration-summary.txt; }
-fail() { echo "::error::FAIL: $*"; echo "FAIL: $*" >> logs/integration-summary.txt; FAILS=$((FAILS + 1)); }
-note() { echo "NOTE: $*" | tee -a logs/integration-summary.txt; }
+pass() { echo "PASS $(date +%T): $*" | tee -a logs/integration-summary.txt; }
+fail() { echo "::error::FAIL $(date +%T): $*"; echo "FAIL $(date +%T): $*" >> logs/integration-summary.txt; FAILS=$((FAILS + 1)); }
+note() { echo "NOTE $(date +%T): $*" | tee -a logs/integration-summary.txt; }
 limited() { local secs=$1; shift; perl -e 'alarm shift; exec @ARGV' "$secs" "$@"; }
 nexus() {
   env -u NEXUS_SERVER -u CENTRAL_SERVER_URL -u NEXUS_TOKEN -u CENTRAL_MEMORY_TOKEN \
@@ -88,6 +88,9 @@ BAR=$(se 'get name of every menu bar item of menu bar 1')
 echo "app menu bar: $BAR"
 if echo "$BAR" | grep -q "Edit" && echo "$BAR" | grep -q "Window"; then
   AX=1
+  # Frontmost, so the screenshots show Nexus's own menu bar.
+  se 'set frontmost to true' > /dev/null
+  sleep 1
   pass "app menu bar: $BAR"
   for i in 2 3 4 5 6; do
     echo "menu $i: $(se "get name of every menu item of menu 1 of menu bar item $i of menu bar 1")"
@@ -118,6 +121,8 @@ fi
 if [ $AX = 1 ]; then
   se 'click menu item "Close Window" of menu 1 of menu bar item 3 of menu bar 1' > /dev/null
   if wait_for 6 no_window && alive; then pass "Close Window hides the window; the app keeps running"; else note "window still visible after Close Window"; fi
+  sleep 2
+  if alive && [ -n "$(windows_at 25)" ]; then pass "status item still there with the window hidden"; else fail "status item gone after hiding (alive=$(alive && echo 1 || echo 0))"; fi
   screencapture -x shots/20-after-close.png
   (se 'click menu bar item 1 of menu bar 2' > /dev/null &)
   sleep 1.5

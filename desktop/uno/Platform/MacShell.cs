@@ -47,6 +47,7 @@ internal static class MacShell
 
     private static void Run(MainWindow window, MacNative.Command command)
     {
+        Log($"command: {command}");
         switch (command)
         {
             case MacNative.Command.Open:

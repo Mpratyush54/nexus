@@ -10,7 +10,6 @@
   <key>CFBundleShortVersionString</key><string>__SHORT_VERSION__</string>
   <key>CFBundleVersion</key><string>__BUILD_VERSION__</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleIconFile</key><string>Nexus</string>
   <key>LSMinimumSystemVersion</key><string>12.0</string>
   <key>LSApplicationCategoryType</key><string>public.app-category.developer-tools</string>
   <key>NSHighResolutionCapable</key><true/>

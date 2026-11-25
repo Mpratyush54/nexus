@@ -194,10 +194,24 @@ static BOOL nx_session_ending(void)
 // window to close, which the app turns into "hide". Route it to the app's Quit
 // instead, which shuts the core down and exits. Logout and restart keep Uno's
 // behaviour (terminate now).
+static NSString *nx_four_cc(OSType code)
+{
+    char c[5] = { (char)(code >> 24), (char)(code >> 16), (char)(code >> 8), (char)code, 0 };
+    return [NSString stringWithUTF8String:c] ?: @"????";
+}
+
+static NSString *nx_describe_quit_source(void)
+{
+    NSAppleEventDescriptor *event = [[NSAppleEventManager sharedAppleEventManager] currentAppleEvent];
+    if (event == nil) return [NSString stringWithFormat:@"no apple event, ui event type %ld", (long)NSApp.currentEvent.type];
+    pid_t sender = [event attributeDescriptorForKeyword:keySenderPIDAttr].int32Value;
+    return [NSString stringWithFormat:@"apple event %@/%@ from pid %d", nx_four_cc(event.eventClass), nx_four_cc(event.eventID), sender];
+}
+
 static NSApplicationTerminateReply nx_should_terminate(id self, SEL _cmd, NSApplication *sender)
 {
     if (s_command != NULL && s_item != nil && !nx_session_ending()) {
-        NSLog(@"[nexus-mac] quit requested by the system (Dock or menu)");
+        NSLog(@"[nexus-mac] quit requested by the system (Dock or menu): %@", nx_describe_quit_source());
         nx_send(NXTerminateRequested);
         return NSTerminateCancel;
     }
@@ -471,10 +485,12 @@ void nx_mac_show_windows(void)
     nx_on_main(^{
         if (@available(macOS 14.0, *)) [NSApp activate];
         else [NSApp activateIgnoringOtherApps:YES];
-        for (NSWindow *window in nx_uno_windows()) {
+        NSArray<NSWindow *> *windows = nx_uno_windows();
+        for (NSWindow *window in windows) {
             if (window.miniaturized) [window deminiaturize:nil];
             [window makeKeyAndOrderFront:nil];
         }
+        NSLog(@"[nexus-mac] show: %lu window(s)", (unsigned long)windows.count);
     });
 }
 
@@ -482,7 +498,10 @@ __attribute__((visibility("default")))
 void nx_mac_hide_windows(void)
 {
     nx_on_main(^{
-        for (NSWindow *window in nx_uno_windows()) [window orderOut:nil];
+        NSArray<NSWindow *> *windows = nx_uno_windows();
+        for (NSWindow *window in windows) [window orderOut:nil];
+        NSLog(@"[nexus-mac] hide: %lu window(s); status item visible=%d", (unsigned long)windows.count,
+              s_item != nil && s_item.visible ? 1 : 0);
     });
 }
 

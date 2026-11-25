@@ -102,12 +102,15 @@ jobs:
           sed -e "s/__SHORT_VERSION__/${short}/" -e "s/__BUILD_VERSION__/${GITHUB_RUN_NUMBER}/"             desktop/uno/macos/Info.plist > "$RUNNER_TEMP/nexus.plist"
           # Our keys win over Uno's defaults, except the executable name Uno chose.
           exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PL")
-          for key in CFBundleIdentifier CFBundleName CFBundleDisplayName CFBundleShortVersionString CFBundleVersion                      CFBundleIconFile LSMinimumSystemVersion LSApplicationCategoryType NSHighResolutionCapable                      NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription CFBundleURLTypes; do
+          for key in CFBundleIdentifier CFBundleName CFBundleDisplayName CFBundleShortVersionString CFBundleVersion                      LSMinimumSystemVersion LSApplicationCategoryType NSHighResolutionCapable                      NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription CFBundleURLTypes; do
             /usr/libexec/PlistBuddy -c "Delete :$key" "$PL" 2>/dev/null || true
           done
           /usr/libexec/PlistBuddy -c "Merge $RUNNER_TEMP/nexus.plist" "$PL"
           /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $exe" "$PL"
           plutil -lint "$PL"; plutil -p "$PL"
+          # The Dock icon: Uno's packager names it icon.icns (from Resizetizer).
+          icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PL")
+          test -f "$APP/Contents/Resources/${icon%.icns}.icns" || { echo "CFBundleIconFile $icon is missing"; exit 1; }
           ls "$APP/Contents/Resources" | grep -i icns || echo "no .icns in Resources"
           # The core goes where the other native libraries (SkiaSharp) are,
           # which is where [LibraryImport("nexuscore")] probes.

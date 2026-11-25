@@ -15,7 +15,8 @@ public static class Program
     {
         if (OperatingSystem.IsMacOS())
         {
-            if (args.Length == 0) args = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            // Uno's .app launcher does not forward argv to Main.
+            if (args.Length == 0) args = LaunchArgs.Arguments();
             // Flags only: links can carry sign-in codes.
             var flags = string.Join(" ", args.Where(a => a.StartsWith("--", StringComparison.Ordinal)).Select(a => a.Split('=')[0]));
             Console.Error.WriteLine($"[nexus-mac] launch: {args.Length} argument(s) {flags}");
