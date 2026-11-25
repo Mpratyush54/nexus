@@ -76,7 +76,7 @@ public static class InstallerHooks
 }
 
 /// <summary>
-/// Shortcuts left by the pre-installer era: scripts/install-windows.ps1
+/// Shortcuts left by the pre-installer era: the old scripts/install-windows.ps1
 /// (Nexus.exe in %LOCALAPPDATA%\Nexus\bin) and the retired Fyne shell
 /// (nexus-desktop*.exe, e.g. Start Menu\Programs\Nexus\Nexus Desktop.lnk).
 /// After a real install they would open or autostart an old copy, or show
