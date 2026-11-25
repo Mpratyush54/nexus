@@ -2955,18 +2955,29 @@ public sealed partial class SessionPage : NexusPage
         try
         {
             _model.Items.Clear();
-            _model.Items.Add(new ComboBoxItem { Content = "Default model", Tag = "" });
+            var catalog = _modelCatalogs.GetValueOrDefault(SelectedHarness());
+            _model.Items.Add(new ComboBoxItem { Content = DefaultModelLabel(), Tag = "" });
             _refreshModels.Visibility = Visibility.Visible;
             _refreshModels.IsEnabled = !_loadingModelAgents.Contains(SelectedHarness()) && !_sendInFlight;
-            _model.PlaceholderText = _loadingModelAgents.Contains(SelectedHarness()) && !_modelCatalogs.ContainsKey(SelectedHarness()) ? "Loading models…" : "Default model";
-            foreach (var choice in _modelCatalogs.GetValueOrDefault(SelectedHarness())?.Choices ?? Array.Empty<ModelPickerChoice>())
+            _model.PlaceholderText = _loadingModelAgents.Contains(SelectedHarness()) && catalog is null ? "Loading models…" : DefaultModelLabel();
+            foreach (var (header, choice) in catalog?.Rows() ?? Enumerable.Empty<(string, ModelPickerChoice?)>())
             {
+                if (choice is null)
+                {
+                    // Provider group header: not a model, not selectable.
+                    _model.Items.Add(new ComboBoxItem { Content = header, IsEnabled = false, FontSize = 11, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Padding = new Thickness(10, 8, 10, 2) });
+                    continue;
+                }
                 var item = new ComboBoxItem { Content = choice.Label, Tag = choice.ID };
                 ToolTipService.SetToolTip(item, choice.Description.Length > 0 ? choice.Description + "\n" + choice.ID : choice.ID);
                 _model.Items.Add(item);
             }
-            _model.SelectedIndex = -1;
-            _model.Text = _modelByHarness.GetValueOrDefault(SelectedHarness(), "");
+            // Select the remembered model (Default included) so the list opens
+            // at it; a typed ID the list doesn't have stays as text.
+            var remembered = RememberedModel(SelectedHarness());
+            var match = _model.Items.OfType<ComboBoxItem>().FirstOrDefault(i => i.IsEnabled && (i.Tag as string) == remembered);
+            _model.SelectedIndex = match is null ? -1 : _model.Items.IndexOf(match);
+            if (match is null) _model.Text = remembered;
         }
         finally { _configuringModel = false; }
         UpdateModelCatalogNotice();
@@ -3072,10 +3083,7 @@ public sealed partial class SessionPage : NexusPage
         }
         var agent = SelectedHarness();
         var model = SelectedModel();
-        _modelByHarness[agent] = model;
-        AppPrefs.Data.ChatModels ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        AppPrefs.Data.ChatModels[agent] = model;
-        AppPrefs.Save();
+        SaveModelChoice(agent, model);
         if (!SupportsInAppReply(agent)) { SetComposerStatus("Choose an agent that can chat in Nexus: Claude Code, Codex, Cursor, OpenCode, Gemini or Kimi."); return; }
         if (_images.Count > 0 && ComposerAttachments.ImageProblem(agent, _images[0], 1) is { } imageProblem) { SetComposerStatus(imageProblem); return; }
         // Images go to the agent as images; other files are named by path.

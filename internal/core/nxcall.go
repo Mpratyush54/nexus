@@ -265,7 +265,11 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 	case "harness.available":
 		// Every chat agent at once, for the agent pickers. Read-only: PATH
 		// lookups, file stats and launcher reads; no agent is started.
-		return map[string]any{"agents": continuex.DetectHarnesses()}, nil
+		// The app asks this at startup, so it also fills the model-picker
+		// cache in the background for the agents that are ready.
+		agents := continuex.DetectHarnesses()
+		continuex.PrewarmModelCatalogs(agents)
+		return map[string]any{"agents": agents}, nil
 	case "harness.models":
 		// Cached per harness (memory + disk, 24h, background refresh) so the
 		// picker does not spawn a CLI each time it opens.

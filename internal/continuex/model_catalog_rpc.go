@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -141,63 +140,4 @@ func codexModels(ctx context.Context, status HarnessAvailability) (HarnessModelC
 		}
 	}
 	return catalog, nil
-}
-
-func claudeModels(ctx context.Context, status HarnessAvailability) (HarnessModelCatalog, error) {
-	catalog := HarnessModelCatalog{Agent: "claude", Source: "Claude SDK initialization model list"}
-	// No prompt or user message is sent. Disable project settings and MCP
-	// servers so listing models cannot start workspace tools or connectors.
-	p, err := startModelProbe(ctx, status, []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--no-session-persistence", "--bare", "--settings", `{"disableAllHooks":true}`, "--strict-mcp-config", "--mcp-config", `{"mcpServers":{}}`, "--setting-sources", "user"})
-	if err != nil {
-		return catalog, err
-	}
-	defer p.close()
-	const requestID = "nexus_models"
-	if err = p.encoder.Encode(map[string]any{"type": "control_request", "request_id": requestID, "request": map[string]string{"subtype": "initialize"}}); err != nil {
-		return catalog, err
-	}
-	for count := 0; count < 256 && p.scanner.Scan(); count++ {
-		items, matched, err := parseClaudeInitModels(p.scanner.Bytes(), requestID)
-		if !matched {
-			continue
-		}
-		catalog.Items = items
-		return catalog, err
-	}
-	return catalog, fmt.Errorf("%s did not return its model list before the local discovery limit", status.Name)
-}
-
-// parseClaudeInitModels reads one stream-json line. matched is false for
-// lines that are not the initialize response (logs, system messages).
-func parseClaudeInitModels(line []byte, requestID string) (items []HarnessModel, matched bool, err error) {
-	var row struct {
-		Type     string `json:"type"`
-		Response struct {
-			Subtype   string `json:"subtype"`
-			RequestID string `json:"request_id"`
-			Response  struct {
-				Models []struct {
-					Value       string `json:"value"`
-					Name        string `json:"displayName"`
-					Description string `json:"description"`
-				} `json:"models"`
-			} `json:"response"`
-		} `json:"response"`
-	}
-	if json.Unmarshal(line, &row) != nil || row.Type != "control_response" || row.Response.RequestID != requestID {
-		return nil, false, nil
-	}
-	if row.Response.Subtype != "success" {
-		return nil, true, errors.New("Claude rejected the read-only model-list initialization")
-	}
-	for _, model := range row.Response.Response.Models {
-		// "default" is the picker's own "Default model" entry.
-		if model.Value != "" && model.Value != "default" {
-			items = append(items, HarnessModel{ID: model.Value, Name: model.Name, Description: model.Description})
-		}
-	}
-	if len(items) == 0 {
-		return nil, true, errors.New("Installed Claude did not include model choices in SDK initialization")
-	}
-	return items, true, nil
 }

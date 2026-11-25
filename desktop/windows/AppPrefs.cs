@@ -125,6 +125,8 @@ public static class AppPrefs
         // Appearance: "system" (follow Windows), "light" or "dark".
         public string Theme { get; set; } = "system";
         public Dictionary<string, string> ChatModels { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        // "chat id|agent" -> model last used in that chat (bounded).
+        public Dictionary<string, string> ChatModelsByChat { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         // project id -> local folder last used for chats in that project
         public Dictionary<string, string> ProjectFolders { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     }
