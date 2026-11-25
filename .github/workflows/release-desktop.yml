@@ -301,6 +301,11 @@ jobs:
           # here would read as a bogus "mcp-proxy" CLI platform below. The
           # Velopack feed is published separately (desktop/velopack/).
           find artifacts -type f ! -name 'nexus-mcp-proxy.exe' ! -path 'artifacts/velopack-feed/*' -exec cp -f {} dist/ \;
+          # A fixed-name copy of the installer, so
+          # releases/latest/download/Nexus-Setup.exe (and nexus.pratyushes.dev/download)
+          # always points at the newest one.
+          setup=$(ls dist/Nexus-*-win-x64-Setup.exe 2>/dev/null | head -1 || true)
+          if [ -n "$setup" ]; then cp -f "$setup" dist/Nexus-Setup.exe; fi
           ls -la dist
           BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
           if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi

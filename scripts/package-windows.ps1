@@ -77,6 +77,19 @@ $props = @(
   "-p:OutputPath=$compiled/"
 )
 $appxStubs = Join-Path $root "desktop\build-stubs\AppxPackage"
+# The unpackaged WinUI build needs the stub Appx/PRI MSBuild tasks (the real
+# ones ship only with Visual Studio). build.ps1 builds them on first use; do
+# the same here so a clean checkout (CI) can package without build.ps1.
+if (-not (Test-Path -LiteralPath (Join-Path $appxStubs "Microsoft.Build.Packaging.Pri.Tasks.dll"))) {
+  Push-Location (Join-Path $root "desktop\build-stubs")
+  dotnet build -c Release -v q
+  Assert-Native "stub task build"
+  Pop-Location
+  New-Item -ItemType Directory -Force -Path $appxStubs | Out-Null
+  $stubDll = Join-Path $root "desktop\build-stubs\bin\Release\net8.0\Microsoft.Build.AppxPackage.dll"
+  Copy-Item $stubDll (Join-Path $appxStubs "Microsoft.Build.AppxPackage.dll") -Force
+  Copy-Item $stubDll (Join-Path $appxStubs "Microsoft.Build.Packaging.Pri.Tasks.dll") -Force
+}
 if (Test-Path -LiteralPath (Join-Path $appxStubs "Microsoft.Build.Packaging.Pri.Tasks.dll")) { $props += "-p:AppxMSBuildToolsPath=$appxStubs/" }
 dotnet publish "$win\Nexus.csproj" -c Release -r win-x64 --self-contained true -o $publish -nodeReuse:false @props
 Assert-Native "dotnet publish"
