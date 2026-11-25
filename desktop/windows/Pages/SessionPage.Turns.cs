@@ -171,6 +171,7 @@ public sealed partial class SessionPage
         if (streamIndex >= 0)
         {
             _chat.Children.RemoveAt(streamIndex);
+            streamIndex += MoveStreamThinking(streamStack, streamIndex);
             _chat.Children.Insert(streamIndex, AdoptingStream(view.StreamStack, () => IndexedChatMessage("assistant", answer, answerKey, agent)));
             if (activityView.Count > 0)
             {

@@ -364,19 +364,51 @@ public sealed partial class SessionPage
         // The action row (2 + 28) the saved message adds under its text; the
         // stream bubble's own bottom padding stands in for the message's.
         host.Children.Add(new Border { Height = 30 });
-        var at = stack.Children.IndexOf(status);
         // The role label and the "Thinking…" line give way to the reply.
-        if (at > 0 && stack.Children[at - 1] is TextBlock label && !ReferenceEquals(label, status))
-        {
-            stack.Children.RemoveAt(at - 1);
-            at--;
-        }
+        foreach (var label in stack.Children.OfType<TextBlock>().Where(t => !ReferenceEquals(t, status)).ToList())
+            stack.Children.Remove(label);
+        var at = stack.Children.IndexOf(status);
         stack.Children.RemoveAt(at);
         stack.Children.Insert(at, host);
         s_streamViews.AddOrUpdate(stack, view);
         s_streamByStatus.AddOrUpdate(status, view);
         s_streamHosts.AddOrUpdate(view, host);
         return view;
+    }
+
+    // ── Live thinking ─────────────────────────────────────────────────────
+
+    private static readonly ConditionalWeakTable<Panel, ThinkingView> s_streamThinking = new();
+
+    /// The "Thinking… Ns" row of a live reply, above where its text will go.
+    private ThinkingView StreamThinking(TextBlock status)
+    {
+        if (status.Parent is not Panel stack) return ThinkingView.Live();
+        if (s_streamThinking.TryGetValue(stack, out var existing)) return existing;
+        var view = ThinkingView.Live();
+        stack.Children.Insert(stack.Children.IndexOf(status), view.View);
+        // The row says it; the status line would repeat it.
+        status.Visibility = Visibility.Collapsed;
+        s_streamThinking.AddOrUpdate(stack, view);
+        return view;
+    }
+
+    /// The reply's text started: "Thought for Ns".
+    private void FinishStreamThinking(TextBlock status)
+    {
+        if (status.Parent is Panel stack && s_streamThinking.TryGetValue(stack, out var view)) view.Finish();
+    }
+
+    /// Moves a streamed reply's thinking row into the chat at `at`, where it
+    /// stays above the saved message. Returns how many elements it added.
+    private int MoveStreamThinking(Panel streamStack, int at)
+    {
+        if (!s_streamThinking.TryGetValue(streamStack, out var view)) return 0;
+        view.Finish();
+        streamStack.Children.Remove(view.View);
+        _chat.Children.Insert(at, view.View);
+        s_streamThinking.Remove(streamStack);
+        return 1;
     }
 
     /// Builds the saved reply with the streamed view inside it.
