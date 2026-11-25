@@ -49,13 +49,21 @@ func fileTooBigToCapture(src TranscriptSource, path string, size int64) bool {
 // noteSkippedTranscript records (and logs, the first time) a transcript
 // that is not read because of its size.
 func noteSkippedTranscript(agent, path string, size int64) {
+	if noteSkipped(agent, path, size, "larger than the 64 MB limit for this format") {
+		log.Printf("capture: not reading %s transcript %s: %d MB is over the %d MB limit for this format",
+			agent, path, size>>20, maxWalkFileBytes>>20)
+	}
+}
+
+// noteSkipped records a skipped transcript and reports whether it is new.
+func noteSkipped(agent, path string, size int64, reason string) bool {
 	key := strings.ToLower(filepath.Clean(path))
 	skippedTranscripts.Lock()
 	_, known := skippedTranscripts.m[key]
 	if !known && len(skippedTranscripts.m) < maxSkippedTranscripts {
 		skippedTranscripts.m[key] = SkippedTranscript{
 			Agent: agent, Path: path, Name: filepath.Base(path), Bytes: size,
-			Reason: "larger than the 64 MB limit for this format", Since: time.Now().UTC(),
+			Reason: reason, Since: time.Now().UTC(),
 		}
 	} else if known {
 		e := skippedTranscripts.m[key]
@@ -63,10 +71,14 @@ func noteSkippedTranscript(agent, path string, size int64) {
 		skippedTranscripts.m[key] = e
 	}
 	skippedTranscripts.Unlock()
-	if !known {
-		log.Printf("capture: not reading %s transcript %s: %d MB is over the %d MB limit for this format",
-			agent, path, size>>20, maxWalkFileBytes>>20)
-	}
+	return !known
+}
+
+// forgetSkipped drops a transcript from the list (it is handled again).
+func forgetSkipped(path string) {
+	skippedTranscripts.Lock()
+	delete(skippedTranscripts.m, strings.ToLower(filepath.Clean(path)))
+	skippedTranscripts.Unlock()
 }
 
 // SkippedTranscripts lists owned transcripts capture is not reading, largest

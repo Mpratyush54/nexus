@@ -80,6 +80,20 @@ func (t *publishTrack) fail(now time.Time, err error, stamp string, size int64) 
 	return permanent || tooLarge
 }
 
+// MaxUploadGzipBytes caps one session upload (the gzip transcript): the
+// server assembles a blob in memory and stores it as one row.
+const MaxUploadGzipBytes = 8 << 20
+
+// markTooLarge stops uploads of this transcript size or larger (or, with
+// no file size to go by, of this content).
+func (t *publishTrack) markTooLarge(size int64, stamp string) {
+	if size > 0 {
+		t.badSize = size
+		return
+	}
+	t.badStamp = stamp
+}
+
 func (t *publishTrack) succeed() {
 	*t = publishTrack{}
 }

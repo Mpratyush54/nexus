@@ -712,6 +712,22 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	r.snapshotMu.Unlock()
 	snap.SessionID = sessionID
 	snap.ProjectID = hs.ProjectID
+	// Hard cap on what one session upload may be (MaxUploadGzipBytes): the
+	// server assembles a blob in memory, and a huge live transcript took it
+	// down. Above the cap nothing is uploaded, version or legacy, until the
+	// transcript is smaller than it was.
+	if gz := int64(len(snap.TranscriptPayload)); gz > MaxUploadGzipBytes {
+		r.snapshotMu.Lock()
+		versionT.markTooLarge(size, stamp)
+		legacyT.markTooLarge(size, stamp)
+		r.snapshotMu.Unlock()
+		if noteSkipped(harness, "session "+sessionID, gz, "too large to back up right now") {
+			log.Printf("daemon: session=%s not backed up: %d MB compressed is over the %d MB upload limit (until the transcript shrinks)",
+				sessionID, gz>>20, MaxUploadGzipBytes>>20)
+		}
+		return
+	}
+	forgetSkipped("session " + sessionID)
 
 	published := false
 	if versionDue {

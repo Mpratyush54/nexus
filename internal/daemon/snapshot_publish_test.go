@@ -1,10 +1,13 @@
 package daemon
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -184,5 +187,51 @@ func TestUploadClientIsSeparateAndSizedToTheBody(t *testing.T) {
 	}
 	if hs.HTTP.Timeout != 20*time.Second {
 		t.Fatalf("API client timeout changed: %s", hs.HTTP.Timeout)
+	}
+}
+
+// Above the upload cap nothing is uploaded (version or legacy), the
+// transcript is not re-packed while it only grows, and capture status
+// lists it.
+func TestUploadSizeCap(t *testing.T) {
+	if MaxUploadGzipBytes != 8<<20 {
+		t.Fatalf("MaxUploadGzipBytes = %d, want 8 MB", MaxUploadGzipBytes)
+	}
+	cloud := &publishCloud{}
+	r, proj := publishRuntime(t, cloud)
+	const sid = "0b9f2b7e-3c41-4d0a-8f6e-5a7d9c1e2f50"
+	path := filepath.Join(proj, sid+".jsonl")
+	// Incompressible content: about 12 MB of random base64 compresses to
+	// about 9 MB.
+	noise := make([]byte, 6<<10)
+	var lines []string
+	for i := 0; i < 2048; i++ {
+		_, _ = rand.Read(noise)
+		lines = append(lines, claudeUserLine(i, base64.StdEncoding.EncodeToString(noise)))
+	}
+	writeLinesMkdir(t, path, lines...)
+	r.noteSessionTurns(sid, "claude", 1)
+	r.maybePushSnapshot(t.Context(), sid, true)
+	if blobs, legacy := cloud.counts(); blobs != 0 || legacy != 0 {
+		t.Fatalf("over the cap: %d version and %d legacy uploads, want none", blobs, legacy)
+	}
+	listed := false
+	for _, s := range SkippedTranscripts() {
+		if strings.Contains(s.Path, sid) && s.Reason == "too large to back up right now" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("not listed in capture status: %+v", SkippedTranscripts())
+	}
+	r.snapshotMu.Lock()
+	v, l := r.snapTracks.version[sid], r.snapTracks.legacy[sid]
+	r.snapshotMu.Unlock()
+	st, _ := os.Stat(path)
+	if v.due(time.Now().Add(24*time.Hour), "other", st.Size()+1) || l.due(time.Now().Add(24*time.Hour), "other", st.Size()) {
+		t.Fatal("a larger transcript would be uploaded again")
+	}
+	if !v.due(time.Now(), "other", st.Size()-1) {
+		t.Fatal("a smaller transcript should be uploaded again")
 	}
 }
