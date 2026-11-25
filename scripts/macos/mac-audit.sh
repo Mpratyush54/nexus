@@ -157,71 +157,97 @@ sw_vers | tee "$L/machine.txt"
 system_profiler SPDisplaysDataType 2>/dev/null | grep -E 'Resolution|Retina|UI Looks' | tee -a "$L/machine.txt"
 command -v node | tee -a "$L/machine.txt" || true
 
+# Clicks the first element whose Accessibility name is $1 (what VoiceOver
+# reads), at its centre; prints "x y" or "missing".
+ax_click() {
+  local at
+  at=$(limited 60 osascript - "$PID" "$1" <<'OSA' 2>&1
+on run argv
+  set pid to (item 1 of argv) as integer
+  set wanted to item 2 of argv
+  tell application "System Events" to tell (first process whose unix id is pid)
+    repeat with e in (entire contents of window 1)
+      try
+        if (name of e as text) is wanted then
+          set p to position of e
+          set z to size of e
+          return ((item 1 of p) + (item 1 of z) div 2) & " " & ((item 2 of p) + (item 2 of z) div 2) as text
+        end if
+      end try
+    end repeat
+  end tell
+  return "missing"
+end run
+OSA
+)
+  echo "ax_click '$1': $at" >> "$L/clicks.txt"
+  case "$at" in
+    missing*|*rror*|"") note "no element named '$1' to click"; return 1 ;;
+  esac
+  ./dist/pointer click ${at% *} ${at#* }
+}
+nav() { ax_click "$1" || true; sleep 4; }
+dismiss() { keys 'key code 53' > /dev/null; sleep 0.8; }
+
 # ---- 1. First run: welcome, setup guide, sign-in -------------------------------
 for theme in light dark; do
   appearance $theme
   profile "fresh-$theme" 0 system timeline
   if launch; then
-    shot "01-first-run-$theme"
+    shot "01-welcome-$theme"
     ax_dump "first-run-$theme"
-    # The welcome's primary button ("Get started" / "Continue"), then the
-    # setup guide's steps.
-    for step in 1 2 3 4; do
-      keys 'key code 36' > /dev/null   # Return: the default button
-      sleep 3
-      shot "02-setup-step$step-$theme"
-    done
+    # "Get started": centred, 165 pt below the middle (Platform/MacWelcome.cs).
+    b=$(win); set -- $b
+    ./dist/pointer click $(( $2 + $4 / 2 )) $(( $3 + $5 / 2 + 165 )); sleep 4
+    shot "02-setup-signin-$theme"
+    ax_dump "setup-$theme"
     stop
   fi
 done
 appearance light
 
-# Setup done, signed out: the sign-in prompt.
+# Setup done, never signed in.
 for theme in light dark; do
   profile "signedout-$theme" 1 "$theme" timeline
-  if launch; then shot "03-signed-out-$theme"; ax_dump "signed-out-$theme"; stop; fi
+  if launch; then sleep 8; shot "03-signed-out-$theme"; stop; fi
 done
 
-# ---- 2. Signed in: every page in both themes ----------------------------------
+# ---- 2. Signed in: every page in both themes, driven like a person ------------
 for theme in light dark; do
-  for nav in home timeline memory agentsetup settings; do
-    profile "in-$nav-$theme" 2 "$theme" "$nav"
-    launch || continue
-    sleep 6   # first fetch from the server
-    shot "10-$nav-$theme"
-    case $nav in
-      settings)
-        ax_dump "settings-$theme"
-        for i in 1 2 3 4 5 6 7 8; do scroll_at 0.65 0.6 -8; sleep 1; shot "11-settings-scroll$i-$theme"; done
-        ;;
-      timeline)
-        ax_dump "chats-$theme"
-        # Scrolling the chat list (perf: CPU while scrolling).
-        scroll_at 0.2 0.6 -20; sleep 1; shot "12-chats-scrolled-$theme"
-        ;;
-      memory)
-        ax_dump "memory-$theme"
-        ;;
-      home)
-        ax_dump "home-$theme"
-        # Cmd+P: the project switcher.
-        keys 'keystroke "p" using command down' > /dev/null; sleep 2; shot "13-project-switcher-$theme"
-        keys 'key code 53' > /dev/null; sleep 1
-        # Cmd+K: search.
-        keys 'keystroke "k" using command down' > /dev/null; sleep 2; shot "14-search-$theme"
-        keys 'key code 53' > /dev/null; sleep 1
-        # Cmd+N: a new chat (the composer).
-        keys 'keystroke "n" using command down' > /dev/null; sleep 3; shot "15-new-chat-$theme"
-        ax_dump "composer-$theme"
-        keys 'keystroke "Hello from the macOS audit"' > /dev/null; sleep 1; shot "16-composer-typed-$theme"
-        # Paste an image from the clipboard (a PNG on the pasteboard).
-        screencapture -x -R0,0,320,200 "$RUNNER_TEMP/clip.png"
-        osascript -e "set the clipboard to (read (POSIX file \"$RUNNER_TEMP/clip.png\") as «class PNGf»)" > /dev/null 2>&1
-        keys 'keystroke "v" using command down' > /dev/null; sleep 3; shot "17-composer-pasted-image-$theme"
-        ;;
-    esac
-    stop
-  done
+  profile "walk-$theme" 2 "$theme" home
+  launch || continue
+  sleep 8   # first fetch from the server
+  shot "10-home-$theme"
+  ax_dump "home-$theme"
+  # Project switcher (Cmd+P), then pick "Orbit Notes".
+  keys 'keystroke "p" using command down' > /dev/null; sleep 2; shot "11-project-switcher-$theme"
+  dismiss; shot "11b-switcher-after-esc-$theme"
+  click 650 110; sleep 1
+  # Search (Cmd+K).
+  keys 'keystroke "k" using command down' > /dev/null; sleep 2
+  keys 'keystroke "sync"' > /dev/null; sleep 3; shot "12-search-$theme"
+  dismiss; sleep 1
+  # The chat list: open the first chat by its name.
+  ax_click "Fix sync conflict when two devices edit the same note" && { sleep 6; shot "13-chat-open-$theme"; ax_dump "chat-$theme"; }
+  scroll_at 0.6 0.45 -12; sleep 1.5; shot "14-chat-scrolled-$theme"
+  # The composer: agent picker, typing, a pasted image.
+  ax_click "Ask anything…" || click_frac 0.6 0.82
+  keys 'keystroke "Hello from the macOS audit"' > /dev/null; sleep 1; shot "15-composer-typed-$theme"
+  screencapture -x -R0,0,320,200 "$RUNNER_TEMP/clip.png"
+  osascript -e "set the clipboard to (read (POSIX file \"$RUNNER_TEMP/clip.png\") as «class PNGf»)" > /dev/null 2>&1
+  keys 'keystroke "v" using command down' > /dev/null; sleep 4; shot "16-composer-pasted-$theme"
+  ax_click "Claude Code" && { sleep 2; shot "17-agent-picker-$theme"; dismiss; }
+  # New chat (Cmd+N).
+  keys 'keystroke "n" using command down' > /dev/null; sleep 3; shot "18-new-chat-$theme"
+  # Memory, the graph, Agents, Inbox, Settings.
+  nav "Memory"; shot "20-memory-$theme"; ax_dump "memory-$theme"
+  ax_click "Graph" && { sleep 6; shot "21-graph-$theme"; ax_dump "graph-$theme"; }
+  nav "Agents"; shot "22-agents-$theme"; ax_dump "agents-$theme"
+  nav "Chats sent to you"; shot "23-inbox-$theme"
+  nav "Settings"; shot "24-settings-$theme"; ax_dump "settings-$theme"
+  for i in 1 2 3 4 5 6 7 8 9 10; do scroll_at 0.65 0.6 -8; sleep 1; shot "25-settings-$i-$theme"; done
+  nav "Home"
+  stop
 done
 
 # ---- 3. One long session: open a chat, menus, report, offline/online ----------

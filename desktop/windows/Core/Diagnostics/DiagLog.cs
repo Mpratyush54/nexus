@@ -219,6 +219,10 @@ internal static class DiagLog
     public static string OsDescription()
     {
         var v = Environment.OSVersion.Version;
+        var arch = System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant();
+        // Reports and logs used to say "Windows 15.8.2" on a Mac.
+        if (OperatingSystem.IsMacOS()) return $"macOS {v.Major}.{v.Minor}.{v.Build} {arch}";
+        if (OperatingSystem.IsLinux()) return $"Linux {v} {arch}";
         var name = v.Major == 10 && v.Build >= 22000 ? "Windows 11" : v.Major == 10 ? "Windows 10" : "Windows";
         return $"{name} {v.Major}.{v.Minor}.{v.Build} {System.Runtime.InteropServices.RuntimeInformation.OSArchitecture.ToString().ToLowerInvariant()}";
     }

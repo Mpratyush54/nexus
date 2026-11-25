@@ -2612,9 +2612,14 @@ public sealed partial class SessionPage : NexusPage
                 var rows = new List<string> { line };
                 var end = at + 2;
                 while (end < lines.Length && SessionChatRender.IsTableRow(lines[end].TrimEnd())) rows.Add(lines[end++].TrimEnd());
+#if HAS_UNO
+                // Uno has no InlineUIContainer; the shim takes the table as a block.
+                document.AddElement(SessionChatRender.Table(rows, AddInlineFormatting));
+#else
                 var table = new Paragraph { Margin = new Thickness(0, 4, 0, 10) };
                 table.Inlines.Add(new InlineUIContainer { Child = SessionChatRender.Table(rows, AddInlineFormatting) });
                 document.Blocks.Add(table);
+#endif
                 at = end - 1;
                 continue;
             }
