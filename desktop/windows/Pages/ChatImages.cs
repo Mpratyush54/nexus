@@ -116,9 +116,9 @@ internal static class ChatImages
         try
         {
             if (await dialog.ShowThemedAsync() == ContentDialogResult.Primary)
-                await Windows.System.Launcher.LaunchFileAsync(await Windows.Storage.StorageFile.GetFileFromPathAsync(System.IO.Path.GetFullPath(path)));
+                await PlatformText.OpenFileAsync(System.IO.Path.GetFullPath(path));
         }
-        catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException)
+        catch (Exception ex) when (ex is InvalidOperationException or System.Runtime.InteropServices.COMException or System.ComponentModel.Win32Exception)
         {
             // Another dialog is already open; the click does nothing.
         }

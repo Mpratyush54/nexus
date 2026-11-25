@@ -38,7 +38,7 @@ public sealed partial class SettingsPage
         {
             if (_loginStartSync) return;
             try { LoginStart.SetEnabled(_loginStart.IsOn); }
-            catch (Exception ex) { Notify(NxErrors.ForException("Windows didn't let Nexus change whether it starts when you sign in.", ex, "settings"), true); }
+            catch (Exception ex) { Notify(NxErrors.ForException(PlatformText.Os + " didn't let Nexus change whether it starts when you sign in.", ex, "settings"), true); }
         };
         var startup = SettingsGroup("Startup & window",
             SettingRow(RowText("Start Nexus when I sign in", $"Starts Nexus when you sign in to {PlatformText.Os} so capture keeps running in the background."), _loginStart),

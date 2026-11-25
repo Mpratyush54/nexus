@@ -39,6 +39,20 @@ internal static class PlatformText
     /// <summary>"Ctrl+K" / "⌘K".</summary>
     public static string Shortcut(string key) => Shortcuts.Label(key);
 
+    /// <summary>Opens a file in its default app. Uno's Launcher.LaunchFileAsync
+    /// is not implemented on macOS, so the Mac asks `open`.</summary>
+    public static async Task OpenFileAsync(string path)
+    {
+        if (IsMac)
+        {
+            var info = new ProcessStartInfo("/usr/bin/open") { UseShellExecute = false };
+            info.ArgumentList.Add(path);
+            Process.Start(info);
+            return;
+        }
+        await Windows.System.Launcher.LaunchFileAsync(await Windows.Storage.StorageFile.GetFileFromPathAsync(path));
+    }
+
     /// <summary>Shows a file (selected) or a folder in File Explorer or Finder.</summary>
     public static void Reveal(string path)
     {

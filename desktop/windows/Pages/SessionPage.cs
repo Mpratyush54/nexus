@@ -199,7 +199,7 @@ public sealed partial class SessionPage : NexusPage
         _model.TextSubmitted += (_, _) => DispatcherQueue.TryEnqueue(RememberModelChoice);
         _model.LostFocus += (_, _) => RememberModelChoice();
         _attachImage.Content = new FontIcon { Glyph = "\uE723", FontSize = 15, Opacity = 0.72 };
-        ToolTipService.SetToolTip(_attachImage, "Attach images or files" + Environment.NewLine + "You can also paste (Ctrl+V) or drop them here.");
+        ToolTipService.SetToolTip(_attachImage, "Attach images or files" + Environment.NewLine + "You can also paste (" + Shortcuts.Label("V") + ") or drop them here.");
         _attachImage.Padding = new Thickness(6);
         _attachImage.MinWidth = 32;
         _attachImage.MinHeight = 32;
@@ -3508,7 +3508,7 @@ public sealed partial class SessionPage : NexusPage
     {
         if (path.Length <= 44) return path;
         var leaf = System.IO.Path.GetFileName(path.TrimEnd('\\', '/'));
-        return leaf.Length > 0 && leaf.Length < 40 ? "…\\" + leaf : "…" + path[^41..];
+        return leaf.Length > 0 && leaf.Length < 40 ? "…" + System.IO.Path.DirectorySeparatorChar + leaf : "…" + path[^41..];
     }
 
     private void AnimateInputFocus(bool focused)
