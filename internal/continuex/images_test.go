@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -103,8 +104,13 @@ func TestCodexInputListsLocalImagesBeforeText(t *testing.T) {
 }
 
 func TestImageTagsNameImagesWithoutBytes(t *testing.T) {
-	got := ImageTags("look", []string{`C:\Users\me\shot.png`})
-	if !strings.Contains(got, `<image name=[Image #1] path="C:/Users/me/shot.png">`) || !strings.HasPrefix(got, "look") {
+	// Windows paths are sent with forward slashes; a Mac path as it is.
+	in, want := `C:\Users\me\shot.png`, "C:/Users/me/shot.png"
+	if runtime.GOOS != "windows" {
+		in, want = "/Users/me/Desktop/shot.png", "/Users/me/Desktop/shot.png"
+	}
+	got := ImageTags("look", []string{in})
+	if !strings.Contains(got, `<image name=[Image #1] path="`+want+`">`) || !strings.HasPrefix(got, "look") {
 		t.Fatalf("tags %q", got)
 	}
 	if ImageTags("plain", nil) != "plain" {
