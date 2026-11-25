@@ -20,6 +20,7 @@ internal sealed class ConversationIndex
     internal void Clear() { _entries.Clear(); _signatures.Clear(); _copyKeys.Clear(); _ordered = _prompts = null; }
     internal void Remove(string key) { _entries.Remove(key); _ordered = _prompts = null; }
     internal bool Contains(string key) => _entries.ContainsKey(key);
+    internal ConversationEntry? Find(string key) => _entries.GetValueOrDefault(key);
     /// copy: the turn has no source time, so it may repeat a captured one. A
     /// long copy of a message already indexed is left out, and a captured
     /// message replaces a copy indexed before it (pages arrive newest first).

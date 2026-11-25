@@ -1014,7 +1014,14 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 		if id == "" {
 			return "", "", nil, errors.New("session id is required")
 		}
-		return http.MethodPost, "/v1/agent-sessions/" + url.PathEscape(id) + "/fork", []byte("{}"), nil
+		// through_idx ("fork from here") is passed through as written: turn
+		// indexes can exceed float64 precision.
+		body := []byte("{}")
+		var values map[string]json.RawMessage
+		if json.Unmarshal(args, &values) == nil && len(values["through_idx"]) > 0 && string(values["through_idx"]) != "null" {
+			body, _ = json.Marshal(map[string]json.RawMessage{"through_idx": values["through_idx"]})
+		}
+		return http.MethodPost, "/v1/agent-sessions/" + url.PathEscape(id) + "/fork", body, nil
 	case "sessions.shared_with":
 		if id == "" {
 			return "", "", nil, errors.New("session id is required")
