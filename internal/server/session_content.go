@@ -63,6 +63,15 @@ func (s *Server) authorizeSessionContent(w http.ResponseWriter, r *http.Request,
 // The first uploader of a session with no content becomes the owner.
 // Ownerless existing content stays ownerless until a project admin assigns it.
 func (s *Server) claimSessionWrite(w http.ResponseWriter, r *http.Request, projectID, sessionID string) (string, bool) {
+	// Session content is keyed by the cloud session's UUID
+	// (session_content_owners and session_snapshots are uuid columns). An
+	// agent's native id ("ses_…" from OpenCode, "rollout-…" from Codex) can
+	// never be stored: say so with a 400 instead of failing the insert and
+	// answering 500, which clients retry forever.
+	if !uuidLikeSessionID(strings.TrimSpace(sessionID)) {
+		writeError(w, http.StatusBadRequest, "session id must be the cloud session UUID, not an agent's native id")
+		return "", false
+	}
 	acl, ok := s.sessionContent()
 	if !ok {
 		writeError(w, http.StatusForbidden, "session is private")
