@@ -39,7 +39,8 @@ no_window() { [ -z "$(windows_at 0)" ]; }
 alive() { kill -0 "$PID" 2>/dev/null; }
 gone() { ! kill -0 "$PID" 2>/dev/null; }
 app_log() { cat "$OUT" 2>/dev/null; find "$ROOT" -path '*logs*' -name '*.log' -exec cat {} + 2>/dev/null; }
-log_has() { app_log | grep -q -- "$1"; }
+# Not grep -q: it exits early, and pipefail turns the writer's SIGPIPE into a failure.
+log_has() { app_log | grep -- "$1" > /dev/null; }
 wait_for() {
   local secs=$1; shift
   local i

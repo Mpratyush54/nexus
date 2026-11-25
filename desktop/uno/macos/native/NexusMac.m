@@ -55,6 +55,7 @@ static NSMenuItem *s_pauseItem;
 static BOOL s_paused;
 static BOOL s_installed;
 static IMP s_originalShouldTerminate;
+static IMP s_originalTerminateAfterLastWindow;
 static id s_launchObserver;
 
 static void nx_on_main(dispatch_block_t block)
@@ -221,6 +222,18 @@ static NSApplicationTerminateReply nx_should_terminate(id self, SEL _cmd, NSAppl
     return NSTerminateNow;
 }
 
+// Hiding the only window counts as "last window closed" for AppKit, and Uno
+// answers YES, so the app would quit the moment it is hidden. While the menu
+// bar item exists the app stays; without it, Uno decides as before.
+static BOOL nx_terminate_after_last_window(id self, SEL _cmd, NSApplication *sender)
+{
+    if (s_item != nil) return NO;
+    if (s_originalTerminateAfterLastWindow != NULL) {
+        return ((BOOL (*)(id, SEL, NSApplication *))s_originalTerminateAfterLastWindow)(self, _cmd, sender);
+    }
+    return NO;
+}
+
 static void nx_hook_delegate(void)
 {
     id delegate = NSApp.delegate;
@@ -230,6 +243,11 @@ static void nx_hook_delegate(void)
     snprintf(reopenTypes, sizeof reopenTypes, "%s@:@%s", @encode(BOOL), @encode(BOOL));
     class_replaceMethod(cls, @selector(applicationShouldHandleReopen:hasVisibleWindows:), (IMP)nx_should_handle_reopen, reopenTypes);
     class_replaceMethod(cls, @selector(application:openURLs:), (IMP)nx_open_urls, "v@:@@");
+    char lastWindowTypes[16];
+    snprintf(lastWindowTypes, sizeof lastWindowTypes, "%s@:@", @encode(BOOL));
+    IMP previousLastWindow = class_replaceMethod(cls, @selector(applicationShouldTerminateAfterLastWindowClosed:),
+                                                 (IMP)nx_terminate_after_last_window, lastWindowTypes);
+    if (previousLastWindow != (IMP)nx_terminate_after_last_window) s_originalTerminateAfterLastWindow = previousLastWindow;
     Method terminate = class_getInstanceMethod(cls, @selector(applicationShouldTerminate:));
     if (terminate != NULL) {
         IMP previous = method_setImplementation(terminate, (IMP)nx_should_terminate);
