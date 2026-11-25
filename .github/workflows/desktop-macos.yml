@@ -288,8 +288,20 @@ jobs:
           ls -la /Volumes/NexusAudit
           rm -rf "$APP"
           ditto /Volumes/NexusAudit/Nexus.app "$APP"
+          echo "--- extended attributes on the DMG's Nexus.app (top level and Contents)"
+          xattr -l /Volumes/NexusAudit/Nexus.app || true
+          find /Volumes/NexusAudit/Nexus.app -maxdepth 3 -print0 | xargs -0 xattr 2>/dev/null | sort | uniq -c | sort -rn | head -20 || true
           hdiutil detach /Volumes/NexusAudit -force
-          codesign --verify --strict "$APP"
+          mkdir -p logs-audit
+          # What a user's dragged copy carries; Gatekeeper checks the same signature.
+          if codesign --verify --deep --strict --verbose=2 "$APP" > logs-audit/codesign-installed.txt 2>&1; then
+            echo "installed copy verifies (--deep --strict)"
+          else
+            echo "::warning::installed copy fails codesign --strict: $(tail -2 logs-audit/codesign-installed.txt | paste -sd' ' -)"
+            xattr -lr "$APP" 2>/dev/null | grep -v 'com.apple.provenance' | head -20 | tee -a logs-audit/codesign-installed.txt
+            codesign --verify --deep --verbose=2 "$APP" >> logs-audit/codesign-installed.txt 2>&1 && echo "verifies without --strict"
+          fi
+          spctl --assess --type execute -vv "$APP" >> logs-audit/codesign-installed.txt 2>&1 || true
           du -sh "$APP"
 
       - name: Demo server (Postgres + Go server, fictional data)
