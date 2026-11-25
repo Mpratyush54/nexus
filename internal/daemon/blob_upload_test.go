@@ -3,7 +3,7 @@ package daemon
 // Transcript blob uploads against a fake server with the real server's
 // limits (internal/server): JSON bodies are capped at 2 MB (decodeJSON,
 // maxRequestBodyBytes) except the chunk routes at 32 MB
-// (maxChunkRequestBytes), pieces are hash-checked, and assembly checks the
+// (maxChunkRequestBytes, 8 MiB), pieces are hash-checked, and assembly checks the
 // assembled file's sha256.
 
 import (
@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	serverJSONCap  = 2 << 20  // internal/server maxRequestBodyBytes
-	serverChunkCap = 32 << 20 // internal/server maxChunkRequestBytes
+	serverJSONCap  = 2 << 20 // internal/server maxRequestBodyBytes
+	serverChunkCap = 8 << 20 // internal/server maxChunkRequestBytes
 )
 
 type blobPiece struct {

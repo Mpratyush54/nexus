@@ -79,11 +79,11 @@ func (f *fakeCloud) route(path string) string {
 func (f *fakeCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	route := r.Method + " " + f.route(r.URL.Path)
 	// The real server's request caps (internal/server): 2 MB for JSON
-	// bodies (decodeJSON), 32 MB on the blob chunk routes. Bodies are
+	// bodies (decodeJSON), 8 MB on the blob chunk routes. Bodies are
 	// counted, not decoded, so the fake adds no heap to the measurement.
 	limit := int64(2 << 20)
 	if strings.HasSuffix(r.URL.Path, "/chunks") || strings.HasSuffix(r.URL.Path, "/assemble") {
-		limit = 32 << 20
+		limit = 8 << 20
 	}
 	if strings.HasPrefix(r.URL.Path, "/memory/") || strings.HasPrefix(r.URL.Path, "/sessions/") {
 		limit = 1 << 62 // legacy routes, not part of this check
