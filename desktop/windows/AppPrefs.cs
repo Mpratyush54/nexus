@@ -127,5 +127,11 @@ public static class AppPrefs
         public Dictionary<string, string> ChatModels { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         // project id -> local folder last used for chats in that project
         public Dictionary<string, string> ProjectFolders { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        // chat session id -> permission mode picked in its composer (ask,
+        // edits, full). Chats without one use the default in Settings.
+        public Dictionary<string, string> ChatPermissionModes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        // Desktop notifications for chats working in the background, shown
+        // when the window isn't focused: all, approvals, off.
+        public string AgentNotifications { get; set; } = "all";
     }
 }

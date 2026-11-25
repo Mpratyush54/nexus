@@ -42,5 +42,6 @@
     <Compile Include="../windows/Core/ComposerAttachments.cs" Link="ComposerAttachments.cs" />
     <Compile Include="../windows/Core/AgentAvailability.cs" Link="AgentAvailability.cs" />
     <Compile Include="../windows/Core/ChatListRetry.cs" Link="ChatListRetry.cs" />
+    <Compile Include="../windows/Core/LiveSessions.cs" Link="LiveSessions.cs" />
   </ItemGroup>
 </Project>

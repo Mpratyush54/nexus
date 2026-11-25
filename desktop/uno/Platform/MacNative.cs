@@ -62,6 +62,18 @@ internal static partial class MacNative
 
     public static void SetCapturePaused(bool paused) => Try(() => nx_mac_set_capture_state(paused ? 1 : 0));
 
+    /// <summary>A notification; clicking it delivers <paramref name="url"/> (a nexus:// link).</summary>
+    public static void Notify(string title, string body, string url)
+    {
+        if (Available) Try(() => nx_mac_notify(title, body, url));
+    }
+
+    /// <summary>The menu bar line for agents at work ("2 agents working"); empty hides it.</summary>
+    public static void SetAgentsStatus(string summary)
+    {
+        if (Available) Try(() => nx_mac_set_agents(summary));
+    }
+
     public static bool ShowWindows() => Try(nx_mac_show_windows);
 
     public static bool HideWindows() => Try(nx_mac_hide_windows);
@@ -142,6 +154,12 @@ internal static partial class MacNative
 
     [LibraryImport(Lib)]
     private static partial void nx_mac_set_capture_state(int paused);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial void nx_mac_notify(string title, string body, string url);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial void nx_mac_set_agents(string summary);
 
     [LibraryImport(Lib)]
     private static partial void nx_mac_show_windows();

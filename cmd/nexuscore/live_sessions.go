@@ -6,25 +6,35 @@ package main
 //
 // continue.here runs one CLI process per message with stdin closed, so the
 // agent can't ask for permission, can't be interrupted and can't take a
-// follow-up while it works. live.* keeps one agent process per open chat and
-// streams its events to the UI as {"type":"live.event", ...}.
+// follow-up while it works. live.* keeps one agent process per chat, owned
+// by the core (internal/agentrun), not by the page that sent the message:
+// closing the chat, opening another one or hiding the window never stops a
+// turn. Only Stop, closing the chat's session or quitting Nexus do.
 //
-//	live.supported {agent}                                  -> {live}
-//	live.start     {session_id, agent, workspace_root, resume_id?, model?,
-//	                permission_mode?, context?}             -> {live_id}
-//	live.send      {live_id, text, images?}  images: local files, sent in
-//	                the agent's own image format (see continuex.ImageSender)
-//	live.approve   {live_id, request_id, allow, reason?}
-//	live.interrupt {live_id}
-//	live.close     {live_id}
+// Every call is keyed by the chat's session_id:
 //
-// Each finished turn is recorded through core continue.record, exactly like
-// a continue.here exchange, then announced as {"type":"live.recorded", ...}.
+//	live.supported   {agent}                         -> {live}
+//	live.send        {session_id, project_id, agent, workspace_root,
+//	                  resume_id?, model?, mode?, context?, text, images?,
+//	                  title?, when?}                 -> {live_id} | {queued} | {followup}
+//	live.attach      {session_id}                    -> snapshot to replay
+//	live.approve     {session_id, request_id, decision: once|chat|project|deny, reason?}
+//	live.set_mode    {session_id, mode: ask|edits|full}
+//	live.interrupt   {session_id}
+//	live.close       {session_id}
+//	live.seen / live.resume / live.dismiss {session_id}
+//	live.followup_remove {session_id, index}         -> {text, images}
+//	live.list                                        -> {sessions, running, queued, approval}
+//	live.rules.list                                  -> {default_mode, projects}
+//	live.rules.remove {project, tool, prefix?}
+//	live.rules.default {mode}
+//
+// Events: {"type":"live.event", session_id, seq, kind, ...} while a turn
+// streams, live.turn_started, live.recorded when the turn is saved,
+// live.status when a chat's status changes, live.followups.
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -33,6 +43,7 @@ import (
 	"sync"
 	"time"
 
+	"central-memory/internal/agentrun"
 	"central-memory/internal/continuex"
 	"central-memory/internal/core"
 	"central-memory/internal/daemon"
@@ -57,24 +68,37 @@ func acpStarter(agent string) func(context.Context, continuex.LiveOptions) (cont
 	}
 }
 
-type liveEntry struct {
-	id, sessionID, projectID, agent, workspace string
-	session                                    continuex.LiveSession
-	cancel                                     context.CancelFunc
-	resumeID                                   string
+var (
+	liveMu  sync.Mutex
+	liveMgr *agentrun.Manager
+)
 
-	mu     sync.Mutex
-	prompt strings.Builder
-	answer strings.Builder
-	// streamed holds text_delta text not yet confirmed by a full "text"
-	// block. ACP agents (Cursor, OpenCode) only ever send deltas, so this is
-	// their whole reply.
-	streamed   strings.Builder
-	activities []continuex.ToolActivity
-	files      []string
+// liveManager returns the process-wide session manager, created on first
+// use so it picks up the diagnostics folder (its state lives next to logs).
+func liveManager() *agentrun.Manager {
+	liveMu.Lock()
+	defer liveMu.Unlock()
+	if liveMgr == nil {
+		liveMgr = agentrun.New(agentrun.Config{
+			StateDir: liveStateDir(),
+			Start:    startLiveAgent,
+			Record:   recordLiveTurn,
+			Emit:     func(e map[string]any) { emitCoreEvent(e) },
+		})
+	}
+	return liveMgr
 }
 
-var liveSessions sync.Map // live_id -> *liveEntry
+func liveStateDir() string {
+	base := strings.TrimSpace(diagBase)
+	if base == "" {
+		base = diagnostics.DefaultDir()
+	}
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, "agent-sessions")
+}
 
 func normalizeLiveAgent(agent string) string {
 	a := strings.ToLower(strings.TrimSpace(agent))
@@ -89,86 +113,114 @@ func normalizeLiveAgent(agent string) string {
 
 func liveCall(name string, args json.RawMessage) (any, error) {
 	var body struct {
-		LiveID         string   `json:"live_id"`
-		SessionID      string   `json:"session_id"`
-		ProjectID      string   `json:"project_id"`
-		Agent          string   `json:"agent"`
-		WorkspaceRoot  string   `json:"workspace_root"`
-		ResumeID       string   `json:"resume_id"`
-		Model          string   `json:"model"`
-		PermissionMode string   `json:"permission_mode"`
-		Context        string   `json:"context"`
-		Text           string   `json:"text"`
-		Images         []string `json:"images"`
-		RequestID      string   `json:"request_id"`
-		Allow          bool     `json:"allow"`
-		Reason         string   `json:"reason"`
+		agentrun.SendRequest
+		PermissionMode string `json:"permission_mode"` // older desktops
+		RequestID      string `json:"request_id"`
+		Decision       string `json:"decision"`
+		Allow          *bool  `json:"allow"`
+		Reason         string `json:"reason"`
+		Index          int    `json:"index"`
+		Project        string `json:"project"`
+		Tool           string `json:"tool"`
+		Prefix         string `json:"prefix"`
 	}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &body); err != nil {
 			return nil, err
 		}
 	}
-	switch name {
-	case "live.supported":
+	if name == "live.supported" {
 		_, ok := liveStarters[normalizeLiveAgent(body.Agent)]
 		return map[string]any{"live": ok}, nil
-	case "live.start":
-		return startLive(body.SessionID, body.ProjectID, normalizeLiveAgent(body.Agent), body.WorkspaceRoot, body.ResumeID, body.Model, body.PermissionMode, body.Context)
 	}
-	value, ok := liveSessions.Load(body.LiveID)
-	if !ok {
-		return nil, errors.New("This chat stopped running. Send your message again to restart it")
-	}
-	entry := value.(*liveEntry)
+	m := liveManager()
+	id := strings.TrimSpace(body.SessionID)
 	switch name {
 	case "live.send":
-		text := strings.TrimSpace(body.Text)
-		if text == "" || len(text) > 16000 {
-			return nil, errors.New("Write a message of up to 16,000 characters")
+		req := body.SendRequest
+		if req.Mode == "" {
+			req.Mode = body.PermissionMode
 		}
-		if len(body.Images) > continuex.MaxImages {
-			return nil, errors.New("Attach up to four images at a time")
+		if err := validateLiveSend(&req); err != nil {
+			return nil, err
 		}
-		for _, path := range body.Images {
-			if !continuex.AllowedImage(path) {
-				return nil, errors.New("Attach a PNG, JPEG, GIF or WebP image under 20 MB")
-			}
-		}
-		var sender continuex.ImageSender
-		if len(body.Images) > 0 {
-			var ok bool
-			if sender, ok = entry.session.(continuex.ImageSender); !ok {
-				return nil, errors.New(continuex.AgentDisplayName(entry.agent) + " can't take images in Nexus yet. Remove the image, or pick another agent")
-			}
-		}
-		entry.mu.Lock()
-		if entry.prompt.Len() > 0 {
-			entry.prompt.WriteString("\n\n")
-		}
-		// The recorded message names its images (never their bytes) so the
-		// chat shows them; the agent gets the plain text plus the images.
-		entry.prompt.WriteString(continuex.ImageTags(text, body.Images))
-		entry.mu.Unlock()
-		// Background: drivers queue the message and must not tie the turn
-		// to this call's lifetime.
-		if sender != nil {
-			return map[string]any{"sent": true}, sender.SendWithImages(context.Background(), text, body.Images)
-		}
-		return map[string]any{"sent": true}, entry.session.Send(context.Background(), text)
+		return m.Send(req)
+	case "live.attach":
+		return m.Attach(id), nil
 	case "live.approve":
-		reason := strings.TrimSpace(body.Reason)
-		if !body.Allow && reason == "" {
-			reason = "The user declined this action in Nexus."
+		decision := body.Decision
+		if decision == "" && body.Allow != nil {
+			decision = agentrun.Deny
+			if *body.Allow {
+				decision = agentrun.AllowOnce
+			}
 		}
-		return map[string]any{"answered": true}, entry.session.Approve(body.RequestID, body.Allow, reason)
+		switch decision {
+		case agentrun.AllowOnce, agentrun.AllowChat, agentrun.AllowProject, agentrun.Deny:
+		default:
+			return nil, errors.New("Choose Allow or Deny")
+		}
+		return map[string]any{"answered": true}, m.Approve(id, body.RequestID, decision, strings.TrimSpace(body.Reason))
+	case "live.set_mode":
+		return map[string]any{"mode": agentrun.NormalizeMode(body.Mode)}, m.SetMode(id, body.Mode)
 	case "live.interrupt":
-		return map[string]any{"interrupted": true}, entry.session.Interrupt()
+		return map[string]any{"interrupted": true}, m.Interrupt(id)
 	case "live.close":
-		closeLive(entry)
+		m.Close(id)
 		return map[string]any{"closed": true}, nil
+	case "live.seen":
+		m.Seen(id)
+		return map[string]any{"seen": true}, nil
+	case "live.resume":
+		return m.Resume(id)
+	case "live.dismiss":
+		m.Dismiss(id)
+		return map[string]any{"dismissed": true}, nil
+	case "live.followup_remove":
+		return m.RemoveFollowup(id, body.Index)
+	case "live.list":
+		return m.List(), nil
+	case "live.rules.list":
+		return map[string]any{"default_mode": m.Rules.DefaultMode(), "projects": m.Rules.All()}, nil
+	case "live.rules.remove":
+		return map[string]any{"removed": true}, m.Rules.Remove(body.Project, agentrun.Rule{Tool: body.Tool, Prefix: body.Prefix})
+	case "live.rules.default":
+		return map[string]any{"default_mode": agentrun.NormalizeMode(body.Mode)}, m.Rules.SetDefaultMode(body.Mode)
 	}
 	return nil, errors.New("unknown live method " + name)
+}
+
+// validateLiveSend checks a message before the manager takes it.
+func validateLiveSend(req *agentrun.SendRequest) error {
+	req.Agent = normalizeLiveAgent(req.Agent)
+	if _, ok := liveStarters[req.Agent]; !ok {
+		return errors.New(continuex.AgentDisplayName(req.Agent) + " can't chat inside Nexus yet")
+	}
+	text := strings.TrimSpace(req.Text)
+	if text == "" || len(text) > 16000 {
+		return errors.New("Write a message of up to 16,000 characters")
+	}
+	if len(req.Images) > continuex.MaxImages {
+		return errors.New("Attach up to four images at a time")
+	}
+	for _, path := range req.Images {
+		if !continuex.AllowedImage(path) {
+			return errors.New("Attach a PNG, JPEG, GIF or WebP image under 20 MB")
+		}
+	}
+	workspace := strings.TrimSpace(req.Workspace)
+	if workspace == "" {
+		return errors.New("Choose a project folder on this computer before sending")
+	}
+	abs, err := filepath.Abs(workspace)
+	if err != nil {
+		return err
+	}
+	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
+		return errors.New("That project folder isn't on this computer. Choose one that is, then send again")
+	}
+	req.Workspace = abs
+	return nil
 }
 
 // nexusMemoryReadTools are memory lookups agents may call without asking;
@@ -194,238 +246,95 @@ func nexusMemoryServer(projectID string) []continuex.MCPServer {
 	}}
 }
 
-func startLive(sessionID, projectID, agent, workspace, resumeID, model, permissionMode, seed string) (any, error) {
-	start, ok := liveStarters[agent]
+// startLiveAgent starts the agent process for a chat.
+func startLiveAgent(ctx context.Context, spec agentrun.StartSpec) (continuex.LiveSession, error) {
+	start, ok := liveStarters[spec.Agent]
 	if !ok {
-		return nil, errors.New(continuex.AgentDisplayName(agent) + " can't chat inside Nexus yet")
+		return nil, errors.New(continuex.AgentDisplayName(spec.Agent) + " can't chat inside Nexus yet")
 	}
-	workspace = strings.TrimSpace(workspace)
-	if workspace == "" {
-		return nil, errors.New("Choose a project folder on this computer before sending")
-	}
-	abs, err := filepath.Abs(workspace)
-	if err != nil {
-		return nil, err
-	}
-	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
-		return nil, errors.New("That project folder isn't on this computer. Choose one that is, then send again")
-	}
-	ctx, cancel := context.WithCancel(context.Background())
 	session, err := start(ctx, continuex.LiveOptions{
-		Workspace: abs, ResumeID: strings.TrimSpace(resumeID), Model: model,
-		PermissionMode: permissionMode, SystemContext: continuex.SafeContinuationContext(seed),
-		MCPServers: nexusMemoryServer(projectID),
+		Workspace: spec.Workspace, ResumeID: strings.TrimSpace(spec.ResumeID), Model: spec.Model,
+		PermissionMode: spec.Mode, SystemContext: continuex.SafeContinuationContext(spec.Context),
+		MCPServers: nexusMemoryServer(spec.ProjectID),
 	})
 	if err != nil {
-		cancel()
-		return nil, continuex.AsAgentError(agent, "cannot_start", err)
+		return nil, continuex.AsAgentError(spec.Agent, "cannot_start", err)
 	}
-	entry := &liveEntry{id: newLiveID(), sessionID: sessionID, projectID: projectID, agent: agent, workspace: abs, session: session, cancel: cancel, resumeID: strings.TrimSpace(resumeID)}
-	entry.markOwned(session.NativeID())
-	liveSessions.Store(entry.id, entry)
-	diagnostics.Go("live", func() { pumpLive(entry) })
-	return map[string]any{"live_id": entry.id, "agent": agent}, nil
+	return ownLiveSession(session, spec.ResumeID), nil
 }
 
-func newLiveID() string {
-	var b [8]byte
-	_, _ = rand.Read(b[:])
-	return "live_" + hex.EncodeToString(b[:])
+// ownedSession tells capture that the agent session is saved by Nexus, so
+// its transcript is not imported as a second copy of the chat. A resumed
+// session that kept its id was captured before Nexus continued it.
+type ownedSession struct {
+	continuex.LiveSession
+	resumeID string
+	once     sync.Once
+	events   chan continuex.LiveEvent
 }
 
-func closeLive(entry *liveEntry) {
-	liveSessions.Delete(entry.id)
-	_ = entry.session.Close()
-	entry.cancel()
-}
-
-// closeAllLive is called on core shutdown.
-func closeAllLive() {
-	liveSessions.Range(func(_, value any) bool {
-		closeLive(value.(*liveEntry))
-		return true
-	})
-}
-
-// fileTools write files; their file_path input becomes a changed file.
-var fileTools = map[string]bool{"Write": true, "Edit": true, "MultiEdit": true, "NotebookEdit": true}
-
-// liveDeltaFlush batches text deltas: agents send dozens per second (Codex
-// and Cursor sent 239 deltas for a 600-character reply), and forwarding each
-// one made the desktop re-render the whole message thousands of times on long
-// replies.
-const liveDeltaFlush = 50 * time.Millisecond
-
-func pumpLive(entry *liveEntry) {
-	defer liveSessions.Delete(entry.id)
-	send := func(ev continuex.LiveEvent) {
-		event := map[string]any{
-			"type": "live.event", "live_id": entry.id, "session_id": entry.sessionID, "agent": entry.agent,
-			"kind": ev.Kind, "text": ev.Text, "tool_id": ev.ToolID, "tool_name": ev.ToolName,
-			"tool_input": string(ev.ToolInput), "tool_output": ev.ToolOutput, "is_error": ev.IsError,
-			"request_id": ev.RequestID, "native_id": ev.NativeID, "cost_usd": ev.CostUSD,
-			"parent_tool_id": ev.ParentToolID,
-		}
-		if len(ev.Usage) > 0 {
-			// Per model; the turn so far on "usage", the whole turn on turn_done.
-			event["usage"] = ev.Usage
-		}
-		emitCoreEvent(event)
+func ownLiveSession(session continuex.LiveSession, resumeID string) continuex.LiveSession {
+	o := &ownedSession{LiveSession: session, resumeID: strings.TrimSpace(resumeID)}
+	o.mark(session.NativeID())
+	if _, ok := session.(continuex.ImageSender); ok {
+		return &ownedImageSession{o}
 	}
-	var pending strings.Builder
-	flush := func() {
-		if pending.Len() > 0 {
-			send(continuex.LiveEvent{Kind: "text_delta", Text: pending.String()})
-			pending.Reset()
-		}
-	}
-	ticker := time.NewTicker(liveDeltaFlush)
-	defer ticker.Stop()
-	events := entry.session.Events()
-	for {
-		select {
-		case ev, ok := <-events:
-			if !ok {
-				flush()
-				return
-			}
-			entry.track(ev)
-			if ev.Kind == "text_delta" {
-				pending.WriteString(ev.Text)
-				continue
-			}
-			flush() // keep text ahead of the tool/turn event that follows it
-			send(ev)
-			if ev.Kind == "turn_done" {
-				entry.record(ev)
-			}
-		case <-ticker.C:
-			flush()
-		}
-	}
+	return o
 }
 
-// markOwned tells capture that this agent session is saved by Nexus, so its
-// transcript is not imported as a second copy of the chat. A resumed session
-// that kept its id was captured before Nexus continued it; capture keeps it.
-func (e *liveEntry) markOwned(nativeID string) {
-	if nativeID != "" && nativeID != e.resumeID {
+func (o *ownedSession) mark(nativeID string) {
+	if nativeID != "" && nativeID != o.resumeID {
 		daemon.MarkNexusOwned(nativeID)
 	}
 }
 
-func (e *liveEntry) track(ev continuex.LiveEvent) {
-	if ev.NativeID != "" {
-		e.markOwned(ev.NativeID)
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	switch ev.Kind {
-	case "text_delta":
-		e.streamed.WriteString(ev.Text)
-	case "text":
-		// A full block supersedes the deltas that built it.
-		e.streamed.Reset()
-		if e.answer.Len() > 0 {
-			e.answer.WriteString("\n\n")
-		}
-		e.answer.WriteString(ev.Text)
-	case "tool_start":
-		e.flushStreamedLocked()
-		activity := continuex.ToolActivity{ID: ev.ToolID, Tool: ev.ToolName, Status: "running", Input: string(ev.ToolInput), Parent: ev.ParentToolID}
-		if fileTools[ev.ToolName] {
-			var in struct {
-				FilePath     string `json:"file_path"`
-				NotebookPath string `json:"notebook_path"`
-			}
-			if json.Unmarshal(ev.ToolInput, &in) == nil {
-				path := in.FilePath
-				if path == "" {
-					path = in.NotebookPath
+func (o *ownedSession) Events() <-chan continuex.LiveEvent {
+	o.once.Do(func() {
+		o.events = make(chan continuex.LiveEvent, 256)
+		in := o.LiveSession.Events()
+		diagnostics.Go("live", func() {
+			defer close(o.events)
+			for ev := range in {
+				if ev.NativeID != "" {
+					o.mark(ev.NativeID)
 				}
-				if path != "" {
-					if rel, err := filepath.Rel(e.workspace, path); err == nil && !strings.HasPrefix(rel, "..") {
-						path = filepath.ToSlash(rel)
-					}
-					activity.Files = []string{path}
-					e.files = appendUnique(e.files, path)
-				}
+				o.events <- ev
 			}
-		}
-		if len(e.activities) < 100 {
-			e.activities = append(e.activities, activity)
-		}
-	case "tool_end":
-		for i := range e.activities {
-			if e.activities[i].ID == ev.ToolID {
-				e.activities[i].Output = ev.ToolOutput
-				e.activities[i].Status = "completed"
-				if ev.IsError {
-					e.activities[i].Status = "error"
-					e.activities[i].Error = ev.ToolOutput
-				}
-			}
-		}
-	}
+		})
+	})
+	return o.events
 }
 
-func (e *liveEntry) record(done continuex.LiveEvent) {
-	e.mu.Lock()
-	e.flushStreamedLocked()
-	prompt, answer := e.prompt.String(), e.answer.String()
-	if strings.TrimSpace(answer) == "" && !done.IsError {
-		answer = done.Text
-	}
-	activities, files := e.activities, e.files
-	e.prompt.Reset()
-	e.answer.Reset()
-	e.activities, e.files = nil, nil
-	e.mu.Unlock()
-	if strings.TrimSpace(answer) == "" {
-		// The UI waits for live.recorded to finish the turn; always send one.
-		problem := "The agent finished without a reply."
-		if done.IsError && strings.TrimSpace(done.Text) != "" {
-			problem = done.Text
-		}
-		emitCoreEvent(map[string]any{"type": "live.recorded", "live_id": e.id, "session_id": e.sessionID, "error": problem})
-		return
-	}
+type ownedImageSession struct{ *ownedSession }
+
+func (o *ownedImageSession) SendWithImages(ctx context.Context, text string, images []string) error {
+	return o.LiveSession.(continuex.ImageSender).SendWithImages(ctx, text, images)
+}
+
+// recordLiveTurn saves a finished turn through core continue.record,
+// exactly like a continue.here exchange.
+func recordLiveTurn(t agentrun.TurnRecord) (any, error) {
 	payload, _ := json.Marshal(map[string]any{
-		"session_id": e.sessionID, "project_id": e.projectID, "agent": e.agent, "native_id": e.session.NativeID(),
-		"prompt": prompt, "answer": answer, "file_changes": files, "activities": activities,
-		"usage": done.Usage,
+		"session_id": t.SessionID, "project_id": t.ProjectID, "agent": t.Agent, "native_id": t.NativeID,
+		"prompt": t.Prompt, "answer": t.Answer, "file_changes": t.Files, "activities": t.Activities,
+		"usage": t.Usage,
 	})
 	nxState.mu.Lock()
 	deps := nxState.deps
 	nxState.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	result, err := core.Call(ctx, "continue.record", payload, deps)
-	event := map[string]any{"type": "live.recorded", "live_id": e.id, "session_id": e.sessionID, "result": result}
-	if err != nil {
-		event["error"] = err.Error()
-	}
-	emitCoreEvent(event)
+	return core.Call(ctx, "continue.record", payload, deps)
 }
 
-// flushStreamedLocked moves delta-only text into the answer (caller holds mu).
-func (e *liveEntry) flushStreamedLocked() {
-	text := strings.TrimSpace(e.streamed.String())
-	e.streamed.Reset()
-	if text == "" {
-		return
+// closeAllLive is called on core shutdown: every agent process ends, and
+// turns still running are remembered so the next start offers Resume.
+func closeAllLive() {
+	liveMu.Lock()
+	m := liveMgr
+	liveMgr = nil
+	liveMu.Unlock()
+	if m != nil {
+		m.Shutdown()
 	}
-	if e.answer.Len() > 0 {
-		e.answer.WriteString("\n\n")
-	}
-	e.answer.WriteString(text)
-}
-
-func appendUnique(list []string, value string) []string {
-	for _, existing := range list {
-		if existing == value {
-			return list
-		}
-	}
-	return append(list, value)
 }

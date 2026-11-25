@@ -67,7 +67,7 @@ public sealed partial class MainWindow : Window
         TrayOpenCommand = new RelayCommand(RestoreWindow);
         TrayPauseCommand = new AsyncRelayCommand(PauseCaptureAsync);
         TrayTeleportCommand = new RelayCommand(() => { RestoreWindow(); OpenTeleport(); });
-        TrayQuitCommand = new AsyncRelayCommand(QuitAsync);
+        TrayQuitCommand = new AsyncRelayCommand(QuitFromMenuAsync);
         TrayReportCommand = new RelayCommand(() => { RestoreWindow(); ShowReportProblem(); });
         InitializeComponent();
         // Ctrl+K / Ctrl+P / Ctrl+N become Command+K / P / N on macOS.
@@ -128,6 +128,7 @@ public sealed partial class MainWindow : Window
         TeleportBadge.Visibility = Visibility.Collapsed;
         ContentFrame.Loaded += OnContentFrameLoaded;
         App.Core.Subscribe(DispatcherQueue, OnCoreEvent);
+        InitAgentSessions();
         _ = App.Core.CallAsync(NxMethods.EventsSubscribe);
         EnsureLoginStartDefault();
         // Names for any control built without one (icon buttons, rows with
@@ -845,7 +846,7 @@ public sealed partial class MainWindow : Window
     private const int MaxChatPagesPerFill = 8;
     private string _tagFilter = "";
 
-    private bool PassesTagFilter(ChatPaneEntry entry) => _tagFilter.Length == 0 || ChatTags.Has(entry.Id, _tagFilter);
+    private bool PassesTagFilter(ChatPaneEntry entry) => PassesRunningFilter(entry) && (_tagFilter.Length == 0 || ChatTags.Has(entry.Id, _tagFilter));
 
     private int VisibleChatCount(IEnumerable<ChatPaneEntry> entries) => entries.Count(PassesTagFilter);
 
@@ -1180,7 +1181,7 @@ public sealed partial class MainWindow : Window
         if (_chatStatus.Length > 0)
             items.Add(new ChatListNotice(NxErrors.IsSignedOut(_chatStatus) ? NxErrors.SignedOutMessage : _chatStatus));
         else if (seen.Count == 0)
-            items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press " + Shortcuts.Label("N") + "."));
+            items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _runningFilter ? "No agents are working right now." : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press " + Shortcuts.Label("N") + "."));
         _chatItems = items;
         ChatList.ItemTemplate ??= new ChatRowFactory(this);
         ChatList.ItemsSource = items;
@@ -1277,6 +1278,7 @@ public sealed partial class MainWindow : Window
     private void BuildProjectFilterMenu(MenuFlyout menu)
     {
         menu.Items.Clear();
+        AddRunningFilter(menu);
         // Projects are chosen in the project switcher above the list; this
         // menu filters by tag (chat tags are kept on this device; see ChatTags).
         var tags = ChatTags.All();
@@ -1320,7 +1322,7 @@ public sealed partial class MainWindow : Window
     private void UpdateProjectFilterLabel()
     {
         // The project shows in the switcher; only the tag filter is named here.
-        var name = _tagFilter.Length > 0 ? "Tagged #" + _tagFilter : "";
+        var name = _runningFilter ? "Working now" : _tagFilter.Length > 0 ? "Tagged #" + _tagFilter : "";
         _projectSwitcher?.Refresh();
         ProjectFilterLabel.Text = name.Length > 0 ? name : "";
         ProjectFilterLabel.Visibility = name.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -1366,14 +1368,20 @@ public sealed partial class MainWindow : Window
         }
         lines.Children.Add(top);
 
-        // Line 2: title
+        // Line 2: live status (working, needs approval, new reply) and title
         var title = new TextBlock
         {
             Text = NxJson.Scrub(entry.Title), FontSize = 13.5, Opacity = 0.88,
             TextTrimming = TextTrimming.CharacterEllipsis, TextWrapping = TextWrapping.NoWrap
         };
-        Grid.SetRow(title, 1);
-        lines.Children.Add(title);
+        var titleLine = new Grid { ColumnSpacing = 6 };
+        titleLine.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        titleLine.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        titleLine.Children.Add(new ChatStatusDot(entry.Id));
+        Grid.SetColumn(title, 1);
+        titleLine.Children.Add(title);
+        Grid.SetRow(titleLine, 1);
+        lines.Children.Add(titleLine);
 
         // Line 3: agent
         var bottom = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -1717,6 +1725,12 @@ public sealed partial class MainWindow : Window
 #endif
     }
 
+    /// <summary>Quit from the tray or menu: asks first while agents work.</summary>
+    private async Task QuitFromMenuAsync()
+    {
+        if (await ConfirmQuitWithAgentsAsync()) await QuitAsync();
+    }
+
     private async Task QuitAsync()
     {
         if (_quitting) return;
@@ -1773,6 +1787,12 @@ public sealed partial class MainWindow : Window
 
     private void OnCoreEvent(string json)
     {
+        // Agent chats: status for the sidebar, tray and notifications. Their
+        // stream events belong to the chat page, not the status banner.
+        if (LiveSessions.Current.Apply(json) || json.Contains("\"type\":\"live.", StringComparison.Ordinal))
+        {
+            return;
+        }
         if (json.Contains("\"type\":\"desktop.request", StringComparison.Ordinal))
         {
             _ = HandleDesktopRequestAsync(json);

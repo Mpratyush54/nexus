@@ -43,6 +43,9 @@ type LiveEvent struct {
 	// ParentToolID links work done inside a sub-agent (Claude's Task tool,
 	// Codex collab agents) to the tool call that started it.
 	ParentToolID string
+	// ToolKind is the agent's own category for an approval when it has one
+	// (ACP: edit, execute, read, fetch, ...).
+	ToolKind string
 }
 
 // MCPServer is an extra MCP server handed to the agent for this session,
@@ -58,10 +61,21 @@ type MCPServer struct {
 }
 
 type LiveOptions struct {
-	Workspace      string      // Required existing directory; becomes cmd.Dir.
-	ResumeID       string      // Optional native session ID.
-	MCPServers     []MCPServer // Optional extra MCP servers (Nexus memory).
-	Model          string      // Optional; validated using WithModel's rules.
-	PermissionMode string      // Empty, acceptEdits, or plan; never bypassPermissions.
-	SystemContext  string      // Optional context passed via --append-system-prompt.
+	Workspace  string      // Required existing directory; becomes cmd.Dir.
+	ResumeID   string      // Optional native session ID.
+	MCPServers []MCPServer // Optional extra MCP servers (Nexus memory).
+	Model      string      // Optional; validated using WithModel's rules.
+	// PermissionMode is empty (ask), acceptEdits, plan or bypassPermissions
+	// (the chat's "Full access", chosen explicitly by the person).
+	PermissionMode string
+	SystemContext  string // Optional context passed via --append-system-prompt.
+}
+
+// validPermissionMode reports whether a driver accepts mode.
+func validPermissionMode(mode string) bool {
+	switch mode {
+	case "", "acceptEdits", "plan", "bypassPermissions":
+		return true
+	}
+	return false
 }
