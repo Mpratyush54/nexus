@@ -170,8 +170,11 @@ internal sealed class MacWelcome : Grid
 
     private async Task DismissAsync()
     {
-        await Motion.FadeOutAsync(this, 320);
+        // Bounded: the fade's completion event is a Composition batch, and the
+        // screen must go away even if it never reports back.
+        await Task.WhenAny(Motion.FadeOutAsync(this, 320), Task.Delay(700));
         if (Parent is Panel panel) panel.Children.Remove(this);
+        MacShell.Log("first-run screen dismissed");
     }
 
     private static Ellipse Ambient(Color color, byte alpha, double w, double h, HorizontalAlignment ha, VerticalAlignment va, Thickness margin)

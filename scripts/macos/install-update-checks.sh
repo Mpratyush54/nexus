@@ -50,6 +50,8 @@ app_pids() { pgrep -f "$APP_RE" || true; }
 installed_pid() { pgrep -f "^$INSTALLED/Contents/MacOS/Nexus( |\$)" | head -1; }
 installed_running() { [ -n "$(installed_pid)" ]; }
 quit_all() {
+  # Only when running: telling a closed app to quit would open it.
+  [ -n "$(app_pids)" ] || return 0
   limited 15 osascript -e 'tell application id "com.nexus.desktop" to quit' > /dev/null 2>&1 || true
   wait_for 12 bash -c "! pgrep -f '$APP_RE' > /dev/null" || { pkill -f "$APP_RE"; sleep 2; pkill -9 -f "$APP_RE" || true; }
 }
@@ -145,6 +147,13 @@ if wait_for 60 installed_running && wait_for 60 has_window "$(installed_pid)"; t
   shot_window "$(installed_pid)" 04-welcome
   LOGS=$(find "$PROFILE_ROOT" -path '*logs*' -name '*.log' -exec cat {} + 2>/dev/null)
   if echo "$LOGS" | grep -q "first-run screen: Welcome"; then pass "first launch from /Applications shows You're all set"; else fail "no welcome logged from /Applications"; fi
+  # "Get started" (focused) leads into the setup guide underneath.
+  front "$(installed_pid)"; sleep 1
+  keys 'key code 49' > /dev/null
+  sleep 3
+  shot_window "$(installed_pid)" 04b-setup-after-welcome
+  LOGS=$(find "$PROFILE_ROOT" -path '*logs*' -name '*.log' -exec cat {} + 2>/dev/null)
+  if echo "$LOGS" | grep -q "first-run screen dismissed"; then pass "Get started opens the setup guide"; else note "Get started: no dismiss logged"; fi
 else
   fail "Nexus from /Applications showed no window"
 fi
