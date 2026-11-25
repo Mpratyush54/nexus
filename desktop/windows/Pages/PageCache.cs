@@ -65,6 +65,12 @@ public static class PageCache
         _timelineProjectId = "";
     }
 
+    /// <summary>A deleted chat: its cached page goes too.</summary>
+    public static void ForgetSession(string sessionId)
+    {
+        if (_sessions.Remove(sessionId)) _sessionLru.Remove(sessionId);
+    }
+
     public static void InvalidateProject(string? previousProjectId, string newProjectId)
     {
         if (string.Equals(previousProjectId ?? "", newProjectId, StringComparison.OrdinalIgnoreCase))
