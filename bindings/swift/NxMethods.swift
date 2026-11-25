@@ -29,6 +29,8 @@ public enum NxMethods {
     public static let harnessStatus = "harness.status"
     public static let harnessModels = "harness.models"
     public static let continueHere = "continue.here"
+    public static let transcriptImages = "transcript.images"
+    public static let transcriptImage = "transcript.image"
     public static let continueCancel = "continue.cancel"
     public static let continueLocalList = "continue.local.list"
     public static let continueRecord = "continue.record"

@@ -28,6 +28,8 @@ type Device struct {
 	Projects  []string  `json:"projects"`
 	Harnesses []string  `json:"harnesses"`
 	Seen      time.Time `json:"last_seen_at"`
+	// Protocol is the relay version the desktop last reported (0 = 1).
+	Protocol int `json:"protocol,omitempty"`
 }
 
 type Request struct {
@@ -39,6 +41,8 @@ type Request struct {
 	Agent     string `json:"agent"`
 	Model     string `json:"model,omitempty"`
 	Prompt    string `json:"prompt,omitempty"`
+	// Attachments are images sent with a turn (protocol 2).
+	Attachments []Attachment `json:"attachments,omitempty"`
 }
 
 type Job struct {
@@ -94,6 +98,9 @@ func (r Request) Validate() error {
 	}
 	if len(r.Model) > 160 || strings.HasPrefix(r.Model, "-") || strings.ContainsAny(r.Model, "\r\n\x00") {
 		return errors.New("invalid model ID")
+	}
+	if len(r.Attachments) > MaxAttachments {
+		return errors.New("attach at most 4 images")
 	}
 	if r.Kind == "turn" && (r.SessionID == "" || strings.TrimSpace(r.Prompt) == "" || len(r.Prompt) > 16000) {
 		return errors.New("a session and message of up to 16,000 bytes are required")

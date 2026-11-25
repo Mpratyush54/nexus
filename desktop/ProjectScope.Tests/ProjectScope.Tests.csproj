@@ -38,5 +38,6 @@
     <Compile Include="../windows/Core/Diagnostics/DiagLog.cs" Link="Diagnostics/DiagLog.cs" />
     <Compile Include="../windows/Core/Diagnostics/ProblemReport.cs" Link="Diagnostics/ProblemReport.cs" />
     <Compile Include="../windows/Core/MarkdownText.cs" Link="MarkdownText.cs" />
+    <Compile Include="../windows/Core/ComposerAttachments.cs" Link="ComposerAttachments.cs" />
   </ItemGroup>
 </Project>

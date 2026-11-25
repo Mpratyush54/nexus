@@ -12,7 +12,8 @@ package main
 //	live.supported {agent}                                  -> {live}
 //	live.start     {session_id, agent, workspace_root, resume_id?, model?,
 //	                permission_mode?, context?}             -> {live_id}
-//	live.send      {live_id, text}
+//	live.send      {live_id, text, images?}  images: local files, sent in
+//	                the agent's own image format (see continuex.ImageSender)
 //	live.approve   {live_id, request_id, allow, reason?}
 //	live.interrupt {live_id}
 //	live.close     {live_id}
@@ -88,19 +89,20 @@ func normalizeLiveAgent(agent string) string {
 
 func liveCall(name string, args json.RawMessage) (any, error) {
 	var body struct {
-		LiveID         string `json:"live_id"`
-		SessionID      string `json:"session_id"`
-		ProjectID      string `json:"project_id"`
-		Agent          string `json:"agent"`
-		WorkspaceRoot  string `json:"workspace_root"`
-		ResumeID       string `json:"resume_id"`
-		Model          string `json:"model"`
-		PermissionMode string `json:"permission_mode"`
-		Context        string `json:"context"`
-		Text           string `json:"text"`
-		RequestID      string `json:"request_id"`
-		Allow          bool   `json:"allow"`
-		Reason         string `json:"reason"`
+		LiveID         string   `json:"live_id"`
+		SessionID      string   `json:"session_id"`
+		ProjectID      string   `json:"project_id"`
+		Agent          string   `json:"agent"`
+		WorkspaceRoot  string   `json:"workspace_root"`
+		ResumeID       string   `json:"resume_id"`
+		Model          string   `json:"model"`
+		PermissionMode string   `json:"permission_mode"`
+		Context        string   `json:"context"`
+		Text           string   `json:"text"`
+		Images         []string `json:"images"`
+		RequestID      string   `json:"request_id"`
+		Allow          bool     `json:"allow"`
+		Reason         string   `json:"reason"`
 	}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &body); err != nil {
@@ -125,14 +127,34 @@ func liveCall(name string, args json.RawMessage) (any, error) {
 		if text == "" || len(text) > 16000 {
 			return nil, errors.New("enter a message of up to 16,000 characters")
 		}
+		if len(body.Images) > continuex.MaxImages {
+			return nil, errors.New("attach at most four images")
+		}
+		for _, path := range body.Images {
+			if !continuex.AllowedImage(path) {
+				return nil, errors.New("attach a local PNG, JPEG, GIF, or WebP image under 20 MB")
+			}
+		}
+		var sender continuex.ImageSender
+		if len(body.Images) > 0 {
+			var ok bool
+			if sender, ok = entry.session.(continuex.ImageSender); !ok {
+				return nil, errors.New(entry.agent + " does not accept images in chat yet")
+			}
+		}
 		entry.mu.Lock()
 		if entry.prompt.Len() > 0 {
 			entry.prompt.WriteString("\n\n")
 		}
-		entry.prompt.WriteString(text)
+		// The recorded message names its images (never their bytes) so the
+		// chat shows them; the agent gets the plain text plus the images.
+		entry.prompt.WriteString(continuex.ImageTags(text, body.Images))
 		entry.mu.Unlock()
 		// Background: drivers queue the message and must not tie the turn
 		// to this call's lifetime.
+		if sender != nil {
+			return map[string]any{"sent": true}, sender.SendWithImages(context.Background(), text, body.Images)
+		}
 		return map[string]any{"sent": true}, entry.session.Send(context.Background(), text)
 	case "live.approve":
 		reason := strings.TrimSpace(body.Reason)

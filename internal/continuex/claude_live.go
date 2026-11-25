@@ -203,6 +203,16 @@ func (s *claudeLive) write(ctx context.Context, value any) error {
 func (s *claudeLive) Send(ctx context.Context, text string) error {
 	return s.write(ctx, map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []any{map[string]any{"type": "text", "text": text}}}})
 }
+
+// SendWithImages sends the text with each image as a base64 image content
+// block, the format Claude Code's stream-json input accepts.
+func (s *claudeLive) SendWithImages(ctx context.Context, text string, images []string) error {
+	message, err := ClaudeUserMessage(text, images)
+	if err != nil {
+		return err
+	}
+	return s.write(ctx, message)
+}
 func (s *claudeLive) Approve(id string, allow bool, reason string) error {
 	s.mu.Lock()
 	input, ok := s.pending[id]

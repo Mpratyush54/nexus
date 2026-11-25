@@ -3,9 +3,12 @@ package desktopworker
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -66,7 +69,7 @@ func (e *fakeExecutor) TurnStreaming(ctx context.Context, _ continuex.LaunchPlan
 	}
 	return continuex.TurnOutput{Text: "full text", ChangedFiles: []string{"a.txt"}, FileDiffs: []continuex.FileDiff{{Path: "a.txt", Diff: "@@ -1 +1 @@\n-old\n+new"}}}, nil
 }
-func setupWorker(t *testing.T, approve func(context.Context, desktopbridge.Job, string) bool) (*Worker, *desktopbridge.Memory, desktopbridge.Job, *fakeExecutor) {
+func setupWorker(t *testing.T, approve func(context.Context, desktopbridge.Job, string, []string) bool) (*Worker, *desktopbridge.Memory, desktopbridge.Job, *fakeExecutor) {
 	t.Helper()
 	m := desktopbridge.NewMemory()
 	ctx := t.Context()
@@ -88,13 +91,14 @@ func setupWorker(t *testing.T, approve func(context.Context, desktopbridge.Job, 
 		}
 		var out any
 		var err error
+		id := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/desktop/jobs/"), "/")[0]
 		switch {
 		case r.Method == "GET":
-			out, err = m.Get(r.Context(), "owner", "job")
+			out, err = m.Get(r.Context(), "owner", id)
 		case strings.HasSuffix(r.URL.Path, "/progress"):
 			var u desktopbridge.Update
 			_ = json.NewDecoder(r.Body).Decode(&u)
-			out, err = m.Update(r.Context(), "owner", "device", "job", u, time.Now().UTC())
+			out, err = m.Update(r.Context(), "owner", "device", id, u, time.Now().UTC())
 		}
 		code := 200
 		if err != nil {
@@ -111,7 +115,7 @@ func setupWorker(t *testing.T, approve func(context.Context, desktopbridge.Job, 
 	return w, m, j, exec
 }
 func TestDeclinedBrowserTurnNeverExecutes(t *testing.T) {
-	w, m, j, exec := setupWorker(t, func(context.Context, desktopbridge.Job, string) bool { return false })
+	w, m, j, exec := setupWorker(t, func(context.Context, desktopbridge.Job, string, []string) bool { return false })
 	w.execute(t.Context(), j)
 	got, _ := m.Get(t.Context(), "owner", j.ID)
 	if exec.calls.Load() != 0 || got.State != "failed" || !strings.Contains(got.Error, "declined") {
@@ -119,7 +123,7 @@ func TestDeclinedBrowserTurnNeverExecutes(t *testing.T) {
 	}
 }
 func TestApprovedBrowserTurnStreamsAndPersistsDiffs(t *testing.T) {
-	w, m, j, exec := setupWorker(t, func(context.Context, desktopbridge.Job, string) bool { return true })
+	w, m, j, exec := setupWorker(t, func(context.Context, desktopbridge.Job, string, []string) bool { return true })
 	done := make(chan struct{})
 	go func() { defer close(done); w.execute(t.Context(), j) }()
 	deadline := time.After(5 * time.Second)
@@ -143,7 +147,7 @@ func TestApprovedBrowserTurnStreamsAndPersistsDiffs(t *testing.T) {
 	}
 }
 func TestBrowserCancellationStopsOnlyItsTurn(t *testing.T) {
-	w, m, j, exec := setupWorker(t, func(context.Context, desktopbridge.Job, string) bool { return true })
+	w, m, j, exec := setupWorker(t, func(context.Context, desktopbridge.Job, string, []string) bool { return true })
 	exec.wait = true
 	exec.started = make(chan struct{})
 	done := make(chan struct{})
@@ -162,5 +166,106 @@ func TestBrowserCancellationStopsOnlyItsTurn(t *testing.T) {
 	got, _ := m.Get(t.Context(), "owner", j.ID)
 	if got.State != "cancelled" {
 		t.Fatal("late result overwrote cancel", got.State)
+	}
+}
+
+// recordingExecutor keeps the plan it was asked to run.
+type recordingExecutor struct {
+	fakeExecutor
+	plan continuex.LaunchPlan
+}
+
+func (e *recordingExecutor) TurnStreaming(ctx context.Context, p continuex.LaunchPlan, root string, progress func(continuex.StreamProgress)) (continuex.TurnOutput, error) {
+	e.plan = p
+	return continuex.TurnOutput{Text: "I see a login form."}, nil
+}
+
+func imageJob(t *testing.T, w *Worker, m *desktopbridge.Memory, agent string) desktopbridge.Job {
+	t.Helper()
+	png := append([]byte("\x89PNG\r\n\x1a\n"), make([]byte, 24)...)
+	now := time.Now().UTC()
+	req := desktopbridge.Request{ID: "img-job", DeviceID: "device", SessionID: "session", ProjectID: "project", Agent: agent, Kind: "turn", Prompt: "what is on screen?",
+		Attachments: []desktopbridge.Attachment{{Name: "shot.png", MediaType: "image/png", Data: base64.StdEncoding.EncodeToString(png)}}}
+	if err := req.PrepareAttachments(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Create(t.Context(), desktopbridge.Job{Request: req, Owner: "owner", State: "queued", Revision: 1, Created: now, Expires: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := m.Claim(t.Context(), "owner", "device", now)
+	if err != nil || claimed == nil {
+		t.Fatal("claim", err)
+	}
+	return *claimed
+}
+
+func TestBrowserImagesReachTheHarnessAfterApproval(t *testing.T) {
+	var shown []string
+	w, m, first, _ := setupWorker(t, func(_ context.Context, _ desktopbridge.Job, _ string, images []string) bool {
+		shown = images
+		return true
+	})
+	_, _ = m.Cancel(t.Context(), "owner", first.ID, time.Now().UTC())
+	w.ImageDir = t.TempDir()
+	exec := &recordingExecutor{}
+	deps := w.Deps
+	w.Deps = func() core.Deps { d := deps(); d.ContinueExecutor = exec; return d }
+	j := imageJob(t, w, m, "codex")
+	w.execute(t.Context(), j)
+	got, _ := m.Get(t.Context(), "owner", j.ID)
+	if got.State != "completed" {
+		t.Fatalf("job %+v", got)
+	}
+	if len(shown) != 1 || filepath.Dir(shown[0]) != w.ImageDir {
+		t.Fatalf("approval must show the saved image: %v", shown)
+	}
+	if argv := strings.Join(exec.plan.Argv, " "); !strings.Contains(argv, "--image "+shown[0]) {
+		t.Fatalf("codex must receive the image: %s", argv)
+	}
+	if data, err := os.ReadFile(shown[0]); err != nil || !bytes.HasPrefix(data, []byte("\x89PNG")) {
+		t.Fatal("saved image is wrong", err)
+	}
+}
+
+func TestDeclinedImageTurnRemovesSavedImages(t *testing.T) {
+	var shown []string
+	w, m, first, _ := setupWorker(t, func(_ context.Context, _ desktopbridge.Job, _ string, images []string) bool {
+		shown = images
+		return false
+	})
+	_, _ = m.Cancel(t.Context(), "owner", first.ID, time.Now().UTC())
+	w.ImageDir = t.TempDir()
+	j := imageJob(t, w, m, "claude")
+	w.execute(t.Context(), j)
+	if len(shown) != 1 {
+		t.Fatal("approval never saw the image")
+	}
+	if _, err := os.Stat(shown[0]); !os.IsNotExist(err) {
+		t.Fatal("declined image left on disk")
+	}
+}
+
+func TestImagesForAHarnessWithoutImageSupportFailClearly(t *testing.T) {
+	asked := false
+	w, m, first, _ := setupWorker(t, func(context.Context, desktopbridge.Job, string, []string) bool { asked = true; return true })
+	_, _ = m.Cancel(t.Context(), "owner", first.ID, time.Now().UTC())
+	w.ImageDir = t.TempDir()
+	j := imageJob(t, w, m, "cursor")
+	w.execute(t.Context(), j)
+	got, _ := m.Get(t.Context(), "owner", j.ID)
+	if asked || got.State != "failed" || !strings.Contains(got.Error, "Cursor can't take images") {
+		t.Fatalf("asked=%v job=%+v", asked, got)
+	}
+}
+
+func TestClientSendsProtocolVersion(t *testing.T) {
+	var header string
+	client := &http.Client{Transport: transportFunc(func(r *http.Request) (*http.Response, error) {
+		header = r.Header.Get(desktopbridge.ProtocolHeader)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{}`)), Header: make(http.Header)}, nil
+	})}
+	c := desktopbridge.Client{BaseURL: "https://nexus.test", Token: "t", Key: "k", HTTP: client}
+	if err := c.Call(t.Context(), "GET", "/v1/desktop/devices", nil, nil); err != nil || header != "2" {
+		t.Fatalf("protocol header %q err %v", header, err)
 	}
 }

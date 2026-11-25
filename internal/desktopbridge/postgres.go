@@ -70,24 +70,32 @@ func (p *Postgres) Device(ctx context.Context, owner, id string) (Device, error)
 }
 func (p *Postgres) Create(ctx context.Context, j Job) (Job, error) {
 	// Expiration is terminal. Never requeue a previously claimed request.
-	_, err := p.db.Exec(ctx, `UPDATE desktop_execution_jobs SET state='expired',revision=revision+1,payload=payload || jsonb_build_object('state','expired','revision',revision+1,'updated_at',now()) WHERE owner_id=$1 AND device_id=$2 AND expires_at<=now() AND state IN ('queued','awaiting_approval','running')`, j.Owner, j.DeviceID)
+	_, err := p.db.Exec(ctx, `UPDATE desktop_execution_jobs SET state='expired',revision=revision+1,attachments=NULL,payload=payload || jsonb_build_object('state','expired','revision',revision+1,'updated_at',now()) WHERE owner_id=$1 AND device_id=$2 AND expires_at<=now() AND state IN ('queued','awaiting_approval','running')`, j.Owner, j.DeviceID)
 	if err != nil {
 		return Job{}, err
 	}
-	b, e := json.Marshal(j)
+	// Image bytes live in their own column: status reads and live streams
+	// load the payload only, and just the worker's claim reads them.
+	b, e := json.Marshal(j.Public())
 	if e != nil {
 		return Job{}, e
+	}
+	var attachments []byte
+	if len(j.Attachments) > 0 {
+		if attachments, e = json.Marshal(j.Attachments); e != nil {
+			return Job{}, e
+		}
 	}
 	// The unique partial index, not a process-local lock or a snapshot count,
 	// serializes admission across replicas. Keys are scoped to the owner.
 	var raw []byte
 	e = p.db.QueryRow(ctx, `WITH locked AS (SELECT id FROM desktop_execution_devices WHERE owner_id=$1 AND id=$3 FOR UPDATE), admitted AS (
 		SELECT 1 FROM locked WHERE (SELECT count(*) FROM desktop_execution_jobs WHERE owner_id=$1 AND device_id=$3 AND state IN ('queued','awaiting_approval','running') AND expires_at>now())<1)
- INSERT INTO desktop_execution_jobs(owner_id,id,device_id,state,revision,created_at,expires_at,payload)
- SELECT $1,$2,$3,$4,$5,$6,$7,$8 FROM admitted ON CONFLICT(owner_id,id) DO NOTHING RETURNING payload`, j.Owner, j.ID, j.DeviceID, j.State, j.Revision, j.Created, j.Expires, b).Scan(&raw)
+ INSERT INTO desktop_execution_jobs(owner_id,id,device_id,state,revision,created_at,expires_at,payload,attachments)
+ SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9 FROM admitted ON CONFLICT(owner_id,id) DO NOTHING RETURNING payload`, j.Owner, j.ID, j.DeviceID, j.State, j.Revision, j.Created, j.Expires, b, attachments).Scan(&raw)
 	if errors.Is(e, pgx.ErrNoRows) {
 		old, getErr := p.Get(ctx, j.Owner, j.ID)
-		if getErr == nil && old.Request == j.Request {
+		if getErr == nil && SameRequest(old.Request, j.Request) {
 			return old, nil
 		}
 		return Job{}, ErrConflict
@@ -110,11 +118,11 @@ func decodeJob(b []byte, owner string) (Job, error) {
 func (p *Postgres) Claim(ctx context.Context, owner, device string, now time.Time) (*Job, error) {
 	// SKIP LOCKED and the state predicate give exactly one claimant. Expired
 	// claimed jobs stay failed/expired and are never replayed on another worker.
-	var b []byte
-	e := p.db.QueryRow(ctx, `WITH candidate AS (SELECT owner_id,id FROM desktop_execution_jobs WHERE owner_id=$1 AND device_id=$2 AND state='queued' AND expires_at>$3 ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
- UPDATE desktop_execution_jobs j SET state='awaiting_approval',revision=j.revision+1,
+	var b, attachments []byte
+	e := p.db.QueryRow(ctx, `WITH candidate AS (SELECT owner_id,id,attachments FROM desktop_execution_jobs WHERE owner_id=$1 AND device_id=$2 AND state='queued' AND expires_at>$3 ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+ UPDATE desktop_execution_jobs j SET state='awaiting_approval',revision=j.revision+1,attachments=NULL,
  payload=j.payload || jsonb_build_object('state','awaiting_approval','status','Awaiting approval in Nexus Desktop','revision',j.revision+1,'updated_at',$3::timestamptz)
- FROM candidate c WHERE j.owner_id=c.owner_id AND j.id=c.id RETURNING j.payload`, owner, device, now).Scan(&b)
+ FROM candidate c WHERE j.owner_id=c.owner_id AND j.id=c.id RETURNING j.payload,c.attachments`, owner, device, now).Scan(&b, &attachments)
 	if errors.Is(e, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -122,6 +130,11 @@ func (p *Postgres) Claim(ctx context.Context, owner, device string, now time.Tim
 		return nil, e
 	}
 	j, e := decodeJob(b, owner)
+	if e == nil && len(attachments) > 0 {
+		// The claiming worker is the only reader of the image bytes, and the
+		// claim clears them: a claimed job is never handed out again.
+		e = json.Unmarshal(attachments, &j.Attachments)
+	}
 	return &j, e
 }
 func (p *Postgres) Get(ctx context.Context, owner, id string) (Job, error) {
@@ -159,7 +172,7 @@ func (p *Postgres) Update(ctx context.Context, owner, device, id string, u Updat
 	return j, e
 }
 func (p *Postgres) Cancel(ctx context.Context, owner, id string, now time.Time) (Job, error) {
-	_, e := p.db.Exec(ctx, `UPDATE desktop_execution_jobs SET state='cancelled',revision=revision+1,payload=payload || jsonb_build_object('state','cancelled','revision',revision+1,'updated_at',$3::timestamptz) WHERE owner_id=$1 AND id=$2 AND state IN ('queued','awaiting_approval','running')`, owner, id, now)
+	_, e := p.db.Exec(ctx, `UPDATE desktop_execution_jobs SET state='cancelled',revision=revision+1,attachments=NULL,payload=payload || jsonb_build_object('state','cancelled','revision',revision+1,'updated_at',$3::timestamptz) WHERE owner_id=$1 AND id=$2 AND state IN ('queued','awaiting_approval','running')`, owner, id, now)
 	if e != nil {
 		return Job{}, e
 	}

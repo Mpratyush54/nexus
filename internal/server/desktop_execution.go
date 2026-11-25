@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -96,12 +97,22 @@ func (s *Server) desktopRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	d := desktopbridge.Device{ID: req.ID, Owner: authSubject(r), KeyHash: desktopbridge.HashKey(secret), Name: req.Name, Projects: req.Projects, Harnesses: req.Harnesses, Seen: time.Now().UTC()}
+	d := desktopbridge.Device{ID: req.ID, Owner: authSubject(r), KeyHash: desktopbridge.HashKey(secret), Name: req.Name, Projects: req.Projects, Harnesses: req.Harnesses, Seen: time.Now().UTC(), Protocol: desktopProtocol(r)}
 	if e := s.Desktop.Register(r.Context(), d); e != nil {
 		s.desktopError(w, e)
 		return
 	}
 	writeJSON(w, 200, d)
+}
+
+// desktopProtocol reads the relay version a desktop reports in its header.
+// No header (every desktop before images) is protocol 1.
+func desktopProtocol(r *http.Request) int {
+	v, err := strconv.Atoi(strings.TrimSpace(r.Header.Get(desktopbridge.ProtocolHeader)))
+	if err != nil || v < 1 {
+		return 1
+	}
+	return min(v, 1000)
 }
 func (s *Server) desktopAuthenticate(w http.ResponseWriter, r *http.Request, id string) (desktopbridge.Device, bool) {
 	if !s.desktopReady(w) {
@@ -131,10 +142,15 @@ func (s *Server) desktopCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req desktopbridge.Request
-	if !decodeJSON(w, r, &req) {
+	// Turns may carry up to four images; every other route keeps the default limit.
+	if !decodeJSONLimit(w, r, &req, desktopbridge.MaxCreateBodyBytes) {
 		return
 	}
 	if e := req.Validate(); e != nil {
+		writeError(w, 400, e.Error())
+		return
+	}
+	if e := req.PrepareAttachments(); e != nil {
 		writeError(w, 400, e.Error())
 		return
 	}
@@ -161,12 +177,18 @@ func (s *Server) desktopCreate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 409, "desktop is offline, workspace is not mapped, or harness is not installed")
 		return
 	}
+	// An older desktop would ignore the images and run the text alone.
+	// Refuse plainly instead, before anything is queued.
+	if len(req.Attachments) > 0 && d.Protocol < desktopbridge.ProtocolImages {
+		writeError(w, 409, desktopbridge.ErrDesktopTooOld.Error())
+		return
+	}
 	j, e := s.Desktop.Create(r.Context(), desktopbridge.Job{Request: req, Owner: authSubject(r), State: "queued", Revision: 1, Created: now, Updated: now, Expires: now.Add(desktopbridge.ApprovalLifetime), Status: "Waiting for Nexus Desktop"})
 	if e != nil {
 		s.desktopError(w, e)
 		return
 	}
-	writeJSON(w, 202, j)
+	writeJSON(w, 202, j.Public())
 }
 func (s *Server) desktopReadJob(w http.ResponseWriter, r *http.Request) (desktopbridge.Job, bool) {
 	if !s.desktopReady(w) {
@@ -190,7 +212,7 @@ func (s *Server) desktopReadJob(w http.ResponseWriter, r *http.Request) (desktop
 func (s *Server) desktopGet(w http.ResponseWriter, r *http.Request) {
 	if j, ok := s.desktopReadJob(w, r); ok {
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, 200, j)
+		writeJSON(w, 200, j.Public())
 	}
 }
 func (s *Server) desktopCancel(w http.ResponseWriter, r *http.Request) {
@@ -203,7 +225,7 @@ func (s *Server) desktopCancel(w http.ResponseWriter, r *http.Request) {
 		s.desktopError(w, e)
 		return
 	}
-	writeJSON(w, 200, j)
+	writeJSON(w, 200, j.Public())
 }
 func (s *Server) desktopProgress(w http.ResponseWriter, r *http.Request) {
 	j, ok := s.desktopReadJob(w, r)
@@ -222,7 +244,7 @@ func (s *Server) desktopProgress(w http.ResponseWriter, r *http.Request) {
 		s.desktopError(w, e)
 		return
 	}
-	writeJSON(w, 200, j)
+	writeJSON(w, 200, j.Public())
 }
 
 // Browser SSE uses an Authorization header (fetch), never a bearer token in a
@@ -247,7 +269,7 @@ func (s *Server) desktopEvents(w http.ResponseWriter, r *http.Request) {
 	revision := int64(-1)
 	for {
 		if j.Revision != revision {
-			b, _ := json.Marshal(j)
+			b, _ := json.Marshal(j.Public())
 			if _, e := fmt.Fprintf(w, "id: %d\nevent: snapshot\ndata: %s\n\n", j.Revision, b); e != nil {
 				return
 			}

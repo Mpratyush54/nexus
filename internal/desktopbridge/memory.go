@@ -70,7 +70,7 @@ func (m *Memory) Create(_ context.Context, j Job) (Job, error) {
 	defer m.mu.Unlock()
 	k := key(j.Owner, j.ID)
 	if old, ok := m.jobs[k]; ok {
-		if old.Request != j.Request {
+		if !SameRequest(old.Request, j.Request) {
 			return Job{}, ErrConflict
 		}
 		return copyJob(old), nil
@@ -113,8 +113,11 @@ func (m *Memory) Claim(_ context.Context, owner, device string, now time.Time) (
 	next.Status = "Awaiting approval in Nexus Desktop"
 	next.Revision++
 	next.Updated = now
-	m.jobs[key(owner, next.ID)] = copyJob(*next)
+	// The claim hands the image bytes to the worker once and drops them.
 	c := copyJob(*next)
+	stored := copyJob(*next)
+	stored.Attachments = WithoutAttachmentData(stored.Attachments)
+	m.jobs[key(owner, next.ID)] = stored
 	return &c, nil
 }
 func expire(j Job, now time.Time) Job {
@@ -160,6 +163,7 @@ func (m *Memory) Cancel(_ context.Context, owner, id string, now time.Time) (Job
 	if !ok {
 		return j, ErrNotFound
 	}
+	j.Attachments = WithoutAttachmentData(j.Attachments)
 	if !Terminal(j.State) {
 		j.State = "cancelled"
 		j.Revision++

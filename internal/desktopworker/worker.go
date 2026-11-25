@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -28,10 +30,15 @@ type Worker struct {
 	Client   desktopbridge.Client
 	ID, Name string
 	// Roots returns only locally approved project bindings, never cloud paths.
-	Roots   func() map[string]string
-	Approve func(context.Context, desktopbridge.Job, string) bool
-	Deps    func() core.Deps
-	Report  func(string)
+	Roots func() map[string]string
+	// Approve asks the person on this computer; images are the saved
+	// attachments so the prompt can show them before anything runs.
+	Approve func(ctx context.Context, job desktopbridge.Job, root string, images []string) bool
+	// ImageDir is where browser images are saved for the agent (default:
+	// the user cache folder). Kept so the chat can show them afterwards.
+	ImageDir string
+	Deps     func() core.Deps
+	Report   func(string)
 }
 
 func (w *Worker) report(e error) {
@@ -121,7 +128,18 @@ func (w *Worker) execute(parent context.Context, j desktopbridge.Job) {
 		w.finish(parent, j, "failed", nil, errors.New("Workspace is no longer approved on this device"))
 		return
 	}
-	if j.Kind == "turn" && !w.Approve(ctx, j, root) {
+	images, discard, e := w.saveAttachments(j)
+	if e != nil {
+		w.finish(parent, j, "failed", nil, e)
+		return
+	}
+	ran := false
+	defer func() {
+		if !ran {
+			discard()
+		}
+	}()
+	if j.Kind == "turn" && !w.Approve(ctx, j, root, images) {
 		w.finish(parent, j, "failed", nil, errors.New("Request was declined or approval expired in Nexus Desktop"))
 		return
 	}
@@ -239,7 +257,8 @@ func (w *Worker) execute(parent context.Context, j desktopbridge.Job) {
 			mu.Unlock()
 		}
 	}()
-	args, _ := json.Marshal(map[string]any{"session_id": j.SessionID, "agent": j.Agent, "prompt": j.Prompt, "model": j.Model, "resume": "seeded", "context": contextText, "workspace_root": root, "trust_workspace": true, "request_id": j.ID})
+	ran = true
+	args, _ := json.Marshal(map[string]any{"session_id": j.SessionID, "agent": j.Agent, "prompt": j.Prompt, "model": j.Model, "resume": "seeded", "context": contextText, "images": images, "workspace_root": root, "trust_workspace": true, "request_id": j.ID})
 	result, e := core.Call(ctx, "continue.here", args, deps)
 	close(flushDone)
 	<-flushed
@@ -254,6 +273,103 @@ func (w *Worker) execute(parent context.Context, j desktopbridge.Job) {
 	}
 	w.finish(parent, j, "completed", result, e)
 }
+
+// saveAttachments checks a job's images again (never trusting the server's
+// validation alone) and writes them where the agent can read them. discard
+// removes them when the turn never runs.
+func (w *Worker) saveAttachments(j desktopbridge.Job) (paths []string, discard func(), err error) {
+	discard = func() {}
+	if len(j.Attachments) == 0 {
+		return nil, discard, nil
+	}
+	if j.Kind != "turn" || len(j.Attachments) > desktopbridge.MaxAttachments {
+		return nil, discard, errors.New("This request carries more images than Nexus accepts")
+	}
+	if !imageHarness(j.Agent) {
+		return nil, discard, fmt.Errorf("%s can't take images from the web yet. Choose Claude Code, Codex, or OpenCode", agentLabel(j.Agent))
+	}
+	dir := w.ImageDir
+	if dir == "" {
+		root, e := os.UserCacheDir()
+		if e != nil {
+			return nil, discard, e
+		}
+		dir = filepath.Join(root, "Nexus", "relay-images")
+	}
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		return nil, discard, e
+	}
+	pruneImages(dir, 200)
+	discard = func() {
+		for _, p := range paths {
+			_ = os.Remove(p)
+		}
+	}
+	for i, a := range j.Attachments {
+		data, e := desktopbridge.DecodeAttachment(a)
+		if e != nil {
+			discard()
+			return nil, func() {}, e
+		}
+		ext := continuex.ImageExtension(a.MediaType)
+		name := fmt.Sprintf("web-%s-%d%s", safeID(j.ID), i+1, ext)
+		path := filepath.Join(dir, name)
+		if e := os.WriteFile(path, data, 0600); e != nil {
+			discard()
+			return nil, func() {}, e
+		}
+		paths = append(paths, path)
+	}
+	return paths, discard, nil
+}
+
+func imageHarness(agent string) bool {
+	return agent == "claude" || agent == "codex" || agent == "opencode"
+}
+
+func agentLabel(agent string) string {
+	switch agent {
+	case "cursor":
+		return "Cursor"
+	case "claude":
+		return "Claude Code"
+	case "codex":
+		return "Codex"
+	case "opencode":
+		return "OpenCode"
+	}
+	return agent
+}
+
+func safeID(id string) string {
+	out := []rune{}
+	for _, r := range id {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' {
+			out = append(out, r)
+		}
+		if len(out) >= 40 {
+			break
+		}
+	}
+	return string(out)
+}
+
+// pruneImages keeps the newest files so saved images cannot grow forever.
+func pruneImages(dir string, keep int) {
+	entries, e := os.ReadDir(dir)
+	if e != nil || len(entries) < keep {
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		a, _ := entries[i].Info()
+		b, _ := entries[j].Info()
+		return a != nil && b != nil && a.ModTime().After(b.ModTime())
+	})
+	for _, entry := range entries[keep-1:] {
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
+}
+
 func (w *Worker) watch(ctx context.Context, cancel context.CancelFunc, id string, done <-chan struct{}) {
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
