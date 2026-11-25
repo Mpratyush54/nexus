@@ -13,6 +13,23 @@
     <SolidColorBrush x:Key="Faint" Color="#6E6C66"/>
     <SolidColorBrush x:Key="Hair" Color="#1FFFFFFF"/>
 
+    <!-- Focus rings appear only for keyboard focus (FocusVisualStyle), never
+         after a mouse click or when the window gives a button focus itself. -->
+    <Style x:Key="RingPrimary">
+      <Setter Property="Control.Template">
+        <Setter.Value>
+          <ControlTemplate><Border Margin="-3" CornerRadius="14" BorderBrush="#E8BB67" BorderThickness="2" SnapsToDevicePixels="True"/></ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="RingSmall">
+      <Setter Property="Control.Template">
+        <Setter.Value>
+          <ControlTemplate><Border Margin="-1" CornerRadius="7" BorderBrush="#E8BB67" BorderThickness="1.5" SnapsToDevicePixels="True"/></ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <!-- One big primary action: cream on ink, warms to gold on hover. -->
     <Style x:Key="Primary" TargetType="Button">
       <Setter Property="Foreground" Value="#0E0F0E"/>
@@ -22,13 +39,13 @@
       <Setter Property="Height" Value="46"/>
       <Setter Property="MinWidth" Value="220"/>
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource RingPrimary}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Grid>
-              <Border x:Name="Halo" CornerRadius="14" Margin="-3" BorderBrush="#E8BB67" BorderThickness="2" Opacity="0"/>
-              <Border x:Name="Face" CornerRadius="11">
+              <Border x:Name="Face" CornerRadius="11" RenderTransformOrigin="0.5,0.5">
+                <Border.RenderTransform><ScaleTransform x:Name="Press"/></Border.RenderTransform>
                 <Border.Background><SolidColorBrush Color="#F2EFE6"/></Border.Background>
                 <Border.Effect>
                   <DropShadowEffect Color="#E8BB67" BlurRadius="24" ShadowDepth="0" Opacity="0.0"/>
@@ -55,13 +72,25 @@
                   </BeginStoryboard>
                 </Trigger.ExitActions>
               </Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True">
-                <Setter TargetName="Halo" Property="Opacity" Value="1"/>
-              </Trigger>
+              <!-- Tactile press: sinks quickly, springs back on release. -->
               <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="Face" Property="RenderTransform">
-                  <Setter.Value><ScaleTransform ScaleX="0.98" ScaleY="0.98" CenterX="110" CenterY="23"/></Setter.Value>
-                </Setter>
+                <Trigger.EnterActions>
+                  <BeginStoryboard>
+                    <Storyboard>
+                      <DoubleAnimation Storyboard.TargetName="Press" Storyboard.TargetProperty="ScaleX" To="0.96" Duration="0:0:0.09"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+                      <DoubleAnimation Storyboard.TargetName="Press" Storyboard.TargetProperty="ScaleY" To="0.96" Duration="0:0:0.09"><DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+                      <DoubleAnimation Storyboard.TargetName="Face" Storyboard.TargetProperty="(Border.Effect).(DropShadowEffect.Opacity)" To="0.2" Duration="0:0:0.09"/>
+                    </Storyboard>
+                  </BeginStoryboard>
+                </Trigger.EnterActions>
+                <Trigger.ExitActions>
+                  <BeginStoryboard>
+                    <Storyboard>
+                      <DoubleAnimation Storyboard.TargetName="Press" Storyboard.TargetProperty="ScaleX" To="1" Duration="0:0:0.24"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.5"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+                      <DoubleAnimation Storyboard.TargetName="Press" Storyboard.TargetProperty="ScaleY" To="1" Duration="0:0:0.24"><DoubleAnimation.EasingFunction><BackEase EasingMode="EaseOut" Amplitude="0.5"/></DoubleAnimation.EasingFunction></DoubleAnimation>
+                    </Storyboard>
+                  </BeginStoryboard>
+                </Trigger.ExitActions>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter TargetName="Face" Property="Opacity" Value="0.4"/>
@@ -76,7 +105,7 @@
       <Setter Property="Foreground" Value="{StaticResource Muted}"/>
       <Setter Property="FontSize" Value="12.5"/>
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource RingSmall}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
@@ -85,7 +114,6 @@
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True"><Setter Property="Foreground" Value="#F2EFE6"/></Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="B" Property="BorderBrush" Value="#E8BB67"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -98,7 +126,7 @@
       <Setter Property="Foreground" Value="{StaticResource Muted}"/>
       <Setter Property="FontFamily" Value="Segoe Fluent Icons, Segoe MDL2 Assets"/>
       <Setter Property="FontSize" Value="10"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource RingSmall}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
@@ -110,7 +138,6 @@
                 <Setter TargetName="B" Property="Background" Value="#1AFFFFFF"/>
                 <Setter Property="Foreground" Value="#F2EFE6"/>
               </Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="B" Property="Background" Value="#1AFFFFFF"/></Trigger>
               <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.3"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
@@ -123,7 +150,7 @@
       <Setter Property="Foreground" Value="{StaticResource Cream}"/>
       <Setter Property="FontSize" Value="13"/>
       <Setter Property="Cursor" Value="Hand"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+      <Setter Property="FocusVisualStyle" Value="{StaticResource RingSmall}"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="CheckBox">
@@ -139,7 +166,6 @@
                 <Setter TargetName="Box" Property="BorderBrush" Value="#E8BB67"/>
                 <Setter TargetName="Tick" Property="Opacity" Value="1"/>
               </Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="Box" Property="BorderBrush" Value="#F5D79A"/></Trigger>
             </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
@@ -147,7 +173,7 @@
     </Style>
   </Window.Resources>
 
-  <Border x:Name="Frame" Background="Transparent">
+  <Border x:Name="Frame" Background="Transparent" Focusable="True" FocusVisualStyle="{x:Null}">
     <Grid x:Name="Root">
       <!-- Ambient light: warm top-left, cool bottom-right. -->
       <Rectangle x:Name="Tint" Fill="#E00E0F0E"/>
@@ -185,7 +211,7 @@
         <Grid Grid.Row="1" x:Name="Screens">
           <!-- 1 Welcome -->
           <StackPanel x:Name="Welcome" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="0,-14,0,0">
-            <Border x:Name="HeroHost" HorizontalAlignment="Center" Height="150" ClipToBounds="False"/>
+            <Border x:Name="HeroHost" HorizontalAlignment="Center" Height="150" ClipToBounds="False" RenderTransformOrigin="0.5,0.5"/>
             <TextBlock x:Name="Headline" Text="Nexus" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="34" FontWeight="SemiBold" Foreground="{StaticResource Cream}" HorizontalAlignment="Center" Margin="0,10,0,0"/>
             <TextBlock x:Name="Tagline" Text="Shared memory for your AI agents" FontSize="15.5" Foreground="{StaticResource Muted}" HorizontalAlignment="Center" Margin="0,4,0,0"/>
             <Border x:Name="ExistingPill" Visibility="Collapsed" HorizontalAlignment="Center" Margin="0,14,0,0" Padding="14,6,14,7" CornerRadius="14" Background="#12F2EFE6" BorderBrush="#33E8BB67" BorderThickness="1">
@@ -231,7 +257,7 @@
                 <TextBlock x:Name="StatusA" FontSize="15" Foreground="{StaticResource Cream}" HorizontalAlignment="Center"/>
                 <TextBlock x:Name="StatusB" FontSize="15" Foreground="{StaticResource Cream}" HorizontalAlignment="Center" Opacity="0"/>
               </Grid>
-              <TextBlock x:Name="Percent" FontSize="11.5" Foreground="{StaticResource Faint}" HorizontalAlignment="Center" Margin="0,6,0,0" Typography.NumeralAlignment="Tabular"/>
+              <TextBlock x:Name="Percent" Text="0%" FontSize="11.5" Foreground="{StaticResource Faint}" HorizontalAlignment="Center" Margin="0,6,0,0" Typography.NumeralAlignment="Tabular"/>
             </StackPanel>
           </Grid>
 
@@ -284,6 +310,9 @@
           <Button x:Name="SourceLink" Style="{StaticResource Link}" FontSize="11" Content="Source &amp; license"/>
         </StackPanel>
       </Grid>
+
+      <!-- Shared-element layer: the welcome mark travels here into the graph. -->
+      <Canvas x:Name="MorphLayer" IsHitTestVisible="False"/>
     </Grid>
   </Border>
 </Window>

@@ -70,7 +70,10 @@ public partial class MainWindow : Window
     private readonly HeroMark _hero = new();
     private readonly MemoryGraph _graph = new();
     private string _root;
-    private bool _busy, _optionsOpen, _privacyOpen, _wasRunning, _opened, _demoWroteFiles;
+    private bool _busy, _optionsOpen, _privacyOpen, _wasRunning, _opened, _demoWroteFiles, _graphLive, _mouseClick;
+    private FrameworkElement _current = null!;
+    private int _swap, _sheet;
+    private TaskCompletionSource<bool>? _graphReady;
     private double _target, _shown;
     private string _status = "";
     private InstallEngine? _engine;
@@ -89,6 +92,10 @@ public partial class MainWindow : Window
             : Versions.Compare(_bundled, _existing.Version) switch { 0 => Plan.Current, < 0 => Plan.Newer, _ => Plan.Update };
         _root = _existing?.Root ?? InstallEngine.DefaultRoot;
         InitializeComponent();
+        _current = Welcome;
+        // Hidden from the very first frame: the entrance fades it in, so the
+        // finished layout never flashes before the animation starts.
+        if (Anim.Enabled) ContentGrid.Opacity = 0;
         WindowStyle = WindowStyle.SingleBorderWindow;
         TitleMark.Source = Brand.Mark;
         HeroHost.Child = _hero;
@@ -98,8 +105,13 @@ public partial class MainWindow : Window
         if (_existing is not null) DescribeExisting(_existing);
 
         InstallButton.IsDefault = true;
+        // A mouse press already sinks the button; Enter (or a screen reader)
+        // gets the same tap, so every way of pressing Install feels the same.
+        InstallButton.PreviewMouseLeftButtonUp += (_, _) => _mouseClick = true;
         InstallButton.Click += async (_, _) =>
         {
+            if (!_mouseClick && InstallButton.Template.FindName("Press", InstallButton) is ScaleTransform press) Anim.Tap(press);
+            _mouseClick = false;
             if (_plan is Plan.Current or Plan.Newer) await OpenInstalledAsync();
             else await InstallAsync();
         };
@@ -125,7 +137,9 @@ public partial class MainWindow : Window
             if (e.OriginalSource is DependencyObject d && FindButton(d) is null && e.ButtonState == MouseButtonState.Pressed) DragMove();
         };
         SourceInitialized += (_, _) => ApplyChrome();
-        Loaded += (_, _) => Entrance();
+        // ContentRendered, not Loaded: the first frame is on screen (and the
+        // backdrop is up) before anything moves, so no frames are skipped.
+        ContentRendered += (_, _) => Entrance();
         CompositionTargetTick();
     }
 
@@ -206,30 +220,51 @@ public partial class MainWindow : Window
     private void Entrance()
     {
         var (scale, _) = Anim.Rig(Content);
-        Content.Opacity = Anim.Enabled ? 0 : 1;
-        Anim.To(Content, OpacityProperty, 1, 380, 40, Anim.Out, 0);
-        Anim.To(scale, ScaleTransform.ScaleXProperty, 1, 520, 40, Anim.Out, 0.965);
-        Anim.To(scale, ScaleTransform.ScaleYProperty, 1, 520, 40, Anim.Out, 0.965);
+        Anim.To(Content, OpacityProperty, 1, Anim.Enter, 0, Anim.Out, 0);
+        Anim.To(scale, ScaleTransform.ScaleXProperty, 1, Anim.Enter + 60, 0, Anim.Out, 0.975);
+        Anim.To(scale, ScaleTransform.ScaleYProperty, 1, Anim.Enter + 60, 0, Anim.Out, 0.975);
         _hero.Play();
-        Anim.Rise(Headline, 260, 10, 520);
-        Anim.Rise(Tagline, 340, 10, 520);
-        if (ExistingPill.Visibility == Visibility.Visible) Anim.Rise(ExistingPill, 400, 10, 520);
-        Anim.Rise(InstallButton, 440, 12, 560);
-        Anim.Rise(SecondaryRow, 520, 8, 520);
-        Anim.Rise(FinePrint, 600, 6, 520);
+        // One cascade, top to bottom, on the same curve and length.
+        var d = 200;
+        Anim.Rise(Headline, d, 8, Anim.Enter);
+        Anim.Rise(Tagline, d += Anim.Stagger, 8, Anim.Enter);
+        if (ExistingPill.Visibility == Visibility.Visible) Anim.Rise(ExistingPill, d += Anim.Stagger, 8, Anim.Enter);
+        Anim.Rise(InstallButton, d += Anim.Stagger, 8, Anim.Enter);
+        Anim.Rise(SecondaryRow, d += Anim.Stagger, 8, Anim.Enter);
+        Anim.Rise(FinePrint, d + Anim.Stagger, 6, Anim.Enter);
         InstallButton.Focus();
     }
 
     // ---- welcome options
 
+    // In sequence, never overlapping: what leaves fades out (the hero shrinks
+    // with its space, so it never draws over the headline) before what
+    // arrives fades in.
     private void ToggleOptions()
     {
         _optionsOpen = !_optionsOpen;
-        Anim.To(OptionsPanel, MaxHeightProperty, _optionsOpen ? 180 : 0, 380, 0, Anim.Out);
-        Anim.To(OptionsPanel, OpacityProperty, _optionsOpen ? 1 : 0, 300, _optionsOpen ? 80 : 0, Anim.Out);
-        Anim.To(HeroHost, HeightProperty, _optionsOpen ? 0 : 150, 380, 0, Anim.Out);
-        Anim.To(HeroHost, OpacityProperty, _optionsOpen ? 0 : 1, 240, 0, Anim.Out);
-        Anim.To(ChevronTurn, System.Windows.Media.RotateTransform.AngleProperty, _optionsOpen ? 180 : 0, 300, 0, Anim.Out);
+        if (HeroHost.RenderTransform is not ScaleTransform heroScale)
+            HeroHost.RenderTransform = heroScale = new ScaleTransform(1, 1);
+        const int fade = Anim.Exit, resize = Anim.Enter;
+        if (_optionsOpen)
+        {
+            Anim.To(HeroHost, OpacityProperty, 0, fade - 60, 0, Anim.Out);
+            Anim.To(heroScale, ScaleTransform.ScaleXProperty, 0.85, fade, 0, Anim.Out);
+            Anim.To(heroScale, ScaleTransform.ScaleYProperty, 0.85, fade, 0, Anim.Out);
+            Anim.To(HeroHost, HeightProperty, 0, resize, 60, Anim.Out);
+            Anim.To(OptionsPanel, MaxHeightProperty, 180, resize, 60, Anim.Out);
+            Anim.To(OptionsPanel, OpacityProperty, 1, Anim.Enter, fade, Anim.Out);
+        }
+        else
+        {
+            Anim.To(OptionsPanel, OpacityProperty, 0, fade - 60, 0, Anim.Out);
+            Anim.To(OptionsPanel, MaxHeightProperty, 0, resize, 60, Anim.Out);
+            Anim.To(HeroHost, HeightProperty, 150, resize, 60, Anim.Out);
+            Anim.To(HeroHost, OpacityProperty, 1, Anim.Enter, fade, Anim.Out);
+            Anim.To(heroScale, ScaleTransform.ScaleXProperty, 1, Anim.Enter, fade, Anim.Out);
+            Anim.To(heroScale, ScaleTransform.ScaleYProperty, 1, Anim.Enter, fade, Anim.Out);
+        }
+        Anim.To(ChevronTurn, System.Windows.Media.RotateTransform.AngleProperty, _optionsOpen ? 180 : 0, Anim.Enter, 0, Anim.Out);
     }
 
     // The sheet is solid and the welcome screen steps out (and is disabled) while
@@ -238,19 +273,30 @@ public partial class MainWindow : Window
     {
         if (open == _privacyOpen) return;
         _privacyOpen = open;
+        var token = ++_sheet;
         Welcome.IsEnabled = !open;
         if (open)
         {
             PrivacyLayer.Visibility = Visibility.Visible;
-            Anim.To(Welcome, OpacityProperty, 0, 180, 0, Anim.Out);
-            Anim.Rise(PrivacySheet, 60, 16, 360);
-            PrivacyClose.Focus();
+            PrivacySheet.Opacity = 0;
+            ParkFocus(Welcome);
+            Anim.Leave(Welcome, () =>
+            {
+                if (token != _sheet) return;
+                Anim.Arrive(PrivacySheet, 0, 12);
+                PrivacyClose.Focus();
+            });
         }
         else
         {
-            PrivacyLayer.Visibility = Visibility.Collapsed;
-            Anim.To(Welcome, OpacityProperty, 1, 260, 0, Anim.Out);
-            PrivacyLink.Focus();
+            ParkFocus(PrivacySheet);
+            Anim.Leave(PrivacySheet, () =>
+            {
+                if (token != _sheet) return;
+                PrivacyLayer.Visibility = Visibility.Collapsed;
+                if (_current == Welcome) Anim.Arrive(Welcome, 0, 6);
+                PrivacyLink.Focus();
+            });
         }
     }
 
@@ -278,10 +324,18 @@ public partial class MainWindow : Window
         Anim.To(CloseButton, OpacityProperty, 0, 200, 0, Anim.Out);
         _target = _shown = 0;
         _demoWroteFiles = false;
-        Show(Installing);
+        _graphLive = false;
+        _graph.Reset();
+        Percent.Text = "0%";
+        _graphReady = new TaskCompletionSource<bool>();
+        if (_current == Welcome && CanMorph()) MorphToInstalling();
+        else Show(Installing, s => Anim.Arrive(s, 0, 8, GraphLive));
         SetStatus("Preparing…");
         try
         {
+            // The work starts once the graph is on screen (at most a moment),
+            // so the first status lines are read, not flashed past.
+            await Task.WhenAny(_graphReady.Task, Task.Delay(1500));
             var progress = new Progress<Progress>(p => { _target = p.Percent; SetStatus(p.Status); });
             // The fork: a demo takes only the scripted path below and never
             // reaches RunLiveAsync, which is the only way to the quit/Setup code.
@@ -367,7 +421,8 @@ public partial class MainWindow : Window
     {
         CompositionTarget.Rendering += (_, _) =>
         {
-            if (_shown >= _target) return;
+            // Nodes start forming only once the graph is fully on screen.
+            if (!_graphLive || _shown >= _target) return;
             _shown = Math.Min(_target, _shown + Math.Max(0.25, (_target - _shown) * 0.06));
             _graph.SetProgress(_shown);
             Percent.Text = $"{Math.Floor(_shown)}%";
@@ -378,21 +433,53 @@ public partial class MainWindow : Window
     {
         if (text == _status || text.Length == 0) return;
         _status = text;
-        // Crossfade between two lines.
+        // Two lines, in sequence: the old one lifts away before the new one
+        // rises, so two statuses are never on screen at once.
         var (inc, outg) = StatusA.Opacity > 0.5 ? (StatusB, StatusA) : (StatusA, StatusB);
         inc.Text = text;
-        Anim.To(outg, OpacityProperty, 0, 220, 0, Anim.Out);
-        Anim.Rise(inc, 60, 8, 360);
+        const int gone = 140;
+        var wait = outg.Opacity > 0 ? gone : 0;
+        var (_, lift) = Anim.Rig(outg);
+        Anim.To(lift, TranslateTransform.YProperty, -6, gone, 0, Anim.Out);
+        Anim.To(outg, OpacityProperty, 0, gone, 0, Anim.Out);
+        Anim.Rise(inc, wait, 6, Anim.Enter - 60);
     }
 
     // ---- done / failed
 
+    // The graph is the shared element: the status lines step out, the graph
+    // glides to its place on the Done screen and blooms, then the text rises.
     private void ShowDone()
     {
-        GraphHost.Child = null;
-        DoneGraphHost.Child = _graph;
-        Show(Done);
-        _graph.Bloom();
+        var token = ++_swap;
+        _current = Done;
+        foreach (var e in new UIElement[] { StatusA, StatusB, Percent }) Anim.Leave(e, null, 0, 1, -4);
+        void Land()
+        {
+            if (token != _swap) return;
+            var before = _graph.TranslatePoint(new Point(), MorphLayer);
+            GraphHost.Child = null;
+            DoneGraphHost.Child = _graph;
+            foreach (var e in new UIElement[] { DoneTitle, DoneSub, OpenButton }) e.Opacity = 0;
+            Done.BeginAnimation(OpacityProperty, null);
+            Done.RenderTransform = null;
+            Done.Opacity = 1;
+            Done.IsHitTestVisible = true;
+            Done.Visibility = Visibility.Visible;
+            Installing.Visibility = Visibility.Collapsed;
+            UpdateLayout();
+            var after = _graph.TranslatePoint(new Point(), MorphLayer);
+            var (_, move) = Anim.Rig(_graph);
+            Anim.To(move, TranslateTransform.XProperty, 0, Anim.Travel, 0, Anim.Move, before.X - after.X);
+            Anim.To(move, TranslateTransform.YProperty, 0, Anim.Travel, 0, Anim.Move, before.Y - after.Y);
+            _graph.Bloom();
+            ShowDoneText();
+        }
+        if (Anim.Enabled) Delay(Anim.Exit, Land); else Land();
+    }
+
+    private void ShowDoneText()
+    {
         DoneTitle.Text = _plan switch
         {
             Plan.Update => "Nexus is updated",
@@ -400,9 +487,9 @@ public partial class MainWindow : Window
             Plan.Newer => _bundled.Length > 0 ? $"Nexus {_bundled} is installed" : "Nexus is installed",
             _ => "You're all set"
         };
-        Anim.Rise(DoneTitle, 260, 10, 520);
-        Anim.Rise(DoneSub, 340, 8, 520);
-        Anim.Rise(OpenButton, 420, 10, 520);
+        Anim.Rise(DoneTitle, 160, 8, Anim.Enter);
+        Anim.Rise(DoneSub, 160 + Anim.Stagger, 8, Anim.Enter);
+        Anim.Rise(OpenButton, 160 + 2 * Anim.Stagger, 8, Anim.Enter);
         OpenButton.Focus();
         var left = 2;
         DoneSub.Text = $"{(_wasRunning ? "Restarting" : "Opening")} Nexus in {left}…";
@@ -436,8 +523,7 @@ public partial class MainWindow : Window
                 + (_wasRunning ? " Nexus was closed first; you can open it again from Start." : "");
         FailedDetail.Text = ex.Message;
         LogButton.Visibility = ex is InstallFailedException f && f.LogPath.Length > 0 && File.Exists(f.LogPath) ? Visibility.Visible : Visibility.Collapsed;
-        Show(Failed);
-        RetryButton.Focus();
+        Show(Failed, s => { Anim.Arrive(s); RetryButton.Focus(); });
     }
 
     private async void OpenNexus()
@@ -480,20 +566,125 @@ public partial class MainWindow : Window
 
     // ---- screens
 
-    private void Show(FrameworkElement screen)
+    /// <summary>
+    /// Sequential swap: the current screen steps out completely, then the next
+    /// one comes in, so two screens are never visible together. A newer swap
+    /// supersedes one still in flight.
+    /// </summary>
+    private void Show(FrameworkElement screen, Action<FrameworkElement>? enter = null)
     {
-        foreach (var s in new FrameworkElement[] { Welcome, Installing, Done, Failed })
+        var token = ++_swap;
+        var leaving = _current;
+        _current = screen;
+        ClosePrivacyNow();
+        if (screen != Welcome) HideFinePrint(token, 0);
+        void In()
         {
-            if (s == screen || s.Visibility != Visibility.Visible) continue;
-            var leaving = s;
-            Anim.To(leaving, OpacityProperty, 0, 240, 0, Anim.Out, null, () => leaving.Visibility = Visibility.Collapsed);
+            if (token != _swap) return;
+            foreach (var s in new FrameworkElement[] { Welcome, Installing, Done, Failed })
+                if (s != screen) s.Visibility = Visibility.Collapsed;
+            screen.Visibility = Visibility.Visible;
+            screen.Opacity = 0;
+            if (enter is not null) enter(screen); else Anim.Arrive(screen);
         }
-        PrivacyLayer.Visibility = Visibility.Collapsed;
+        if (leaving == screen || leaving.Visibility != Visibility.Visible || leaving.Opacity <= 0) { In(); return; }
+        ParkFocus(leaving);
+        Anim.Leave(leaving, In);
+    }
+
+    private void HideFinePrint(int token, int delay)
+    {
+        if (FinePrint.Visibility != Visibility.Visible) return;
+        Anim.Leave(FinePrint, () => { if (token == _swap) FinePrint.Visibility = Visibility.Hidden; }, delay, 1, 0);
+    }
+
+    private void ClosePrivacyNow()
+    {
+        if (!_privacyOpen) return;
         _privacyOpen = false;
+        ++_sheet;
+        PrivacyLayer.Visibility = Visibility.Collapsed;
         Welcome.IsEnabled = true;
-        screen.Visibility = Visibility.Visible;
-        Anim.Rise(screen, 140, 18, 520);
-        FinePrint.Visibility = screen == Welcome ? Visibility.Visible : Visibility.Hidden;
+    }
+
+    // ---- the shared-element morph: the welcome mark becomes the graph's centre
+
+    private bool CanMorph() =>
+        Anim.Enabled && !_optionsOpen && !_privacyOpen && Welcome.IsVisible && HeroHost.ActualHeight > 100;
+
+    private void MorphToInstalling()
+    {
+        var token = ++_swap;
+        _current = Installing;
+        ParkFocus(Welcome);
+
+        // Where the mark is now, and where it will be once Installing is laid out.
+        var hero = _hero.Mark;
+        var from = hero.TranslatePoint(new Point(hero.ActualWidth / 2, hero.ActualHeight / 2), MorphLayer);
+        var fromSize = hero.ActualWidth * _hero.MarkScale;
+        Installing.BeginAnimation(OpacityProperty, null);
+        Installing.RenderTransform = null;
+        Installing.Opacity = 0;
+        Installing.IsHitTestVisible = true;
+        Installing.Visibility = Visibility.Visible;
+        UpdateLayout();
+        var mark = _graph.Mark;
+        var to = mark.TranslatePoint(new Point(mark.ActualWidth / 2, mark.ActualHeight / 2), MorphLayer);
+        var toSize = mark.ActualWidth;
+
+        // The travelling copy; both real marks stay hidden until it lands.
+        var ghost = new Image { Source = Brand.Mark, Width = fromSize, Height = fromSize };
+        RenderOptions.SetBitmapScalingMode(ghost, BitmapScalingMode.HighQuality);
+        Canvas.SetLeft(ghost, from.X - fromSize / 2);
+        Canvas.SetTop(ghost, from.Y - fromSize / 2);
+        var (scale, move) = Anim.Rig(ghost);
+        MorphLayer.Children.Add(ghost);
+        hero.Opacity = 0;
+        mark.Opacity = 0;
+
+        // 1. Welcome steps out around the mark (the ghost stands in for it).
+        Anim.Leave(Welcome, () =>
+        {
+            if (token != _swap) return;
+            Welcome.Visibility = Visibility.Collapsed;
+            // 2. Then Installing fades in around the arriving mark.
+            Anim.To(Installing, OpacityProperty, 1, Anim.Enter, 0, Anim.Out, 0);
+        }, 40);
+        HideFinePrint(token, 40);
+        // 3. Meanwhile the mark glides and settles into the centre of the graph.
+        var k = toSize / fromSize;
+        Anim.To(move, TranslateTransform.XProperty, to.X - from.X, Anim.Travel, 40, Anim.Move);
+        Anim.To(move, TranslateTransform.YProperty, to.Y - from.Y, Anim.Travel, 40, Anim.Move);
+        Anim.To(scale, ScaleTransform.ScaleXProperty, k, Anim.Travel, 40, Anim.Move);
+        Anim.To(scale, ScaleTransform.ScaleYProperty, k, Anim.Travel, 40, Anim.Move, null, () =>
+        {
+            MorphLayer.Children.Remove(ghost);
+            GraphLive();
+        });
+    }
+
+    private void GraphLive()
+    {
+        _graph.Mark.Opacity = 1;
+        _graph.Breathe();
+        _graphLive = true;
+        _graphReady?.TrySetResult(true);
+    }
+
+    /// <summary>
+    /// Keyboard focus leaves a screen before it fades: the focus ring lives in
+    /// the adorner layer and would otherwise linger at full strength.
+    /// </summary>
+    private void ParkFocus(UIElement leaving)
+    {
+        if (leaving.IsKeyboardFocusWithin) Keyboard.Focus(Frame);
+    }
+
+    private static void Delay(int ms, Action then)
+    {
+        var t = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(ms) };
+        t.Tick += (_, _) => { t.Stop(); then(); };
+        t.Start();
     }
 
     private async Task CloseAsync()
