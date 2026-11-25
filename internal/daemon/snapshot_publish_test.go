@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -233,5 +234,59 @@ func TestUploadSizeCap(t *testing.T) {
 	}
 	if !v.due(time.Now(), "other", st.Size()-1) {
 		t.Fatal("a smaller transcript should be uploaded again")
+	}
+}
+
+// A transcript over the raw limit is never read or compressed, now or
+// while it keeps growing, and capture status lists it.
+func TestRawTranscriptCapSkipsBeforeReading(t *testing.T) {
+	if MaxRawTranscriptBytes != 32<<20 {
+		t.Fatalf("MaxRawTranscriptBytes = %d, want 32 MiB", MaxRawTranscriptBytes)
+	}
+	cloud := &publishCloud{}
+	r, proj := publishRuntime(t, cloud)
+	const sid = "0b9f2b7e-3c41-4d0a-8f6e-5a7d9c1e2f60"
+	path := filepath.Join(proj, sid+".jsonl")
+	writeHugeJSONL(t, path, MaxRawTranscriptBytes+(1<<20), claudeUserLine(1, "huge live chat"))
+	before := snapStats.collected.Load()
+	for i := 0; i < 3; i++ {
+		writeLines(t, path, claudeUserLine(2+i, "still growing"))
+		r.noteSessionTurns(sid, "claude", 1)
+		r.maybePushSnapshot(t.Context(), sid, i == 0)
+	}
+	if got := snapStats.collected.Load() - before; got != 0 {
+		t.Fatalf("over-limit transcript read %d times, want never", got)
+	}
+	if blobs, legacy := cloud.counts(); blobs != 0 || legacy != 0 {
+		t.Fatalf("uploads: %d version, %d legacy", blobs, legacy)
+	}
+	listed := false
+	for _, s := range SkippedTranscripts() {
+		if strings.Contains(s.Path, sid) && s.Reason == "too large to back up right now" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatal("not listed in capture status")
+	}
+}
+
+func TestMemLogLines(t *testing.T) {
+	var buf strings.Builder
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+	logMemLine("mem")
+	old := freeOSMemoryAbove
+	freeOSMemoryAbove = 0
+	defer func() { freeOSMemoryAbove = old }()
+	snapStats.collected.Store(2)
+	snapStats.bytesRead.Store(3 << 20)
+	endSnapshotCycle(time.Now(), 5)
+	out := buf.String()
+	for _, want := range []string{"mem: heap_alloc=", "heap_inuse=", "heap_sys=", "heap_released=", "next_gc=", "num_gc=", "goroutines=", "snapshot_queue=",
+		"snapshot cycle: sessions=5 collected=2 read=3.0MiB took="} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log lacks %q:\n%s", want, out)
+		}
 	}
 }

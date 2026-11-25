@@ -22,54 +22,65 @@ const maxUntrackedFileBytes = 100 * 1024
 
 // CollectSnapshot builds a SessionSnapshot for a conversation across harnesses.
 func CollectSnapshot(root, conversationID, harness, machineID string) (*store.SessionSnapshot, error) {
-	harness = normalizeHarness(harness)
-	layout, err := ResolveSnapshotLayout(harness, conversationID, root)
+	snap, layout, err := collectSnapshotTranscript(root, conversationID, harness, machineID)
 	if err != nil {
 		return nil, err
 	}
-	if layout.TranscriptFile == "" && layout.ArtifactDir == "" {
-		return nil, fmt.Errorf("snapshot: harness %q has no layout for %s", harness, conversationID)
+	if err := addSnapshotExtras(snap, layout, root); err != nil {
+		return nil, err
 	}
+	return snap, nil
+}
 
+// collectSnapshotTranscript packs only the transcript: all a session
+// version uploads. The artifacts bundle and git diff are only for the
+// legacy snapshot (addSnapshotExtras), and packing them every cycle for a
+// chat with many sub-agent runs cost far more than the transcript.
+func collectSnapshotTranscript(root, conversationID, harness, machineID string) (*store.SessionSnapshot, SnapshotLayout, error) {
+	harness = normalizeHarness(harness)
+	layout, err := ResolveSnapshotLayout(harness, conversationID, root)
+	if err != nil {
+		return nil, layout, err
+	}
+	if layout.TranscriptFile == "" && layout.ArtifactDir == "" {
+		return nil, layout, fmt.Errorf("snapshot: harness %q has no layout for %s", harness, conversationID)
+	}
 	// Streamed line by line: a live chat's transcript can be tens of
 	// megabytes and is re-packed every few minutes (snapshot_stream.go).
 	src, err := openSnapshotTranscript(layout, root)
 	if err != nil {
-		return nil, fmt.Errorf("snapshot: read transcript: %w", err)
+		return nil, layout, fmt.Errorf("snapshot: read transcript: %w", err)
 	}
 	gzTranscript, turnCount, err := gzipSnapshotTranscript(src)
 	_ = src.Close()
 	if err != nil {
-		return nil, fmt.Errorf("snapshot: read transcript: %w", err)
+		return nil, layout, fmt.Errorf("snapshot: read transcript: %w", err)
 	}
+	return &store.SessionSnapshot{
+		Harness:           harness,
+		ConversationID:    conversationID,
+		TurnCount:         turnCount,
+		TranscriptPayload: gzTranscript,
+		SourceMachineID:   machineID,
+	}, layout, nil
+}
 
+// addSnapshotExtras adds the artifacts bundle and the git state and diff.
+func addSnapshotExtras(snap *store.SessionSnapshot, layout SnapshotLayout, root string) error {
 	artifacts, err := tarGzipArtifacts(layout)
 	if err != nil {
 		log.Printf("daemon: snapshot artifacts: %v", err)
 		artifacts = nil
 	}
-
 	branch, commit, dirty, _, _ := GitStatusCached(root)
 	diff, err := snapshotDiff(root)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	gzDiff, diffSize, diffTrunc := diff.gz, diff.size, diff.trunc
-
-	return &store.SessionSnapshot{
-		Harness:           harness,
-		ConversationID:    conversationID,
-		TurnCount:         turnCount,
-		GitBranch:         branch,
-		GitCommit:         commit,
-		GitDirty:          dirty,
-		UncommittedDiff:   gzDiff,
-		DiffSizeBytes:     diffSize,
-		DiffTruncated:     diffTrunc,
-		TranscriptPayload: gzTranscript,
-		ArtifactsBundle:   artifacts,
-		SourceMachineID:   machineID,
-	}, nil
+	snap.ArtifactsBundle = artifacts
+	snap.GitBranch, snap.GitCommit, snap.GitDirty = branch, commit, dirty
+	snap.UncommittedDiff, snap.DiffSizeBytes, snap.DiffTruncated = diff.gz, diff.size, diff.trunc
+	return nil
 }
 
 // snapshotTranscriptStamp identifies the transcript a snapshot of

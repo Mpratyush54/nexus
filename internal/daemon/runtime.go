@@ -361,6 +361,7 @@ func (r *Runtime) Start(ctx context.Context) {
 
 	// Snapshots (collect, gzip, upload) run on their own worker, so a slow
 	// or failing upload never stalls the capture loop.
+	startMemLog()
 	snapCh := make(chan string, 256)
 	r.snapQueueMu.Lock()
 	r.snapQueue = snapCh
@@ -686,7 +687,24 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	if unchanged || tooSoon || !collectDue || (!versionDue && !legacyDue) {
 		return
 	}
-	snap, err := CollectSnapshot(r.Daemon.Root, sessionID, harness, r.Daemon.MachineID)
+	// A transcript over MaxRawTranscriptBytes is never read: not uploadable
+	// anyway, and reading, scanning and compressing it every cycle was most
+	// of the core's memory and CPU in real use. Marked like the gzip cap,
+	// so it is not looked at again until it is smaller than now.
+	if size > MaxRawTranscriptBytes {
+		r.snapshotMu.Lock()
+		versionT.markTooLarge(size, stamp)
+		legacyT.markTooLarge(size, stamp)
+		r.snapshotMu.Unlock()
+		if noteSkipped(harness, "session "+sessionID, size, "too large to back up right now") {
+			log.Printf("daemon: session=%s not backed up: %d MB transcript is over the %d MB limit (until it shrinks)",
+				sessionID, size>>20, MaxRawTranscriptBytes>>20)
+		}
+		return
+	}
+	snapStats.collected.Add(1)
+	snapStats.bytesRead.Add(size)
+	snap, layout, err := collectSnapshotTranscript(r.Daemon.Root, sessionID, harness, r.Daemon.MachineID)
 	if errors.Is(err, errSubagentTranscriptGone) {
 		return // the run's transcript was removed with its parent chat
 	}
@@ -696,7 +714,7 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 			if altStamp, _ := snapshotTranscriptStamp(r.Daemon.Root, sessionID, alt); altStamp != "" {
 				stamp = altStamp
 			}
-			snap, err = CollectSnapshot(r.Daemon.Root, sessionID, alt, r.Daemon.MachineID)
+			snap, layout, err = collectSnapshotTranscript(r.Daemon.Root, sessionID, alt, r.Daemon.MachineID)
 			harness = alt
 		}
 	}
@@ -751,7 +769,12 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 		}
 	}
 	if !published && legacyDue {
-		err := hs.PushSnapshot(ctx, snap)
+		// The legacy snapshot also carries artifacts and the git diff; they
+		// are packed only now that it is actually being sent.
+		err := addSnapshotExtras(snap, layout, r.Daemon.Root)
+		if err == nil {
+			err = hs.PushSnapshot(ctx, snap)
+		}
 		r.snapshotMu.Lock()
 		if err == nil {
 			legacyT.succeed()

@@ -80,6 +80,10 @@ func (t *publishTrack) fail(now time.Time, err error, stamp string, size int64) 
 	return permanent || tooLarge
 }
 
+// MaxRawTranscriptBytes: a transcript file larger than this is not read
+// for a snapshot at all (the server's assembled-file limit is the same).
+const MaxRawTranscriptBytes = 32 << 20
+
 // MaxUploadGzipBytes caps one session upload (the gzip transcript): the
 // server assembles a blob in memory and stores it as one row.
 const MaxUploadGzipBytes = 8 << 20
@@ -208,6 +212,7 @@ func (r *Runtime) queueSnapshot(sid string, force bool) {
 	}
 	select {
 	case ch <- sid:
+		snapStats.queued.Add(1)
 	default:
 		// Full: the periodic pass will ask again.
 		r.snapQueueMu.Lock()
@@ -217,17 +222,31 @@ func (r *Runtime) queueSnapshot(sid string, force bool) {
 }
 
 // snapshotWorker publishes queued sessions one at a time until ctx ends.
+// A cycle is a run of queued work: it is logged when it starts and when the
+// queue is empty again (sessions, transcripts read, bytes, time).
 func (r *Runtime) snapshotWorker(ctx context.Context, ch <-chan string) {
+	var started time.Time
+	sessions := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case sid := <-ch:
+			snapStats.queued.Add(-1)
+			if sessions == 0 {
+				started = time.Now()
+				log.Printf("snapshot cycle start: queued=%d", len(ch)+1)
+			}
+			sessions++
 			r.snapQueueMu.Lock()
 			force := r.snapQueued[sid]
 			delete(r.snapQueued, sid)
 			r.snapQueueMu.Unlock()
 			r.maybePushSnapshot(ctx, sid, force)
+			if len(ch) == 0 {
+				endSnapshotCycle(started, sessions)
+				sessions = 0
+			}
 		}
 	}
 }
