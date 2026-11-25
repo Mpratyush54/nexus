@@ -51,7 +51,7 @@ public sealed partial class MainWindow : Window
     private string _chatInFlightKey = "";
     private bool _chatRefreshing;
     private CancellationTokenSource? _chatFetchCts;
-    private sealed record ChatPaneEntry(string Id, string Title, string Agent, string Summary, string When, bool Forked, string ParentId, string ProjectId = "", string Match = "", long TurnCount = -1);
+    private sealed record ChatPaneEntry(string Id, string Title, string Agent, string Summary, string When, bool Forked, string ParentId, string ProjectId = "", string Match = "", long TurnCount = -1, bool Pinned = false, bool Archived = false);
 
     public new static MainWindow? Current { get; private set; }
 
@@ -129,6 +129,7 @@ public sealed partial class MainWindow : Window
         ContentFrame.Loaded += OnContentFrameLoaded;
         App.Core.Subscribe(DispatcherQueue, OnCoreEvent);
         InitAgentSessions();
+        InitShell();
         _ = App.Core.CallAsync(NxMethods.EventsSubscribe);
         EnsureLoginStartDefault();
         // Names for any control built without one (icon buttons, rows with
@@ -748,7 +749,11 @@ public sealed partial class MainWindow : Window
 
     private async void MoreChatsButton_Click(object sender, RoutedEventArgs e) => await LoadMoreChatsAsync();
 
-    public void RefreshChats() => _ = LoadChatsAsync(force: true);
+    public void RefreshChats()
+    {
+        _ = LoadChatsAsync(force: true);
+        _ = LoadChatStatesAsync();
+    }
 
     /// Readable title the sidebar computed for a chat ("" when not listed).
     public string ChatTitleFor(string sessionId) =>
@@ -1150,7 +1155,8 @@ public sealed partial class MainWindow : Window
                 NxJson.Text(item, "last_active_at", "updated_at", "captured_at"),
                 SessionLineage.IsForkSession(item), NxJson.Text(item, "parent_session_id", "parentSessionId"),
                 NxJson.Text(item, "project_id", "projectId"), match,
-                long.TryParse(NxJson.Text(item, "turn_count"), out var turns) ? turns : -1));
+                long.TryParse(NxJson.Text(item, "turn_count"), out var turns) ? turns : -1,
+                NxJson.Text(item, "pinned") == "true", NxJson.Text(item, "archived") == "true"));
         }
     }
 
@@ -1174,14 +1180,13 @@ public sealed partial class MainWindow : Window
         if (_chatRefreshing && _chatEntries.Count > 0)
             items.Add(new ChatListNotice("Updating…"));
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var entry in _chatEntries)
-        {
-            if (PassesTagFilter(entry) && seen.Add(entry.Id)) items.Add(entry);
-        }
-        if (_chatStatus.Length > 0)
+        ComposeChatItems(items, seen);
+        if (_archivedView) { }
+        else if (_chatStatus.Length > 0)
             items.Add(new ChatListNotice(NxErrors.IsSignedOut(_chatStatus) ? NxErrors.SignedOutMessage : _chatStatus));
         else if (seen.Count == 0)
             items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _runningFilter ? "No agents are working right now." : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press " + Shortcuts.Label("N") + "."));
+        AddArchivedLink(items);
         _chatItems = items;
         ChatList.ItemTemplate ??= new ChatRowFactory(this);
         ChatList.ItemsSource = items;
@@ -1205,6 +1210,7 @@ public sealed partial class MainWindow : Window
 
     private UIElement ChatListElement(object? data)
     {
+        if (ShellListElement(data) is { } shellElement) return shellElement;
         if (data is not ChatPaneEntry entry)
         {
             var text = (data as ChatListNotice)?.Text ?? data?.ToString() ?? "";
@@ -1322,7 +1328,7 @@ public sealed partial class MainWindow : Window
     private void UpdateProjectFilterLabel()
     {
         // The project shows in the switcher; only the tag filter is named here.
-        var name = _runningFilter ? "Working now" : _tagFilter.Length > 0 ? "Tagged #" + _tagFilter : "";
+        var name = _archivedView ? "Archived chats" : _runningFilter ? "Working now" : _tagFilter.Length > 0 ? "Tagged #" + _tagFilter : "";
         _projectSwitcher?.Refresh();
         ProjectFilterLabel.Text = name.Length > 0 ? name : "";
         ProjectFilterLabel.Visibility = name.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -1367,6 +1373,8 @@ public sealed partial class MainWindow : Window
             top.Children.Add(time);
         }
         lines.Children.Add(top);
+        // Compact (Settings › General): two lines, the project joins the agent line.
+        if (ShellPrefs.Compact) top.Visibility = Visibility.Collapsed;
 
         // Line 2: live status (working, needs approval, new reply) and title
         var title = new TextBlock
@@ -1387,6 +1395,8 @@ public sealed partial class MainWindow : Window
         var bottom = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         bottom.Children.Add(new Microsoft.UI.Xaml.Shapes.Ellipse { Width = 6, Height = 6, Fill = AgentBrush(entry.Agent), VerticalAlignment = VerticalAlignment.Center });
         bottom.Children.Add(new TextBlock { Text = ChatTitles.AgentName(entry.Agent), FontSize = 12, Opacity = 0.45 });
+        if (ShellPrefs.Compact && projectName.Length > 0) bottom.Children.Add(new TextBlock { Text = "· " + projectName, FontSize = 12, Opacity = 0.45, MaxWidth = 120, TextTrimming = TextTrimming.CharacterEllipsis });
+        if (ShellPrefs.Compact && when.Length > 0) bottom.Children.Add(new TextBlock { Text = "· " + when, FontSize = 12, Opacity = 0.4 });
         if (entry.Forked) bottom.Children.Add(new TextBlock { Text = "· fork", FontSize = 12, Opacity = 0.4 });
         if (ChatTags.For(entry.Id) is { Count: > 0 } chatTags)
             bottom.Children.Add(new TextBlock { Text = "· " + string.Join(" ", chatTags.Select(t => "#" + t)), FontSize = 12, Opacity = 0.75, Foreground = NexusPalette.Accent, MaxWidth = 170, TextTrimming = TextTrimming.CharacterEllipsis });
@@ -1410,11 +1420,7 @@ public sealed partial class MainWindow : Window
         };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, entry.Title + (projectName.Length > 0 ? ", " + projectName : ""));
         Motion.AddPressFeedback(button);
-        var rowMenu = new MenuFlyout();
-        var editTags = new MenuFlyoutItem { Text = "Tags…", Icon = new FontIcon { Glyph = "\uE8EC" } };
-        editTags.Click += async (_, _) => await ChatTags.EditAsync(button.XamlRoot, entry.Id, entry.Title);
-        rowMenu.Items.Add(editTags);
-        button.ContextFlyout = rowMenu;
+        DecorateChatRow(button, title, entry);
         return (button, title);
     }
 
@@ -1736,6 +1742,7 @@ public sealed partial class MainWindow : Window
         if (_quitting) return;
         _quitting = true;
         DiagLog.Info("shutdown", "quit requested");
+        ShutdownShell();
         // Never block WinUI's dispatcher in native shutdown. The tray creates
         // its own hidden windows; destroying the visible AppWindow alone is
         // not a process-exit guarantee, and exceptions used to be swallowed.
@@ -1766,23 +1773,10 @@ public sealed partial class MainWindow : Window
     }
 
     /// Ctrl+K, and File > Search in the macOS menu bar.
-    public async Task ShowSearchAsync()
+    public Task ShowSearchAsync()
     {
-        var box = new TextBox { PlaceholderText = "Sessions, memories, files, projects" };
-        var dialog = new ContentDialog
-        {
-            Title = "Search",
-            Content = box,
-            PrimaryButtonText = "Search",
-            CloseButtonText = "Close",
-            XamlRoot = Content.XamlRoot,
-            DefaultButton = ContentDialogButton.Primary
-        };
-        if (await dialog.ShowThemedAsync() != ContentDialogResult.Primary)
-        {
-            return;
-        }
-        ShowPage(new SearchPage(), box.Text);
+        ShowPalette();
+        return Task.CompletedTask;
     }
 
     private void OnCoreEvent(string json)

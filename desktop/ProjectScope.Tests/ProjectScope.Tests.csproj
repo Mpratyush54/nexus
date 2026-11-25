@@ -43,5 +43,8 @@
     <Compile Include="../windows/Core/AgentAvailability.cs" Link="AgentAvailability.cs" />
     <Compile Include="../windows/Core/ChatListRetry.cs" Link="ChatListRetry.cs" />
     <Compile Include="../windows/Core/LiveSessions.cs" Link="LiveSessions.cs" />
+    <Compile Include="../windows/Core/ShortcutRegistry.cs" Link="ShortcutRegistry.cs" />
+    <Compile Include="../windows/Core/PaletteRanking.cs" Link="PaletteRanking.cs" />
+    <Compile Include="../windows/Core/ToastQueue.cs" Link="ToastQueue.cs" />
   </ItemGroup>
 </Project>

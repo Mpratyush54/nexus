@@ -50,7 +50,7 @@ lipo -info "$OUT/libnexuscore.dylib"
 # nexus:// URL events, App Translocation lookup (desktop/uno/macos/native/NexusMac.m).
 echo "--- libnexusmac.dylib (arm64 + x86_64, universal)"
 clang -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -fobjc-arc -Wall -Wextra -Wno-unused-parameter \
-  -dynamiclib -framework AppKit -framework CoreServices -framework UserNotifications \
+  -dynamiclib -framework AppKit -framework Carbon -framework CoreServices -framework UserNotifications \
   -install_name @rpath/libnexusmac.dylib -o "$OUT/libnexusmac.dylib" "$ROOT/desktop/uno/macos/native/NexusMac.m"
 lipo -info "$OUT/libnexusmac.dylib"
 nm -gU "$OUT/libnexusmac.dylib" | grep ' _nx_mac_' | sort -u

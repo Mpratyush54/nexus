@@ -138,10 +138,12 @@ type MemStore struct {
 	blobs           map[string]blobRec
 	sessionTurns    map[string][]SessionTurn
 	sessionUsage    map[string]map[string]*SessionUsage // session -> usage key (migration 048)
-	agentGrants     map[string][]agentGrant
-	storageUsage    map[string]storageRec
-	teleports       map[string]*Teleport
-	secretKeys      map[string]*secretKeyRec
+	// Per-person chat state (migration 055): user -> session -> state.
+	sessionUserStates map[string]map[string]SessionUserState
+	agentGrants       map[string][]agentGrant
+	storageUsage      map[string]storageRec
+	teleports         map[string]*Teleport
+	secretKeys        map[string]*secretKeyRec
 	// Org admin (migration 032): capture switch and link invites.
 	projectCapture map[string]bool
 	orgInvites     map[string]*OrgInvite
