@@ -284,6 +284,22 @@ public sealed class DashboardPage : NexusPage
         {
             var workspace = await ProjectFolders.ResolveAsync(Core, project, ShellProjectLabel());
             await UiThread.Resume(DispatcherQueue);
+            if (workspace.Length == 0)
+            {
+                // Ask for the folder before anything is created: the chat then
+                // opens and sends at once, and cancelling leaves only the
+                // typed text here, never an empty chat.
+                StartStatus($"Choose the folder for {ShellProjectLabel()} on this computer. Your message is sent right after.");
+                workspace = await CaptureSetup.PickFolderAsync();
+                await UiThread.Resume(DispatcherQueue);
+                if (workspace.Length == 0)
+                {
+                    StartStatus($"Choose the folder for {ShellProjectLabel()} to start the chat. What you typed is kept.");
+                    return;
+                }
+                ProjectFolders.Remember(project, workspace);
+                StartStatus("Starting chat…");
+            }
             var firstLine = prompt.Split('\n', 2)[0].Trim();
             var title = firstLine.Length > 72 ? firstLine[..69] + "…" : firstLine;
             var created = await Core.CallAsync(NxMethods.SessionsCreate, new

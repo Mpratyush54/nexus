@@ -465,7 +465,7 @@ public sealed class SetupWizardPage : NexusPage
         }
         _accountState.Text = _signedIn
             ? SignedInText + $" on {HostOf(ServerInUse)}."
-            : "Not signed in yet. Nexus still captures on this computer and uploads once you sign in.";
+            : "Not signed in yet. Sign in to keep your chats and memories in your Nexus account.";
         UpdateServerHint();
         if (_signedIn) StopAuthPoll();
         UpdateButtons();
