@@ -210,6 +210,7 @@ jobs:
           ditto -x -k dist/app/Nexus-macos-arm64-adhoc.zip dist/app
           codesign --verify --strict "dist/app/Nexus.app"
           swiftc -O -o dist/winlist scripts/macos/winlist.swift
+          swiftc -O -o dist/pointer scripts/macos/pointer.swift
 
       - name: Package version A and B (vpk + DMG)
         run: |

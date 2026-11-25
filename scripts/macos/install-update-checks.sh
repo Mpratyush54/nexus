@@ -36,6 +36,22 @@ wait_for() {
 }
 keys() { limited 10 osascript -e "tell application \"System Events\" to $1" 2>&1; }
 front() { keys "set frontmost of (first process whose unix id is $1) to true" > /dev/null; }
+# The primary button of the first-run screen: centred, 165 pt below the
+# window's middle (the layout is centred; see Platform/MacWelcome.cs).
+click_primary() { # pid
+  local b
+  b=$(./dist/winlist "$1" 2>/dev/null | tail -n +2 | awk '$6==0' | sort -k5 -n -r | head -1)
+  [ -n "$b" ] || return 1
+  set -- $b
+  ./dist/pointer click $(( $2 + $4 / 2 )) $(( $3 + $5 / 2 + 165 ))
+}
+scroll_right_pane() { # pid lines
+  local b
+  b=$(./dist/winlist "$1" 2>/dev/null | tail -n +2 | awk '$6==0' | sort -k5 -n -r | head -1)
+  [ -n "$b" ] || return 1
+  set -- $b "$2"
+  ./dist/pointer scroll $(( $2 + $4 * 3 / 4 )) $(( $3 + $5 / 2 )) "$7"
+}
 main_window() { ./dist/winlist "$1" 2>/dev/null | tail -n +2 | awk '$6==0' | sort -k5 -n -r | head -1 | cut -d' ' -f1; }
 has_window() { [ -n "$(main_window "$1")" ]; }
 shot_window() { # pid name
@@ -120,7 +136,7 @@ if wait_for 90 has_window "$PID"; then
   shot_window "$PID" 03-move-offer
   if grep -q "first-run screen: Move" logs-install/move-stdout.log; then pass "launched from the DMG: the Move to Applications offer is shown"; else fail "no Move offer logged (see move-stdout.log)"; fi
   front "$PID"; sleep 1
-  keys 'key code 49' > /dev/null   # Space: the focused "Move to Applications" button
+  click_primary "$PID"   # "Move to Applications"
   if wait_for 60 installed_running; then
     pass "Move to Applications copied Nexus to /Applications and relaunched it from there"
     if wait_for 30 bash -c "! kill -0 $PID 2>/dev/null"; then pass "the disk-image copy quit"; else fail "the disk-image copy is still running"; fi
@@ -149,7 +165,7 @@ if wait_for 60 installed_running && wait_for 60 has_window "$(installed_pid)"; t
   if echo "$LOGS" | grep -q "first-run screen: Welcome"; then pass "first launch from /Applications shows You're all set"; else fail "no welcome logged from /Applications"; fi
   # "Get started" (focused) leads into the setup guide underneath.
   front "$(installed_pid)"; sleep 1
-  keys 'key code 49' > /dev/null
+  click_primary "$(installed_pid)"
   sleep 3
   shot_window "$(installed_pid)" 04b-setup-after-welcome
   LOGS=$(find "$PROFILE_ROOT" -path '*logs*' -name '*.log' -exec cat {} + 2>/dev/null)
@@ -172,22 +188,25 @@ echo "installed: $(version_of), CFBundleVersion $(/usr/libexec/PlistBuddy -c 'Pr
 # UpdateMac from a package Nexus downloaded itself, which macOS never
 # quarantines, so B opens without Gatekeeper; checked below.
 xattr -l "$INSTALLED" | tee -a "$SUMMARY"
-PKGS="$HOME/Library/Caches/velopack/NexusMac/packages"
-rm -rf "$PKGS"
 use_profile ci-mac-update 1
 "$INSTALLED/Contents/MacOS/Nexus" > logs-install/update-a-stdout.log 2>&1 &
 PID=$!
-staged() { ls "$PKGS"/*"$VERSION_B"*.nupkg > /dev/null 2>&1; }
+profile_logs() { find "$PROFILE_ROOT" -path '*logs*' -name '*.log' -exec cat {} + 2>/dev/null; }
+staged() { profile_logs | grep "version $VERSION_B downloaded" > /dev/null; }
 if wait_for 150 staged; then
-  pass "background check downloaded $VERSION_B: $(ls "$PKGS")"
+  # Under NEXUS_PROFILE the profile is the home folder, so Velopack's cache is in it.
+  pass "background check downloaded $VERSION_B: $(find "$PROFILE_ROOT" "$HOME/Library/Caches/velopack" -name "*$VERSION_B*.nupkg" 2>/dev/null | head -2 | tr '
+' ' ')"
 else
-  fail "no $VERSION_B package after 150 s"; ls -la "$PKGS" 2>&1 | tee -a "$SUMMARY"
+  fail "no $VERSION_B download logged after 150 s"
 fi
 grep -h "update" logs-install/update-a-stdout.log | tail -5
 if has_window "$PID"; then
   front "$PID"; sleep 1
   keys 'keystroke "," using command down' > /dev/null   # Settings (Updates is in General)
   sleep 4
+  scroll_right_pane "$PID" -25   # down to Updates
+  sleep 2
   shot_window "$PID" 05-update-before
 fi
 quit_all
