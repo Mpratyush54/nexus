@@ -19,7 +19,9 @@ async function afterAuth(
   // Projects resolve by folder name across all users and only the first
   // resolver becomes a member, so a shared name like 'nexus-default' left
   // every later signup on a project they could not open (403s everywhere).
-  const project = await projectsApi.resolve({ folder_name: `${res.username}-personal` })
+  // The sign-in itself has succeeded by now: a failed starter project must
+  // not turn it into an error on the form (the session is already stored).
+  const project = await projectsApi.resolve({ folder_name: `${res.username}-personal` }).catch(() => null)
   if (project?.id) setProjectId(project.id)
   return res
 }

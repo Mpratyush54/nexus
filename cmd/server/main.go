@@ -66,6 +66,7 @@ import (
 	memctx "central-memory/internal/context"
 	"central-memory/internal/desktopbridge"
 	"central-memory/internal/extract"
+	"central-memory/internal/mail"
 	"central-memory/internal/server"
 	"central-memory/internal/store"
 )
@@ -373,6 +374,10 @@ func run() error {
 	srv.EmbedProvider = memctx.ProviderFromEnv()
 	srv.Embedder = srv.EmbedProvider.Embedder()
 	log.Printf("server: embeddings model %s", srv.EmbedProvider.Model())
+	// Sign-up and password-reset codes need this; say plainly at boot whether
+	// it can work (host, port and whether a login is set; never the secret).
+	srv.Mail = mail.FromEnv()
+	log.Printf("server: %s", mail.Describe(srv.Mail))
 	srv.Extractor = extract.NewService(extract.ConfigFromEnv())
 	if srv.Extractor.HasAPIKey() {
 		log.Print("server: OpenRouter memory extraction enabled")

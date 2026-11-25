@@ -25,7 +25,11 @@ export type SignupSendCodeResponse = {
   expires_in: number
   /** Present only in local/dev when mail is not configured. */
   dev_code?: string
+  /** The code email is sent in the background; /auth/signup/status reports how it went. */
+  delivery?: MailDelivery
 }
+
+export type MailDelivery = 'sending' | 'sent' | 'failed'
 
 export type SignupStatusResponse = {
   pending: boolean
@@ -33,6 +37,8 @@ export type SignupStatusResponse = {
   email?: string
   username?: string
   expires_in?: number
+  /** How the last code email went; absent when the server no longer knows. */
+  delivery?: MailDelivery
 }
 
 export type PasswordForgotResponse = {
