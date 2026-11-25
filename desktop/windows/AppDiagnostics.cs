@@ -35,9 +35,13 @@ internal static partial class AppDiagnostics
 
     public static string LogsDir => DiagLog.LogsDir;
 
+    /// When this run started; reports newer than this belong to this run.
+    public static DateTimeOffset RunStarted { get; private set; } = DateTimeOffset.UtcNow;
+
     public static void Init()
     {
         if (BaseDir.Length > 0) return;
+        RunStarted = DateTimeOffset.UtcNow;
         BaseDir = Path.Combine(ProfilePaths.Folder(Environment.SpecialFolder.LocalApplicationData), "Nexus");
         Version = AppVersion();
         DiagLog.Init(BaseDir, Version);
