@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"sync"
@@ -88,12 +89,21 @@ func (s *Server) handleBlobChunkPost(w http.ResponseWriter, r *http.Request) {
 	if err := store.PutBlobChunk(store.BlobChunk{
 		ProjectID:    projectID,
 		ParentSHA256: parent,
+		Owner:        authSubject(r),
 		Index:        body.Index,
 		Total:        body.Total,
 		ChunkSHA256:  chunkSHA,
 		Body:         raw,
 	}); err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		switch {
+		case errors.Is(err, store.ErrChunkSetTooLarge):
+			writeError(w, http.StatusRequestEntityTooLarge, err.Error())
+		case errors.Is(err, store.ErrChunkQuota):
+			w.Header().Set("Retry-After", "60")
+			writeError(w, http.StatusTooManyRequests, err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -113,8 +123,20 @@ func (s *Server) handleBlobAssemble(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		ProjectID string `json:"project_id"`
+		// Purpose is what the assembled blob is: "file" (the default,
+		// counted against the plan's storage) or "transcript" (a session
+		// version's transcript, stored like a plain PUT of one).
+		Purpose string `json:"purpose"`
 	}
 	if !decodeBlobJSON(w, r, &body, maxChunkRequestBytes) {
+		return
+	}
+	purpose := strings.TrimSpace(body.Purpose)
+	if purpose == "" {
+		purpose = "file"
+	}
+	if purpose != "file" && purpose != "transcript" {
+		writeError(w, http.StatusBadRequest, "purpose must be file or transcript")
 		return
 	}
 	projectID := strings.TrimSpace(body.ProjectID)
@@ -162,10 +184,16 @@ func (s *Server) handleBlobAssemble(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "blob storage unavailable")
 		return
 	}
-	if err := cs.PutBlob(r.Context(), projectID, parent, "plain", "file", plain); err != nil {
+	if err := cs.PutBlob(r.Context(), projectID, parent, "plain", purpose, plain); err != nil {
+		if errors.Is(err, store.ErrStorageFull) {
+			writeError(w, http.StatusPaymentRequired, "storage full")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "could not store assembled file: "+err.Error())
 		return
 	}
+	// Stored: the pieces are no longer needed in memory.
+	store.DeleteBlobChunks(projectID, parent)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"sha256":      parent,
 		"size":        len(plain),
