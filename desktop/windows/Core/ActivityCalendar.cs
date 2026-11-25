@@ -24,7 +24,8 @@ internal static class ActivityCalendar
 }
 
 /// One dashboard's agent_activity block, or several projects added together.
-internal sealed record ActivitySummary(IReadOnlyList<(DateOnly Date, int Count)> Days, long Total, int ActiveDays, long Undated, bool Partial, int Projects, int FailedProjects);
+/// Pending: the server is still reading archived transcripts; ask again soon.
+internal sealed record ActivitySummary(IReadOnlyList<(DateOnly Date, int Count)> Days, long Total, int ActiveDays, long Undated, bool Partial, int Projects, int FailedProjects, bool Pending = false);
 
 internal static class ActivitySummaries
 {
@@ -44,7 +45,20 @@ internal static class ActivitySummaries
         long.TryParse(NxJson.Text(activity, "total"), out var total);
         int.TryParse(NxJson.Text(activity, "active_days"), out var active);
         long.TryParse(NxJson.Text(activity, "undated_messages"), out var undated);
-        return new ActivitySummary(days, total, active, undated, NxJson.Text(activity, "partial") == "true", 1, 0);
+        return new ActivitySummary(days, total, active, undated, NxJson.Text(activity, "partial") == "true", 1, 0, NxJson.Text(activity, "archive_pending") == "true");
+    }
+
+    /// True when a dashboard.get answer says a section could not be read in
+    /// time ("unavailable": ["agent_activity", "memories", …]); the rest of
+    /// the answer is still good.
+    internal static bool Unavailable(System.Text.Json.JsonElement? response, string section)
+    {
+        if (response is not { ValueKind: System.Text.Json.JsonValueKind.Object } data ||
+            !data.TryGetProperty("unavailable", out var list) || list.ValueKind != System.Text.Json.JsonValueKind.Array)
+            return false;
+        foreach (var item in list.EnumerateArray())
+            if (item.ValueKind == System.Text.Json.JsonValueKind.String && item.GetString() == section) return true;
+        return false;
     }
 
     /// Activity across projects: message counts per day are added (each
@@ -54,7 +68,7 @@ internal static class ActivitySummaries
     {
         var byDay = new Dictionary<DateOnly, int>();
         long total = 0, undated = 0;
-        bool partial = false;
+        bool partial = false, pending = false;
         int projects = 0, failed = 0;
         foreach (var part in parts)
         {
@@ -64,11 +78,12 @@ internal static class ActivitySummaries
             total += part.Total;
             undated += part.Undated;
             partial |= part.Partial;
+            pending |= part.Pending;
             // A dashboard lists every day once; guard against repeats anyway.
             foreach (var group in part.Days.GroupBy(d => d.Date))
                 byDay[group.Key] = byDay.GetValueOrDefault(group.Key) + Math.Max(0, group.Max(d => d.Count));
         }
         var days = byDay.OrderBy(d => d.Key).Select(d => (d.Key, d.Value)).ToList();
-        return new ActivitySummary(days, total, days.Count(d => d.Value > 0), undated, partial || failed > 0, projects, failed);
+        return new ActivitySummary(days, total, days.Count(d => d.Value > 0), undated, partial || failed > 0, projects, failed, pending);
     }
 }

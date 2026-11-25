@@ -83,7 +83,9 @@ public class NexusPage : Page
         panel.Children.Clear();
         panel.Children.Add(new TextBlock
         {
-            Text = response.Error ?? "Request failed",
+            Text = NxErrors.Classify(response.Error, Connectivity.Offline) == CallTrouble.Slow
+                ? NxErrors.SlowMessage
+                : response.Error ?? "Request failed",
             TextWrapping = TextWrapping.Wrap
         });
     }

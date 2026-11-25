@@ -1,8 +1,12 @@
 package server
 
 import (
+	"context"
+	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"central-memory/internal/store"
@@ -12,6 +16,16 @@ func (s *Server) registerDashboardRoutes() {
 	s.Mux.HandleFunc("GET /projects/{id}/dashboard", s.requireAuth(s.handleProjectDashboard))
 }
 
+// dashboardBudget bounds one dashboard build. Clients give up after 20 s;
+// a section still running at the budget is left out (named in
+// "unavailable") instead of failing the whole answer.
+var dashboardBudget = 6 * time.Second
+
+// handleProjectDashboard answers GET /projects/{id}/dashboard: tiles,
+// the agent activity calendar, event counts and the latest events. Every
+// section is an aggregate query; answers are cached per project, caller and
+// UTC offset (dashboard_cache.go), and a section that fails or runs out of
+// time is named in "unavailable" while the rest still answers 200.
 func (s *Server) handleProjectDashboard(w http.ResponseWriter, r *http.Request) {
 	id := strings.TrimSpace(r.PathValue("id"))
 	if id == "" {
@@ -21,84 +35,14 @@ func (s *Server) handleProjectDashboard(w http.ResponseWriter, r *http.Request) 
 	if !s.authorizeProject(w, r, id) {
 		return
 	}
-
-	now := time.Now().UTC()
-	since := now.AddDate(0, 0, -364) // ~52 weeks
-
-	events, err := s.Store.ListEvents(r.Context(), id, 0, store.MaxEventsLimit)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load events: "+err.Error())
+	offset, _ := strconv.Atoi(r.URL.Query().Get("utc_offset_minutes"))
+	if offset < -840 || offset > 840 {
+		offset = 0
+	}
+	data, ok := s.dashboardData(r.Context(), id, authSubject(r), offset)
+	if !ok {
+		// The caller went away while another request was building it.
 		return
-	}
-
-	dayCounts := map[string]int{}
-	byType := map[string]int{}
-	var weekEvents, agentsHints int
-	for _, ev := range events {
-		if ev == nil {
-			continue
-		}
-		day := ev.CreatedAt.UTC().Format("2006-01-02")
-		if !ev.CreatedAt.Before(since) {
-			dayCounts[day]++
-		}
-		if ev.CreatedAt.After(now.AddDate(0, 0, -7)) {
-			weekEvents++
-		}
-		byType[ev.EventType]++
-		if ev.EventType == "MCP_TOOL_CALL" || strings.TrimSpace(ev.AgentID) != "" {
-			agentsHints++
-		}
-	}
-
-	heatmap := make([]map[string]any, 0, 371)
-	for d := since; !d.After(now); d = d.AddDate(0, 0, 1) {
-		key := d.Format("2006-01-02")
-		heatmap = append(heatmap, map[string]any{"date": key, "count": dayCounts[key]})
-	}
-
-	typeRows := make([]map[string]any, 0, len(byType))
-	for t, n := range byType {
-		typeRows = append(typeRows, map[string]any{"type": t, "count": n})
-	}
-	// sort by count desc
-	for i := 0; i < len(typeRows); i++ {
-		for j := i + 1; j < len(typeRows); j++ {
-			if typeRows[j]["count"].(int) > typeRows[i]["count"].(int) {
-				typeRows[i], typeRows[j] = typeRows[j], typeRows[i]
-			}
-		}
-	}
-	if len(typeRows) > 8 {
-		typeRows = typeRows[:8]
-	}
-	agentActivity, err := s.activityCalendar(r, id, now)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not load agent activity")
-		return
-	}
-
-	memories := 0
-	proposed := 0
-	confirmed := 0
-	if items, serr := s.Store.SearchMemory(r.Context(), id, "", nil, 500); serr == nil {
-		for _, m := range items {
-			if m == nil {
-				continue
-			}
-			memories++
-			switch m.Status {
-			case "PROPOSED":
-				proposed++
-			case "CONFIRMED":
-				confirmed++
-			}
-		}
-	}
-
-	members := 0
-	if ids, merr := s.Store.ListMembers(r.Context(), id); merr == nil {
-		members = len(ids)
 	}
 
 	online := 0
@@ -111,40 +55,158 @@ func (s *Server) handleProjectDashboard(w http.ResponseWriter, r *http.Request) 
 	if online == 0 {
 		online = 1 // caller is always online for the tile
 	}
-
-	githubConnected := false
-	githubRepo := ""
-	if gs, ok := s.githubStore(); ok {
-		if link, gerr := gs.GetGitHubLink(r.Context(), id); gerr == nil && link != nil {
-			githubConnected = true
-			githubRepo = link.Owner + "/" + link.Repo
-		}
+	metrics := make(map[string]any, len(data.metrics)+1)
+	for k, v := range data.metrics {
+		metrics[k] = v
 	}
-
-	recent := make([]*store.Event, 0, 12)
-	for i := len(events) - 1; i >= 0 && len(recent) < 12; i-- {
-		if events[i] != nil {
-			recent = append(recent, events[i])
-		}
+	metrics["online"] = online
+	out := make(map[string]any, len(data.body)+1)
+	for k, v := range data.body {
+		out[k] = v
 	}
+	out["metrics"] = metrics
+	writeJSON(w, http.StatusOK, out)
+}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"project_id": id,
-		"metrics": map[string]any{
-			"memories":         memories,
-			"proposed":         proposed,
-			"confirmed":        confirmed,
-			"members":          members,
-			"online":           online,
-			"events_7d":        weekEvents,
-			"agent_calls":      agentsHints,
-			"github_connected": githubConnected,
-			"github_repo":      githubRepo,
-		},
-		"heatmap":        agentActivity["days"],
-		"agent_activity": agentActivity,
-		"event_heatmap":  heatmap,
-		"by_type":        typeRows,
-		"recent":         recent,
+// buildDashboard runs the sections concurrently under one budget. It is
+// detached from the request: a client that gives up does not waste the work,
+// the next request is served from the cache.
+func (s *Server) buildDashboard(project, owner string, offset int) *dashboardResult {
+	ctx, cancel := context.WithTimeout(context.Background(), dashboardBudget)
+	defer cancel()
+	ctx = store.WithoutEmbeddings(ctx)
+	now := time.Now().UTC()
+	since := now.AddDate(0, 0, -364) // ~52 weeks
+
+	var (
+		mu          sync.Mutex
+		unavailable []string
+		wg          sync.WaitGroup
+	)
+	fail := func(section string, err error) {
+		s.Log.Printf("dashboard %s: %s unavailable: %v", project, section, err)
+		mu.Lock()
+		unavailable = append(unavailable, section)
+		mu.Unlock()
+	}
+	// Sections run on their own goroutines, outside net/http's panic
+	// recovery: a panic in one is reported as that section missing.
+	run := func(section string, fn func()) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() {
+				if p := recover(); p != nil {
+					fail(section, fmt.Errorf("panic: %v", p))
+				}
+			}()
+			fn()
+		}()
+	}
+	ds, _ := s.Store.(store.DashboardStore)
+
+	var events store.DashboardEventStats
+	eventsOK := false
+	run("events", func() {
+		if ds == nil {
+			fail("events", errDashboardUnsupported)
+			return
+		}
+		got, err := ds.DashboardEvents(ctx, project, since, now)
+		if err != nil {
+			fail("events", err)
+			return
+		}
+		events, eventsOK = got, true
 	})
+	var memories store.DashboardMemoryCounts
+	memoriesOK := false
+	run("memories", func() {
+		if ds == nil {
+			fail("memories", errDashboardUnsupported)
+			return
+		}
+		got, err := ds.DashboardMemories(ctx, project)
+		if err != nil {
+			fail("memories", err)
+			return
+		}
+		memories, memoriesOK = got, true
+	})
+	var activity map[string]any
+	run("agent_activity", func() {
+		got, err := s.activityCalendar(ctx, project, owner, offset, now)
+		if err != nil {
+			fail("agent_activity", err)
+			return
+		}
+		activity = got
+	})
+	members := 0
+	run("members", func() {
+		ids, err := s.Store.ListMembers(ctx, project)
+		if err != nil {
+			fail("members", err)
+			return
+		}
+		members = len(ids)
+	})
+	githubConnected, githubRepo := false, ""
+	run("github", func() {
+		if gs, ok := s.githubStore(); ok {
+			if link, err := gs.GetGitHubLink(ctx, project); err == nil && link != nil {
+				githubConnected = true
+				githubRepo = link.Owner + "/" + link.Repo
+			}
+		}
+	})
+	wg.Wait()
+
+	heatmap := make([]map[string]any, 0, 371)
+	for d := since; !d.After(now); d = d.AddDate(0, 0, 1) {
+		key := d.Format("2006-01-02")
+		heatmap = append(heatmap, map[string]any{"date": key, "count": events.Days[key]})
+	}
+	byType := events.ByType
+	if byType == nil {
+		byType = []store.DashboardTypeCount{}
+	}
+	recent := events.Recent
+	if recent == nil {
+		recent = []*store.Event{}
+	}
+	metrics := map[string]any{
+		"members":          members,
+		"github_connected": githubConnected,
+		"github_repo":      githubRepo,
+	}
+	// A section that could not be read is left out rather than shown as 0.
+	if memoriesOK {
+		metrics["memories"] = memories.Total
+		metrics["proposed"] = memories.Proposed
+		metrics["confirmed"] = memories.Confirmed
+	}
+	if eventsOK {
+		metrics["events_7d"] = events.Week
+		metrics["agent_calls"] = events.AgentCalls
+	}
+	body := map[string]any{
+		"project_id":    project,
+		"event_heatmap": heatmap,
+		"by_type":       byType,
+		"recent":        recent,
+		"partial":       len(unavailable) > 0,
+	}
+	if activity != nil {
+		body["heatmap"] = activity["days"]
+		body["agent_activity"] = activity
+	}
+	if len(unavailable) > 0 {
+		body["unavailable"] = unavailable
+	}
+	complete := len(unavailable) == 0
+	if pending, _ := activity["archive_pending"].(bool); pending {
+		complete = false
+	}
+	return &dashboardResult{metrics: metrics, body: body, complete: complete}
 }

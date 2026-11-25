@@ -7,6 +7,21 @@ namespace Nexus.Core;
 /// Classifies nx_call errors and turns them into sentences people can act
 /// on. Raw engine text (Go/HTTP errors such as "dial tcp … connectex") is
 /// written to the log under a short reference id and never shown.
+/// What went wrong with one call, from the point of view of the card that made it.
+internal enum CallTrouble
+{
+    None,
+    /// The saved sign-in was rejected: the fix is signing in.
+    SignedOut,
+    /// The reachability probe says the server is down: the app-wide banner speaks.
+    Offline,
+    /// This call timed out or could not get through while the server is up:
+    /// the card waits calmly and retries; the rest of the app stays online.
+    Slow,
+    /// The server answered with an error.
+    Failed,
+}
+
 internal static partial class NxErrors
 {
     /// True when the server rejected the saved sign-in (expired, revoked or
@@ -42,6 +57,37 @@ internal static partial class NxErrors
             e.Contains("connection reset") || e.Contains("forcibly closed") || e.Contains("network is unreachable") ||
             e.Contains("unexpected eof") || e.EndsWith(": eof") ||
             e.Contains("502 bad gateway") || e.Contains("503 service unavailable") || e.Contains("504 gateway");
+    }
+
+    internal const string SlowMessage = "The Nexus server is taking longer than usual to answer. Nexus tries again in a moment.";
+
+    /// True when the request reached for the server but no answer came in
+    /// time (or the answer was cut off): the server may simply be slow for
+    /// this one request. Failing to connect at all is not "slow".
+    internal static bool IsSlow(string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error)) return false;
+        if (error.StartsWith(SlowMessage, StringComparison.Ordinal)) return true;
+        var e = error.ToLowerInvariant();
+        if (e.Contains("dial tcp") || e.Contains("connectex") || e.Contains("no such host") || e.Contains("refused") ||
+            e.Contains("network is unreachable") || e.Contains("tls handshake"))
+            return false;
+        return e.Contains("context deadline exceeded") || e.Contains("client.timeout") || e.Contains("awaiting headers") ||
+            e.Contains("i/o timeout") || e.Contains("unexpected eof") || e.EndsWith(": eof") || e.Contains("504 gateway") ||
+            e.Contains("connection reset") || e.Contains("forcibly closed");
+    }
+
+    /// What a failed call means for the card that made it. Only the
+    /// reachability probe decides the app is offline (offline = the probe's
+    /// verdict, Connectivity.Offline): one call timing out, being cut off or
+    /// failing to connect makes its own card wait and retry, never the app.
+    internal static CallTrouble Classify(string? error, bool offline)
+    {
+        if (string.IsNullOrWhiteSpace(error)) return CallTrouble.None;
+        if (IsSignedOut(error)) return CallTrouble.SignedOut;
+        var transport = IsSlow(error) || IsUnreachable(error) || error.StartsWith(UnreachableMessage, StringComparison.Ordinal);
+        if (!transport) return CallTrouble.Failed;
+        return offline ? CallTrouble.Offline : CallTrouble.Slow;
     }
 
     /// The server (or this engine build) has no such feature.

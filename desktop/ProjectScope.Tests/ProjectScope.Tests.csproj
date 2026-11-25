@@ -18,6 +18,7 @@
     <Compile Include="../windows/Core/ConversationIndex.cs" Link="ConversationIndex.cs" />
     <Compile Include="../windows/Core/ActivityCalendar.cs" Link="ActivityCalendar.cs" />
     <Compile Include="../windows/Core/NxErrors.cs" Link="NxErrors.cs" />
+    <Compile Include="../windows/Core/CardRetry.cs" Link="CardRetry.cs" />
     <Compile Include="../windows/Core/FriendlyTime.cs" Link="FriendlyTime.cs" />
     <Compile Include="../windows/Core/TagText.cs" Link="TagText.cs" />
     <Compile Include="../windows/Core/SubagentTranscript.cs" Link="SubagentTranscript.cs" />

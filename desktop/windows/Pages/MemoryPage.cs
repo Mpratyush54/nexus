@@ -328,7 +328,7 @@ public sealed partial class MemoryPage : NexusPage
         _cards.Children.Clear();
         if (fill.Error is not null)
         {
-            _cards.Children.Add(StateView.Error("Couldn't load memories", fill.Error.Error, () => _ = LoadPageAsync(reset: true)));
+            _cards.Children.Add(StateView.Error("Couldn't load memories", fill.Error.Error, () => _ = LoadPageAsync(reset: true), "Your memories are taking a moment…"));
             UpdatePaginationUi();
             return;
         }

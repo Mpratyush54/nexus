@@ -48,15 +48,22 @@ internal static class Connectivity
         try { Wake.Release(); } catch (SemaphoreFullException) { }
     }
 
-    /// <summary>A call could not reach the server. Returns the reference id the failure is logged under.</summary>
-    internal static string NoteUnreachable(string method, string raw)
+    /// <summary>
+    /// A call could not reach the server, or (slow) got no answer in time.
+    /// Returns the reference id the failure is logged under. This only asks
+    /// the probe to check now: a single failed call never marks the app
+    /// offline, only a failing probe does.
+    /// </summary>
+    internal static string NoteUnreachable(string method, string raw, bool slow = false)
     {
         lock (Gate)
         {
             if (Offline && OutageRef.Length > 0) return OutageRef;
         }
         var reference = NxErrors.NewRef();
-        DiagLog.Warn("net", $"{method} could not reach the server (ref {reference}): {raw}");
+        DiagLog.Warn("net", slow
+            ? $"{method} got no answer from the server in time (ref {reference}): {raw}"
+            : $"{method} could not reach the server (ref {reference}): {raw}");
         ProbeNow();
         return reference;
     }

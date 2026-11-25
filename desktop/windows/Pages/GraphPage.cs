@@ -526,6 +526,10 @@ public sealed class GraphPage : NexusPage
                 ShowEmpty("Graph view isn't available yet",
                     "Your Nexus server doesn't serve the memory graph yet. It will appear here once the server is updated; the Memory list keeps working meanwhile.");
             }
+            else if (NxErrors.Classify(response.Error, Connectivity.Offline) == CallTrouble.Slow)
+            {
+                ShowEmpty("The graph is taking a moment…", "The server is slow to answer right now. Try again in a moment; everything else keeps working.", retry: true);
+            }
             else
             {
                 ShowEmpty("Couldn't load the graph", response.Error ?? "Request failed.", retry: true);

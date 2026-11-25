@@ -70,7 +70,15 @@ public sealed class NxClient
         // text goes to the log under that id (method and error only:
         // arguments may hold chat text).
         string shown;
-        if (NxErrors.IsUnreachable(raw))
+        if (NxErrors.IsSlow(raw))
+        {
+            // No answer in time (or cut off): this call was slow, which says
+            // nothing about the server being down. The probe checks; the
+            // card that asked shows its own calm state.
+            var reference = Connectivity.NoteUnreachable(method, raw ?? "", slow: true);
+            shown = NxErrors.SlowMessage + " (ref " + reference + ")";
+        }
+        else if (NxErrors.IsUnreachable(raw))
         {
             var reference = Connectivity.NoteUnreachable(method, raw ?? "");
             shown = NxErrors.UnreachableMessage + " (ref " + reference + ")";
