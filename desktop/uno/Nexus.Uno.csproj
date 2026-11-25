@@ -31,7 +31,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <LangVersion>latest</LangVersion>
     <!-- Keep the head small: no Material/Toolkit/Extensions, Skia renderer. -->
-    <UnoFeatures>SkiaRenderer;Mvvm;Resizetizer</UnoFeatures>
+    <UnoFeatures>SkiaRenderer;Mvvm</UnoFeatures>
     <!-- The shared WinUI code is written for Windows; Uno flags APIs it does
          not implement (Uno0001). Those are reviewed per feature, not per build. -->
     <NoWarn>$(NoWarn);Uno0001;CA1416;CS8002;NU1507</NoWarn>
@@ -57,9 +57,10 @@
     <Page Include="$(IntermediateOutputPath)shared\MainWindow.xaml" Link="MainWindow.xaml" SubType="Designer" Generator="MSBuild:Compile" />
 
     <!-- App icon (Resizetizer). Uno's macOS .app packager builds the .icns
-         from it. Resizetizer wants a lowercase file name, so the Windows
-         Assets/Nexus.png is copied to obj/ first (see StripTrayFromMainWindow). -->
-    <UnoIcon Include="$(IntermediateOutputPath)shared\nexusicon.png" />
+         from outputs named icon16x16@1x.png and so on, so the Windows
+         Assets/Nexus.png is copied to obj/.../icon.png first (Resizetizer
+         also wants lowercase names); see StripTrayFromMainWindow. -->
+    <UnoIcon Include="$(IntermediateOutputPath)shared\icon.png" />
 
     <Content Include="$(WindowsSources)Assets\**" Exclude="$(WindowsSources)Assets\InstallerSplash.gif"
              Link="Assets\%(RecursiveDir)%(Filename)%(Extension)"
@@ -77,7 +78,7 @@
   </PropertyGroup>
   <Target Name="StripTrayFromMainWindow" BeforeTargets="PrepareForBuild;CoreCompile;_UnoSourceGenerator;GenerateMSBuildEditorConfigFileCore;UnoResizetizeCollectItems;UnoResizetizeImages">
     <MakeDir Directories="$(IntermediateOutputPath)shared" />
-    <Copy SourceFiles="$(WindowsSources)Assets\Nexus.png" DestinationFiles="$(IntermediateOutputPath)shared\nexusicon.png" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(WindowsSources)Assets\Nexus.png" DestinationFiles="$(IntermediateOutputPath)shared\icon.png" SkipUnchangedFiles="true" />
     <WriteLinesToFile File="$(IntermediateOutputPath)shared\MainWindow.xaml" Lines="$([MSBuild]::Escape($(_NxMainXamlText)))" Overwrite="true" WriteOnlyWhenDifferent="true" Encoding="utf-8" />
   </Target>
 </Project>
