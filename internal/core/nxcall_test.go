@@ -304,6 +304,12 @@ func TestCloudMethodsUseContractRoutes(t *testing.T) {
 	if c.method != "POST" || c.path != "/v1/agent-sessions/s%2F1/fork" || string(c.body) != "{}" {
 		t.Fatalf("fork route = %s %s %s", c.method, c.path, c.body)
 	}
+	if _, err := Call(context.Background(), "sessions.fork", json.RawMessage(`{"session_id":"s/1","through_idx":179533922286017891}`), deps); err != nil {
+		t.Fatal(err)
+	}
+	if c.method != "POST" || c.path != "/v1/agent-sessions/s%2F1/fork" || string(c.body) != `{"through_idx":179533922286017891}` {
+		t.Fatalf("fork from here = %s %s %s", c.method, c.path, c.body)
+	}
 	if _, err := Call(context.Background(), "sessions.share", json.RawMessage(`{"session_id":"s/1","user_id":"friend"}`), deps); err != nil {
 		t.Fatal(err)
 	}
