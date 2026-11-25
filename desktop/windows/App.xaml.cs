@@ -82,7 +82,15 @@ public partial class App : Application
         if (background)
         {
 #if HAS_UNO
+            // Uno shows the window on a later turn than Activate(), so a hide
+            // right here is undone: hide again once it has come up (first time only).
             WindowExtensions.Hide(window);
+            void HideWhenShown(object sender, WindowActivatedEventArgs e)
+            {
+                window.Activated -= HideWhenShown;
+                window.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => WindowExtensions.Hide(window));
+            }
+            window.Activated += HideWhenShown;
 #else
             window.AppWindow.Hide();
 #endif
