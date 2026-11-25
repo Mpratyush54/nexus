@@ -228,6 +228,24 @@ else
   if wait_for 15 gone; then pass "--quit through the socket ended the running app"; else fail "the app did not quit"; kill -9 "$PID" 2>/dev/null; fi
 fi
 
+# ---- 9. --background (what the login item runs) -------------------------------
+BG=ci-mac-background
+BGROOT="$RUNNER_TEMP/nexus-profile-$BG"
+rm -rf "$BGROOT"; mkdir -p "$BGROOT/AppData/Local/Nexus"
+printf '{ "SetupCompleted": true, "LastNav": "timeline", "Theme": "dark" }
+' > "$BGROOT/AppData/Local/Nexus/ui-prefs.json"
+env -u NEXUS_SERVER -u CENTRAL_SERVER_URL -u NEXUS_TOKEN -u CENTRAL_MEMORY_TOKEN   NEXUS_PROFILE="$BG" NEXUS_PROFILE_ROOT="$BGROOT" "$EXE" --background > "logs/$BG-stdout.log" 2>&1 &
+PID=$!
+bg_ready() { [ -n "$(windows_at 25)" ]; }
+if wait_for 60 bg_ready; then
+  sleep 8
+  if [ -z "$(windows_at 0)" ] && alive; then pass "--background: menu bar item only, no window"; else fail "--background showed a window"; fi
+else
+  fail "--background: no menu bar item within 60 s"
+fi
+screencapture -x shots/50-background-launch.png
+kill "$PID" 2>/dev/null; sleep 2; kill -9 "$PID" 2>/dev/null || true
+
 # ---- Evidence -------------------------------------------------------------------
 mkdir -p "logs/$NAME"
 find "$ROOT" -maxdepth 6 -name '*.log' -exec cp {} "logs/$NAME/" \; 2>/dev/null || true
