@@ -28,13 +28,14 @@ internal sealed class ActivityCalendarView : UserControl
     }
 
     /// <summary>Paints the calendar. scope names what it covers ("all your projects", a project name).</summary>
-    internal void Render(ActivitySummary? activity, string scope, string? error = null)
+    /// <param name="retry">Shown as a quiet "Try again" when the calendar's call was slow.</param>
+    internal void Render(ActivitySummary? activity, string scope, string? error = null, Action? retry = null)
     {
         _content.Children.Clear();
         AutomationProperties.SetName(_content, "Agent activity");
         if (activity is null)
         {
-            _content.Children.Add(StateView.Error("Activity isn't available right now", error is { Length: > 0 } ? error : "This server doesn't report activity yet.", null));
+            _content.Children.Add(StateView.Error("Activity isn't available right now", error is { Length: > 0 } ? error : "This server doesn't report activity yet.", retry, "Activity is taking a moment…"));
             return;
         }
         var days = activity.Days;
@@ -58,7 +59,9 @@ internal sealed class ActivityCalendarView : UserControl
         scroller.SizeChanged += (_, _) => scroller.ChangeView(scroller.ScrollableWidth, null, null, true);
         _content.Children.Add(scroller);
         if (activity.Undated > 0) _content.Children.Add(new TextBlock { Text = $"{activity.Undated:N0} older messages have no date, so they aren't on the calendar.", Opacity = 0.65, FontSize = 12, TextWrapping = TextWrapping.Wrap });
-        if (activity.FailedProjects > 0) _content.Children.Add(new TextBlock { Text = $"Activity for {activity.FailedProjects} project{(activity.FailedProjects == 1 ? "" : "s")} could not be loaded. This calendar may be incomplete.", Foreground = NexusPalette.Amber, FontSize = 12, TextWrapping = TextWrapping.Wrap });
+        if (activity.FailedProjects > 0 && retry is not null) _content.Children.Add(new TextBlock { Text = $"Activity for {activity.FailedProjects} project{(activity.FailedProjects == 1 ? " is" : "s are")} taking a moment. Nexus adds {(activity.FailedProjects == 1 ? "it" : "them")} when the server answers.", Opacity = 0.7, FontSize = 12, TextWrapping = TextWrapping.Wrap });
+        else if (activity.FailedProjects > 0) _content.Children.Add(new TextBlock { Text = $"Activity for {activity.FailedProjects} project{(activity.FailedProjects == 1 ? "" : "s")} could not be loaded. This calendar may be incomplete.", Foreground = NexusPalette.Amber, FontSize = 12, TextWrapping = TextWrapping.Wrap });
+        else if (activity.Pending) _content.Children.Add(new TextBlock { Text = "Still reading older archived chats. The calendar fills in by itself.", Opacity = 0.7, FontSize = 12, TextWrapping = TextWrapping.Wrap });
         else if (activity.Partial) _content.Children.Add(new TextBlock { Text = "Some archived history could not be read. This calendar may be incomplete.", Foreground = NexusPalette.Amber, FontSize = 12, TextWrapping = TextWrapping.Wrap });
     }
 

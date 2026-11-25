@@ -92,6 +92,12 @@ type Server struct {
 	activityMu           sync.Mutex
 	activityCache        map[string]cachedLegacyActivity
 	activityCacheEntries int
+	activityWarming      map[string]bool
+
+	// Per-project dashboard answers (dashboard_cache.go).
+	dashMu      sync.Mutex
+	dashEntries map[string]dashboardEntry
+	dashFlights map[string]*dashboardFlight
 
 	// Tokens is the API token store for mint/list/revoke (issue #161).
 	Tokens *store.APITokenStore
@@ -243,7 +249,7 @@ func (s *Server) authorizeProject(w http.ResponseWriter, r *http.Request, projec
 // Handler returns the CORS + request-ID + request-logging middleware chain
 // around the mux.
 func (s *Server) Handler() http.Handler {
-	return s.withCORS(s.withRequestID(s.withLogging(s.Mux)))
+	return s.withCORS(s.withRequestID(s.withLogging(s.withDashboardInvalidation(s.Mux))))
 }
 
 // ServeHTTP implements http.Handler so *Server can be passed to http.Serve directly.

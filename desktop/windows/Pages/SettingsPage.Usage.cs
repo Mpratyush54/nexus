@@ -61,6 +61,9 @@ public sealed partial class SettingsPage
         _usageProjectsLoaded = true;
     }
 
+    // Set when the last usage query failed only because the server was slow.
+    private bool _usageSlow;
+
     private async Task<List<UsageTotal>?> UsageQueryAsync(string groupBy, DateTime fromLocalDate, string project, int offset)
     {
         var response = await App.Core.CallAsync(NxMethods.UsageSummary, new
@@ -68,7 +71,11 @@ public sealed partial class SettingsPage
             group_by = groupBy, scope = "mine", project_id = project,
             from = fromLocalDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture), utc_offset_minutes = offset,
         });
-        if (!response.Ok) return null;
+        if (!response.Ok)
+        {
+            if (NxErrors.Classify(response.Error, Connectivity.Offline) == CallTrouble.Slow) _usageSlow = true;
+            return null;
+        }
         var items = new List<UsageTotal>();
         foreach (var item in NxJson.Items(response.Result)) items.Add(UsageTotal.Parse(item));
         return items;
@@ -83,6 +90,7 @@ public sealed partial class SettingsPage
         var today = DateTime.Now.Date;
         var from = today.AddDays(-(UsageDays - 1));
         _usageStatus.Text = "Loading usage…";
+        _usageSlow = false;
         var days = UsageQueryAsync("day", from, project, offset);
         var agents = UsageQueryAsync("agent", from, project, offset);
         var models = UsageQueryAsync("model", from, project, offset);
@@ -92,7 +100,9 @@ public sealed partial class SettingsPage
         _usageBody.Children.Clear();
         if (days.Result is null || agents.Result is null || models.Result is null)
         {
-            _usageStatus.Text = "Usage isn't available. Sign in, and check that your Nexus server is up to date.";
+            _usageStatus.Text = _usageSlow
+                ? "Usage is taking a moment… The server is slow to answer right now; open this page again shortly."
+                : "Usage isn't available. Sign in, and check that your Nexus server is up to date.";
             return;
         }
         var byDay = days.Result.ToDictionary(d => d.Key, StringComparer.Ordinal);

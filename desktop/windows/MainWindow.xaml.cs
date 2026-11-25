@@ -975,7 +975,7 @@ public sealed partial class MainWindow : Window
                 var wait = ChatListRetry.ShouldRetry(response.RawError) ? ChatListRetry.NextDelay(attempt) : null;
                 _chatRetryKey = key;
                 _chatRetryAttempt = attempt + 1;
-                _chatStatus = ChatListRetry.Status(filter.Length > 0, VisibleChatCount(_chatEntries), NxErrors.IsUnreachable(response.RawError), wait is not null, response.Error);
+                _chatStatus = ChatListRetry.Status(filter.Length > 0, VisibleChatCount(_chatEntries), NxErrors.Classify(response.RawError, Connectivity.Offline) == CallTrouble.Offline, wait is not null, response.Error);
                 RenderChats();
                 if (wait is { } delay) _ = RetryChatsAsync(key, delay);
                 return;

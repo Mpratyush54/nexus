@@ -357,19 +357,28 @@ public sealed class DashboardPage : NexusPage
         _metrics.Children.Clear();
         if (metrics.Count == 0)
         {
-            if (error is { Length: > 0 }) { var note = NexusTokens.Caption("Numbers aren't available right now."); Grid.SetColumnSpan(note, 3); _metrics.Children.Add(note); }
+            if (error is { Length: > 0 })
+            {
+                // A slow answer is not an outage: say the numbers are on their way.
+                var slow = NxErrors.Classify(error, Connectivity.Offline) == CallTrouble.Slow;
+                var note = NexusTokens.Caption(slow ? "Numbers are taking a moment…" : "Numbers aren't available right now.");
+                Grid.SetColumnSpan(note, 3); _metrics.Children.Add(note);
+            }
             return;
         }
         long Sum(string key) => metrics.Sum(m => long.TryParse(NxJson.Text(m, key), out var n) ? n : 0);
         long Max(string key) => metrics.Max(m => long.TryParse(NxJson.Text(m, key), out var n) ? n : 0);
+        // The server leaves out a count it could not read in time; show a
+        // dash, not a misleading 0.
+        string Count(string key) => metrics.Any(m => m.TryGetProperty(key, out _)) ? Sum(key).ToString("N0") : "—";
         var memories = Sum("memories"); var online = Max("online");
         // Offline, "devices online" is a guess from before the outage, and
         // this computer isn't online itself: say so instead of a count.
         var offline = _metricsOffline;
         var stats = new (string Value, string Label, string Tip, Brush Tone)[]
         {
-            (memories.ToString("N0"), memories == 1 ? "Memory" : "Memories", "Decisions and facts Nexus keeps for your agents", NexusPalette.Accent),
-            (Sum("proposed").ToString("N0"), "To review", "Suggested memories waiting for your OK (Memory page)", NexusPalette.Amber),
+            (Count("memories"), memories == 1 ? "Memory" : "Memories", "Decisions and facts Nexus keeps for your agents", NexusPalette.Accent),
+            (Count("proposed"), "To review", "Suggested memories waiting for your OK (Memory page)", NexusPalette.Amber),
             offline
                 ? ("—", "Offline", "Nexus can't reach the server right now, so it can't tell which computers are online", NexusPalette.Muted)
                 : (online.ToString("N0"), online == 1 ? "Device online" : "Devices online", "Computers signed in to Nexus right now", NexusTokens.Brush("TextFillColorPrimaryBrush", Microsoft.UI.Colors.White))
@@ -426,12 +435,13 @@ public sealed class DashboardPage : NexusPage
     private static readonly Dictionary<string, (ActivitySummary? Summary, List<JsonElement> Metrics, string? Error, DateTime At)> s_activity = new(StringComparer.Ordinal);
     private static readonly TimeSpan ActivityFresh = TimeSpan.FromMinutes(5);
 
-    private async Task LoadActivityAsync(int version, string shellProject, NxResponse? shellDashboard)
+    private async Task LoadActivityAsync(int version, string shellProject, NxResponse? shellDashboard, bool retrying = false)
     {
         var filter = ShellState.Current.ChatFilter;
         var all = filter.Length == 0;
         var scope = all ? "across all your projects" : ShellProjectLabel() is { Length: > 0 } label ? "in " + label : "in this project";
         var key = all ? "*" : filter;
+        if (!retrying) _activityAttempt = 0;
         if (s_activity.TryGetValue(key, out var cached) && DateTime.UtcNow - cached.At < ActivityFresh)
         {
             _calendar.Render(cached.Summary, scope, cached.Error);
@@ -441,17 +451,35 @@ public sealed class DashboardPage : NexusPage
         var offset = (int)TimeZoneInfo.Local.GetUtcOffset(DateTime.Now).TotalMinutes;
         ActivitySummary? summary;
         string? error = null;
+        var slow = false;
         var metrics = new List<JsonElement>();
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        _calendar.ShowLoading(scope);
-        ShowMetricsLoading();
+        // A retry keeps what is on screen until the new answer arrives.
+        if (!retrying)
+        {
+            _calendar.ShowLoading(scope);
+            ShowMetricsLoading();
+        }
+        // One project's answer: its calendar, or null when the call failed,
+        // was slow, or the server could not read activity in time.
+        ActivitySummary? Read(NxResponse response)
+        {
+            if (!response.Ok)
+            {
+                slow |= NxErrors.Classify(response.Error, Connectivity.Offline) == CallTrouble.Slow;
+                return null;
+            }
+            if (ActivitySummaries.Unavailable(response.Result, "agent_activity")) { slow = true; return null; }
+            return ActivitySummaries.Parse(response.Result);
+        }
         if (!all)
         {
             var response = filter == shellProject && shellDashboard is not null
                 ? shellDashboard
                 : await Core.CallAsync(NxMethods.DashboardGet, new { project_id = filter, utc_offset_minutes = offset });
-            summary = response.Ok ? ActivitySummaries.Parse(response.Result) : null;
+            summary = Read(response);
             if (!response.Ok) error = response.Error;
+            else if (summary is null && slow) error = NxErrors.SlowMessage;
             if (response is { Ok: true, Result: { } data } && data.TryGetProperty("metrics", out var m)) metrics.Add(m.Clone());
         }
         else
@@ -462,16 +490,20 @@ public sealed class DashboardPage : NexusPage
             {
                 summary = null;
                 error = projects.Ok ? "No projects yet." : projects.Error;
+                slow = !projects.Ok && NxErrors.Classify(projects.Error, Connectivity.Offline) == CallTrouble.Slow;
             }
             else
             {
-                var calls = ids.Select(id => id == shellProject && shellDashboard is { Ok: true }
+                // The shell project's answer (or its timeout) is reused: asking again would
+                // make a slow server keep Home waiting twice as long.
+                var calls = ids.Select(id => id == shellProject && shellDashboard is not null
                     ? Task.FromResult(shellDashboard)
                     : Core.CallAsync(NxMethods.DashboardGet, new { project_id = id, utc_offset_minutes = offset })).ToList();
                 var answers = await Task.WhenAll(calls);
                 for (var i = 0; i < ids.Count; i++) NoteMemoryCount(ids[i], answers[i]);
-                error = answers.FirstOrDefault(a => !a.Ok)?.Error;
-                summary = answers.Any(a => a.Ok) ? ActivitySummaries.Merge(answers.Select(a => a.Ok ? ActivitySummaries.Parse(a.Result) : null)) : null;
+                var parts = answers.Select(Read).ToList();
+                error = answers.FirstOrDefault(a => !a.Ok)?.Error ?? (slow ? NxErrors.SlowMessage : null);
+                summary = parts.Any(p => p is not null) ? ActivitySummaries.Merge(parts) : null;
                 foreach (var answer in answers)
                     if (answer is { Ok: true, Result: { } data } && data.TryGetProperty("metrics", out var m)) metrics.Add(m.Clone());
             }
@@ -482,9 +514,32 @@ public sealed class DashboardPage : NexusPage
         // The project choice moved on while this loaded (e.g. restored at
         // startup): load what is chosen now instead of leaving a skeleton.
         if (ShellState.Current.ChatFilter != filter) { _ = LoadActivityAsync(version, ShellProjectId(), null); return; }
-        if (summary is not null || NxErrors.IsSignedOut(error)) s_activity[key] = (summary, metrics, error, DateTime.UtcNow);
-        _calendar.Render(summary, scope, error);
+        // Only complete answers are kept for the next visit.
+        var complete = summary is { Pending: false, FailedProjects: 0 } && !slow;
+        if (complete || NxErrors.IsSignedOut(error)) s_activity[key] = (summary, metrics, error, DateTime.UtcNow);
+        else s_activity.Remove(key);
+        void Retry() => _ = LoadActivityAsync(_version, ShellProjectId(), null, retrying: true);
+        _calendar.Render(summary, scope, error, slow ? Retry : null);
         RenderMetrics(metrics, error);
+        // A slow card retries by itself a few times; archived history the
+        // server is still reading is asked for again shortly.
+        if (slow) ScheduleActivityRetry(version, CardRetry.NextDelay(_activityAttempt++));
+        else if (summary is { Pending: true }) ScheduleActivityRetry(version, CardRetry.ArchivePending);
+        else _activityAttempt = 0;
+    }
+
+    private int _activityAttempt;
+
+    private void ScheduleActivityRetry(int version, TimeSpan? delay)
+    {
+        if (delay is not { } wait) return;
+        var filter = ShellState.Current.ChatFilter;
+        _ = Task.Delay(wait).ContinueWith(_ => DispatcherQueue.TryEnqueue(() =>
+        {
+            // Only while Home still shows the same thing.
+            if (version != _version || !IsLoaded || ShellState.Current.ChatFilter != filter) return;
+            _ = LoadActivityAsync(version, ShellProjectId(), null, retrying: true);
+        }), TaskScheduler.Default);
     }
 
     // The project switcher shows memory counts for projects already loaded.

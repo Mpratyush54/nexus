@@ -354,16 +354,24 @@ internal static class StateView
         return host;
     }
 
-    public static FrameworkElement Error(string title, string? detail, Action? retry)
+    /// <param name="slowTitle">What the card says while its call is slow, e.g. "Activity is taking a moment…".</param>
+    public static FrameworkElement Error(string title, string? detail, Action? retry, string? slowTitle = null)
     {
-        // The server is unreachable: the banner on top already says so and
-        // the page reloads by itself on reconnect, so this is a calm note,
-        // not a second red error.
-        if ((detail ?? "").StartsWith(Nexus.Core.NxErrors.UnreachableMessage, StringComparison.Ordinal) || Nexus.Core.NxErrors.IsUnreachable(detail))
-            return Empty("", "Waiting for the connection", "This shows up again as soon as Nexus reconnects to the server.");
-        // Not signed in is a state with one fix, not a failure: no red error.
-        if (Nexus.Core.NxErrors.IsSignedOut(detail))
-            return Empty("", "Not signed in", Nexus.Core.NxErrors.SignedOutMessage);
+        switch (Nexus.Core.NxErrors.Classify(detail, Nexus.Core.Connectivity.Offline))
+        {
+            // The probe says the server is down: the banner on top already
+            // says so and the page reloads by itself on reconnect, so this is
+            // a calm note, not a second red error.
+            case Nexus.Core.CallTrouble.Offline:
+                return Empty("", "Waiting for the connection", "This shows up again as soon as Nexus reconnects to the server.");
+            // Only this call was slow or cut off; the server is up. The card
+            // waits on its own and the rest of the app stays online.
+            case Nexus.Core.CallTrouble.Slow:
+                return Slow(slowTitle, retry);
+            // Not signed in is a state with one fix, not a failure: no red error.
+            case Nexus.Core.CallTrouble.SignedOut:
+                return Empty("", "Not signed in", Nexus.Core.NxErrors.SignedOutMessage);
+        }
         var plain = Friendly(detail);
         var stack = new StackPanel { Spacing = 6, MaxWidth = 560, HorizontalAlignment = HorizontalAlignment.Left };
         var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
@@ -389,11 +397,22 @@ internal static class StateView
         return host;
     }
 
+    /// <summary>
+    /// One card's call was slow or cut off while the server is up: a calm
+    /// note with a quiet "Try again", never the offline state.
+    /// </summary>
+    public static FrameworkElement Slow(string? title, Action? retry) =>
+        Empty("", title is { Length: > 0 } ? title : "This is taking a moment…",
+            "The server is slow to answer right now. Nexus tries again by itself; everything else keeps working.",
+            retry is null ? null : "Try again", retry);
+
     /// <summary>Turns transport errors into a sentence a person can act on.</summary>
     public static string Friendly(string? error)
     {
         var text = (error ?? "").Trim();
         if (text.Length == 0) return "";
+        if (text.StartsWith(Nexus.Core.NxErrors.SlowMessage, StringComparison.Ordinal)) return text;
+        if (Nexus.Core.NxErrors.IsSlow(text)) return Nexus.Core.NxErrors.SlowMessage;
         if (Nexus.Core.NxErrors.IsUnreachable(text) && !text.StartsWith(Nexus.Core.NxErrors.UnreachableMessage, StringComparison.Ordinal))
             return Nexus.Core.NxErrors.UnreachableMessage;
         var lower = text.ToLowerInvariant();

@@ -150,7 +150,7 @@ public sealed class TeleportPage : NexusPage
         if (!response.Ok)
         {
             _count.Text = "";
-            _list.Children.Add(StateView.Error("Couldn't load shared chats", response.Error, () => _ = LoadAsync(method, requestedID)));
+            _list.Children.Add(StateView.Error("Couldn't load shared chats", response.Error, () => _ = LoadAsync(method, requestedID), "Shared chats are taking a moment…"));
             return;
         }
         var items = NxJson.Items(response.Result).ToList();
