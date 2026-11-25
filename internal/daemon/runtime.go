@@ -602,12 +602,19 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 	byMillisecond := map[int64]int64{}
 	turns := make([]MirroredTurn, 0, len(batch))
 	title := ""
+	parent := ""
 	for _, ev := range batch {
 		if ev.Type != EventConversationTurn || ev.Payload == nil {
 			continue
 		}
 		if title == "" {
 			title, _ = ev.Payload["session_title"].(string)
+		}
+		if parent == "" {
+			// A Claude Code sub-agent transcript names its parent session:
+			// <project>/<parent>/subagents/agent-<hex>.jsonl.
+			path, _ := ev.Payload["path"].(string)
+			parent = subagentParentNativeID(path)
 		}
 		at := ev.CreatedAt
 		var sourceAt *time.Time
@@ -649,7 +656,7 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 			UsageKey:    usageKey,
 		})
 	}
-	id, err := hs.MirrorAgentSessionTurns(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, turns, title)
+	id, err := hs.MirrorAgentSessionTurnsWithParent(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, parent, turns, title)
 	if err != nil {
 		log.Printf("daemon: mirror cloud session turns session=%s: %v", nativeID, err)
 		return ""
