@@ -282,6 +282,7 @@ jobs:
           set -euo pipefail
           swiftc -O -o dist/winlist scripts/macos/winlist.swift
           swiftc -O -o dist/pointer scripts/macos/pointer.swift
+          swiftc -O -o dist/keys scripts/macos/keys.swift
           DMG=$(ls dist/dmg/Nexus-*.dmg | head -1)
           shasum -a 256 "$DMG"
           hdiutil attach "$DMG" -noverify -nobrowse -mountpoint /Volumes/NexusAudit

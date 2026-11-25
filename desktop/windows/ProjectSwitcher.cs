@@ -125,12 +125,13 @@ internal sealed class ProjectSwitcher : UserControl
         };
         // Esc closes the list from the search box or a row. WinUI's light
         // dismiss does this already; Uno on macOS did not.
-        panel.KeyDown += (_, e) =>
+        // Also when the text box already handled the key (Uno's does).
+        panel.AddHandler(UIElement.KeyDownEvent, new Microsoft.UI.Xaml.Input.KeyEventHandler((_, e) =>
         {
             if (e.Key != Windows.System.VirtualKey.Escape) return;
             e.Handled = true;
             _flyout.Hide();
-        };
+        }), true);
         _flyout.Opened += (_, _) => _search.Focus(FocusState.Programmatic);
         Refresh();
     }

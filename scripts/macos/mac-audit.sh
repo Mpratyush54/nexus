@@ -229,11 +229,22 @@ for theme in light dark; do
   ax_dump "home-$theme"
   # Project switcher (Cmd+P), then pick "Orbit Notes".
   keys 'keystroke "p" using command down' > /dev/null; sleep 2; shot "11-project-switcher-$theme"
-  dismiss; shot "11b-switcher-after-esc-$theme"
+  # Esc as a hardware key (CGEvent), not System Events.
+  ./dist/keys key 53; sleep 1; shot "11b-switcher-after-esc-$theme"
   click 650 110; sleep 1
   # Search (Cmd+K).
   keys 'keystroke "k" using command down' > /dev/null; sleep 2
   keys 'keystroke "sync"' > /dev/null; sleep 3; shot "12-search-$theme"
+  # Capitals: typed like a hardware keyboard, then like System Events.
+  for how in hardware systemevents; do
+    keys 'keystroke "a" using command down' > /dev/null; ./dist/keys key 51; sleep 0.5
+    if [ $how = hardware ]; then ./dist/keys type "Hello World OS"; else keys 'keystroke "Hello World OS"' > /dev/null; fi
+    sleep 1; printf 'stale' | pbcopy
+    keys 'keystroke "a" using command down' > /dev/null; keys 'keystroke "c" using command down' > /dev/null; sleep 1
+    got=$(pbpaste)
+    if [ "$got" = "Hello World OS" ]; then pass "capitals typed ($how, $theme): '$got'"; else note "capitals typed ($how, $theme) gave '$got'"; fi
+  done
+  shot "12b-search-capitals-$theme"
   dismiss; sleep 1
   # The chat list: open the first chat by its name.
   # The fifth chat row (newest first): "Fix sync conflict…", the one with an image.
@@ -252,11 +263,13 @@ for theme in light dark; do
   keys 'keystroke "n" using command down' > /dev/null; sleep 3; shot "18-new-chat-$theme"
   # Memory, the graph, Agents, Inbox, Settings.
   nav Memory; shot "20-memory-$theme"; ax_dump "memory-$theme"
-  ax_click "Graph" && { sleep 6; shot "21-graph-$theme"; }
+  click -67 90; sleep 6; shot "21-graph-$theme"; ax_dump "graph-$theme"
+  click -125 90; sleep 2
   nav Agents; shot "22-agents-$theme"; ax_dump "agents-$theme"
   nav Inbox; shot "23-inbox-$theme"
   nav Settings; shot "24-settings-$theme"; ax_dump "settings-$theme"
-  for i in 1 2 3 4 5 6 7 8 9 10; do scroll_at 0.65 0.6 -8; sleep 1; shot "25-settings-$i-$theme"; done
+  # Every section in the Settings list, then the bottom of the last one.
+  for i in 0 1 2 3 4 5 6 7 8; do click 400 $(( 123 + 34 * i )); sleep 2.5; shot "25-settings-$i-$theme"; scroll_at 0.75 0.6 -15; sleep 1; shot "25-settings-$i-end-$theme"; done
   nav Home
   stop
 done
