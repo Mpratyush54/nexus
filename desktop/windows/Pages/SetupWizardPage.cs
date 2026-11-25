@@ -970,12 +970,17 @@ public sealed class SetupWizardPage : NexusPage
         return grid;
     }
 
+    // The row each reused toggle sits in (see ToggleRow).
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ToggleSwitch, Panel> s_toggleRows = new();
+
     private static Border ToggleRow(string label, string description, ToggleSwitch toggle)
     {
         // The Done summary is rebuilt each time it is shown: the same toggle
-        // must leave its old row first, or WinUI throws and the step stops
-        // half drawn.
-        if (toggle.Parent is Panel previous) previous.Children.Remove(toggle);
+        // must leave its old row first, or WinUI throws ("No installed
+        // components were detected") and the step stops half drawn.
+        // FrameworkElement.Parent is not reliable for a row that is no
+        // longer on screen, so the row is remembered here.
+        if (s_toggleRows.TryGetValue(toggle, out var previous)) previous.Children.Remove(toggle);
         AutomationProperties.SetName(toggle, label);
         AutomationProperties.SetHelpText(toggle, description);
         var grid = new Grid { ColumnSpacing = 24 };
@@ -988,6 +993,7 @@ public sealed class SetupWizardPage : NexusPage
         toggle.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(toggle, 1);
         grid.Children.Add(toggle);
+        s_toggleRows.AddOrUpdate(toggle, grid);
         return new Border { Padding = new Thickness(0, 12, 0, 12), BorderBrush = NexusPalette.Hairline, BorderThickness = new Thickness(0, 0, 0, 1), Child = grid };
     }
 
