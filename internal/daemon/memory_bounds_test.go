@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+
 	"central-memory/internal/security"
 	"central-memory/internal/store"
 )
@@ -487,4 +489,47 @@ func writeLinesMkdir(t *testing.T, path string, lines ...string) {
 		t.Fatal(err)
 	}
 	writeLines(t, path, lines...)
+}
+
+// Watching a transcript tree costs a few KiB per folder, not fsnotify's
+// default 64 KiB: agent trees have thousands of folders, and 4000 default
+// watches held 250 MiB for as long as the app ran.
+func TestSharedScannerWatchesAreSmall(t *testing.T) {
+	root := t.TempDir()
+	const dirs = 400
+	for i := 0; i < dirs; i++ {
+		if err := os.MkdirAll(filepath.Join(root, fmt.Sprintf("chat-%03d", i), "subagents"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w, err := fsnotify.NewWatcher()
+	if err != nil {
+		t.Skip("file notifications unavailable:", err)
+	}
+	defer w.Close()
+	// fsnotify blocks adding watches while its events go unread.
+	go func() {
+		for {
+			select {
+			case _, ok := <-w.Events:
+				if !ok {
+					return
+				}
+			case _, ok := <-w.Errors:
+				if !ok {
+					return
+				}
+			}
+		}
+	}()
+	s := NewSharedScanner("")
+	watched := map[string]bool{}
+	alloc := allocDuring(func() { s.watchTree(w, watched, root, maxWalkDepth) })
+	if len(watched) < 2*dirs {
+		t.Fatalf("watched %d folders, want %d", len(watched), 2*dirs+1)
+	}
+	perDir := alloc / uint64(len(watched))
+	if !raceEnabled && runtime.GOOS == "windows" && perDir > 16<<10 {
+		t.Fatalf("%d bytes per watched folder, want under 16 KiB (fsnotify default is 64 KiB)", perDir)
+	}
 }

@@ -75,8 +75,14 @@ func writeHeapDiagnostics(logsDir string, at time.Time) {
 			pruneHeapProfiles(logsDir, heapProfilesKept)
 		}
 	}
+	// In-use (live) bytes per site, as of the last collection, scaled for
+	// sampling like pprof's inuse_space; heap_alloc and the live heap on
+	// each line make the numbers comparable with the "mem:" lines.
+	ms := []metrics.Sample{{Name: "/memory/classes/heap/objects:bytes"}, {Name: "/gc/heap/live:bytes"}}
+	metrics.Read(ms)
+	alloc, live := float64(ms[0].Value.Uint64())/(1<<20), float64(ms[1].Value.Uint64())/(1<<20)
 	for _, s := range topHeapSites(heapSitesLogged, heapSiteFrames) {
-		log.Printf("heapsite: %.1f %s", float64(s.bytes)/(1<<20), s.chain)
+		log.Printf("heapsite: inuse=%.1fMiB heap_alloc=%.1fMiB live=%.1fMiB %s", float64(s.bytes)/(1<<20), alloc, live, s.chain)
 	}
 }
 

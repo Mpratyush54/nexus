@@ -43,6 +43,15 @@ const (
 	sharedSQLiteDebounce    = 30 * time.Second
 	sharedOpenCodeDebounce  = 15 * time.Second
 	sharedMaxWatches        = 4000
+	// sharedWatchBuffer is the change-notification buffer per watched
+	// folder. On Windows fsnotify allocates its default 64 KiB for every
+	// watched directory, and agent transcript trees have thousands of
+	// folders (every Claude chat has its own subagents/ folder): 4000
+	// watches held 250 MiB of heap for good, the live heap seen in real
+	// use. Transcript folders see a handful of appends at a time; an
+	// overflow is reported as an error and answered with a full
+	// reconcile, so nothing is missed.
+	sharedWatchBuffer = 4096
 	// routePeekBytes is how far attribution may look into a transcript. A
 	// negative decision for a smaller file is re-evaluated once it grows.
 	routePeekBytes = 512 << 10
@@ -73,6 +82,8 @@ type SharedScanner struct {
 	kick      chan struct{}
 	lastOC    time.Time
 	lastSave  time.Time
+	// rwatch is the Windows recursive watcher while run is active.
+	rwatch *recursiveWatcher
 	// sourceList overrides ResolveSources (tests).
 	sourceList []TranscriptSource
 }
@@ -293,18 +304,27 @@ func (s *SharedScanner) run(ctx context.Context, engine *Harvester, done chan st
 	defer close(done)
 	defer s.saveCursors(engine, true)
 
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
+	// Windows: one recursive watch per source folder (recursive_watch_*.go).
+	// Elsewhere: fsnotify, folder by folder.
+	var watcher *fsnotify.Watcher
+	var rw *recursiveWatcher
+	if recursiveWatchSupported {
+		rw, _ = newRecursiveWatcher()
+	}
+	if rw != nil {
+		defer rw.Close()
+	} else if w, err := fsnotify.NewWatcher(); err != nil {
 		log.Printf("capture: file notifications unavailable, polling every %s: %v", sharedPollFallback, err)
-		watcher = nil
 	} else {
+		watcher = w
 		defer watcher.Close()
 	}
+	s.rwatch = rw
 	watched := map[string]bool{}
 	s.reconcile(engine, watcher, watched)
 
 	interval := sharedReconcileInterval
-	if watcher == nil {
+	if watcher == nil && rw == nil {
 		interval = sharedPollFallback
 	}
 	reconcileT := time.NewTicker(interval)
@@ -320,6 +340,8 @@ func (s *SharedScanner) run(ctx context.Context, engine *Harvester, done chan st
 	var errs <-chan error
 	if watcher != nil {
 		events, errs = watcher.Events, watcher.Errors
+	} else if rw != nil {
+		events, errs = rw.Events(), rw.Errors()
 	}
 	for {
 		select {
@@ -350,7 +372,9 @@ func (s *SharedScanner) run(ctx context.Context, engine *Harvester, done chan st
 			}
 			if ev.Op&fsnotify.Create != 0 {
 				if st, err := os.Stat(ev.Name); err == nil && st.IsDir() {
-					s.watchTree(watcher, watched, ev.Name, 4)
+					if watcher != nil {
+						s.watchTree(watcher, watched, ev.Name, 4)
+					}
 					continue
 				}
 			}
@@ -399,7 +423,16 @@ func (s *SharedScanner) handleFile(engine *Harvester, path string) {
 		return
 	}
 	for _, src := range engine.Sources {
-		if sourceContains(src, path) {
+		if !sourceContains(src, path) {
+			continue
+		}
+		skipped := false
+		for _, dir := range src.Dirs {
+			if sourceContains(TranscriptSource{Dirs: []string{dir}}, path) && inSkippedDirUnder(dir, path) {
+				skipped = true
+			}
+		}
+		if !skipped {
 			engine.considerFile(src, path, info)
 		}
 	}
@@ -449,6 +482,16 @@ func (s *SharedScanner) reconcile(engine *Harvester, watcher *fsnotify.Watcher, 
 		for _, src := range s.sources() {
 			for _, dir := range src.Dirs {
 				s.watchTree(watcher, watched, dir, maxWalkDepth)
+			}
+		}
+	} else if s.rwatch != nil {
+		// One watch per existing source folder (a folder created later is
+		// picked up by the next reconcile).
+		for _, src := range s.sources() {
+			for _, dir := range src.Dirs {
+				if st, err := os.Stat(dir); err == nil && st.IsDir() {
+					_ = s.rwatch.AddRoot(dir)
+				}
 			}
 		}
 	}
@@ -528,7 +571,7 @@ func (s *SharedScanner) watchTree(w *fsnotify.Watcher, watched map[string]bool, 
 		}
 		key := strings.ToLower(filepath.Clean(d))
 		if !watched[key] {
-			if err := w.Add(d); err != nil {
+			if err := w.AddWith(d, fsnotify.WithBufferSize(sharedWatchBuffer)); err != nil {
 				return
 			}
 			watched[key] = true
@@ -643,6 +686,27 @@ func sourceContains(src TranscriptSource, path string) bool {
 	for _, dir := range src.Dirs {
 		d := strings.ToLower(filepath.Clean(dir))
 		if d != "" && strings.HasPrefix(clean, d+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// inSkippedDirUnder reports a path inside a folder the transcript walk
+// skips (node_modules, .git, build output, agent scratch folders), counting
+// only folders below dir, or deeper than the walk goes. A recursive watch
+// reports those too.
+func inSkippedDirUnder(dir, p string) bool {
+	rel, err := filepath.Rel(dir, filepath.Dir(p))
+	if err != nil || rel == "." {
+		return false
+	}
+	segs := strings.Split(rel, string(filepath.Separator))
+	if len(segs) > maxWalkDepth {
+		return true // deeper than the walk goes
+	}
+	for _, seg := range segs {
+		if harvesterSkipDirs[seg] {
 			return true
 		}
 	}
