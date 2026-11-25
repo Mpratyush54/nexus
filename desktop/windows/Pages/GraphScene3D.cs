@@ -303,6 +303,21 @@ internal sealed class GraphScene3D : Grid
     /// Node textures: 3 kinds × (normal, stale), baked once per theme and
     /// shared by every node through six surface brushes.
     /// </summary>
+    // This scene's share of UiStats (memory log), adjusted by deltas.
+    private int _statNodes, _statTextures;
+
+    private void ReportStats()
+    {
+        var nodes = _slots.Count;
+        var textures = 0;
+        for (var k = 0; k < 6; k++) if (_spriteSurfaces[k] is not null) textures++;
+        Interlocked.Add(ref Nexus.Core.Diagnostics.UiStats.GraphNodes, nodes - _statNodes);
+        Interlocked.Add(ref Nexus.Core.Diagnostics.UiStats.GraphTextures, textures - _statTextures);
+        Interlocked.Add(ref Nexus.Core.Diagnostics.UiStats.GraphTextureBytes, (long)(textures - _statTextures) * SpriteSize * SpriteSize * 4);
+        _statNodes = nodes;
+        _statTextures = textures;
+    }
+
     private void BakeTextures()
     {
         if (_palette is not { } palette) return;
@@ -327,6 +342,7 @@ internal sealed class GraphScene3D : Grid
             _spriteSurfaces[k]?.Dispose();
             _spriteSurfaces[k] = surface;
         }
+        ReportStats();
     }
 
     /// <summary>Frees the textures while the scene is off screen (rebaked on return).</summary>
@@ -338,6 +354,7 @@ internal sealed class GraphScene3D : Grid
             _spriteSurfaces[k]?.Dispose();
             _spriteSurfaces[k] = null;
         }
+        ReportStats();
     }
 
     public void Clear()
@@ -352,6 +369,7 @@ internal sealed class GraphScene3D : Grid
         foreach (var l in _lines) l.Visual.Dispose();
         _slots.Clear();
         _lines.Clear();
+        ReportStats();
         _pointerPos = null;
         _selected = _hovered = -1;
         _flying = false;
@@ -409,6 +427,7 @@ internal sealed class GraphScene3D : Grid
             _lines.Add(new Edge { Visual = v });
             _edgeLayer.Children.InsertAtTop(v);
         }
+        ReportStats();
         // Start a little close, so the graph unfolds into view; frame it once settled.
         _cam.Yaw = 0.6;
         _cam.Pitch = 0.28;
