@@ -156,6 +156,8 @@ public sealed partial class SessionPage : NexusPage
             catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
         };
         _prompt.KeyboardAccelerators.Add(imagePaste);
+        // The macOS Edit menu's Paste (and Cmd+V there) comes through this.
+        Shortcuts.SetPasteHandler(_prompt, TryPasteClipboardImageAsync);
         _harness.SelectionChanged += (_, _) => {
             if (_lastHarness.Length > 0) _modelByHarness[_lastHarness] = SelectedModel();
             _lastHarness = SelectedHarness();
@@ -3052,6 +3054,19 @@ public sealed partial class SessionPage : NexusPage
             await PasteClipboardImageAsync(content);
         }
         catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
+    }
+
+    /// True when the clipboard held an image and the composer took it.
+    private async Task<bool> TryPasteClipboardImageAsync()
+    {
+        try
+        {
+            var content = Clipboard.GetContent();
+            if (!ClipboardHasImage(content)) return false;
+            await PasteClipboardImageAsync(content);
+        }
+        catch (Exception ex) { SetComposerStatus("Could not paste the image: " + ex.Message); }
+        return true;
     }
 
     private async Task PasteClipboardImageAsync(DataPackageView content)

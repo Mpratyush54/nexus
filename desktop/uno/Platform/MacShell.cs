@@ -117,7 +117,7 @@ internal static class MacShell
                     case MacNative.Command.Redo: box.Redo(); break;
                     case MacNative.Command.Cut: box.CutSelectionToClipboard(); break;
                     case MacNative.Command.Copy: box.CopySelectionToClipboard(); break;
-                    case MacNative.Command.Paste: box.PasteFromClipboard(); break;
+                    case MacNative.Command.Paste: _ = PasteAsync(box); break;
                     case MacNative.Command.SelectAll: box.SelectAll(); break;
                     default: done = false; break;
                 }
@@ -161,6 +161,19 @@ internal static class MacShell
             }
         }
         window.DispatcherQueue.TryEnqueue(() => window.HandleRemote(url));
+    }
+
+    private static async Task PasteAsync(TextBox box)
+    {
+        try
+        {
+            if (Shortcuts.PasteHandler(box) is { } custom && await custom()) return;
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Warn("mac", "custom paste failed; pasting text", ex);
+        }
+        box.PasteFromClipboard();
     }
 
     internal static void Log(string message)

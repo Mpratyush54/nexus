@@ -1,4 +1,6 @@
+using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
 using Windows.System;
 
 namespace Nexus;
@@ -34,6 +36,18 @@ internal static class Shortcuts
             }
         }
     }
+
+    private static readonly ConditionalWeakTable<TextBox, Func<Task<bool>>> s_pasteHandlers = new();
+
+    /// <summary>
+    /// A text box whose paste does more than text (the chat prompt attaches a
+    /// pasted image). The macOS Edit menu pastes through TextBox.PasteFromClipboard,
+    /// which raises no Paste event, so it asks this handler first; true means
+    /// the handler took the clipboard.
+    /// </summary>
+    public static void SetPasteHandler(TextBox box, Func<Task<bool>> handler) => s_pasteHandlers.AddOrUpdate(box, handler);
+
+    public static Func<Task<bool>>? PasteHandler(TextBox box) => s_pasteHandlers.TryGetValue(box, out var handler) ? handler : null;
 
     /// <summary>Whether the primary modifier is held (for KeyDown handlers that do not use accelerators).</summary>
     public static bool IsPrimaryDown()

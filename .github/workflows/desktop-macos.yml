@@ -16,6 +16,7 @@ on:
       - 'internal/**'
       - 'go.mod'
       - 'go.sum'
+      - 'scripts/macos/**'
       - '.github/workflows/desktop-macos.yml'
   workflow_dispatch:
 
