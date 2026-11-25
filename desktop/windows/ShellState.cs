@@ -10,6 +10,9 @@ public partial class ShellState : ObservableObject
 
     [ObservableProperty] private string banner = "";
     [ObservableProperty] private bool offline;
+    // No saved sign-in. Server features are unavailable (Offline is true
+    // too), but the fix is signing in, not waiting for a connection.
+    [ObservableProperty] private bool signedOut;
     [ObservableProperty] private int pendingUploads;
     [ObservableProperty] private bool capturePaused;
 
@@ -18,6 +21,7 @@ public partial class ShellState : ObservableObject
     [ObservableProperty] private string memoryScope = "all";
 
     partial void OnOfflineChanged(bool value) => Changed?.Invoke(this, EventArgs.Empty);
+    partial void OnSignedOutChanged(bool value) => Changed?.Invoke(this, EventArgs.Empty);
 
     partial void OnMemoryScopeChanged(string value)
     {

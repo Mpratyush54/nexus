@@ -2892,7 +2892,7 @@ public sealed partial class SessionPage : NexusPage
             _sendHere.IsEnabled = false;
             _attachImage.IsEnabled = false;
             _prompt.IsEnabled = false;
-            SetComposerStatus("Sending is paused until Nexus reconnects. Your draft is kept.");
+            SetComposerStatus(ShellState.Current.SignedOut ? "Sign in to Nexus to send (Settings > Account). Your draft is kept." : "Sending is paused until Nexus reconnects. Your draft is kept.");
             _offlineNoticeShown = true;
         }
         else if (_offlineNoticeShown)

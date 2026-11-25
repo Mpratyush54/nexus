@@ -259,7 +259,7 @@ public sealed class DashboardPage : NexusPage
         _startSend.IsEnabled = !offline;
         _startPrompt.IsEnabled = !offline;
         _startAgent.IsEnabled = !offline;
-        if (offline) { StartStatus("Starting chats is paused until Nexus reconnects. What you typed is kept."); _offlineShown = true; }
+        if (offline) { StartStatus(ShellState.Current.SignedOut ? "Sign in to Nexus to start chats (Settings > Account). What you typed is kept." : "Starting chats is paused until Nexus reconnects. What you typed is kept."); _offlineShown = true; }
         else if (_offlineShown) { _offlineShown = false; StartStatus(""); }
     }
 

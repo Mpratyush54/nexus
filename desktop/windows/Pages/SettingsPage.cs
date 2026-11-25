@@ -61,9 +61,10 @@ public sealed partial class SettingsPage : NexusPage
         Content = BuildShell();
     }
 
-    // Returning to Settings shows the last section at once and refreshes it.
+    // Returning to Settings shows the last section at once and refreshes it;
+    // a section key ("account") opens that section instead.
     protected override void OnEnter(object? parameter) =>
-        ShowSection(_section.Length > 0 ? _section : s_lastSection, forceLoad: true);
+        ShowSection(parameter is string { Length: > 0 } key ? key : _section.Length > 0 ? _section : s_lastSection, forceLoad: true);
 
     private async Task RefreshBrowserExecutionAsync()
     {

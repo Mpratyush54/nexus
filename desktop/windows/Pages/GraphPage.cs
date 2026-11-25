@@ -495,12 +495,13 @@ public sealed class GraphPage : NexusPage
         ClearGraph();
         if (projectId.Length == 0)
         {
-            ShowEmpty("Choose a project", "Choose a project on the Timeline page to see its memory graph.");
+            ShowEmpty("Choose a project", "Choose a project in the sidebar to see its memory graph.");
             return;
         }
         if (ShellState.Current.Offline)
         {
-            ShowEmpty("Offline", "The memory graph is drawn from the cloud. Reconnect to see it.", retry: true);
+            if (ShellState.Current.SignedOut) ShowEmpty("Not signed in", "Sign in to Nexus to see your memory graph (Settings > Account).");
+            else ShowEmpty("Offline", "The memory graph comes from your Nexus account. It shows up again when Nexus reconnects.", retry: true);
             return;
         }
         _status.Text = $"Loading the graph for {ShellProjectLabel()}…";

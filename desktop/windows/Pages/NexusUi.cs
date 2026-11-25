@@ -348,7 +348,10 @@ internal static class StateView
         // not a second red error.
         if ((detail ?? "").StartsWith(Nexus.Core.NxErrors.UnreachableMessage, StringComparison.Ordinal) || Nexus.Core.NxErrors.IsUnreachable(detail))
             return Empty("", "Waiting for the connection", "This shows up again as soon as Nexus reconnects to the server.");
-        var plain = Nexus.Core.NxErrors.IsSignedOut(detail) ? Nexus.Core.NxErrors.SignedOutMessage : Friendly(detail);
+        // Not signed in is a state with one fix, not a failure: no red error.
+        if (Nexus.Core.NxErrors.IsSignedOut(detail))
+            return Empty("", "Not signed in", Nexus.Core.NxErrors.SignedOutMessage);
+        var plain = Friendly(detail);
         var stack = new StackPanel { Spacing = 6, MaxWidth = 560, HorizontalAlignment = HorizontalAlignment.Left };
         var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
         head.Children.Add(new FontIcon { Glyph = "", FontSize = 16, Foreground = NexusTokens.Brush("NexusDangerBrush", Windows.UI.Color.FromArgb(255, 0xF2, 0x8B, 0x8B)), VerticalAlignment = VerticalAlignment.Center });
