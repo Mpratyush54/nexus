@@ -21,6 +21,7 @@ internal sealed class ThinkingView
     private readonly System.Text.StringBuilder _text = new();
     private DispatcherTimer? _tick;
     private DateTimeOffset _started;
+    private bool _finished;
 
     public ThinkingView(string content, TimeSpan? duration = null)
     {
@@ -88,6 +89,9 @@ internal sealed class ThinkingView
     /// The thinking ended (the reply's text started): "Thought for Ns".
     public void Finish(TimeSpan? duration = null)
     {
+        // Once: the time is when the text started, not when the row was moved.
+        if (_finished) return;
+        _finished = true;
         _tick?.Stop();
         _tick = null;
         var took = duration ?? (_started == default ? (TimeSpan?)null : DateTimeOffset.Now - _started);
