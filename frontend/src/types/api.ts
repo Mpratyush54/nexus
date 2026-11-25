@@ -2,18 +2,23 @@ export type ApiErrorBody = {
   error: {
     code: number
     message: string
+    /** Same as the X-Request-ID header; matches the server log line. */
+    request_id?: string
   }
 }
 
 export class ApiError extends Error {
   status: number
   code: number
+  /** The server's request ID ("ref ABC123"), when the API returned one. */
+  requestId?: string
 
-  constructor(status: number, message: string, code?: number) {
+  constructor(status: number, message: string, code?: number, requestId?: string) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code ?? status
+    this.requestId = requestId || undefined
   }
 }
 

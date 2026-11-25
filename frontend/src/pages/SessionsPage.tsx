@@ -22,7 +22,8 @@ import { useAuth } from '@/providers/AuthProvider'
 import { ApiError } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 
-export function SessionsPage() {
+/** `embedded` drops the page title when this renders inside another page's Advanced section. */
+export function SessionsPage({ embedded = false, showSteer = !embedded }: { embedded?: boolean; showSteer?: boolean } = {}) {
   const { projectId } = useAuth()
   const { push } = useToast()
   const sessions = useSessions()
@@ -79,6 +80,7 @@ export function SessionsPage() {
 
   return (
     <div className="space-y-8">
+      {embedded ? null : (
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Sessions</h1>
         <p className="mt-1 text-sm text-fg-dim">
@@ -86,10 +88,11 @@ export function SessionsPage() {
           Desktop auto-sync writes straight to Memory.
         </p>
       </div>
+      )}
 
       <div className="grid gap-6 lg:grid-cols-2">
         <GlassPanel className="space-y-4 p-5">
-          <h2 className="text-sm font-medium text-fg">Active sessions</h2>
+          <h2 className="text-sm font-medium text-fg">Sessions</h2>
           <form onSubmit={onCreate} className="flex flex-wrap gap-2">
             <input
               value={title}
@@ -264,6 +267,8 @@ export function SessionsPage() {
             )}
           </GlassPanel>
 
+          {/* Inside Phone & devices the main form already steers, unless that form is the desktop relay. */}
+          {!showSteer ? null : (
           <GlassPanel className="space-y-4 p-5">
             <div className="flex items-center gap-2">
               <Radio className="h-4 w-4 text-fg-dim" />
@@ -360,12 +365,13 @@ export function SessionsPage() {
               </>
             )}
           </GlassPanel>
+          )}
         </div>
       </div>
 
       <GlassPanel className="space-y-4 p-5">
         <div>
-          <h2 className="text-sm font-medium text-fg">Session snapshots (Teleport)</h2>
+          <h2 className="text-sm font-medium text-fg">Saved session snapshots</h2>
           <p className="mt-1 text-xs text-muted">
             Auto-refreshes every 30s. Restore on another machine with the CLI or Desktop Cockpit.
           </p>

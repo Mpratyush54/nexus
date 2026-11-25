@@ -1,6 +1,8 @@
 import { cleanToolResult, parseTurnText } from './harness-message'
 
-export type ToolView = { name: string; path: string; command: string; input: string; output: string; diff: string; notice: string; subagent: string }
+export type ToolView = { name: string; path: string; command: string; input: string; output: string; diff: string; notice: string; subagent: string; brief: string }
+/** Hunk header for an edit saved as before/after text, with no line numbers. ChatDiff doesn't show it. */
+export const BARE_HUNK = '@@ @@'
 
 const SUBAGENT_TOOL = /^(task|agent)$|sub_?agent|spawn_agent/i
 type ObjectValue = Record<string, unknown>
@@ -34,12 +36,13 @@ export function toolViews(raw: unknown): ToolView[] {
     const success = object(result.success ?? object(result.result).success)
     let diff = field(args, 'diff', 'diffString', 'patch', 'patch_text') || field(success, 'diffString', 'diff') || field(result, 'diffString', 'diff')
     if (!diff && typeof args.old_string === 'string' && typeof args.new_string === 'string' && args.old_string !== args.new_string)
-      diff = '@@ saved replacement @@\n' + (args.old_string ? args.old_string.split('\n').map(line => '-' + line).join('\n') + '\n' : '') + (args.new_string ? args.new_string.split('\n').map(line => '+' + line).join('\n') : '')
+      diff = BARE_HUNK + '\n' + (args.old_string ? args.old_string.split('\n').map(line => '-' + line).join('\n') + '\n' : '') + (args.new_string ? args.new_string.split('\n').map(line => '+' + line).join('\n') : '')
     const name = field(call, 'name', 'tool_name', 'toolName', 'tool') || field(fn, 'name') || 'Tool'
     const rawOutput = pretty(call.result ?? call.output ?? call.error)
     const subagent = SUBAGENT_TOOL.test(name) ? field(args, 'description', 'subagent_type', 'agent', 'name') || 'Sub-agent run' : ''
     return {
       name, subagent,
+      brief: subagent ? field(args, 'prompt', 'task', 'instructions') : '',
       path: field(args, 'path', 'file_path', 'filePath', 'target_file', 'relative_workspace_path') || (Array.isArray(call.files) ? String(call.files[0] ?? '') : ''),
       command: field(args, 'command', 'cmd', 'command_line') || field(call, 'command'), input: pretty(Object.keys(args).length ? args : call.input),
       output: subagent ? cleanToolResult(rawOutput) : rawOutput, diff: diff || field(call, 'diff'), notice: field(args, 'notice'),

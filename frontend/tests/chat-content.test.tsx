@@ -36,7 +36,7 @@ test('diff file headers are not additions and real hunk indexes are kept', () =>
   assert.equal(rows.filter(row => row.kind === 'added').length, 1)
   assert.equal(rows[3].before, 40); assert.equal(rows[4].after, 50)
   assert.equal(rows[5].before, 41); assert.equal(rows[5].after, 51)
-  const saved = diffRows('@@ saved replacement @@\n-a\n+b')
+  const saved = diffRows('@@ @@\n-a\n+b')
   assert.equal(saved[1].before, undefined); assert.equal(saved[2].after, undefined)
 })
 test('Markdown is rendered safely and browser message IDs stay lossless', () => {

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"time"
 
 	memctx "central-memory/internal/context"
+	"central-memory/internal/desktopbridge"
 	"central-memory/internal/extract"
 	"central-memory/internal/mail"
 	"central-memory/internal/mcp"
@@ -48,6 +50,11 @@ type Server struct {
 	Mux   *http.ServeMux
 	Auth  *Authenticator
 	Log   *log.Logger
+
+	// Desktop is the browser-to-desktop execution queue (/v1/desktop/*).
+	// Nil answers 503. cmd/server wires the Postgres repository after it
+	// swaps in the real store.
+	Desktop desktopbridge.Repository
 
 	// Ingest rate-limit gates (issues #93/#100). Lazily initialized so
 	// zero-value Servers in tests still enforce defaults.
@@ -151,6 +158,12 @@ func NewServer(st store.Store) *Server {
 		login:     newRateGate(1, 5),
 		checkouts: make(map[string]string),
 		handoffs:  make(map[string]*handoffRecord),
+	}
+	if pg, ok := st.(*store.PostgresStore); ok {
+		s.Desktop = desktopbridge.NewPostgres(pg.DB())
+	} else if _, ok := st.(*store.MemStore); ok {
+		// Only explicit in-memory development/test stores may lose queued work.
+		s.Desktop = desktopbridge.NewMemory()
 	}
 	s.registerRoutes()
 	return s
@@ -288,7 +301,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	// Trailing garbage after the first value is rejected (issue #154):
 	// Decode stops at the first complete value, so verify EOF follows.
 	var extra any
-	if err := dec.Decode(&extra); err == nil {
+	if err := dec.Decode(&extra); err != io.EOF {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: trailing data after JSON value")
 		return false
 	}

@@ -1,22 +1,39 @@
 import { AnimatePresence, motion } from 'framer-motion'
-import { Activity, Bell, Bot, Building2, Cable, LayoutDashboard, Search, Settings, Shield, Split, Users } from 'lucide-react'
+import { Activity, Bell, Bot, Brain, Building2, Cable, History, LayoutDashboard, MessageSquare, Search, Send, Settings, Shield, Smartphone, Split, Users } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { STEER_ROUTE } from '@/lib/navigation'
 
 const items = [
-  { id: 'dashboard', label: 'Home', hint: 'Project memories, scanner, pulse', icon: LayoutDashboard, to: '/app/dashboard' },
-  { id: 'memory', label: 'Memory', hint: 'Review queue & editor', icon: Search, to: '/app/memory' },
-  { id: 'agents', label: 'Agents', hint: 'MCP activity & permissions', icon: Bot, to: '/app/agents' },
-  { id: 'team', label: 'Team', hint: 'Members, roles, GitHub', icon: Users, to: '/app/team' },
-  { id: 'org', label: 'Org', hint: 'Organizations, projects, billing', icon: Building2, to: '/app/org' },
-  { id: 'branches', label: 'Overlays', hint: 'Memory fork / diff / merge (not git)', icon: Split, to: '/app/branches' },
-  { id: 'activity', label: 'Activity', hint: 'Project event log with filters', icon: Activity, to: '/app/activity' },
+  { id: 'dashboard', label: 'Home', hint: 'Recent chats and memories', icon: LayoutDashboard, to: '/app/dashboard' },
+  { id: 'chats', label: 'Chats', hint: 'Read and search your agent chats', icon: History, to: '/app/chats' },
+  { id: 'memory', label: 'Memory', hint: 'What your agents learned', icon: Search, to: '/app/memory' },
+  { id: 'activity', label: 'Activity', hint: 'What your agents did, day by day', icon: Activity, to: '/app/activity' },
+  { id: 'steer', label: 'Phone & devices', hint: 'Message an agent on your computer', icon: Smartphone, to: STEER_ROUTE },
+  { id: 'team', label: 'Team', hint: 'Who can see this project', icon: Users, to: '/app/team' },
+  { id: 'org', label: 'Organization', hint: 'Members, roles, invites, projects', icon: Building2, to: '/app/org' },
+  { id: 'connect', label: 'Desktop app', hint: 'Install and connect the desktop app', icon: Cable, to: '/app/connect' },
+  { id: 'teleport', label: 'Chats sent to you', hint: 'Phone & devices', icon: Send, to: `${STEER_ROUTE}#sent-to-you` },
+  { id: 'agents', label: 'Agent connections', hint: 'Activity → Advanced', icon: Bot, to: '/app/activity?advanced=agents' },
+  { id: 'branches', label: 'Memory copies', hint: 'Memory → Advanced', icon: Split, to: '/app/memory?advanced=overlays' },
   { id: 'notifications', label: 'Notifications', hint: 'Inbox, preferences, devices', icon: Bell, to: '/app/notifications' },
-  { id: 'connect', label: 'Desktop setup', hint: 'Install Desktop + harvest', icon: Cable, to: '/app/connect' },
-  { id: 'onboarding', label: 'Onboarding', hint: 'First-run setup guide', icon: Cable, to: '/app/onboarding' },
-  { id: 'settings', label: 'Settings', hint: 'Tokens, plan, export', icon: Settings, to: '/app/settings' },
+  { id: 'onboarding', label: 'Setup guide', hint: 'First-run setup', icon: Cable, to: '/app/onboarding' },
+  { id: 'settings', label: 'Settings', hint: 'Account, plan, tokens', icon: Settings, to: '/app/settings' },
   { id: 'admin', label: 'Platform', hint: 'Super Admin, versions, CLI releases', icon: Shield, to: '/app/admin' },
 ]
+
+type Item = (typeof items)[number]
+
+// Typing searches content, not just page names: the first two rows send the
+// words to Chats and Memory search, then matching pages follow.
+function searchItems(q: string): Item[] {
+  const enc = encodeURIComponent(q)
+  return [
+    { id: 'search-chats', label: `Search chats for “${q}”`, hint: 'Every chat in this project', icon: MessageSquare, to: `/app/chats?q=${enc}` },
+    { id: 'search-memory', label: `Search memory for “${q}”`, hint: 'What your agents learned', icon: Brain, to: `/app/memory?q=${enc}` },
+  ]
+}
+
 
 type Props = {
   open: boolean
@@ -29,11 +46,13 @@ export function CommandPalette({ open, onClose }: Props) {
   const [active, setActive] = useState(0)
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
+    const raw = query.trim()
+    const q = raw.toLowerCase()
     if (!q) return items
-    return items.filter(
+    const pages = items.filter(
       (i) => i.label.toLowerCase().includes(q) || i.hint.toLowerCase().includes(q),
     )
+    return [...searchItems(raw), ...pages]
   }, [query])
 
   useEffect(() => {
@@ -102,7 +121,8 @@ export function CommandPalette({ open, onClose }: Props) {
                 autoFocus
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Jump to memory, agents, team…"
+                placeholder="Search chats, memory or pages…"
+                aria-label="Search chats, memory or pages"
                 className="w-full bg-transparent text-sm text-fg outline-none placeholder:text-muted"
               />
               <kbd className="font-mono hidden rounded border border-border px-1.5 py-0.5 text-[10px] text-muted sm:inline">

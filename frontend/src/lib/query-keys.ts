@@ -36,6 +36,7 @@ export const queryKeys = {
     storage: (id: string) => ['orgs', 'storage', id] as const,
     audit: (id: string) => ['orgs', 'audit', id] as const,
     shares: (id: string) => ['orgs', 'shares', id] as const,
+    invites: (id: string) => ['orgs', 'invites', id] as const,
     offboardPreview: (id: string, userId: string) =>
       ['orgs', 'offboard-preview', id, userId] as const,
   },
@@ -61,6 +62,8 @@ export const queryKeys = {
     overview: ['admin', 'overview'] as const,
     users: ['admin', 'users'] as const,
     releases: ['admin', 'releases'] as const,
+    problems: (source: string, kind: string) => ['admin', 'problems', source, kind] as const,
+    problem: (fingerprint: string) => ['admin', 'problem', fingerprint] as const,
   },
   billing: {
     plans: ['billing', 'plans'] as const,

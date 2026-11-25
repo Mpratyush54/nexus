@@ -1,27 +1,7 @@
 import { FolderGit2 } from 'lucide-react'
-import { Link } from 'react-router-dom'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
-
-/** Soft nudge when no daemon is heartbeating — only used on Home / Desktop. */
-export function DaemonBanner() {
-  const { serverView, identity } = useTrustedLocalBridge()
-
-  if (serverView.isLoading) return null
-  if (serverView.data?.online) return null
-  if (identity === 'mismatch' || identity === 'unsigned') return null
-
-  return (
-    <div className="mb-6 rounded-lg border border-border bg-raised/80 px-4 py-3 text-sm text-fg-dim">
-      No desktop agent for this project yet.{' '}
-      <Link to="/app/connect" className="text-ember hover:underline">
-        Set up Nexus Desktop
-      </Link>{' '}
-      so chats can harvest into Memory. Cloud Memory and Agents still work without it.
-    </div>
-  )
-}
 
 /**
  * Compact local-folder presence for Home + Desktop only.

@@ -6,7 +6,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const mark = readFileSync(path.join(root, 'public', 'brand', 'nexus-mark.svg'), 'utf8')
+// The app icon itself (tile included), exactly as the desktop app shows it.
+const mark = readFileSync(path.join(root, 'public', 'brand', 'nexus-app.svg'), 'utf8')
   .replace(/<\?xml[^>]*>/, '')
   .replace('<svg', '<svg x="72" y="64" width="64" height="64"')
 
@@ -36,7 +37,6 @@ const code = lines.map(([who, color, text, sel], i) => {
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
   <rect width="1200" height="630" fill="#121413"/>
   <g stroke="#ffffff" stroke-opacity=".035">${Array.from({ length: 25 }, (_, i) => `<line x1="${i * 50}" y1="0" x2="${i * 50}" y2="630"/>`).join('')}</g>
-  <rect x="72" y="64" width="64" height="64" rx="14" fill="#171918"/>
   ${mark}
   <text x="152" y="108" font-family="Segoe UI" font-weight="600" font-size="34" fill="#ECEBE6">Nexus</text>
   <text x="72" y="236" font-family="Segoe UI" font-weight="700" font-size="76" letter-spacing="-2.5" fill="#ECEBE6">One memory for</text>

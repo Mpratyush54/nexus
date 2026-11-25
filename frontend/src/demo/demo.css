@@ -1,0 +1,56 @@
+/*
+ * The demo bar. It portals into the app shell's #app-top-slot, so it sits in
+ * the page flow at the top of the content column: it never covers content,
+ * the sidebar or the phone tab bar. Before the shell mounts it floats
+ * bottom-right as a fallback.
+ */
+html.nx-demo { --demo-bar-h: 44px; }
+html.nx-demo.nx-demo-min { --demo-bar-h: 36px; }
+
+.demo-banner {
+  position: fixed; z-index: 60; right: 16px; bottom: calc(16px + env(safe-area-inset-bottom));
+  display: flex; align-items: center; gap: 14px; max-width: calc(100vw - 24px);
+  padding: 6px 6px 6px 14px; border-radius: 12px;
+  background: #171918; color: #ecebe6; border: 1px solid #2d312e;
+  font: 400 13.5px/1.3 'IBM Plex Sans', 'Segoe UI', system-ui, sans-serif;
+}
+.demo-banner.is-docked {
+  position: static; max-width: none; height: var(--demo-bar-h); box-sizing: border-box;
+  margin-bottom: 1.5rem; box-shadow: none;
+}
+.demo-banner a { color: inherit; text-decoration: none; }
+.demo-banner-tag { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.demo-banner-tag strong { font-weight: 600; }
+.demo-banner-dim, .demo-banner-text { color: #a6a9a5; }
+.demo-banner-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.demo-banner-actions { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
+.demo-banner-cta {
+  display: inline-flex; align-items: center; gap: 6px; white-space: nowrap;
+  height: 30px; padding: 0 12px; border-radius: 8px; background: #e8bb67; color: #141617 !important; font-weight: 600;
+}
+.demo-banner.is-min .demo-banner-cta { height: 24px; padding: 0 10px; font-size: 12.5px; }
+.demo-banner-cta:hover { background: #f0c67a; }
+.demo-banner-link { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; height: 30px; padding: 0 8px; border-radius: 8px; }
+.demo-banner-link:hover { background: rgb(255 255 255 / 0.08); }
+.demo-banner-toggle {
+  width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 8px;
+  background: transparent; color: #a6a9a5; cursor: pointer;
+}
+.demo-banner.is-min .demo-banner-toggle { width: 24px; height: 24px; }
+.demo-banner-toggle:hover { background: rgb(255 255 255 / 0.08); color: #ecebe6; }
+.demo-banner :focus-visible { outline: 2px solid #e8bb67; outline-offset: 2px; }
+.demo-banner.is-min { padding-left: 12px; gap: 8px; }
+
+/* Chat view fills the screen: the bar is a flush strip and the chat gets the rest. */
+html.nx-demo .is-conversation .demo-banner.is-docked { margin: 0; border-radius: 0; border-width: 0 0 1px; }
+html.nx-demo .is-conversation .conversation-layout { height: calc(100% - var(--demo-bar-h)); }
+
+@media (max-width: 1180px) {
+  .demo-banner-text { display: none; }
+}
+@media (max-width: 560px) {
+  .demo-banner { gap: 6px; padding: 5px 5px 5px 10px; }
+  .demo-banner:not(.is-docked) { right: 10px; left: 10px; bottom: calc(76px + env(safe-area-inset-bottom)); }
+  .demo-banner.is-docked { margin-bottom: 1rem; }
+  .demo-banner-dim, .demo-banner-download { display: none; }
+}
