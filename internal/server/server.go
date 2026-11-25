@@ -302,11 +302,17 @@ const maxRequestBodyBytes = 2 << 20
 
 // decodeJSON decodes a JSON request body, disallowing trailing garbage.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return decodeJSONLimit(w, r, dst, maxRequestBodyBytes)
+}
+
+// decodeJSONLimit is decodeJSON with a route-specific body limit (desktop
+// turns with images need more than the default).
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
 	if r.Body == nil {
 		writeError(w, http.StatusBadRequest, "request body is required")
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

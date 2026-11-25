@@ -32,8 +32,19 @@ type codexApproval struct {
 	turn string
 }
 type codexMessage struct {
-	ctx  context.Context
-	text string
+	ctx    context.Context
+	text   string
+	images []string
+}
+
+// codexInput is one turn's input: local images (the app-server reads the
+// files itself) and then the text.
+func codexInput(msg codexMessage) []any {
+	input := []any{}
+	for _, path := range msg.images {
+		input = append(input, map[string]any{"type": "localImage", "path": path})
+	}
+	return append(input, map[string]any{"type": "text", "text": msg.text})
 }
 
 type codexLive struct {
@@ -345,7 +356,7 @@ func (s *codexLive) run(ctx context.Context, opts LiveOptions) {
 			s.turnID = ""
 			s.mu.Unlock()
 			// Follow-ups are FIFO turns, deliberately not mid-turn steering.
-			result, err = s.rpc(ctx, "turn/start", map[string]any{"threadId": response.Thread.ID, "input": []any{map[string]any{"type": "text", "text": msg.text}}})
+			result, err = s.rpc(ctx, "turn/start", map[string]any{"threadId": response.Thread.ID, "input": codexInput(msg)})
 			if err != nil {
 				s.emit(LiveEvent{Kind: "turn_done", Text: liveText(err.Error(), liveLineLimit), IsError: true})
 				// A timeout or transport error leaves the server's turn state
@@ -378,6 +389,14 @@ func (s *codexLive) run(ctx context.Context, opts LiveOptions) {
 	}
 }
 func (s *codexLive) Send(ctx context.Context, text string) error {
+	return s.SendWithImages(ctx, text, nil)
+}
+
+// SendWithImages queues a turn whose input lists each image as localImage.
+func (s *codexLive) SendWithImages(ctx context.Context, text string, images []string) error {
+	if len(images) > MaxImages {
+		return errors.New("attach at most four images")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -386,7 +405,7 @@ func (s *codexLive) Send(ctx context.Context, text string) error {
 		s.mu.Unlock()
 		return errors.New("codex live: session closed")
 	}
-	s.messages = append(s.messages, codexMessage{ctx, text})
+	s.messages = append(s.messages, codexMessage{ctx, text, append([]string(nil), images...)})
 	s.mu.Unlock()
 	s.signal(s.work)
 	return nil

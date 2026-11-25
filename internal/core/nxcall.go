@@ -127,6 +127,7 @@ func Methods() []string {
 		"continue.start",
 		"harness.status", "harness.models",
 		"continue.here",
+		"transcript.images", "transcript.image",
 		"continue.cancel",
 		"continue.local.list",
 		"continue.record",
@@ -327,7 +328,7 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		}
 		for _, path := range req.Images {
 			if !continuex.AllowedImage(path) {
-				return nil, errors.New("attach a local PNG, JPEG, or WebP image under 20 MB")
+				return nil, errors.New("attach a local PNG, JPEG, GIF, or WebP image under 20 MB")
 			}
 		}
 		var plan continuex.LaunchPlan
@@ -405,7 +406,11 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 		if localNativeID == "" && plan.Native {
 			localNativeID = req.NativeID
 		}
-		return recordExchange(ctx, deps, req.SessionID, req.ProjectID, plan.Agent, localNativeID, prompt, answer, changedFiles, fileDiffs, activities, !plan.Native), nil
+		// The saved message names its images (never their bytes) so the chat
+		// can show them next to the text.
+		return recordExchange(ctx, deps, req.SessionID, req.ProjectID, plan.Agent, localNativeID, continuex.ImageTags(prompt, req.Images), answer, changedFiles, fileDiffs, activities, !plan.Native), nil
+	case "transcript.images", "transcript.image":
+		return transcriptImagesCall(method, args)
 	case "agents.setup":
 		// Local: what each agent is configured with (no secrets returned).
 		var body struct {

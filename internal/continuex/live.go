@@ -18,6 +18,13 @@ type LiveSession interface {
 	Close() error                                              // Terminate and wait for exit, with a bounded grace period.
 }
 
+// ImageSender is a LiveSession that can take images with a message. images
+// are local files the caller already validated (AllowedImage); each driver
+// sends them in its agent's own format.
+type ImageSender interface {
+	SendWithImages(ctx context.Context, text string, images []string) error
+}
+
 type LiveEvent struct {
 	Kind       string // status, text_delta, text, tool_start, tool_end, approval, turn_done, error, exited
 	Text       string

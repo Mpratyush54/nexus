@@ -59,13 +59,11 @@ const maxHeadlessOutput = 2 << 20
 
 // AllowedImage validates local files before passing them to a harness CLI.
 func AllowedImage(path string) bool {
-	switch strings.ToLower(filepath.Ext(path)) {
-	case ".png", ".jpg", ".jpeg", ".webp":
-	default:
+	if !imageExtensionAllowed(path) {
 		return false
 	}
 	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() && info.Size() > 0 && info.Size() <= 20<<20
+	return err == nil && info.Mode().IsRegular() && info.Size() > 0 && info.Size() <= MaxLocalImageBytes
 }
 
 func (e HeadlessExecutor) Turn(ctx context.Context, plan LaunchPlan, workspace string) (string, error) {
@@ -143,6 +141,11 @@ func (HeadlessExecutor) TurnStreaming(ctx context.Context, plan LaunchPlan, work
 	}
 	cmd.Dir = workspace
 	cmd.Stdin = nil
+	if len(plan.Stdin) > 0 {
+		// Claude reads image content blocks as one stream-json message; EOF
+		// right after it ends the turn, so nothing can wait for more input.
+		cmd.Stdin = bytes.NewReader(plan.Stdin)
+	}
 	cmd.WaitDelay = 3 * time.Second
 	var stderr cappedOutput
 	var progressLock sync.Mutex

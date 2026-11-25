@@ -94,7 +94,7 @@ func desktopProjectRoots() map[string]string {
 	}
 	return out
 }
-func approveDesktopRequest(ctx context.Context, j desktopbridge.Job, root string) bool {
+func approveDesktopRequest(ctx context.Context, j desktopbridge.Job, root string, images []string) bool {
 	ch := make(chan bool, 1)
 	desktopExecution.Lock()
 	desktopExecution.pending[j.ID] = ch
@@ -105,7 +105,7 @@ func approveDesktopRequest(ctx context.Context, j desktopbridge.Job, root string
 		desktopExecution.Unlock()
 		emitCoreEvent(map[string]any{"type": "desktop.request.closed", "request_id": j.ID})
 	}()
-	emitCoreEvent(map[string]any{"type": "desktop.request", "request_id": j.ID, "agent": j.Agent, "model": j.Model, "prompt": j.Prompt, "workspace": root, "session_id": j.SessionID})
+	emitCoreEvent(map[string]any{"type": "desktop.request", "request_id": j.ID, "agent": j.Agent, "model": j.Model, "prompt": j.Prompt, "workspace": root, "session_id": j.SessionID, "images": images})
 	select {
 	case <-ctx.Done():
 		return false

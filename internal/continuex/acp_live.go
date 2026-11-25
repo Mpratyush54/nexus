@@ -3,6 +3,7 @@ package continuex
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,8 +83,9 @@ type acpPermission struct {
 	}
 }
 type acpPrompt struct {
-	ctx  context.Context
-	text string
+	ctx    context.Context
+	text   string
+	images []string
 }
 type acpResponse struct {
 	method string
@@ -110,6 +112,7 @@ type acpLive struct {
 	events                       chan LiveEvent
 	finished, closing, replaying bool
 	resumed                      bool
+	imageInput                   bool // agent advertised promptCapabilities.image
 }
 
 // StartACPLive starts an ACP v1 JSON-RPC connection. No client filesystem or
@@ -360,7 +363,12 @@ func (s *acpLive) run(ctx context.Context, opts LiveOptions) {
 		first = false
 		// Once submitted, await this response even if Send's context expires;
 		// only session/cancel ends a turn without overlapping the next prompt.
-		m, err := s.rpc(ctx, "session/prompt", map[string]any{"sessionId": s.NativeID(), "prompt": []any{map[string]any{"type": "text", "text": text}}})
+		prompt, problem := s.acpPromptBlocks(text, p.images)
+		if problem != nil {
+			s.emit(LiveEvent{Kind: "turn_done", Text: problem.Error(), IsError: true, NativeID: s.NativeID()})
+			continue
+		}
+		m, err := s.rpc(ctx, "session/prompt", map[string]any{"sessionId": s.NativeID(), "prompt": prompt})
 		// Emit protocol turn_done on the stdout reader to preserve ordering
 		// when the peer exits immediately after writing its response.
 		if err != nil && m.Error == nil {
@@ -377,8 +385,11 @@ func (s *acpLive) initialize(ctx context.Context, opts LiveOptions) error {
 	var init struct {
 		Version      int `json:"protocolVersion"`
 		Capabilities struct {
-			Load bool `json:"loadSession"`
-			MCP  struct {
+			Load   bool `json:"loadSession"`
+			Prompt struct {
+				Image bool `json:"image"`
+			} `json:"promptCapabilities"`
+			MCP struct {
 				HTTP bool `json:"http"`
 			} `json:"mcpCapabilities"`
 		} `json:"agentCapabilities"`
@@ -390,6 +401,9 @@ func (s *acpLive) initialize(ctx context.Context, opts LiveOptions) error {
 	if init.Version != 1 {
 		return fmt.Errorf("ACP live: unsupported protocol version %d", init.Version)
 	}
+	s.mu.Lock()
+	s.imageInput = init.Capabilities.Prompt.Image
+	s.mu.Unlock()
 	// authMethods lists available methods, not whether authentication is needed.
 	// Existing CLI credentials are used; auth-required errors explain sign-in.
 	// Kimi 0.31.1 advertises terminal-auth and loadSession even when local
@@ -541,6 +555,16 @@ func (s *acpLive) initialize(ctx context.Context, opts LiveOptions) error {
 	return nil
 }
 func (s *acpLive) Send(ctx context.Context, text string) error {
+	return s.SendWithImages(ctx, text, nil)
+}
+
+// SendWithImages queues a prompt with ACP image content blocks. Only agents
+// that advertise promptCapabilities.image receive them; others get a clear
+// error instead of a silently dropped picture.
+func (s *acpLive) SendWithImages(ctx context.Context, text string, images []string) error {
+	if len(images) > MaxImages {
+		return errors.New("attach at most four images")
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -549,9 +573,28 @@ func (s *acpLive) Send(ctx context.Context, text string) error {
 	if s.finished || s.closing {
 		return errors.New("ACP live: process closed")
 	}
-	s.prompts = append(s.prompts, acpPrompt{ctx, text})
+	s.prompts = append(s.prompts, acpPrompt{ctx, text, append([]string(nil), images...)})
 	acpSignal(s.promptWake)
 	return nil
+}
+func (s *acpLive) acpPromptBlocks(text string, images []string) ([]any, error) {
+	blocks := []any{}
+	if len(images) > 0 {
+		s.mu.Lock()
+		ok := s.imageInput
+		s.mu.Unlock()
+		if !ok {
+			return nil, fmt.Errorf("%s does not accept images in chat. Remove the image or choose Claude Code or Codex", s.agent)
+		}
+		for _, path := range images {
+			mediaType, data, err := ReadImage(path, MaxInlineImageBytes)
+			if err != nil {
+				return nil, err
+			}
+			blocks = append(blocks, map[string]any{"type": "image", "mimeType": mediaType, "data": base64.StdEncoding.EncodeToString(data)})
+		}
+	}
+	return append(blocks, map[string]any{"type": "text", "text": text}), nil
 }
 func (s *acpLive) Approve(id string, allow bool, reason string) error {
 	s.mu.Lock()
