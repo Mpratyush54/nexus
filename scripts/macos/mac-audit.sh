@@ -204,9 +204,16 @@ for theme in light dark; do
   if launch; then
     shot "01-welcome-$theme"
     ax_dump "first-run-$theme"
-    # "Get started": centred, 165 pt below the middle (Platform/MacWelcome.cs).
-    b=$(win); set -- $b
-    ./dist/pointer click $(( $2 + $4 / 2 )) $(( $3 + $5 / 2 + 165 )); sleep 4
+    if grep -q "Get started" "$L/ax-first-run-$theme.txt"; then pass "VoiceOver sees Get started ($theme)"; else note "Get started is not in the Accessibility tree ($theme)"; fi
+    # Return, from wherever focus is, takes "Get started".
+    ./dist/keys key 36; sleep 4
+    if grep -q "Nexus setup" <(se 'get entire contents of window 1' 2>&1) && ! grep -q "Get started" <(se 'get entire contents of window 1' 2>&1); then
+      pass "Return on the welcome opened the setup guide ($theme)"
+    else
+      note "Return did not leave the welcome ($theme); clicking Get started"
+      b=$(win); set -- $b
+      ./dist/pointer click $(( $2 + $4 / 2 )) $(( $3 + $5 / 2 + 165 )); sleep 4
+    fi
     shot "02-setup-signin-$theme"
     ax_dump "setup-$theme"
     stop
@@ -271,6 +278,13 @@ for theme in light dark; do
   # Every section in the Settings list, then the bottom of the last one.
   for i in 0 1 2 3 4 5 6 7 8; do click 400 $(( 123 + 34 * i )); sleep 2.5; shot "25-settings-$i-$theme"; scroll_at 0.75 0.6 -15; sleep 1; shot "25-settings-$i-end-$theme"; done
   nav Home
+  # Idle CPU: nothing on screen changes for 20 s; then where the time goes.
+  sleep 20
+  top -l 6 -s 1 -pid "$PID" -stats pid,cpu,mem 2>/dev/null | awk '$1 ~ /^[0-9]+$/ {print}' | tail -5 > "$L/idle-cpu-$theme.txt"
+  cpu=$(awk '{s+=$2; n++} END {if (n) printf "%.1f", s/n}' "$L/idle-cpu-$theme.txt")
+  echo "walk-$theme idle_cpu_percent=$cpu" >> "$L/perf.txt"
+  limited 30 sample "$PID" 5 -file "$L/sample-idle-$theme.txt" > /dev/null 2>&1 || true
+  if [ "${cpu%.*}" -lt 15 ] 2>/dev/null; then pass "idle CPU $cpu% ($theme)"; else note "idle CPU $cpu% ($theme); see sample-idle-$theme.txt"; fi
   stop
 done
 

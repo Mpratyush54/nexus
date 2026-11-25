@@ -135,8 +135,18 @@ public sealed partial class MainWindow : Window
         _a11yTimer = DispatcherQueue.CreateTimer();
         _a11yTimer.Interval = TimeSpan.FromMilliseconds(900);
         _a11yTimer.IsRepeating = false;
-        _a11yTimer.Tick += (_, _) => AccessibleNames.Fill(Content);
+        // Anything that re-lays out every frame (a caret, a spinner, Uno's
+        // layout passes) restarted this scan every 0.9 s for good, walking
+        // thousands of elements: most of the idle CPU on macOS. A scan that
+        // finds nothing to name waits twice as long next time (up to ~30 s);
+        // a page or chat change goes back to 0.9 s.
+        _a11yTimer.Tick += (_, _) =>
+        {
+            _a11yQuiet = AccessibleNames.Fill(Content) > 0 ? 0 : Math.Min(_a11yQuiet + 1, 5);
+            _a11yTimer.Interval = TimeSpan.FromMilliseconds(900 << _a11yQuiet);
+        };
         RootGrid.LayoutUpdated += (_, _) => { if (!_a11yTimer.IsRunning) _a11yTimer.Start(); };
+        ContentFrame.RegisterPropertyChangedCallback(ContentControl.ContentProperty, (_, _) => ResetAccessibleNameScan());
         Connectivity.Changed += () => DispatcherQueue.TryEnqueue(ApplyConnectivity);
         Connectivity.Start();
         _ = RefreshBannerAsync();
@@ -188,6 +198,15 @@ public sealed partial class MainWindow : Window
         if (Content is Grid root) root.Children.Remove(dim);
     }
     private readonly DispatcherQueueTimer _a11yTimer;
+    private int _a11yQuiet;
+
+    private void ResetAccessibleNameScan()
+    {
+        _a11yQuiet = 0;
+        _a11yTimer.Stop();
+        _a11yTimer.Interval = TimeSpan.FromMilliseconds(900);
+        _a11yTimer.Start();
+    }
 
     // A live theme switch: XAML-bound resources follow the root's theme by
     // themselves; everything built in code is rebuilt with brushes of the
@@ -1167,6 +1186,7 @@ public sealed partial class MainWindow : Window
         ChatList.ItemsSource = items;
         MoreChatsButton.Visibility = _chatCursor.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         System.Diagnostics.Trace.WriteLine($"[perf] chats: render {seen.Count} rows (virtualized) {watch.Elapsed.TotalMilliseconds:0.0} ms");
+        if (_a11yQuiet > 0) ResetAccessibleNameScan();
     }
 
     private List<object> _chatItems = new();

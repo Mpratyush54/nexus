@@ -42,6 +42,11 @@ internal sealed class MacWelcome : Grid
     private readonly Button _primary;
     private readonly Button _secondary;
     private bool _busy;
+    // The page underneath (setup guide or shell) while this screen covers it:
+    // collapsed so VoiceOver and the keyboard reach only this screen.
+    private readonly List<UIElement> _covered = new();
+    private Grid? _root;
+    private Microsoft.UI.Xaml.Input.KeyEventHandler? _keys;
 
     /// <summary>
     /// MainWindow's constructor, after the setup guide (if any) is open:
@@ -61,7 +66,54 @@ internal sealed class MacWelcome : Grid
         if (!AppPrefs.SetupCompleted) ThemeService.Hold(window, ThemeService.Dark);
         var screen = new MacWelcome(window, mode.Value);
         Grid.SetRowSpan(screen, 2);
+        screen.Cover(root);
         root.Children.Add(screen);
+    }
+
+    // VoiceOver saw only the setup guide underneath (the welcome was not in
+    // the Accessibility tree) and Return went to whatever the guide focused.
+    // Hide what's underneath until this screen goes, and take Return/Space
+    // (and Esc for "Not now") from anywhere in the window.
+    private void Cover(Grid root)
+    {
+        _root = root;
+        foreach (var child in root.Children)
+        {
+            if (child.Visibility != Visibility.Visible) continue;
+            _covered.Add(child);
+            child.Visibility = Visibility.Collapsed;
+        }
+        _keys = (_, e) =>
+        {
+            if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)
+            {
+                e.Handled = true;
+                if (_primary.IsEnabled) _ = PrimaryAsync();
+            }
+            else if (e.Key == Windows.System.VirtualKey.Escape && _mode == Mode.Move && _secondary.IsEnabled)
+            {
+                e.Handled = true;
+                Decline();
+            }
+        };
+        root.AddHandler(KeyDownEvent, _keys, true);
+    }
+
+    private void Uncover()
+    {
+        if (_root is null) return;
+        if (_keys is not null) _root.RemoveHandler(KeyDownEvent, _keys);
+        foreach (var child in _covered) child.Visibility = Visibility.Visible;
+        _covered.Clear();
+        _root = null;
+    }
+
+    private void Decline()
+    {
+        AppPrefs.Data.MacMoveDeclined = true;
+        AppPrefs.Save();
+        MacShell.Log("move to applications declined");
+        _ = DismissAsync();
     }
 
     private MacWelcome(MainWindow window, Mode mode)
@@ -104,13 +156,7 @@ internal sealed class MacWelcome : Grid
         _secondary = LinkButton(welcome ? "" : "Not now");
         _secondary.Visibility = welcome ? Visibility.Collapsed : Visibility.Visible;
         _secondary.Margin = new Thickness(0, 10, 0, 0);
-        _secondary.Click += (_, _) =>
-        {
-            AppPrefs.Data.MacMoveDeclined = true;
-            AppPrefs.Save();
-            MacShell.Log("move to applications declined");
-            _ = DismissAsync();
-        };
+        _secondary.Click += (_, _) => Decline();
         column.Children.Add(_title);
         column.Children.Add(_sub);
         column.Children.Add(_primary);
@@ -135,7 +181,7 @@ internal sealed class MacWelcome : Grid
             Motion.FadeSlideIn(_primary, 1120, 0, 8, 520);
             if (!welcome) Motion.FadeSlideIn(_secondary, 1200, 0, 6, 520);
             Motion.FadeSlideIn(footer, 1300, 0, 0, 600);
-            _primary.Focus(FocusState.Programmatic);
+            _primary.Focus(FocusState.Keyboard);
         };
     }
 
@@ -174,6 +220,8 @@ internal sealed class MacWelcome : Grid
 
     private async Task DismissAsync()
     {
+        // What was underneath comes back first, so the fade shows it.
+        Uncover();
         // Bounded: the fade's completion event is a Composition batch, and the
         // screen must go away even if it never reports back.
         await Task.WhenAny(Motion.FadeOutAsync(this, 320), Task.Delay(700));
