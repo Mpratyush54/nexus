@@ -98,7 +98,6 @@ vpk pack \
   --channel "$CHANNEL" \
   --outputDir "$RELEASES" \
   --noInst \
-  --skipVeloAppCheck \
   --signEntitlements "$ROOT/desktop/uno/macos/Nexus.entitlements" \
   "${SIGN_ARGS[@]}"
 ls -la "$RELEASES"
