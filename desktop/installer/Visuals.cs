@@ -25,7 +25,12 @@ internal static class Anim
 {
     public static bool Enabled => SystemParameters.ClientAreaAnimation && !SystemParameters.HighContrast;
 
+    // One motion vocabulary for every screen change: exits are quick, entries a
+    // touch longer, both cubic-out; only the shared mark travels in-out.
+    public const int Exit = 200, Enter = 300, Travel = 380, Stagger = 40;
+
     public static readonly IEasingFunction Out = new CubicEase { EasingMode = EasingMode.EaseOut };
+    public static readonly IEasingFunction Move = new CubicEase { EasingMode = EasingMode.EaseInOut };
     public static readonly IEasingFunction Back = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.45 };
     public static readonly IEasingFunction InOut = new SineEase { EasingMode = EasingMode.EaseInOut };
 
@@ -93,13 +98,46 @@ internal static class Anim
         To(e, UIElement.OpacityProperty, 1, ms * 2 / 3, delay, Out, 0);
     }
 
-    public static void Rise(UIElement e, int delay, double dy = 14, int ms = 480, double dx = 0)
+    public static void Rise(UIElement e, int delay, double dy = 14, int ms = 480, double dx = 0, Action? done = null)
     {
         var (_, move) = Rig(e);
         e.Opacity = Enabled ? 0 : 1;
         To(move, TranslateTransform.YProperty, 0, ms, delay, Out, dy);
         To(move, TranslateTransform.XProperty, 0, ms, delay, Out, dx);
-        To(e, UIElement.OpacityProperty, 1, ms, delay, Out, 0);
+        To(e, UIElement.OpacityProperty, 1, ms, delay, Out, 0, done);
+    }
+
+    /// <summary>Steps an element out: fades while settling back slightly, then calls done.</summary>
+    public static void Leave(UIElement e, Action? done = null, int delay = 0, double scaleTo = 0.98, double dy = -6)
+    {
+        e.IsHitTestVisible = false;
+        if (!Enabled) { e.Opacity = 0; done?.Invoke(); return; }
+        var from = e.Opacity;
+        var (scale, move) = Rig(e);
+        To(scale, ScaleTransform.ScaleXProperty, scaleTo, Exit, delay, Out);
+        To(scale, ScaleTransform.ScaleYProperty, scaleTo, Exit, delay, Out);
+        To(move, TranslateTransform.YProperty, dy, Exit, delay, Out);
+        To(e, UIElement.OpacityProperty, 0, Exit, delay, Out, from, done);
+    }
+
+    /// <summary>Brings an element in: fades up from a few pixels below.</summary>
+    public static void Arrive(UIElement e, int delay = 0, double dy = 8, Action? done = null)
+    {
+        e.IsHitTestVisible = true;
+        Rise(e, delay, dy, Enter, 0, done);
+    }
+
+    /// <summary>A short press-and-release on a scale, for clicks that arrive without a mouse press.</summary>
+    public static void Tap(ScaleTransform s)
+    {
+        if (!Enabled) return;
+        foreach (var p in new[] { ScaleTransform.ScaleXProperty, ScaleTransform.ScaleYProperty })
+        {
+            var k = new DoubleAnimationUsingKeyFrames();
+            k.KeyFrames.Add(new EasingDoubleKeyFrame(0.96, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(90)), Out));
+            k.KeyFrames.Add(new EasingDoubleKeyFrame(1, KeyTime.FromTimeSpan(TimeSpan.FromMilliseconds(310)), Out));
+            s.BeginAnimation(p, k, HandoffBehavior.SnapshotAndReplace);
+        }
     }
 }
 
@@ -111,6 +149,13 @@ internal sealed class HeroMark : Grid
     private readonly Canvas _orbit = new() { Width = 150, Height = 150 };
     private readonly Ellipse _glow;
     private readonly List<Ellipse> _dots = new();
+    private ScaleTransform? _breath;
+
+    /// <summary>The mark itself, which travels into the install graph.</summary>
+    public FrameworkElement Mark => _mark;
+
+    /// <summary>The mark's current on-screen scale (it breathes at rest).</summary>
+    public double MarkScale => _breath?.ScaleX ?? 1;
 
     public HeroMark()
     {
@@ -142,15 +187,16 @@ internal sealed class HeroMark : Grid
 
     public void Play()
     {
-        Anim.Pop(_markBox, 120, 0.5, 700);
-        Anim.Pop(_glow, 260, 0.2, 1100);
+        Anim.Pop(_markBox, 40, 0.6, 560);
+        Anim.Pop(_glow, 120, 0.2, 800);
         var rotate = new RotateTransform(0, 75, 75);
         _orbit.RenderTransform = rotate;
         Anim.Spin(rotate, 40000);
-        var d = 380;
-        foreach (var dot in _dots) { Anim.Pop(dot, d, 0, 460); d += 70; }
+        var d = 220;
+        foreach (var dot in _dots) { Anim.Pop(dot, d, 0, 360); d += 45; }
         // Resting state: the mark breathes, the glow pulses.
         var (breath, _) = Anim.Rig(_mark);
+        _breath = breath;
         Anim.Forever(breath, ScaleTransform.ScaleXProperty, 1, 1.045, 1600, 900);
         Anim.Forever(breath, ScaleTransform.ScaleYProperty, 1, 1.045, 1600, 900);
         if (_glow.Fill is Brush glowFill) Anim.Forever(glowFill, Brush.OpacityProperty, 1, 0.55, 1600, 900);
@@ -175,6 +221,10 @@ internal sealed class MemoryGraph : Grid
     private readonly int[] _parent = new int[Count];
     private readonly bool[] _shown = new bool[Count];
     private readonly List<UIElement> _nodeViews = new();
+    private bool _drifting, _breathing;
+
+    /// <summary>The centre mark: where the welcome mark lands.</summary>
+    public FrameworkElement Mark => _mark;
 
     public MemoryGraph()
     {
@@ -211,17 +261,36 @@ internal sealed class MemoryGraph : Grid
         Children.Add(_ring);
         Children.Add(_mark);
         RenderOptions.SetBitmapScalingMode(_mark, BitmapScalingMode.HighQuality);
+        // Loaded fires again when the graph moves to the Done screen; start once.
         Loaded += (_, _) =>
         {
-            var (scale, _) = Anim.Rig(_mark);
-            Anim.Forever(scale, ScaleTransform.ScaleXProperty, 1, 1.06, 1400);
-            Anim.Forever(scale, ScaleTransform.ScaleYProperty, 1, 1.06, 1400);
+            if (_drifting) return;
+            _drifting = true;
             var rotate = new RotateTransform(0, W / 2, H / 2);
             _layer.RenderTransform = rotate;
             // Slow drift; the graph is flattened, so a gentle sway reads as depth.
             if (Anim.Enabled)
                 rotate.BeginAnimation(RotateTransform.AngleProperty, new DoubleAnimation(-4, 4, TimeSpan.FromSeconds(6)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever, EasingFunction = Anim.InOut });
         };
+    }
+
+    /// <summary>The centre mark starts to breathe (once it has landed).</summary>
+    public void Breathe()
+    {
+        if (_breathing) return;
+        _breathing = true;
+        var (scale, _) = Anim.Rig(_mark);
+        Anim.Forever(scale, ScaleTransform.ScaleXProperty, 1, 1.06, 1400);
+        Anim.Forever(scale, ScaleTransform.ScaleYProperty, 1, 1.06, 1400);
+    }
+
+    /// <summary>Back to an empty graph (a retry starts from nothing again).</summary>
+    public void Reset()
+    {
+        _edges.Children.Clear();
+        _nodes.Children.Clear();
+        _nodeViews.Clear();
+        Array.Clear(_shown, 0, _shown.Length);
     }
 
     public void SetProgress(double percent)
@@ -255,7 +324,7 @@ internal sealed class MemoryGraph : Grid
         Canvas.SetTop(node, p.Y - size / 2);
         _nodes.Children.Add(node);
         _nodeViews.Add(node);
-        Anim.Pop(node, 260, 0, 420);
+        Anim.Pop(node, 180, 0, 360);
     }
 
     /// <summary>Done: every node in, a gold ring blooms out and the graph settles.</summary>
