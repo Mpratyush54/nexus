@@ -65,6 +65,17 @@ jobs:
           lipo -info dist/libnexuscore.dylib
           nm -gU dist/arm64/libnexuscore.dylib | grep ' _nx_'
 
+      # The macOS integration helper: menu bar status item, app menu, Dock
+      # reopen and nexus:// URL events (desktop/uno/macos/native/NexusMac.m).
+      # A small Objective-C library with a C ABI, called from C# through
+      # LibraryImport; see the file header for why not objc_msgSend.
+      - name: Build libnexusmac.dylib (arm64 + x86_64, universal)
+        run: |
+          set -euo pipefail
+          clang -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -fobjc-arc -Wall -Wextra -Wno-unused-parameter             -dynamiclib -framework AppKit -framework CoreServices             -install_name @rpath/libnexusmac.dylib -o dist/libnexusmac.dylib desktop/uno/macos/native/NexusMac.m
+          lipo -info dist/libnexusmac.dylib
+          nm -gU dist/libnexusmac.dylib | grep ' _nx_mac_'
+
       # Uno's own bundler lays the .app out the way codesign wants it (managed
       # assemblies outside Contents/MacOS) and signs it; CodesignKey=- is ad hoc.
       - name: Publish Nexus.app with Uno (osx-arm64, self-contained)
@@ -103,14 +114,16 @@ jobs:
           skia=$(find "$APP" -name 'libSkiaSharp.dylib' | head -1)
           dest=$(dirname "$skia")
           cp dist/libnexuscore.dylib "$dest/libnexuscore.dylib"
-          echo "core -> ${dest#$APP/}"
+          cp dist/libnexusmac.dylib "$dest/libnexusmac.dylib"
+          echo "core and mac helper -> ${dest#$APP/}"
           du -sh "$APP"
 
       - name: Ad-hoc codesign
         run: |
           set -euo pipefail
-          core=$(find "$APP" -name libnexuscore.dylib)
-          codesign --force --sign - --timestamp=none "$core"
+          for lib in libnexuscore.dylib libnexusmac.dylib; do
+            codesign --force --sign - --timestamp=none "$(find "$APP" -name $lib)"
+          done
           # The outer signature seals Info.plist and the new library.
           codesign --force --sign - --timestamp=none "$APP"
           codesign --verify --strict --verbose=2 "$APP"
@@ -118,6 +131,13 @@ jobs:
 
       - name: Build the window probe
         run: swiftc -O -o dist/winlist scripts/macos/winlist.swift
+
+      # So LaunchServices knows this bundle handles nexus:// (Info.plist
+      # CFBundleURLTypes); an installed app is registered when first opened.
+      - name: Register the bundle with LaunchServices
+        run: |
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -dump             | grep -B2 -A2 'nexus:' | head -20 || true
 
       # Two launches in isolated profiles with no server and no credentials:
       # a fresh one (first-run setup guide), then one seeded past setup (the
@@ -148,12 +168,13 @@ jobs:
               sleep 2
               if ! kill -0 $pid 2>/dev/null; then echo "$name exited early"; break; fi
               out=$(./dist/winlist $pid 2>/dev/null || echo 0)
-              wins=$(echo "$out" | head -1)
+              # Normal windows only (layer 0); the menu bar item is a window too.
+              wins=$(echo "$out" | tail -n +2 | awk '$6==0' | wc -l | tr -d ' ')
               if [ "${wins:-0}" -gt 0 ] 2>/dev/null; then seen=1; echo "t=$((i*2))s"; echo "$out"; break; fi
             done
             sleep 15
             screencapture -x "shots/$name-screen.png" || echo "screencapture failed"
-            wid=$(./dist/winlist $pid 2>/dev/null | tail -n +2 | sort -k5 -n -r | head -1 | cut -d' ' -f1)
+            wid=$(./dist/winlist $pid 2>/dev/null | tail -n +2 | awk '$6==0' | sort -k5 -n -r | head -1 | cut -d' ' -f1)
             if [ -n "$wid" ]; then screencapture -x -o -l "$wid" "shots/$name-window.png" || true; fi
             sleep 10
             screencapture -x "shots/$name-screen-later.png" || true
@@ -171,6 +192,13 @@ jobs:
           ls -la shots logs
           for f in ~/Library/Logs/DiagnosticReports/*; do case "$f" in *Nexus*) cp "$f" logs/ ;; esac; done 2>/dev/null || true
           test $ok = 1
+
+      # The macOS system integration against one running instance: menu bar
+      # item, app menu, close-hides and Dock reopen, nexus:// via LaunchServices,
+      # second-launch hand-off, and the start-at-login LaunchAgent.
+      - name: System integration checks
+        timeout-minutes: 8
+        run: bash scripts/macos/uno-integration-checks.sh
 
       - name: Zip the app
         if: ${{ !cancelled() }}

@@ -76,7 +76,11 @@ public partial class App : Application
         window.Activate();
         if (background)
         {
+#if HAS_UNO
+            WindowExtensions.Hide(window);
+#else
             window.AppWindow.Hide();
+#endif
         }
     }
 

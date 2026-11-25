@@ -70,6 +70,8 @@ public sealed partial class MainWindow : Window
         TrayQuitCommand = new AsyncRelayCommand(QuitAsync);
         TrayReportCommand = new RelayCommand(() => { RestoreWindow(); ShowReportProblem(); });
         InitializeComponent();
+        // Ctrl+K / Ctrl+P / Ctrl+N become Command+K / P / N on macOS.
+        Shortcuts.UseCommandKey(RootGrid);
         // One memory line a minute in the desktop log (Core/Diagnostics/DesktopMemoryLog.cs).
         Nexus.Core.Diagnostics.UiStats.Sidebar = () => (_chatEntries.Count, _chatRows.Count);
         Nexus.Core.Diagnostics.DesktopMemoryLog.Start(DispatcherQueue);
@@ -93,9 +95,13 @@ public sealed partial class MainWindow : Window
         ProjectFilterButton.Flyout = filterMenu;
         ChatTags.Changed += (_, _) => { _chatRows.Clear(); RenderChats(); };
 #if !HAS_UNO
-        Tray.ForceCreate(); // Uno/macOS: no tray yet (desktop/uno strips it from the XAML)
+        Tray.ForceCreate(); // Uno/macOS: the menu bar item replaces the tray (desktop/uno strips it from the XAML)
 #endif
         Current = this;
+#if HAS_UNO
+        // macOS: menu bar status item, app menu, Dock reopen and nexus:// links.
+        Nexus.Platform.MacShell.Attach(this);
+#endif
         ResizeForDisplay(1240, 820);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Nexus.ico"));
         ExtendsContentIntoTitleBar = true;
@@ -1102,7 +1108,7 @@ public sealed partial class MainWindow : Window
         if (_chatStatus.Length > 0)
             items.Add(new ChatListNotice(NxErrors.IsSignedOut(_chatStatus) ? NxErrors.SignedOutMessage : _chatStatus));
         else if (seen.Count == 0)
-            items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press Ctrl+N."));
+            items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press " + Shortcuts.Label("N") + "."));
         _chatItems = items;
         ChatList.ItemTemplate ??= new ChatRowFactory(this);
         ChatList.ItemsSource = items;
@@ -1588,9 +1594,11 @@ public sealed partial class MainWindow : Window
         }
         args.Cancel = true;
 #if HAS_UNO
-        // No tray / menu bar item yet on the Uno head, so a hidden window
-        // could not come back: closing quits (cleanly, through the core).
-        _ = QuitAsync();
+        // macOS: the menu bar item and the Dock bring a hidden window back, so
+        // closing hides it, as the tray does on Windows. Without the native
+        // helper (or on the Win32 preview) nothing could, so closing quits.
+        if (Nexus.Platform.MacShell.HasStatusItem) WindowExtensions.Hide(this);
+        else _ = QuitAsync();
 #else
         WindowExtensions.Hide(this);
 #endif

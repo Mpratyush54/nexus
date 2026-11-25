@@ -37,12 +37,15 @@ public static class DesktopIntegration
     // A NEXUS_PROFILE instance (demos, side-by-side tests) must never touch
     // the real Run key, desktop or nexus:// handler of the normal install.
     public static IDesktopIntegration Current { get; set; } =
-        Nexus.Core.ProfilePaths.Current is { } profile ? new ProfileDesktopIntegration(profile.Root)
 #if HAS_UNO
-        // Uno head (desktop/uno): macOS integration; the Windows preview of
-        // that head never touches the registry.
+        // Uno head (desktop/uno): macOS integration. A profile writes its
+        // LaunchAgent inside the profile folder, never ~/Library. The Windows
+        // preview of that head never touches the registry.
+        Nexus.Core.ProfilePaths.Current is { } macProfile && OperatingSystem.IsMacOS() ? MacDesktopIntegration.ForProfile(macProfile)
+        : Nexus.Core.ProfilePaths.Current is { } profile ? new ProfileDesktopIntegration(profile.Root)
         : OperatingSystem.IsMacOS() ? new MacDesktopIntegration()
 #else
+        Nexus.Core.ProfilePaths.Current is { } profile ? new ProfileDesktopIntegration(profile.Root)
         : OperatingSystem.IsWindows() ? new WindowsDesktopIntegration()
 #endif
         : new NoDesktopIntegration();

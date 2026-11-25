@@ -272,7 +272,7 @@ public sealed partial class MemoryPage : NexusPage
             _briefProjectId = "";
             _briefCard.Visibility = Visibility.Collapsed;
             _cards.Children.Add(StateView.Empty("\uE8B7", "Pick a project",
-                "Memories belong to a project. Choose one at the top of the sidebar (Ctrl+P)."));
+                "Memories belong to a project. Choose one at the top of the sidebar (" + Shortcuts.Label("P") + ")."));
             return;
         }
         if (!string.Equals(_briefProjectId, projectId, StringComparison.Ordinal))

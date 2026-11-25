@@ -9,8 +9,11 @@
     Windows preview:  dotnet build -c Debug
     macOS .app (on a Mac / CI):
       dotnet publish -c Release -f net10.0-desktop -r osx-arm64 -p:PackageFormat=app
-    The Go core (libnexuscore.dylib / nexuscore.dll) is copied next to the
-    executable separately; see .github/workflows/desktop-macos.yml.
+    The Go core (libnexuscore.dylib / nexuscore.dll) and, on macOS, the
+    system-integration helper (libnexusmac.dylib, built with clang from
+    macos/native/NexusMac.m) are copied next to the executable separately;
+    see .github/workflows/desktop-macos.yml. Without libnexusmac the app runs
+    with no menu bar item and closing the window quits.
   -->
   <PropertyGroup>
     <TargetFrameworks>net10.0-desktop</TargetFrameworks>
