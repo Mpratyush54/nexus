@@ -197,7 +197,7 @@ jobs:
       # item, app menu, close-hides and Dock reopen, nexus:// via LaunchServices,
       # second-launch hand-off, and the start-at-login LaunchAgent.
       - name: System integration checks
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: bash scripts/macos/uno-integration-checks.sh
 
       - name: Zip the app

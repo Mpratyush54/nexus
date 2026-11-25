@@ -58,7 +58,8 @@ rm -rf "$ROOT"
 mkdir -p "$ROOT/AppData/Local/Nexus"
 printf '{ "SetupCompleted": true, "LastNav": "timeline", "Theme": "dark" }\n' > "$ROOT/AppData/Local/Nexus/ui-prefs.json"
 
-nexus > "$OUT" 2>&1 &
+# Launched directly (not through the nexus function) so $! is the app itself.
+env -u NEXUS_SERVER -u CENTRAL_SERVER_URL -u NEXUS_TOKEN -u CENTRAL_MEMORY_TOKEN   NEXUS_PROFILE="$NAME" NEXUS_PROFILE_ROOT="$ROOT" "$EXE" > "$OUT" 2>&1 &
 PID=$!
 echo "== $NAME pid=$PID"
 if wait_for 90 has_window; then pass "main window is up"; else fail "no main window within 90 s"; fi
@@ -170,7 +171,7 @@ sleep 3
 screencapture -x shots/40-after-url.png
 
 # ---- 6. Second launch hands off -----------------------------------------------
-nexus "nexus://session/ci-handoff" > logs/second-launch.log 2>&1 &
+env -u NEXUS_SERVER -u CENTRAL_SERVER_URL -u NEXUS_TOKEN -u CENTRAL_MEMORY_TOKEN   NEXUS_PROFILE="$NAME" NEXUS_PROFILE_ROOT="$ROOT" "$EXE" "nexus://session/ci-handoff" > logs/second-launch.log 2>&1 &
 P2=$!
 rc=""
 for _ in $(seq 1 40); do kill -0 $P2 2>/dev/null || break; sleep 0.5; done
@@ -188,7 +189,7 @@ alive && pass "first instance still running" || fail "first instance exited"
 check_login() { # label, plist, runner...
   local label=$1 plist=$2; shift 2
   local out rc
-  out=$("$@" --set-start-at-login=on 2>&1); rc=$?
+  out=$(limited 30 "$@" --set-start-at-login=on 2>&1); rc=$?
   echo "$label on: rc=$rc $out"
   if [ $rc = 0 ] && [ -f "$plist" ] && plutil -lint "$plist" > /dev/null \
      && [ "$(plutil -extract ProgramArguments.1 raw "$plist")" = "--background" ] \
@@ -199,11 +200,11 @@ check_login() { # label, plist, runner...
   else
     fail "$label: toggle on did not write a valid $plist (rc=$rc: $out)"
   fi
-  out=$("$@" --set-start-at-login=off 2>&1); rc=$?
+  out=$(limited 30 "$@" --set-start-at-login=off 2>&1); rc=$?
   echo "$label off: rc=$rc $out"
   if [ $rc = 0 ] && [ ! -e "$plist" ]; then pass "$label: toggle off removed it"; else fail "$label: toggle off left $plist (rc=$rc)"; fi
 }
-check_login "profile" "$ROOT/Library/LaunchAgents/com.nexus.desktop.login.profile-$NAME.plist" nexus
+check_login "profile" "$ROOT/Library/LaunchAgents/com.nexus.desktop.login.profile-$NAME.plist"   env NEXUS_PROFILE="$NAME" NEXUS_PROFILE_ROOT="$ROOT" "$EXE"
 # The real per-user location (a disposable runner; launchd only reads it at login).
 check_login "user" "$HOME/Library/LaunchAgents/com.nexus.desktop.login.plist" env -u NEXUS_PROFILE -u NEXUS_PROFILE_ROOT "$EXE"
 

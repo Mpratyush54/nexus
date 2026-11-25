@@ -15,6 +15,10 @@ public static class Program
     {
         if (OperatingSystem.IsMacOS())
         {
+            if (args.Length == 0) args = Environment.GetCommandLineArgs().Skip(1).ToArray();
+            // Flags only: links can carry sign-in codes.
+            var flags = string.Join(" ", args.Where(a => a.StartsWith("--", StringComparison.Ordinal)).Select(a => a.Split('=')[0]));
+            Console.Error.WriteLine($"[nexus-mac] launch: {args.Length} argument(s) {flags}");
             // NEXUS_PROFILE before anything reads per-user folders.
             Nexus.Core.ProfilePaths.ApplyToProcess();
 
