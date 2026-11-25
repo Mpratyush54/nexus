@@ -1,4 +1,6 @@
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Nexus.Core.Diagnostics;
 
 namespace Nexus.Platform;
@@ -74,7 +76,67 @@ internal static class MacShell
                 Log(command == MacNative.Command.Quit ? "quit from the menu" : "quit from the system");
                 window.TrayQuitCommand.Execute(null);
                 break;
+            // File: the same code as the Ctrl+N / Ctrl+K / Ctrl+P accelerators.
+            case MacNative.Command.NewChat:
+                window.StartNewChat();
+                break;
+            case MacNative.Command.Search:
+                _ = window.ShowSearchAsync();
+                break;
+            case MacNative.Command.SwitchProject:
+                window.OpenProjectSwitcher();
+                break;
+            default:
+                Edit(window, command);
+                break;
         }
+    }
+
+    /// <summary>
+    /// Edit menu (and its Command shortcuts, which the menu receives first):
+    /// acts on the focused text control through its own API, so it works
+    /// wherever focus is and never depends on how a key event is routed.
+    /// A PasswordBox (a TextBox subclass on Uno) never copies or cuts.
+    /// </summary>
+    private static void Edit(MainWindow window, MacNative.Command command)
+    {
+        if (window.Content?.XamlRoot is not { } root) return;
+        var focused = FocusManager.GetFocusedElement(root);
+        var done = true;
+        switch (focused)
+        {
+            case PasswordBox password:
+                if (command == MacNative.Command.Paste) password.PasteFromClipboard();
+                else if (command == MacNative.Command.SelectAll) password.SelectAll();
+                else done = false;
+                break;
+            case TextBox box:
+                switch (command)
+                {
+                    case MacNative.Command.Undo: box.Undo(); break;
+                    case MacNative.Command.Redo: box.Redo(); break;
+                    case MacNative.Command.Cut: box.CutSelectionToClipboard(); break;
+                    case MacNative.Command.Copy: box.CopySelectionToClipboard(); break;
+                    case MacNative.Command.Paste: box.PasteFromClipboard(); break;
+                    case MacNative.Command.SelectAll: box.SelectAll(); break;
+                    default: done = false; break;
+                }
+                break;
+            case TextBlock text when text.IsTextSelectionEnabled:
+                if (command == MacNative.Command.Copy) text.CopySelectionToClipboard();
+                else if (command == MacNative.Command.SelectAll) text.SelectAll();
+                else done = false;
+                break;
+            case RichTextBlock rich when rich.IsTextSelectionEnabled:
+                if (command == MacNative.Command.Copy) rich.CopySelectionToClipboard();
+                else if (command == MacNative.Command.SelectAll) rich.SelectAll();
+                else done = false;
+                break;
+            default:
+                done = false;
+                break;
+        }
+        Log($"edit {command}: {(done ? focused?.GetType().Name : "nothing focused that can do it")}");
     }
 
     /// <summary>A nexus:// URL from LaunchServices (kAEGetURL or application:openURLs:).</summary>

@@ -739,8 +739,11 @@ public sealed partial class MainWindow : Window
     private void NewChat_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
-        NewChatButton_Click(NewChatButton, new RoutedEventArgs());
+        StartNewChat();
     }
+
+    /// Ctrl+N, and File > New Chat in the macOS menu bar.
+    public void StartNewChat() => NewChatButton_Click(NewChatButton, new RoutedEventArgs());
 
     /// Projects in the account (id, name), for pickers outside the sidebar.
     public IReadOnlyList<(string Id, string Name)> Projects => SwitcherProjects();
@@ -785,8 +788,11 @@ public sealed partial class MainWindow : Window
     private void ProjectSwitch_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
-        _projectSwitcher.Open(Nav.IsPaneOpen ? null : ProjectCompactButton);
+        OpenProjectSwitcher();
     }
+
+    /// Ctrl+P, and File > Switch Project in the macOS menu bar.
+    public void OpenProjectSwitcher() => _projectSwitcher.Open(Nav.IsPaneOpen ? null : ProjectCompactButton);
 
     /// Turn count the chat list reported for a chat (-1 when unknown).
     public long ChatTurnCountFor(string sessionId) =>
@@ -1675,6 +1681,12 @@ public sealed partial class MainWindow : Window
     private async void Search_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        await ShowSearchAsync();
+    }
+
+    /// Ctrl+K, and File > Search in the macOS menu bar.
+    public async Task ShowSearchAsync()
+    {
         var box = new TextBox { PlaceholderText = "Sessions, memories, files, projects" };
         var dialog = new ContentDialog
         {

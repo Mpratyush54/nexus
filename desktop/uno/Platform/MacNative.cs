@@ -25,6 +25,15 @@ internal static partial class MacNative
         Reopen = 6,
         TerminateRequested = 7,
         CloseWindow = 8,
+        NewChat = 9,
+        Search = 10,
+        SwitchProject = 11,
+        Undo = 12,
+        Redo = 13,
+        Cut = 14,
+        Copy = 15,
+        Paste = 16,
+        SelectAll = 17,
     }
 
     private static Action<Command>? s_onCommand;

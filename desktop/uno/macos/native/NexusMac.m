@@ -39,12 +39,20 @@ enum {
     NXReopen = 6,
     NXTerminateRequested = 7,
     NXCloseWindow = 8,
+    NXNewChat = 9,
+    NXSearch = 10,
+    NXSwitchProject = 11,
+    NXUndo = 12,
+    NXRedo = 13,
+    NXCut = 14,
+    NXCopy = 15,
+    NXPaste = 16,
+    NXSelectAll = 17,
 };
 
 // Virtual key codes (Carbon HIToolbox kVK_ANSI_*), for menu-chosen shortcuts.
 enum {
-    NXKeyA = 0, NXKeyF = 3, NXKeyZ = 6, NXKeyX = 7, NXKeyC = 8, NXKeyV = 9,
-    NXKeyP = 35, NXKeyK = 40, NXKeyN = 45,
+    NXKeyF = 3,
 };
 
 static nx_command_fn s_command;
@@ -54,6 +62,7 @@ static NSMenuItem *s_stateItem;
 static NSMenuItem *s_pauseItem;
 static BOOL s_paused;
 static BOOL s_installed;
+static BOOL s_delivering;
 static IMP s_originalShouldTerminate;
 static IMP s_originalTerminateAfterLastWindow;
 static id s_launchObserver;
@@ -91,21 +100,29 @@ static NSArray<NSWindow *> *nx_uno_windows(void)
     return found;
 }
 
-// Sends a Cmd shortcut to Uno so its TextBox and KeyboardAccelerators handle it,
-// exactly as if no menu had claimed the key equivalent. Outside a Uno window (the
-// About panel, an alert) the standard action goes down the responder chain.
-// The event is delivered on a later turn of the main queue: the menu is still
-// inside performKeyEquivalent (highlighting its title) when the action runs,
-// and Uno must not handle the key nested in that.
+// Find (Cmd+F) belongs to whichever page is showing, so its menu item sends the
+// key to Uno for the page's own KeyboardAccelerator, as if no menu had claimed
+// it. Outside a Uno window (the About panel, an alert) the standard action goes
+// down the responder chain.
+// The event is delivered on a later turn of the main queue (the menu is still
+// inside performKeyEquivalent when the action runs). If Uno leaves the key
+// unhandled, UNOWindow passes it to NSWindow, which offers it to the main menu
+// again: s_delivering stops that from looping.
 static void nx_deliver_later(NSWindow *window, NSArray<NSEvent *> *events)
 {
     dispatch_async(dispatch_get_main_queue(), ^{
-        for (NSEvent *e in events) [window sendEvent:e];
+        s_delivering = YES;
+        @try {
+            for (NSEvent *e in events) [window sendEvent:e];
+        } @finally {
+            s_delivering = NO;
+        }
     });
 }
 
 static void nx_forward_shortcut(NSMenuItem *item)
 {
+    if (s_delivering) return; // Uno did not want it; do not bounce it back.
     NSWindow *key = NSApp.keyWindow;
     if (!nx_is_uno_window(key)) {
         NSString *fallback = item.representedObject;
@@ -150,6 +167,19 @@ static void nx_forward_shortcut(NSMenuItem *item)
 @implementation NXMacTarget
 - (void)command:(NSMenuItem *)sender { nx_send((int32_t)sender.tag); }
 - (void)forwardShortcut:(NSMenuItem *)sender { nx_forward_shortcut(sender); }
+// Edit commands act on the focused Uno text control (managed side); in other
+// windows (About panel, alerts) the standard action goes down the responder chain.
+- (void)edit:(NSMenuItem *)sender
+{
+    if (nx_is_uno_window(NSApp.keyWindow)) {
+        nx_send((int32_t)sender.tag);
+        return;
+    }
+    NSString *fallback = sender.representedObject;
+    if ([fallback isKindOfClass:[NSString class]] && fallback.length > 0) {
+        [NSApp sendAction:NSSelectorFromString(fallback) to:nil from:sender];
+    }
+}
 - (void)handleGetURL:(NSAppleEventDescriptor *)event withReplyEvent:(NSAppleEventDescriptor *)reply
 {
     nx_deliver_url([[event paramDescriptorForKeyword:keyDirectObject] stringValue]);
@@ -360,6 +390,15 @@ static NSMenuItem *nx_shortcut_item(NSMenu *menu, NSString *title, NSString *key
     return item;
 }
 
+static NSMenuItem *nx_edit_item(NSMenu *menu, NSString *title, int32_t command, NSString *key,
+                                NSEventModifierFlags mods, NSString *fallbackAction)
+{
+    NSMenuItem *item = nx_item(menu, title, @selector(edit:), nx_target(), key, mods);
+    item.tag = command;
+    item.representedObject = fallbackAction;
+    return item;
+}
+
 static NSMenu *nx_submenu(NSMenu *bar, NSString *title)
 {
     NSMenuItem *holder = [[NSMenuItem alloc] initWithTitle:title action:nil keyEquivalent:@""];
@@ -390,20 +429,20 @@ static void nx_build_main_menu(void)
     nx_command_item(app, @"Quit Nexus", NXQuit, @"q", cmd);
 
     NSMenu *file = nx_submenu(bar, @"File");
-    nx_shortcut_item(file, @"New Chat", @"n", cmd, NXKeyN, nil);
-    nx_shortcut_item(file, @"Search…", @"k", cmd, NXKeyK, nil);
-    nx_shortcut_item(file, @"Switch Project…", @"p", cmd, NXKeyP, nil);
+    nx_command_item(file, @"New Chat", NXNewChat, @"n", cmd);
+    nx_command_item(file, @"Search…", NXSearch, @"k", cmd);
+    nx_command_item(file, @"Switch Project…", NXSwitchProject, @"p", cmd);
     [file addItem:[NSMenuItem separatorItem]];
     nx_command_item(file, @"Close Window", NXCloseWindow, @"w", cmd);
 
     NSMenu *edit = nx_submenu(bar, @"Edit");
-    nx_shortcut_item(edit, @"Undo", @"z", cmd, NXKeyZ, @"undo:");
-    nx_shortcut_item(edit, @"Redo", @"z", cmd | NSEventModifierFlagShift, NXKeyZ, @"redo:");
+    nx_edit_item(edit, @"Undo", NXUndo, @"z", cmd, @"undo:");
+    nx_edit_item(edit, @"Redo", NXRedo, @"z", cmd | NSEventModifierFlagShift, @"redo:");
     [edit addItem:[NSMenuItem separatorItem]];
-    nx_shortcut_item(edit, @"Cut", @"x", cmd, NXKeyX, @"cut:");
-    nx_shortcut_item(edit, @"Copy", @"c", cmd, NXKeyC, @"copy:");
-    nx_shortcut_item(edit, @"Paste", @"v", cmd, NXKeyV, @"paste:");
-    nx_shortcut_item(edit, @"Select All", @"a", cmd, NXKeyA, @"selectAll:");
+    nx_edit_item(edit, @"Cut", NXCut, @"x", cmd, @"cut:");
+    nx_edit_item(edit, @"Copy", NXCopy, @"c", cmd, @"copy:");
+    nx_edit_item(edit, @"Paste", NXPaste, @"v", cmd, @"paste:");
+    nx_edit_item(edit, @"Select All", NXSelectAll, @"a", cmd, @"selectAll:");
     [edit addItem:[NSMenuItem separatorItem]];
     nx_shortcut_item(edit, @"Find", @"f", cmd, NXKeyF, @"performTextFinderAction:");
 
