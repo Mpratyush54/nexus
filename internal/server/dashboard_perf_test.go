@@ -230,7 +230,15 @@ func seedDashboardPerf(t *testing.T, ctx context.Context, pool *pgxpool.Pool) da
 	copyRows("memory_items", []string{"project_id", "user_id", "key", "content", "status", "visibility", "created_at"}, memRows)
 	// Real memories carry a 1536-dimension embedding; reading them back as
 	// text is ~19 KB a row.
-	exec(`UPDATE memory_items SET embedding = (SELECT '[' || string_agg(to_char(random() - 0.5, 'FM0.000000000'), ',') || ']' FROM generate_series(1, 1536))
+	// pgvector in CI; a vector-free local database keeps the column as text.
+	var embeddingType string
+	scan(&embeddingType, `SELECT format_type(atttypid, atttypmod) FROM pg_attribute
+		WHERE attrelid = 'memory_items'::regclass AND attname = 'embedding'`)
+	cast := ""
+	if strings.HasPrefix(embeddingType, "vector") {
+		cast = "::" + embeddingType
+	}
+	exec(`UPDATE memory_items SET embedding = (SELECT '[' || string_agg(to_char(random() - 0.5, 'FM0.000000000'), ',') || ']' FROM generate_series(1, 1536))` + cast + `
 		WHERE key LIKE 'dash/perf/%'`)
 
 	// 40,000 events. Most are small; every 400th carries a 256 KiB payload
