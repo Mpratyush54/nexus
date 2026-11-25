@@ -424,11 +424,7 @@ func run() error {
 	defer stopSnap()
 	stopDiag := server.StartDiagnosticsRetention(ctx, srv.Store, 0)
 	defer stopDiag()
-	httpSrv := &http.Server{
-		Addr:              ":" + cfg.port,
-		Handler:           buildMux(srv, cfg),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	httpSrv := newHTTPServer(":"+cfg.port, buildMux(srv, cfg))
 	go func() {
 		<-ctx.Done()
 		shCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -440,4 +436,17 @@ func run() error {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil
+}
+
+// newHTTPServer sets the listener's limits. ReadTimeout and IdleTimeout
+// bound a whole request and an idle keep-alive connection: slow or stalled
+// bodies otherwise hold their buffers (and a connection) indefinitely.
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       2 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+	}
 }

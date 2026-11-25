@@ -96,3 +96,37 @@ func TestAbandonedBlobChunksExpire(t *testing.T) {
 		t.Fatalf("held = %d, want 20", total)
 	}
 }
+
+func TestAssembleBlobChunksChecksSizeAndSHA(t *testing.T) {
+	withChunkLimits(t, 1<<20, 1<<20)
+	a, b := []byte("hello "), []byte("world")
+	whole := append(append([]byte{}, a...), b...)
+	sum := sha256.Sum256(whole)
+	parent := hex.EncodeToString(sum[:])
+	if _, _, err := AssembleBlobChunks("p", parent, 100); !errors.Is(err, ErrAssembleMissing) {
+		t.Fatalf("no pieces: %v", err)
+	}
+	if err := PutBlobChunk(piece("p", parent, "u", 0, 2, a)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := AssembleBlobChunks("p", parent, 100); !errors.Is(err, ErrAssembleMissing) {
+		t.Fatalf("one of two pieces: %v", err)
+	}
+	if err := PutBlobChunk(piece("p", parent, "u", 1, 2, b)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := AssembleBlobChunks("p", parent, 10); !errors.Is(err, ErrAssembleTooLarge) {
+		t.Fatalf("over the size limit: %v", err)
+	}
+	got, n, err := AssembleBlobChunks("p", parent, 100)
+	if err != nil || string(got) != "hello world" || n != 2 || cap(got) != len(got) {
+		t.Fatalf("assembled %q (%d pieces, cap %d): %v", got, n, cap(got), err)
+	}
+	// Pieces that do not add up to the declared sha256.
+	if err := PutBlobChunk(piece("p", "bad", "u", 0, 1, a)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := AssembleBlobChunks("p", "bad", 100); !errors.Is(err, ErrAssembleSHA) {
+		t.Fatalf("wrong sha: %v", err)
+	}
+}

@@ -10,15 +10,28 @@ import (
 	"strings"
 	"sync"
 
-	"central-memory/internal/blobs"
 	"central-memory/internal/secrets"
 	"central-memory/internal/store"
 )
 
 var blobChunkRoutes sync.Map
 
-// maxChunkRequestBytes fits one 16 MiB chunk after base64 expansion, plus JSON.
-const maxChunkRequestBytes = 32 << 20
+// maxChunkRequestBytes fits one piece of up to ~6 MiB after base64
+// expansion, plus JSON. Clients send 4 MiB (daemon) and 1 MiB (teleport)
+// pieces; a request this size costs about three times it while decoded.
+const maxChunkRequestBytes = 8 << 20
+
+// chunkSlots bounds concurrent piece uploads (each held while decoded).
+var chunkSlots = make(chan struct{}, 4)
+
+// maxAssembledBytes caps a file assembled from pieces. Assembly holds the
+// file in memory and stores it as one row, so this bounds what one upload
+// can cost the server. A variable so tests can use a small value.
+var maxAssembledBytes int64 = 32 << 20
+
+// assembleSlots bounds concurrent assemblies (each holds up to
+// maxAssembledBytes).
+var assembleSlots = make(chan struct{}, 2)
 
 // maxChunkCount caps a manifest so a hostile total cannot allocate a huge index set.
 // 10 GiB / 16 MiB is 640 chunks; this is well above that.
@@ -48,6 +61,14 @@ func (s *Server) handleBlobChunkPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "sha256 must be 64 hex characters")
 		return
 	}
+	select {
+	case chunkSlots <- struct{}{}:
+		defer func() { <-chunkSlots }()
+	default:
+		w.Header().Set("Retry-After", "10")
+		writeError(w, http.StatusTooManyRequests, "too many uploads in progress; retry shortly")
+		return
+	}
 	var body struct {
 		ProjectID   string `json:"project_id"`
 		Index       int    `json:"index"`
@@ -67,6 +88,16 @@ func (s *Server) handleBlobChunkPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Total < 1 || body.Total > maxChunkCount || body.Index < 0 || body.Index >= body.Total {
 		writeError(w, http.StatusBadRequest, "chunk index out of range")
+		return
+	}
+	// Refuse an upload that cannot be assembled before decoding or storing
+	// it: every piece but the last is full size, so total pieces of this
+	// size is the file's size (within one piece).
+	pieceBytes := int64(base64.StdEncoding.DecodedLen(len(body.BodyB64)))
+	if int64(body.Total) > maxAssembledBytes ||
+		(body.Index < body.Total-1 && pieceBytes*int64(body.Total-1) > maxAssembledBytes) ||
+		store.BlobChunkSetBytesExcept(strings.TrimSpace(body.ProjectID), parent, body.Index)+pieceBytes > maxAssembledBytes {
+		writeError(w, http.StatusRequestEntityTooLarge, "file is larger than the upload limit")
 		return
 	}
 	raw, err := base64.StdEncoding.DecodeString(body.BodyB64)
@@ -128,7 +159,7 @@ func (s *Server) handleBlobAssemble(w http.ResponseWriter, r *http.Request) {
 		// version's transcript, stored like a plain PUT of one).
 		Purpose string `json:"purpose"`
 	}
-	if !decodeBlobJSON(w, r, &body, maxChunkRequestBytes) {
+	if !decodeBlobJSON(w, r, &body, 64<<10) {
 		return
 	}
 	purpose := strings.TrimSpace(body.Purpose)
@@ -146,36 +177,25 @@ func (s *Server) handleBlobAssemble(w http.ResponseWriter, r *http.Request) {
 	if s.rejectIfCaptureOff(w, r, projectID) {
 		return
 	}
-	loaded := store.LoadBlobChunks(projectID, parent)
-	if len(loaded) == 0 {
-		writeError(w, http.StatusConflict, "missing chunk")
+	// One assembly at a time per slot: each holds the whole file once.
+	select {
+	case assembleSlots <- struct{}{}:
+		defer func() { <-assembleSlots }()
+	default:
+		w.Header().Set("Retry-After", "30")
+		writeError(w, http.StatusTooManyRequests, "too many files being assembled; retry shortly")
 		return
 	}
-	total := loaded[0].Total
-	if total < 1 || total > maxChunkCount {
-		writeError(w, http.StatusConflict, "missing chunk")
+	plain, total, err := store.AssembleBlobChunks(projectID, parent, maxAssembledBytes)
+	switch {
+	case errors.Is(err, store.ErrAssembleTooLarge):
+		store.DeleteBlobChunks(projectID, parent)
+		writeError(w, http.StatusRequestEntityTooLarge, "file is larger than the upload limit")
 		return
-	}
-	seen := make([]bool, total)
-	for _, c := range loaded {
-		if c.Total != total || c.Index < 0 || c.Index >= total || seen[c.Index] {
-			writeError(w, http.StatusConflict, "missing chunk")
-			return
-		}
-		seen[c.Index] = true
-	}
-	for _, ok := range seen {
-		if !ok {
-			writeError(w, http.StatusConflict, "missing chunk")
-			return
-		}
-	}
-	parts := make([]blobs.Chunk, len(loaded))
-	for i, c := range loaded {
-		parts[i] = blobs.Chunk{Index: c.Index, Total: c.Total, SHA256: c.ChunkSHA256, Body: c.Body}
-	}
-	plain, err := blobs.Assemble(parts)
-	if err != nil {
+	case errors.Is(err, store.ErrAssembleSHA):
+		writeError(w, http.StatusBadRequest, "sha256 does not match the assembled file")
+		return
+	case err != nil:
 		writeError(w, http.StatusConflict, "missing chunk")
 		return
 	}
@@ -277,12 +297,33 @@ func decodeBlobJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body is larger than the limit")
+			return false
+		}
 		writeError(w, http.StatusBadRequest, "invalid JSON body: "+err.Error())
 		return false
 	}
 	var extra any
 	if err := dec.Decode(&extra); err == nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON body: trailing data after JSON value")
+		return false
+	}
+	return true
+}
+
+// decodeLimitedJSON decodes a request body of at most limit bytes: 413 over
+// it, 400 for invalid JSON. For routes that do not use decodeJSON's 2 MB cap.
+func decodeLimitedJSON(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
+	if err := json.NewDecoder(r.Body).Decode(dst); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body is larger than the limit")
+			return false
+		}
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return false
 	}
 	return true
