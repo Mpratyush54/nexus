@@ -1,7 +1,9 @@
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using CommunityToolkit.Mvvm.Input;
+#if !HAS_UNO
 using H.NotifyIcon;
+#endif
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -90,7 +92,9 @@ public sealed partial class MainWindow : Window
         filterMenu.Opening += (_, _) => BuildProjectFilterMenu(filterMenu);
         ProjectFilterButton.Flyout = filterMenu;
         ChatTags.Changed += (_, _) => { _chatRows.Clear(); RenderChats(); };
-        Tray.ForceCreate();
+#if !HAS_UNO
+        Tray.ForceCreate(); // Uno/macOS: no tray yet (desktop/uno strips it from the XAML)
+#endif
         Current = this;
         ResizeForDisplay(1240, 820);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Nexus.ico"));
@@ -288,6 +292,11 @@ public sealed partial class MainWindow : Window
     // page. Capped to 90% of the work area.
     private void ResizeForDisplay(int width, int height)
     {
+#if HAS_UNO
+        // Uno sizes windows in layout pixels already. TODO(mac): cap to the
+        // screen's visible frame like the Windows path does.
+        AppWindow.Resize(new SizeInt32 { Width = width, Height = height });
+#else
         try
         {
             var scale = GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)) / 96.0;
@@ -301,6 +310,7 @@ public sealed partial class MainWindow : Window
         {
             AppWindow.Resize(new SizeInt32(width, height));
         }
+#endif
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -1148,8 +1158,8 @@ public sealed partial class MainWindow : Window
     {
         private readonly MainWindow _owner;
         public ChatRowFactory(MainWindow owner) => _owner = owner;
-        public UIElement GetElement(ElementFactoryGetArgs args) => _owner.ChatListElement(args.Data);
-        public void RecycleElement(ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
+        public UIElement GetElement(Microsoft.UI.Xaml.ElementFactoryGetArgs args) => _owner.ChatListElement(args.Data);
+        public void RecycleElement(Microsoft.UI.Xaml.ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
     }
 
     private static void ApplyChatRowSelection((Button Button, TextBlock Title) row, bool selected)
@@ -1561,7 +1571,13 @@ public sealed partial class MainWindow : Window
             return;
         }
         args.Cancel = true;
+#if HAS_UNO
+        // No tray / menu bar item yet on the Uno head, so a hidden window
+        // could not come back: closing quits (cleanly, through the core).
+        _ = QuitAsync();
+#else
         WindowExtensions.Hide(this);
+#endif
     }
 
     private void Nav_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
@@ -1593,11 +1609,15 @@ public sealed partial class MainWindow : Window
         await UiThread.Resume(DispatcherQueue);
         if (!response.Ok)
         {
+#if !HAS_UNO
             PauseItem.Text = response.Error ?? "Pause capture";
+#endif
             return;
         }
         State.CapturePaused = !State.CapturePaused;
+#if !HAS_UNO
         PauseItem.Text = State.CapturePaused ? "Resume capture" : "Pause capture";
+#endif
     }
 
     private async Task QuitAsync()
@@ -1619,7 +1639,9 @@ public sealed partial class MainWindow : Window
         try
         {
             _chatSearchTimer?.Stop();
+#if !HAS_UNO
             try { Tray.Dispose(); } catch (Exception ex) { DiagLog.Warn("shutdown", "tray dispose failed", ex); }
+#endif
             try { SingleInstance.Stop(); } catch (Exception ex) { DiagLog.Warn("shutdown", "single-instance stop failed", ex); }
         }
         finally { uiCleaned.TrySetResult(); }

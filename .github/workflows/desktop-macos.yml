@@ -1,0 +1,183 @@
+name: desktop-macos
+
+# Nexus for macOS, phase 1: the WinUI sources in desktop/windows built as an
+# Uno Platform Skia desktop app (desktop/uno), bundled as an ad-hoc signed
+# Nexus.app with the universal Go core, launched on the runner and
+# screenshotted. Build and evidence only: nothing here signs for
+# distribution, notarizes, publishes or deploys.
+
+on:
+  push:
+    branches-ignore: [master, main]
+    paths:
+      - 'desktop/**'
+      - 'bindings/**'
+      - 'cmd/nexuscore/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/desktop-macos.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  mac-app:
+    name: Nexus.app (Uno Skia, osx-arm64)
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      APP: ${{ github.workspace }}/dist/Nexus.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Machine facts
+        run: |
+          sw_vers; uname -m
+          dotnet --info | head -20
+          system_profiler SPDisplaysDataType | sed -n 1,25p || true
+
+      # Same build as macos.yml's dylib step.
+      - name: Build libnexuscore.dylib (arm64 + x86_64, universal)
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          CGO_ENABLED=1 GOARCH=arm64 CC="clang -arch arm64" \
+            go build -tags nexuscorelib -trimpath -buildmode=c-shared -o dist/arm64/libnexuscore.dylib ./cmd/nexuscore
+          CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" \
+            go build -tags nexuscorelib -trimpath -buildmode=c-shared -o dist/amd64/libnexuscore.dylib ./cmd/nexuscore
+          lipo -create -output dist/libnexuscore.dylib dist/arm64/libnexuscore.dylib dist/amd64/libnexuscore.dylib
+          lipo -info dist/libnexuscore.dylib
+          nm -gU dist/arm64/libnexuscore.dylib | grep ' _nx_'
+
+      - name: Publish the Uno app (osx-arm64, self-contained)
+        working-directory: desktop/uno
+        run: |
+          set -euo pipefail
+          dotnet publish Nexus.Uno.csproj -c Release -f net10.0-desktop -r osx-arm64 \
+            --self-contained true -p:TargetFrameworks=net10.0-desktop \
+            -o "$GITHUB_WORKSPACE/dist/publish" 2>&1 | tee "$GITHUB_WORKSPACE/dist/publish.log" \
+            | grep -E 'error|warning NU|->' || true
+          test "${PIPESTATUS[0]}" -eq 0
+          ls -la "$GITHUB_WORKSPACE/dist/publish" | head -60
+          ls "$GITHUB_WORKSPACE/dist/publish" | wc -l
+
+      - name: Bundle Nexus.app
+        run: |
+          set -euo pipefail
+          rm -rf "$APP"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          # The .NET host resolves everything next to the executable.
+          cp -R dist/publish/. "$APP/Contents/MacOS/"
+          cp dist/libnexuscore.dylib "$APP/Contents/MacOS/libnexuscore.dylib"
+          short=$(sed -n 's:.*<ApplicationDisplayVersion>\(.*\)</ApplicationDisplayVersion>.*:\1:p' desktop/uno/Nexus.Uno.csproj)
+          sed -e "s/__SHORT_VERSION__/${short}/" -e "s/__BUILD_VERSION__/${GITHUB_RUN_NUMBER}/" \
+            desktop/uno/macos/Info.plist > "$APP/Contents/Info.plist"
+          plutil -lint "$APP/Contents/Info.plist"
+          # Icon from the Windows PNG.
+          set +e
+          ICONSET="$RUNNER_TEMP/Nexus.iconset"; mkdir -p "$ICONSET"
+          for s in 16 32 128 256 512; do
+            sips -z $s $s desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+            sips -z $((s*2)) $((s*2)) desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Nexus.icns" || echo "icon conversion failed (non-fatal)"
+          set -e
+          chmod +x "$APP/Contents/MacOS/Nexus"
+          file "$APP/Contents/MacOS/Nexus"
+          du -sh "$APP"
+
+      - name: Ad-hoc codesign
+        run: |
+          set -euo pipefail
+          # Sign nested code first, then the bundle (no --deep: it is deprecated
+          # and signs in the wrong order for some layouts).
+          find "$APP/Contents/MacOS" -type f \( -name '*.dylib' -o -name '*.so' \) -print0 \
+            | xargs -0 -n 20 codesign --force --sign - --timestamp=none
+          codesign --force --sign - --timestamp=none "$APP"
+          codesign --verify --strict --verbose=2 "$APP"
+          codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Signature|Format'
+
+      - name: Build the window probe
+        run: swiftc -O -o dist/winlist scripts/macos/winlist.swift
+
+      - name: Launch, wait for the window, screenshot
+        timeout-minutes: 6
+        run: |
+          set -uo pipefail
+          mkdir -p shots logs
+          PROFILE_ROOT="$RUNNER_TEMP/nexus-profile-ci-mac"
+          rm -rf "$PROFILE_ROOT"
+          # Isolated profile, no server, no credentials.
+          env -u NEXUS_SERVER -u CENTRAL_SERVER_URL -u NEXUS_TOKEN -u CENTRAL_MEMORY_TOKEN \
+            NEXUS_PROFILE=ci-mac NEXUS_PROFILE_ROOT="$PROFILE_ROOT" \
+            "$APP/Contents/MacOS/Nexus" > logs/stdout.log 2>&1 &
+          PID=$!
+          echo "pid=$PID"
+          screencapture -x shots/00-desktop-before.png || true
+          seen=0
+          for i in $(seq 1 60); do
+            sleep 2
+            if ! kill -0 $PID 2>/dev/null; then echo "Nexus exited early"; break; fi
+            out=$(./dist/winlist $PID 2>/dev/null || echo 0)
+            wins=$(echo "$out" | head -1)
+            echo "t=$((i*2))s windows=$wins"
+            if [ "${wins:-0}" -gt 0 ] 2>/dev/null; then seen=1; echo "$out"; break; fi
+          done
+          # Give the first page time to paint, then capture.
+          sleep 12
+          screencapture -x shots/01-screen.png || echo "screencapture failed"
+          # Window-only capture of the largest Nexus window, when there is one.
+          wid=$(./dist/winlist $PID | tail -n +2 | sort -k5 -n -r | head -1 | cut -d' ' -f1)
+          [ -n "$wid" ] && screencapture -x -o -l "$wid" shots/01-main-window.png || echo "no window id to capture"
+          sleep 15
+          screencapture -x shots/02-main-window-later.png || true
+          if kill -0 $PID 2>/dev/null; then alive=1; else alive=0; fi
+          echo "window_seen=$seen alive=$alive"
+          kill $PID 2>/dev/null; sleep 3; kill -9 $PID 2>/dev/null || true
+          echo "--- stdout/stderr (tail)"; tail -80 logs/stdout.log || true
+          cp -R "$PROFILE_ROOT/AppData/Local/Nexus" logs/profile-local 2>/dev/null || true
+          find "$PROFILE_ROOT" -name '*.log' -maxdepth 6 -exec cp {} logs/ \; 2>/dev/null || true
+          ls -la shots logs
+          # Crash reports, if any.
+          ls ~/Library/Logs/DiagnosticReports 2>/dev/null | grep -i nexus && cp ~/Library/Logs/DiagnosticReports/*Nexus* logs/ 2>/dev/null || true
+          test "$alive" = 1 && test "$seen" = 1
+
+      - name: Zip the app
+        if: ${{ !cancelled() }}
+        run: |
+          test -d "$APP" && ditto -c -k --keepParent "$APP" dist/Nexus-macos-arm64-adhoc.zip && ls -la dist/*.zip || true
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-app
+          path: dist/Nexus-macos-arm64-adhoc.zip
+          if-no-files-found: warn
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-screenshots
+          path: |
+            shots/
+            logs/
+            dist/publish.log
+          if-no-files-found: warn
+          retention-days: 14

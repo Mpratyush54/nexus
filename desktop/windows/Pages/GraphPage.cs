@@ -95,7 +95,15 @@ public sealed class GraphPage : NexusPage
     private readonly GraphScene3D _scene = new();
     private readonly ToggleButton _mode3D;
     private readonly ToggleButton _spin;
-    private bool _is3D = true;
+#if HAS_UNO
+    // Uno head (macOS): the Composition 3D scene is not verified on Skia yet
+    // (LoadedImageSurface is missing there), so the flat 2D map is the
+    // default. NEXUS_GRAPH_3D=1 turns the 3D scene back on to test it.
+    private static readonly bool Default3D = Environment.GetEnvironmentVariable("NEXUS_GRAPH_3D") == "1";
+#else
+    private static readonly bool Default3D = true;
+#endif
+    private bool _is3D = Default3D;
     private bool _layout2DReady;
     private bool _drawn2D;
     private bool _loaded;
@@ -175,7 +183,8 @@ public sealed class GraphPage : NexusPage
         BuildLegend();
         // The 2D canvas and the 3D scene share one stage; the legend, hover
         // card and empty state float over whichever is showing.
-        _host.Visibility = Visibility.Collapsed;
+        _host.Visibility = _is3D ? Visibility.Collapsed : Visibility.Visible;
+        _scene.Visibility = _is3D ? Visibility.Visible : Visibility.Collapsed;
         _stageGrid.Children.Add(_host);
         _stageGrid.Children.Add(_scene);
         _stageGrid.Children.Add(_legend);
@@ -254,7 +263,7 @@ public sealed class GraphPage : NexusPage
         _mode3D = new ToggleButton
         {
             Content = "3D",
-            IsChecked = true,
+            IsChecked = Default3D,
             MinHeight = 30,
             MinWidth = 40,
             FontSize = 12,
@@ -267,6 +276,7 @@ public sealed class GraphPage : NexusPage
         {
             Content = new FontIcon { Glyph = "\uE7AD", FontSize = 13 },
             IsChecked = false,
+            IsEnabled = Default3D,
             MinHeight = 30,
             MinWidth = 34,
             Padding = new Thickness(8, 4, 8, 4)

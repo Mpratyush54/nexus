@@ -38,7 +38,13 @@ public static class DesktopIntegration
     // the real Run key, desktop or nexus:// handler of the normal install.
     public static IDesktopIntegration Current { get; set; } =
         Nexus.Core.ProfilePaths.Current is { } profile ? new ProfileDesktopIntegration(profile.Root)
+#if HAS_UNO
+        // Uno head (desktop/uno): macOS integration; the Windows preview of
+        // that head never touches the registry.
+        : OperatingSystem.IsMacOS() ? new MacDesktopIntegration()
+#else
         : OperatingSystem.IsWindows() ? new WindowsDesktopIntegration()
+#endif
         : new NoDesktopIntegration();
 }
 

@@ -1099,7 +1099,7 @@ public sealed partial class AgentSetupPage : NexusPage
 
         public RowFactory(Func<object, UIElement> build) => _build = build;
 
-        public UIElement GetElement(ElementFactoryGetArgs args)
+        public UIElement GetElement(Microsoft.UI.Xaml.ElementFactoryGetArgs args)
         {
             // A recycled host stays a (hidden) child of the repeater, as with
             // the framework's own recycle pool, and is handed back here.
@@ -1112,7 +1112,7 @@ public sealed partial class AgentSetupPage : NexusPage
             return host;
         }
 
-        public void RecycleElement(ElementFactoryRecycleArgs args)
+        public void RecycleElement(Microsoft.UI.Xaml.ElementFactoryRecycleArgs args)
         {
             if (args.Element is not ContentControl host) return;
             host.Content = null;
