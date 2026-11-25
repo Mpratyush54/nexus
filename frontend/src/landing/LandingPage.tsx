@@ -4,6 +4,7 @@ import {
   AGENTS,
   DEMO_PATH,
   DOWNLOAD_URL,
+  MAC_DOWNLOAD_URL,
   FILM_DURATION,
   FAQ,
   SIGN_IN_PATH,
@@ -308,7 +309,7 @@ export function LandingPage() {
                   <MousePointerClick size={16} aria-hidden="true" /> Try the live demo
                 </a>
                 <p className="nx-hero-note">
-                  Beta for Windows x64. macOS is planned. The demo runs in your browser on sample data, no account needed.{' '}
+                  Beta for Windows x64, and a <a href="#mac">macOS beta</a> for Apple silicon. The demo runs in your browser on sample data, no account needed.{' '}
                   <a href={WEB_APP_PATH}>Open the web app</a>
                 </p>
               </div>
@@ -551,6 +552,17 @@ export function LandingPage() {
               <a className="nx-final-link" href={SIGN_UP_PATH}>
                 Create a free account <ArrowRight size={16} aria-hidden="true" />
               </a>
+            </div>
+            <div id="mac" className="nx-mac-note">
+              <p>
+                <strong>On a Mac?</strong> <a href={MAC_DOWNLOAD_URL}>Download the macOS beta</a> (Nexus.dmg, Apple silicon,
+                macOS 12 or later), open it and drag Nexus to Applications. It updates itself after that.
+              </p>
+              <p className="nx-mac-note-small">
+                The beta isn't signed by Apple yet, so macOS asks once. If it says it can't verify Nexus, right-click Nexus in
+                Applications and choose Open. On macOS 15 and later, open System Settings › Privacy &amp; Security and click Open
+                Anyway.
+              </p>
             </div>
           </div>
         </section>

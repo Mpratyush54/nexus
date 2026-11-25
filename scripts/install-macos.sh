@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
-# Install Nexus Desktop (tray + daemon + CLI) for macOS.
+# Install Nexus for macOS (Apple silicon) and the nexus CLI.
 #
 #   curl -fsSL https://central-memory-releases.s3.ap-south-1.amazonaws.com/desktop/latest/install-macos.sh | bash
 #
+# Installs Nexus.app from the release's DMG into /Applications (or
+# ~/Applications when /Applications isn't writable) and opens it. Nexus then
+# updates itself. Files downloaded by curl aren't quarantined, so there's no
+# Gatekeeper prompt on this path. The CLI goes to ~/.local/share/nexus/bin.
+#
+# Replaces the retired Fyne "Nexus Desktop" (nexus-desktop + nexus-daemon and
+# its LaunchAgent) if an earlier version of this script installed it: the
+# app hosts capture itself, like the Windows app.
 set -euo pipefail
 
 BUCKET_BASE="${NEXUS_BUCKET_BASE:-https://central-memory-releases.s3.ap-south-1.amazonaws.com}"
 VERSION="${NEXUS_VERSION:-latest}"
 BIN_DIR="${HOME}/.local/share/nexus/bin"
-LAUNCH_AGENTS="${HOME}/Library/LaunchAgents"
-PLIST="${LAUNCH_AGENTS}/dev.pratyushes.nexus-desktop.plist"
+OLD_PLIST="${HOME}/Library/LaunchAgents/dev.pratyushes.nexus-desktop.plist"
 
 arch="$(uname -m)"
 case "$arch" in
@@ -18,81 +25,76 @@ case "$arch" in
   *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
 esac
 
-mkdir -p "$BIN_DIR" "$LAUNCH_AGENTS"
-
 if [ "$VERSION" = "latest" ]; then
-  VER="$(curl -fsSL "$BUCKET_BASE/desktop/latest.json" 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
-  if [ -n "${VER:-}" ]; then
-    VERSION="$VER"
-  else
-    VERSION="0.1.0"
-  fi
+  VERSION="$(curl -fsSL "$BUCKET_BASE/desktop/latest.json" 2>/dev/null | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1 || true)"
+  if [ -z "$VERSION" ]; then echo "Could not read the latest Nexus version from $BUCKET_BASE." >&2; exit 1; fi
 fi
-
 BASE="$BUCKET_BASE/desktop/$VERSION"
-echo "Installing Nexus Desktop $VERSION (darwin/$GOARCH) into $BIN_DIR"
+TMP="$(mktemp -d)"
+MOUNT=""
+cleanup() { if [ -n "$MOUNT" ]; then hdiutil detach "$MOUNT" -quiet 2>/dev/null || true; fi; rm -rf "$TMP"; }
+trap cleanup EXIT
 
-download() {
-  local name="$1" dest="$2"
-  local url="$BASE/$name"
-  echo "  downloading $name…"
-  curl -fsSL "$url" -o "$dest"
-  chmod +x "$dest"
-}
+# The retired Fyne app.
+if [ -f "$OLD_PLIST" ]; then
+  echo "Removing the old Nexus Desktop (Fyne) login item"
+  launchctl unload "$OLD_PLIST" 2>/dev/null || true
+  rm -f "$OLD_PLIST"
+fi
+pkill -f "$BIN_DIR/nexus-desktop" 2>/dev/null || true
+rm -f "$BIN_DIR/nexus-desktop" "$BIN_DIR/nexus-daemon"
 
-download "nexus-desktop-darwin-${GOARCH}" "$BIN_DIR/nexus-desktop"
-download "nexus-daemon-darwin-${GOARCH}" "$BIN_DIR/nexus-daemon"
-download "nexus-darwin-${GOARCH}" "$BIN_DIR/nexus"
+# The CLI (both architectures).
+mkdir -p "$BIN_DIR"
+echo "Installing the nexus CLI $VERSION (darwin/$GOARCH) into $BIN_DIR"
+curl -fsSL "$BASE/nexus-darwin-${GOARCH}" -o "$BIN_DIR/nexus"
+chmod +x "$BIN_DIR/nexus"
+marker='# nexus-bin'
+for rc in "$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc"; do
+  if [ -f "$rc" ] || [ "$rc" = "$HOME/.zprofile" ]; then
+    touch "$rc"
+    grep -qF "$marker" "$rc" 2>/dev/null || printf '\nexport PATH="%s:$PATH" %s\n' "$BIN_DIR" "$marker" >> "$rc"
+  fi
+done
 
-# PATH for this user (zsh/bash)
-ensure_path() {
-  local marker='# nexus-bin'
-  local line="export PATH=\"$BIN_DIR:\$PATH\" $marker"
-  for rc in "$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc"; do
-    if [ -f "$rc" ] || [ "$rc" = "$HOME/.zprofile" ]; then
-      touch "$rc"
-      if ! grep -qF "$marker" "$rc" 2>/dev/null; then
-        printf '\n%s\n' "$line" >> "$rc"
-      fi
-    fi
-  done
-  export PATH="$BIN_DIR:$PATH"
-}
-ensure_path
-
-# LaunchAgent — start tray at login
-cat > "$PLIST" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>dev.pratyushes.nexus-desktop</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>$BIN_DIR/nexus-desktop</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <false/>
-  <key>WorkingDirectory</key>
-  <string>$BIN_DIR</string>
-  <key>StandardOutPath</key>
-  <string>$HOME/Library/Logs/nexus-desktop.log</string>
-  <key>StandardErrorPath</key>
-  <string>$HOME/Library/Logs/nexus-desktop.log</string>
-</dict>
-</plist>
-EOF
-
-launchctl unload "$PLIST" 2>/dev/null || true
-launchctl load "$PLIST" 2>/dev/null || true
-nohup "$BIN_DIR/nexus-desktop" >/dev/null 2>&1 &
+# The app (Apple silicon).
+if [ "$GOARCH" != "arm64" ]; then
+  echo ""
+  echo "The Nexus app for Mac needs Apple silicon for now; an Intel build is coming soon."
+  echo "The nexus CLI is installed: $BIN_DIR/nexus"
+  exit 0
+fi
+DMG_NAME="Nexus-${VERSION}-osx-arm64.dmg"
+echo "Downloading $DMG_NAME"
+if ! curl -fsSL "$BASE/$DMG_NAME" -o "$TMP/Nexus.dmg"; then
+  echo ""
+  echo "Nexus for macOS isn't in release $VERSION yet: the Mac app is coming soon."
+  echo "The nexus CLI is installed: $BIN_DIR/nexus"
+  exit 0
+fi
+if curl -fsSL "$BASE/SHA256SUMS-macos.txt" -o "$TMP/SHA256SUMS-macos.txt" 2>/dev/null; then
+  want="$(awk -v n="$DMG_NAME" '$2==n {print $1}' "$TMP/SHA256SUMS-macos.txt")"
+  got="$(shasum -a 256 "$TMP/Nexus.dmg" | awk '{print $1}')"
+  if [ -n "$want" ] && [ "$want" != "$got" ]; then echo "Checksum mismatch for $DMG_NAME" >&2; exit 1; fi
+fi
+MOUNT="$TMP/mnt"
+mkdir -p "$MOUNT"
+hdiutil attach "$TMP/Nexus.dmg" -nobrowse -readonly -noverify -mountpoint "$MOUNT" -quiet
+DEST_DIR=/Applications
+if ! [ -w "$DEST_DIR" ]; then DEST_DIR="$HOME/Applications"; mkdir -p "$DEST_DIR"; fi
+# Quit a running copy first (only if running: telling a closed app to quit opens it).
+if pgrep -f '/Nexus\.app/Contents/MacOS/Nexus( |$)' >/dev/null; then
+  osascript -e 'tell application id "com.nexus.desktop" to quit' >/dev/null 2>&1 || true
+  sleep 3
+fi
+rm -rf "$DEST_DIR/Nexus.app"
+ditto "$MOUNT/Nexus.app" "$DEST_DIR/Nexus.app"
+hdiutil detach "$MOUNT" -quiet || true
+MOUNT=""
+open "$DEST_DIR/Nexus.app"
 
 echo ""
-echo "Installed."
-echo "  Binaries: $BIN_DIR"
-echo "  Login:    LaunchAgent $PLIST"
-echo "  Quit:     menu bar → Quit Nexus Desktop"
+echo "Installed Nexus $VERSION."
+echo "  App:  $DEST_DIR/Nexus.app (updates itself)"
+echo "  CLI:  $BIN_DIR/nexus"
 echo ""
