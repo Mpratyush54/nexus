@@ -109,3 +109,60 @@ func TestInstallFoldersHintNamesThisOS(t *testing.T) {
 		t.Fatalf("windows hint %q", hint)
 	}
 }
+
+// The npm/Homebrew global layout on macOS and Linux: <prefix>/bin/<agent> is
+// a symlink into <prefix>/lib/node_modules, the launcher is a
+// `#!/usr/bin/env node` script and node sits in <prefix>/bin. The agent is
+// found without the shell's PATH, started as is, and node's folder ends up
+// on PATH so `env node` resolves.
+func TestUnixNpmGlobalSymlinkLayouts(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinked launchers and execute bits are macOS/Linux")
+	}
+	for _, layout := range []struct{ name, prefix, pkg, platform string }{
+		{"homebrew npm (darwin arm64)", "opt/homebrew", "opencode-ai", "opencode-darwin-arm64"},
+		{"npm-global (linux x64)", ".npm-global", "opencode-ai", "opencode-linux-x64"},
+	} {
+		root := t.TempDir()
+		prefix := filepath.Join(root, filepath.FromSlash(layout.prefix))
+		write(t, prefix, "bin/node", "\xcf\xfa\xed\xfe")
+		write(t, prefix, "lib/node_modules/"+layout.pkg+"/package.json", `{"name":"`+layout.pkg+`"}`)
+		write(t, prefix, "lib/node_modules/"+layout.pkg+"/bin/opencode", nodeScript)
+		write(t, prefix, "lib/node_modules/"+layout.pkg+"/node_modules/"+layout.platform+"/bin/opencode", "\xcf\xfa\xed\xfe")
+		link := filepath.Join(prefix, "bin", "opencode")
+		if err := os.Symlink(filepath.Join("..", "lib", "node_modules", layout.pkg, "bin", "opencode"), link); err != nil {
+			t.Fatal(err)
+		}
+		missing := func(string) (string, error) { return "", errors.New("not on PATH") }
+		got, err := lookAgentIn("opencode", missing, []string{filepath.Join(root, "nothing"), filepath.Join(prefix, "bin")})
+		if err != nil || got != link {
+			t.Fatalf("%s: lookup got %q %v", layout.name, got, err)
+		}
+		exe, prefixArgs, err := directExecutable(got, "opencode")
+		if err != nil || exe != link || len(prefixArgs) != 0 {
+			t.Fatalf("%s: start %q %v %v", layout.name, exe, prefixArgs, err)
+		}
+		path := pathWithDirs("/usr/bin:/bin", []string{filepath.Join(prefix, "bin")})
+		if !strings.HasSuffix(path, ":"+filepath.Join(prefix, "bin")) {
+			t.Fatalf("%s: node's folder not on PATH: %q", layout.name, path)
+		}
+	}
+}
+
+// pnpm on macOS puts launchers in ~/Library/pnpm (PNPM_HOME); Homebrew
+// formulae in /opt/homebrew/bin. Both are searched without the shell's PATH.
+func TestUnixAgentDirsIncludePnpmAndHomebrew(t *testing.T) {
+	home := t.TempDir()
+	dirs := unixAgentDirs(home, func(k string) string {
+		if k == "PNPM_HOME" {
+			return filepath.Join(home, "Library", "pnpm")
+		}
+		return ""
+	})
+	joined := strings.Join(dirs, "\n")
+	for _, want := range []string{filepath.Join(home, "Library", "pnpm"), filepath.FromSlash("/opt/homebrew/bin")} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+}
