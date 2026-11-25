@@ -93,7 +93,7 @@ public sealed partial class SessionPage
             var wasOpen = _model.IsDropDownOpen;
             ConfigureModel();
             if ((openPicker || wasOpen) && !_sendInFlight) _model.IsDropDownOpen = true;
-            if (openPicker) SetComposerStatus("Model catalog loaded. Your model selection has not been changed.");
+            if (openPicker) SetComposerStatus("Models updated.");
         }
         catch (Exception ex)
         {
@@ -137,11 +137,12 @@ public sealed partial class SessionPage
         var missing = selected.Length > 0 && !catalog.Choices.Any(choice => choice.ID == selected);
         var lines = new List<string>();
         if (error.Length > 0) lines.Add(error);
-        if (catalog.Warning.Length > 0) lines.Add(catalog.Warning);
-        if (missing) lines.Add("Your saved/typed model is not in this catalog. It has been preserved; choose another model if it is no longer available.");
+        var notice = ModelPickerCatalog.Notice(catalog.Warning, AgentAvailability.DisplayName(agent));
+        if (notice.Length > 0) lines.Add(notice);
+        if (missing) lines.Add("Your model isn't in this list. Nexus still uses it; pick another one if it stops working.");
         _modelCatalogNotice.Text = string.Join("\n", lines);
         _modelCatalogNotice.Visibility = _modelCatalogNotice.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        SetModelTip(catalog.Source + ". Catalog entries do not guarantee account access or remaining quota. Type a custom model ID if needed.");
+        SetModelTip("Pick a model, or type a model name.");
     }
 
     // The picker's tooltip is withheld while its list is open so it never covers the list.
