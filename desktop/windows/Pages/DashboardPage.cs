@@ -255,6 +255,7 @@ public sealed class DashboardPage : NexusPage
     // one calm line (the typed prompt is kept) and comes back by itself.
     private void ApplyOffline()
     {
+        if (_lastMetrics is { } last && _metricsOffline != ShellState.Current.Offline) RenderMetrics(last.Metrics, last.Error);
         var offline = ShellState.Current.Offline;
         _startSend.IsEnabled = !offline;
         _startPrompt.IsEnabled = !offline;
@@ -346,8 +347,13 @@ public sealed class DashboardPage : NexusPage
 
     // Memories, items to review and devices online, for one project or
     // added up over every project.
+    private (IReadOnlyList<JsonElement> Metrics, string? Error)? _lastMetrics;
+    private bool _metricsOffline;
+
     private void RenderMetrics(IReadOnlyList<JsonElement> metrics, string? error)
     {
+        _lastMetrics = (metrics, error);
+        _metricsOffline = ShellState.Current.Offline;
         _metrics.Children.Clear();
         if (metrics.Count == 0)
         {
@@ -357,15 +363,20 @@ public sealed class DashboardPage : NexusPage
         long Sum(string key) => metrics.Sum(m => long.TryParse(NxJson.Text(m, key), out var n) ? n : 0);
         long Max(string key) => metrics.Max(m => long.TryParse(NxJson.Text(m, key), out var n) ? n : 0);
         var memories = Sum("memories"); var online = Max("online");
-        var stats = new (long Value, string Label, string Tip, Brush Tone)[]
+        // Offline, "devices online" is a guess from before the outage, and
+        // this computer isn't online itself: say so instead of a count.
+        var offline = _metricsOffline;
+        var stats = new (string Value, string Label, string Tip, Brush Tone)[]
         {
-            (memories, memories == 1 ? "Memory" : "Memories", "Decisions and facts Nexus keeps for your agents", NexusPalette.Accent),
-            (Sum("proposed"), "To review", "Suggested memories waiting for your OK (Memory page)", NexusPalette.Amber),
-            (online, online == 1 ? "Device online" : "Devices online", "Computers signed in to Nexus right now", NexusTokens.Brush("TextFillColorPrimaryBrush", Microsoft.UI.Colors.White))
+            (memories.ToString("N0"), memories == 1 ? "Memory" : "Memories", "Decisions and facts Nexus keeps for your agents", NexusPalette.Accent),
+            (Sum("proposed").ToString("N0"), "To review", "Suggested memories waiting for your OK (Memory page)", NexusPalette.Amber),
+            offline
+                ? ("—", "Offline", "Nexus can't reach the server right now, so it can't tell which computers are online", NexusPalette.Muted)
+                : (online.ToString("N0"), online == 1 ? "Device online" : "Devices online", "Computers signed in to Nexus right now", NexusTokens.Brush("TextFillColorPrimaryBrush", Microsoft.UI.Colors.White))
         };
         for (var i = 0; i < stats.Length; i++)
         {
-            var value = new TextBlock { Text = stats[i].Value.ToString("N0"), Foreground = stats[i].Tone, FontSize = 26, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+            var value = new TextBlock { Text = stats[i].Value, Foreground = stats[i].Tone, FontSize = 26, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
             var tile = Tile(value, NexusTokens.Caption(stats[i].Label));
             ToolTipService.SetToolTip(tile, stats[i].Tip);
             AutomationProperties.SetName(tile, stats[i].Label + ": " + stats[i].Value);
@@ -393,9 +404,9 @@ public sealed class DashboardPage : NexusPage
         _notice.Visibility = Visibility.Collapsed;
         if (signedOut && _signedOut.Content is null)
         {
-            var card = StateView.Empty("", "You're signed out",
-                "Your sign-in on this computer expired or was removed. Sign in again to see your chats and memories.",
-                "Sign in", () => MainWindow.Current?.ShowSettings(), primary: true);
+            var card = StateView.Empty("", "You're not signed in",
+                "Sign in to see your chats and memories on this computer.",
+                "Sign in", () => MainWindow.Current?.ShowSettings("account"), primary: true);
             _signedOut.Content = card;
         }
         _signedOut.Visibility = signedOut ? Visibility.Visible : Visibility.Collapsed;

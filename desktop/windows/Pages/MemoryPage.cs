@@ -267,6 +267,7 @@ public sealed partial class MemoryPage : NexusPage
             _pageInfo.Text = "";
             _prevPage.IsEnabled = false;
             _nextPage.IsEnabled = false;
+            if (_prevPage.Parent is FrameworkElement noPager) noPager.Visibility = Visibility.Collapsed;
             _detailPane.Visibility = Visibility.Collapsed;
             _selectedId = null;
             _briefProjectId = "";
@@ -314,6 +315,9 @@ public sealed partial class MemoryPage : NexusPage
         _categoryBar.Children.Clear();
         _count.Text = "";
         _pageInfo.Text = "";
+        // Shown again by UpdatePaginationUi when there is more than one page;
+        // an empty, offline or failed list has nothing to page.
+        if (_prevPage.Parent is FrameworkElement pagerBar) pagerBar.Visibility = Visibility.Collapsed;
         _cards.Children.Add(Skeleton.Cards(3));
 
         var fill = await FillVisiblePageAsync(projectId, apiOffset, pageCarry);
