@@ -56,6 +56,10 @@
          from the Windows file before the build; see StripTrayFromMainWindow. -->
     <Page Include="$(IntermediateOutputPath)shared\MainWindow.xaml" Link="MainWindow.xaml" SubType="Designer" Generator="MSBuild:Compile" />
 
+    <!-- macOS bundle icon, required by Uno's .app packager. desktop-macos.yml
+         makes it from Assets/Nexus.png (sips + iconutil) before publishing. -->
+    <IcnsFiles Include="macos\Nexus.icns" Condition="Exists('macos\Nexus.icns')" />
+
     <Content Include="$(WindowsSources)Assets\**" Exclude="$(WindowsSources)Assets\InstallerSplash.gif"
              Link="Assets\%(RecursiveDir)%(Filename)%(Extension)"
              CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />

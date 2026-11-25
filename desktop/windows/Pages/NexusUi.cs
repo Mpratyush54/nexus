@@ -312,12 +312,11 @@ internal static class Skeleton
             // Loaded replace it (disposing an attached visual is not safe there).
             if (sprite is not null) sprite.IsVisible = false;
             sprite = null; brush = null;
-            return;
 #else
             ElementCompositionPreview.SetElementChildVisual(host, null);
-#endif
             sprite?.Dispose(); brush?.Dispose();
             sprite = null; brush = null;
+#endif
         };
     }
 }

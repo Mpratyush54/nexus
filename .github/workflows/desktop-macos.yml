@@ -65,6 +65,18 @@ jobs:
           lipo -info dist/libnexuscore.dylib
           nm -gU dist/arm64/libnexuscore.dylib | grep ' _nx_'
 
+      # Uno's .app packager requires an .icns (IcnsFiles in Nexus.Uno.csproj).
+      - name: App icon from the Windows PNG
+        run: |
+          set -euo pipefail
+          ICONSET="$RUNNER_TEMP/Nexus.iconset"; mkdir -p "$ICONSET"
+          for s in 16 32 128 256 512; do
+            sips -z $s $s desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+            sips -z $((s*2)) $((s*2)) desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$ICONSET" -o desktop/uno/macos/Nexus.icns
+          ls -la desktop/uno/macos/Nexus.icns
+
       # Uno's own bundler lays the .app out the way codesign wants it (managed
       # assemblies outside Contents/MacOS) and signs it; CodesignKey=- is ad hoc.
       - name: Publish Nexus.app with Uno (osx-arm64, self-contained)
@@ -97,14 +109,7 @@ jobs:
           /usr/libexec/PlistBuddy -c "Merge $RUNNER_TEMP/nexus.plist" "$PL"
           /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $exe" "$PL"
           plutil -lint "$PL"; plutil -p "$PL"
-          # Icon from the Windows PNG (non-fatal).
-          ICONSET="$RUNNER_TEMP/Nexus.iconset"; mkdir -p "$ICONSET"
-          for s in 16 32 128 256 512; do
-            sips -z $s $s desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null || true
-            sips -z $((s*2)) $((s*2)) desktop/windows/Assets/Nexus.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null || true
-          done
-          mkdir -p "$APP/Contents/Resources"
-          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/Nexus.icns" || echo "icon conversion failed (non-fatal)"
+          ls "$APP/Contents/Resources" | grep -i icns || echo "no .icns in Resources"
           # The core goes where the other native libraries (SkiaSharp) are,
           # which is where [LibraryImport("nexuscore")] probes.
           skia=$(find "$APP" -name 'libSkiaSharp.dylib' | head -1)
