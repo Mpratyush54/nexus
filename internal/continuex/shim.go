@@ -384,14 +384,14 @@ func agentSearchDirs() []string {
 		add(pd, "scoop", "shims")
 	}
 	if runtime.GOOS != "windows" {
-		add("/usr/local/bin")
-		add("/opt/homebrew/bin")
+		dirs = append(dirs, unixAgentDirs(home, os.Getenv)...)
 	}
 	return dirs
 }
 
 // lookAgent is exec.LookPath with a fallback to the usual install folders.
 func lookAgent(binary string) (string, error) {
+	ensureAgentPATH()
 	return lookAgentIn(binary, exec.LookPath, agentSearchDirs())
 }
 

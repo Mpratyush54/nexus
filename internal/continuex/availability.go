@@ -90,7 +90,7 @@ func detectHarness(agent string, look func(string) (string, error)) HarnessAvail
 	if err != nil {
 		result.State = "not_installed"
 		result.Problem = (&AgentError{Agent: agent, Kind: "not_installed"}).Message()
-		result.Detail = `No "` + binary + `" command was found on PATH or in the usual install folders (npm, pnpm, bun, scoop, Volta, Chocolatey).`
+		result.Detail = `No "` + binary + `" command was found on PATH or in the usual install folders (` + installFoldersHint() + `).`
 		return result
 	}
 	exe, prefix, err := directExecutable(path, agent)
