@@ -54,6 +54,8 @@ se() { # System Events against this process; prints the result or the error
   limited 12 osascript -e "tell application \"System Events\" to tell (first process whose unix id is $PID) to $1" 2>&1
 }
 keys() { limited 8 osascript -e "tell application \"System Events\" to $1" 2>&1; }
+# The main thread's stack, for a hang (sample needs no extra permission for our own child).
+sample_app() { limited 20 sample "$PID" 2 -file "logs/sample-$1.txt" > /dev/null 2>&1 || true; }
 
 rm -rf "$ROOT"
 mkdir -p "$ROOT/AppData/Local/Nexus"
@@ -142,37 +144,9 @@ fi
 sleep 3
 screencapture -x shots/21-after-reopen.png
 
-# ---- 4. Cmd shortcuts and copy/paste in a text box (Accessibility) -----------
-if [ $AX = 1 ]; then
-  se 'set frontmost to true' > /dev/null
-  sleep 1
-  keys 'keystroke "k" using command down' > /dev/null
-  sleep 2
-  screencapture -x shots/30-cmd-k-search.png
-  keys 'keystroke "nexus copy check"' > /dev/null
-  sleep 0.5
-  printf 'stale' | pbcopy
-  keys 'keystroke "a" using command down' > /dev/null
-  keys 'keystroke "c" using command down' > /dev/null
-  sleep 1
-  if [ "$(pbpaste)" = "nexus copy check" ]; then pass "Cmd+K opened Search; Cmd+A, Cmd+C copied from its text box"; else note "Cmd+C from the text box gave '$(pbpaste)'"; fi
-  printf 'pasted by CI' | pbcopy
-  se 'click menu item "Select All" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
-  se 'click menu item "Paste" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
-  sleep 0.5
-  printf 'stale' | pbcopy
-  se 'click menu item "Select All" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
-  se 'click menu item "Copy" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
-  sleep 1
-  if [ "$(pbpaste)" = "pasted by CI" ]; then pass "Edit menu Select All, Paste and Copy work in the text box"; else note "Edit menu paste/copy round trip gave '$(pbpaste)'"; fi
-  screencapture -x shots/31-after-paste.png
-  keys 'key code 53' > /dev/null
-  sleep 1
-fi
-
 # ---- 5. nexus:// through LaunchServices --------------------------------------
 open "nexus://session/ci-url-test"
-if wait_for 15 log_has "url event: nexus://session"; then pass "open nexus://session/... reached the running app"; else fail "no 'url event: nexus://session' log line after open"; fi
+if wait_for 15 log_has "url event: nexus://session"; then pass "open nexus://session/... reached the running app"; else fail "no 'url event: nexus://session' log line after open"; sample_app url; fi
 sleep 3
 screencapture -x shots/40-after-url.png
 
@@ -213,6 +187,35 @@ check_login() { # label, plist, runner...
 check_login "profile" "$ROOT/Library/LaunchAgents/com.nexus.desktop.login.profile-$NAME.plist"   env NEXUS_PROFILE="$NAME" NEXUS_PROFILE_ROOT="$ROOT" "$EXE"
 # The real per-user location (a disposable runner; launchd only reads it at login).
 check_login "user" "$HOME/Library/LaunchAgents/com.nexus.desktop.login.plist" env -u NEXUS_PROFILE -u NEXUS_PROFILE_ROOT "$EXE"
+
+# ---- 4. Cmd shortcuts and copy/paste in a text box (Accessibility) -----------
+if [ $AX = 1 ]; then
+  se 'set frontmost to true' > /dev/null
+  sleep 1
+  keys 'keystroke "k" using command down' > /dev/null
+  sleep 2
+  screencapture -x shots/30-cmd-k-search.png
+  keys 'keystroke "nexus copy check"' > /dev/null
+  sleep 0.5
+  printf 'stale' | pbcopy
+  keys 'keystroke "a" using command down' > /dev/null
+  keys 'keystroke "c" using command down' > /dev/null
+  sleep 1
+  if [ "$(pbpaste)" = "nexus copy check" ]; then pass "Cmd+K opened Search; Cmd+A, Cmd+C copied from its text box"; else note "Cmd+C from the text box gave '$(pbpaste)'"; fi
+  printf 'pasted by CI' | pbcopy
+  se 'click menu item "Select All" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
+  se 'click menu item "Paste" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
+  sleep 0.5
+  printf 'stale' | pbcopy
+  se 'click menu item "Select All" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
+  se 'click menu item "Copy" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
+  sleep 1
+  if [ "$(pbpaste)" = "pasted by CI" ]; then pass "Edit menu Select All, Paste and Copy work in the text box"; else note "Edit menu paste/copy round trip gave '$(pbpaste)'"; fi
+  screencapture -x shots/31-after-paste.png
+  sample_app after-shortcuts
+  keys 'key code 53' > /dev/null
+  sleep 1
+fi
 
 # ---- 8. Quit through the system (Dock / Apple event) --------------------------
 limited 15 osascript -e 'tell application id "com.nexus.desktop" to quit' > logs/apple-quit.log 2>&1

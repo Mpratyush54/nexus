@@ -94,6 +94,16 @@ static NSArray<NSWindow *> *nx_uno_windows(void)
 // Sends a Cmd shortcut to Uno so its TextBox and KeyboardAccelerators handle it,
 // exactly as if no menu had claimed the key equivalent. Outside a Uno window (the
 // About panel, an alert) the standard action goes down the responder chain.
+// The event is delivered on a later turn of the main queue: the menu is still
+// inside performKeyEquivalent (highlighting its title) when the action runs,
+// and Uno must not handle the key nested in that.
+static void nx_deliver_later(NSWindow *window, NSArray<NSEvent *> *events)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        for (NSEvent *e in events) [window sendEvent:e];
+    });
+}
+
 static void nx_forward_shortcut(NSMenuItem *item)
 {
     NSWindow *key = NSApp.keyWindow;
@@ -110,13 +120,14 @@ static void nx_forward_shortcut(NSMenuItem *item)
     if (current.type == NSEventTypeKeyDown
         && (current.modifierFlags & NSEventModifierFlagCommand) != 0
         && [current.charactersIgnoringModifiers.lowercaseString isEqualToString:chars]) {
-        [key sendEvent:current];
+        nx_deliver_later(key, @[ current ]);
         return;
     }
     // Chosen with the mouse: synthesize the key press.
     unsigned short code = (unsigned short)item.tag;
     NSTimeInterval now = [NSProcessInfo processInfo].systemUptime;
     NSString *typed = (mods & NSEventModifierFlagShift) ? chars.uppercaseString : chars;
+    NSMutableArray<NSEvent *> *events = [NSMutableArray array];
     for (int i = 0; i < 2; i++) {
         NSEvent *e = [NSEvent keyEventWithType:(i == 0 ? NSEventTypeKeyDown : NSEventTypeKeyUp)
                                       location:NSZeroPoint
@@ -128,8 +139,9 @@ static void nx_forward_shortcut(NSMenuItem *item)
                    charactersIgnoringModifiers:chars
                                      isARepeat:NO
                                        keyCode:code];
-        if (e != nil) [key sendEvent:e];
+        if (e != nil) [events addObject:e];
     }
+    nx_deliver_later(key, events);
 }
 
 @interface NXMacTarget : NSObject
