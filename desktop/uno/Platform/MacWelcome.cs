@@ -77,12 +77,26 @@ internal sealed class MacWelcome : Grid
     private void Cover(Grid root)
     {
         _root = root;
-        foreach (var child in root.Children)
+        // Only once the page underneath has finished its own entrance: on Uno
+        // an animation that runs while its element is collapsed stays on its
+        // first frame (the guide's sign-in card came back invisible).
+        var later = DispatcherQueue.CreateTimer();
+        later.Interval = TimeSpan.FromMilliseconds(2500);
+        later.IsRepeating = false;
+        later.Tick += (_, _) =>
         {
-            if (child.Visibility != Visibility.Visible) continue;
-            _covered.Add(child);
-            child.Visibility = Visibility.Collapsed;
-        }
+            // Over the setup guide only (the welcome); the move offer can sit
+            // over the shell, whose lists animate in as they load.
+            if (_root is null || _mode != Mode.Welcome) { FocusPrimary(); return; }
+            foreach (var child in _root.Children)
+            {
+                if (ReferenceEquals(child, this) || child.Visibility != Visibility.Visible) continue;
+                _covered.Add(child);
+                child.Visibility = Visibility.Collapsed;
+            }
+            FocusPrimary();
+        };
+        later.Start();
         _keys = (_, e) =>
         {
             if (e.Key is Windows.System.VirtualKey.Enter or Windows.System.VirtualKey.Space)
@@ -99,11 +113,25 @@ internal sealed class MacWelcome : Grid
         root.AddHandler(KeyDownEvent, _keys, true);
     }
 
+    // Keyboard focus on the main button, so Return and Space work at once.
+    // At launch the window may not be key yet when Loaded runs, so this is
+    // repeated when the window activates and once the page underneath hides.
+    private void FocusPrimary()
+    {
+        if (_root is not null && _primary.IsEnabled) _primary.Focus(FocusState.Keyboard);
+    }
+
     private void Uncover()
     {
         if (_root is null) return;
         if (_keys is not null) _root.RemoveHandler(KeyDownEvent, _keys);
-        foreach (var child in _covered) child.Visibility = Visibility.Visible;
+        foreach (var child in _covered)
+        {
+            child.Visibility = Visibility.Visible;
+            // Its step was built while hidden; build it again so its
+            // entrance plays where it can be seen.
+            if (child is Nexus.Pages.SetupWizardPage guide) guide.ThemeChanged();
+        }
         _covered.Clear();
         _root = null;
     }
@@ -181,8 +209,9 @@ internal sealed class MacWelcome : Grid
             Motion.FadeSlideIn(_primary, 1120, 0, 8, 520);
             if (!welcome) Motion.FadeSlideIn(_secondary, 1200, 0, 6, 520);
             Motion.FadeSlideIn(footer, 1300, 0, 0, 600);
-            _primary.Focus(FocusState.Keyboard);
+            FocusPrimary();
         };
+        window.Activated += (_, _) => DispatcherQueue.TryEnqueue(FocusPrimary);
     }
 
     private async Task PrimaryAsync()
