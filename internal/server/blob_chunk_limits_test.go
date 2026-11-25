@@ -1,0 +1,90 @@
+package server
+
+import (
+	"encoding/base64"
+	"net/http"
+	"testing"
+
+	"central-memory/internal/store"
+)
+
+func postPiece(t *testing.T, s *Server, tok, projectID, parent string, index, total int, body []byte) int {
+	t.Helper()
+	rec := doJSON(t, s, http.MethodPost, "/v1/blobs/"+parent+"/chunks", tok, map[string]any{
+		"project_id": projectID, "index": index, "total": total,
+		"body_b64": base64.StdEncoding.EncodeToString(body), "chunk_sha256": shaHex(body),
+	})
+	return rec.Code
+}
+
+// Assembly stores the declared purpose: a transcript is not counted against
+// the plan's storage (as with a plain PUT of one); a file is. Pieces are
+// freed once assembled.
+func TestBlobAssemblePurposeAndFreesPieces(t *testing.T) {
+	s := newBlobServer(t)
+	projectID := claimFolder(t, s, "blob-purpose", "owner")
+	tok := loginAs(t, s, "owner")
+	mem := s.Store.(*store.MemStore)
+	// A plan with no room left for files.
+	if err := mem.SetStorageUsage(t.Context(), "user:owner", 1, 1); err != nil {
+		t.Fatal(err)
+	}
+	part1, part2 := []byte("transcript line one\n"), []byte("transcript line two\n")
+	whole := append(append([]byte{}, part1...), part2...)
+	parent := shaHex(whole)
+	for i, p := range [][]byte{part1, part2} {
+		if code := postPiece(t, s, tok, projectID, parent, i, 2, p); code != http.StatusCreated {
+			t.Fatalf("piece %d: %d", i, code)
+		}
+	}
+	rec := doJSON(t, s, http.MethodPost, "/v1/blobs/"+parent+"/assemble", tok, map[string]any{"project_id": projectID})
+	if rec.Code != http.StatusPaymentRequired {
+		t.Fatalf("file assembly on a full plan: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodPost, "/v1/blobs/"+parent+"/assemble", tok, map[string]any{"project_id": projectID, "purpose": "bogus"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad purpose: %d %s", rec.Code, rec.Body.String())
+	}
+	rec = doJSON(t, s, http.MethodPost, "/v1/blobs/"+parent+"/assemble", tok, map[string]any{"project_id": projectID, "purpose": "transcript"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("transcript assembly: %d %s", rec.Code, rec.Body.String())
+	}
+	if got, err := mem.ReadBlob(t.Context(), projectID, parent); err != nil || string(got) != string(whole) {
+		t.Fatalf("stored blob = %q, %v", got, err)
+	}
+	if used, _, _ := mem.StorageUsage(t.Context(), "user:owner"); used != 1 {
+		t.Fatalf("transcript counted against storage: used = %d", used)
+	}
+	if len(store.LoadBlobChunks(projectID, parent)) != 0 {
+		t.Fatal("pieces kept after assembly")
+	}
+	if total, _ := store.BlobChunkBytes("owner"); total != 0 {
+		t.Fatalf("%d piece bytes still held", total)
+	}
+}
+
+func TestBlobChunkMemoryLimitsReturn413And429(t *testing.T) {
+	s := newBlobServer(t)
+	oldUser, oldTotal := store.MaxChunkBytesPerUser, store.MaxChunkBytesTotal
+	store.MaxChunkBytesPerUser, store.MaxChunkBytesTotal = 64, 1<<20
+	t.Cleanup(func() { store.MaxChunkBytesPerUser, store.MaxChunkBytesTotal = oldUser, oldTotal })
+	projectID := claimFolder(t, s, "blob-limits", "owner")
+	tok := loginAs(t, s, "owner")
+
+	big := make([]byte, 65)
+	if code := postPiece(t, s, tok, projectID, shaHex(big), 0, 1, big); code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("upload over the limit on its own: %d, want 413", code)
+	}
+	first := make([]byte, 40)
+	if code := postPiece(t, s, tok, projectID, shaHex([]byte("a")), 0, 2, first); code != http.StatusCreated {
+		t.Fatalf("first upload: %d", code)
+	}
+	second := []byte("0123456789012345678901234567890123456789")
+	rec := doJSON(t, s, http.MethodPost, "/v1/blobs/"+shaHex(second)+"/chunks", tok, map[string]any{
+		"project_id": projectID, "index": 0, "total": 1,
+		"body_b64": base64.StdEncoding.EncodeToString(second), "chunk_sha256": shaHex(second),
+	})
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") == "" {
+		t.Fatalf("second upload while the first holds the quota: %d, want 429 with Retry-After", rec.Code)
+	}
+}
