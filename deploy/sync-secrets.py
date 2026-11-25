@@ -19,7 +19,7 @@ LIGHTSAIL_USER = os.environ.get("LIGHTSAIL_USER", "ubuntu")
 SSH_KEY = os.environ.get("LIGHTSAIL_KEY", os.path.expanduser("~/.ssh/central-memory-key.pem"))
 
 
-def get_secret(secret_id):
+def get_secret(secret_id, known_keys=None):
     """Return the secret dict, or None when AWS could not be read.
 
     None means "unknown" (missing permission, expired session, network), not
@@ -39,19 +39,90 @@ def get_secret(secret_id):
     raw = res.stdout.strip()
     if not raw:
         return None
-    # Try standard JSON
+    data = parse_secret_string(raw, known_keys)
+    if data is None:
+        print(f"[-] {secret_id}: SecretString is neither JSON nor key:value pairs; ignoring it", file=sys.stderr)
+    elif not _is_json(raw):
+        print(f"[!] {secret_id}: SecretString is not valid JSON (read keys: {', '.join(sorted(data))}).", file=sys.stderr)
+        print('    Store it as JSON, e.g. {"host":"...","port":"587","username":"...","password":"...","from":"..."}', file=sys.stderr)
+    return data
+
+
+def _is_json(raw):
     try:
-        return json.loads(raw)
+        return isinstance(json.loads(raw), dict)
+    except Exception:
+        return False
+
+
+def parse_secret_string(raw, known_keys=None):
+    """Parse a SecretString: JSON, or the legacy '{key:val,key2:val2}' form.
+
+    The legacy form may carry a stray quote on one or both ends, and quotes
+    around keys or values. Values may contain commas or colons (passwords,
+    "Name <a@b>"): a new pair only starts at ",<key>:" where key is an
+    identifier. Returns None when nothing usable is found.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return {str(k): "" if v is None else str(v) for k, v in data.items()}
     except Exception:
         pass
-    # If wrapped in '{key:val,key2:val2}'
+    body = raw.strip().strip("'\"").strip()
+    if body.startswith("{"):
+        body = body[1:]
+    if body.endswith("}"):
+        body = body[:-1]
+    body = body.strip().strip("'\"").strip()
+    key_re = r"(?:^|,)\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?\s*:"
+    starts = list(re.finditer(key_re, body))
+    if known_keys:
+        # Only real field names start a pair, so "a,b:c" inside a password stays whole.
+        starts = [m for m in starts if m.group(1) in known_keys]
+    if not starts:
+        return None
     data = {}
-    cleaned = raw.strip("'\"").strip("{}")
-    for pair in cleaned.split(","):
-        if ":" in pair:
-            k, v = pair.split(":", 1)
-            data[k.strip()] = v.strip().strip("'\"")
+    for i, m in enumerate(starts):
+        end = starts[i + 1].start() if i + 1 < len(starts) else len(body)
+        value = body[m.end():end].strip()
+        value = value.strip("'\"").strip()
+        data[m.group(1)] = value
     return data
+
+
+SMTP_KEYS = ("host", "port", "username", "password", "from")
+
+
+def smtp_settings(data, existing=lambda key: ""):
+    """SMTP settings for .env, or exit loudly when they would not work.
+
+    A password without a username is refused: relays like Brevo reject it,
+    and every sign-up and password-reset email would fail.
+    """
+    data = data or {}
+    host = (data.get("host") or "").strip() or existing("SMTP_HOST") or "smtp-relay.brevo.com"
+    port = (data.get("port") or "").strip() or existing("SMTP_PORT") or "587"
+    user = (data.get("username") or "").strip() or existing("SMTP_USER")
+    password = (data.get("password") or "").strip() or existing("SMTP_PASSWORD")
+    mail_from = (data.get("from") or "").strip() or "Nexus <noreply@pratyushes.dev>"
+    problems = []
+    if not port.isdigit():
+        problems.append(f"port {port!r} is not a number")
+    if password and not user:
+        problems.append("password is set but username is empty")
+    if not password and os.environ.get("ALLOW_MISSING_SECRETS") != "1":
+        problems.append("password is empty, so no sign-up or reset email can be sent")
+    if problems:
+        print("[-] Refusing to write .env: central-memory/smtp is unusable: " + "; ".join(problems), file=sys.stderr)
+        print('    Set the secret to JSON: {"host":"smtp-relay.brevo.com","port":"587","username":"<login>",'
+              '"password":"<smtp key>","from":"Nexus <noreply@pratyushes.dev>"}', file=sys.stderr)
+        print("    (ALLOW_MISSING_SECRETS=1 skips only the empty-password check.)", file=sys.stderr)
+        sys.exit(1)
+    return host, port, user, password, mail_from
 
 
 def run_ssh(command):
@@ -103,12 +174,15 @@ def main():
     jwt_secret = resolve_value("central-memory/jwt", jwt_data.get("signing_key", ""), "JWT_SECRET")
 
     # 2. SMTP
-    smtp_data = get_secret("central-memory/smtp") or {}
-    smtp_host = smtp_data.get("host", "smtp-relay.brevo.com")
-    smtp_port = smtp_data.get("port", "587")
-    smtp_user = smtp_data.get("username", "")
-    smtp_pass = resolve_value("central-memory/smtp", smtp_data.get("password", ""), "SMTP_PASSWORD", required=False)
-    mail_from = smtp_data.get("from", "Nexus <noreply@pratyushes.dev>")
+    # A failed fetch (None) keeps what the server already has; a secret that
+    # parses but is unusable stops the sync instead of deploying broken mail.
+    smtp_data = get_secret("central-memory/smtp", SMTP_KEYS)
+    if smtp_data is None:
+        print("[*] central-memory/smtp unavailable from AWS; keeping the server's SMTP_* values")
+        smtp_host, smtp_port, smtp_user, smtp_pass, mail_from = smtp_settings({}, existing_env_value)
+    else:
+        smtp_host, smtp_port, smtp_user, smtp_pass, mail_from = smtp_settings(smtp_data)
+    print(f"[*] mail: smtp host={smtp_host} port={smtp_port} auth={'yes' if smtp_user else 'no'}")
 
     # 3. GitHub
     gh_data = get_secret("central-memory/github") or {}

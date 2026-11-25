@@ -49,6 +49,16 @@ export function afterAuthPath(next: string | null) {
   return next && (next.startsWith('/cli/') || next.startsWith('/app/')) ? next : '/app/dashboard'
 }
 
+/**
+ * Where a signed-in visit to /login or /signup goes: where a sign-in would
+ * have gone (a safe `next`, else Home). Desktop setup is offered from Home,
+ * never forced. Null while a sign-in on the page is handing off.
+ */
+export function guestRedirect(isAuthenticated: boolean, handoff: HandoffPhase, next: string | null): string | null {
+  if (!isAuthenticated || handoff !== 'idle') return null
+  return afterAuthPath(next)
+}
+
 /** A page that started a sign-in and is left mid-request must not keep GuestRoute on hold. */
 export function useReleaseHoldOnLeave() {
   useEffect(

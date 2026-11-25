@@ -137,6 +137,9 @@ type Server struct {
 
 	// Mail delivers signup OTP emails. Nil selects mail.FromEnv at first use.
 	Mail mail.Sender
+	// mailbox sends codes in the background (mail_delivery.go).
+	mailOnce sync.Once
+	mailbox  *mailOutbox
 
 	// Project brief debounce (project_brief.go): last check per project.
 	// briefNow overrides the clock in tests.
