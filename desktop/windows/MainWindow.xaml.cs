@@ -146,6 +146,11 @@ public sealed partial class MainWindow : Window
         _ = Task.Run(UpdateService.Shared.SyncDisplayVersion);
         if (!AppPrefs.SetupCompleted) ShowSetup();
         else DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ShowUpdatedToast);
+#if HAS_UNO
+        // macOS first run: "You're all set" over the setup guide, or the
+        // "Move to Applications" offer when running from the disk image.
+        Nexus.Platform.MacWelcome.MaybeShow(this);
+#endif
         // A crash in an earlier run left a report: ask once the window is up
         // (not over the setup guide, not while hidden in the tray).
         Activated += (_, _) => DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, OfferCrashReports);

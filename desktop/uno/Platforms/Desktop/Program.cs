@@ -5,8 +5,9 @@ namespace Nexus;
 
 /// <summary>
 /// Skia desktop entry point (macOS AppKit, and Win32 for the Windows
-/// preview). The Windows head's Program.cs runs Velopack's installer hooks
-/// first; there is no installer on this head yet.
+/// preview). Velopack starts first, as in the Windows head's Program.cs:
+/// when an update was downloaded in an earlier run, it applies it here
+/// (UpdateMac swaps Nexus.app) and relaunches the new version.
 /// </summary>
 public static class Program
 {
@@ -22,6 +23,15 @@ public static class Program
             Console.Error.WriteLine($"[nexus-mac] launch: {args.Length} argument(s) {flags}");
             // NEXUS_PROFILE before anything reads per-user folders.
             Nexus.Core.ProfilePaths.ApplyToProcess();
+
+            // A downloaded update is applied on the next start, before any
+            // UI; not from a copy that can't be replaced in place (the disk
+            // image, a translocated copy), nor for the command-line forms.
+            var command = args.Any(a => a.StartsWith("--set-start-at-login=", StringComparison.OrdinalIgnoreCase));
+            Velopack.VelopackApp.Build()
+                .SetArgs(args)
+                .SetAutoApplyOnStartup(!command && MacInstall.CanSelfUpdate)
+                .Run();
 
             // Command-line form of Settings > Start at login (same code path),
             // used by scripts and CI: --set-start-at-login=on|off.

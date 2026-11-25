@@ -15,7 +15,8 @@
 //   - the standard app menu bar (Nexus, File, Edit, Window, Help);
 //   - Dock reopen, nexus:// URL events, and a Quit that goes through the app's
 //     own shutdown;
-//   - showing and hiding the Uno window (closing hides it while the item exists).
+//   - showing and hiding the Uno window (closing hides it while the item exists);
+//   - App Translocation lookup and Move to Trash, for "Move to Applications".
 //
 // Build (universal):
 //   clang -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -fobjc-arc -dynamiclib \
@@ -25,6 +26,7 @@
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
 #import <objc/runtime.h>
+#include <dlfcn.h>
 
 typedef void (*nx_command_fn)(int32_t command);
 typedef void (*nx_url_fn)(const char *url);
@@ -578,4 +580,51 @@ __attribute__((visibility("default")))
 int32_t nx_mac_status_item_visible(void)
 {
     return s_item != nil && s_item.visible ? 1 : 0;
+}
+
+// ---- Install location ("Move to Applications")
+
+// Gatekeeper runs a quarantined app that was never moved from where it was
+// downloaded from a random read-only copy (App Translocation). Security.framework
+// can say so and name the original; the calls are SPI, so they are looked up at
+// run time and their absence means "not translocated".
+// Returns 1 when `path` is translocated (and writes the original bundle path to
+// `out`, or "" when it cannot be found), 0 otherwise.
+__attribute__((visibility("default")))
+int32_t nx_mac_original_path(const char *path, char *out, int32_t len)
+{
+    if (out != NULL && len > 0) out[0] = 0;
+    if (path == NULL) return 0;
+    @autoreleasepool {
+        void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_LAZY);
+        if (sec == NULL) return 0;
+        Boolean (*isTranslocated)(CFURLRef, bool *, CFErrorRef *) = dlsym(sec, "SecTranslocateIsTranslocatedURL");
+        CFURLRef (*original)(CFURLRef, CFErrorRef *) = dlsym(sec, "SecTranslocateCreateOriginalPathForURL");
+        if (isTranslocated == NULL) return 0;
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        bool translocated = false;
+        if (!isTranslocated((__bridge CFURLRef)url, &translocated, NULL) || !translocated) return 0;
+        if (original != NULL && out != NULL && len > 0) {
+            CFURLRef found = original((__bridge CFURLRef)url, NULL);
+            if (found != NULL) {
+                NSString *p = [(__bridge_transfer NSURL *)found path];
+                if (p != nil) strlcpy(out, p.fileSystemRepresentation, (size_t)len);
+            }
+        }
+        return 1;
+    }
+}
+
+// Moves `path` to the Trash (so a replaced copy can be recovered). 1 on success.
+__attribute__((visibility("default")))
+int32_t nx_mac_trash(const char *path)
+{
+    if (path == NULL) return 0;
+    @autoreleasepool {
+        NSError *error = nil;
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        BOOL ok = [[NSFileManager defaultManager] trashItemAtURL:url resultingItemURL:nil error:&error];
+        if (!ok) NSLog(@"[nexus-mac] trash failed: %@", error.localizedDescription);
+        return ok ? 1 : 0;
+    }
 }

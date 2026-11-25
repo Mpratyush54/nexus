@@ -1,10 +1,13 @@
 name: desktop-macos
 
-# Nexus for macOS, phase 1: the WinUI sources in desktop/windows built as an
-# Uno Platform Skia desktop app (desktop/uno), bundled as an ad-hoc signed
+# Nexus for macOS: the WinUI sources in desktop/windows built as an Uno
+# Platform Skia desktop app (desktop/uno), bundled as an ad-hoc signed
 # Nexus.app with the universal Go core, launched on the runner and
-# screenshotted. Build and evidence only: nothing here signs for
-# distribution, notarizes, publishes or deploys.
+# screenshotted (mac-app); then packaged like a release (Velopack feed +
+# branded DMG) and checked as a user would meet it: the DMG window, Move to
+# Applications, the first-run welcome and a self-update from version A to B
+# through a local feed (mac-install). Build and evidence only: nothing here
+# signs for distribution, notarizes, publishes or deploys.
 
 on:
   push:
@@ -53,84 +56,12 @@ jobs:
           dotnet --info | head -20
           system_profiler SPDisplaysDataType | sed -n 1,25p || true
 
-      # Same build as macos.yml's dylib step.
-      - name: Build libnexuscore.dylib (arm64 + x86_64, universal)
+      # The Go core, the AppKit helper, the Uno publish, our Info.plist keys
+      # and an ad-hoc signature; the same script the release workflow uses.
+      - name: Build Nexus.app (scripts/macos/build-app.sh)
         run: |
-          set -euo pipefail
-          mkdir -p dist
-          CGO_ENABLED=1 GOARCH=arm64 CC="clang -arch arm64" \
-            go build -tags nexuscorelib -trimpath -buildmode=c-shared -o dist/arm64/libnexuscore.dylib ./cmd/nexuscore
-          CGO_ENABLED=1 GOARCH=amd64 CC="clang -arch x86_64" \
-            go build -tags nexuscorelib -trimpath -buildmode=c-shared -o dist/amd64/libnexuscore.dylib ./cmd/nexuscore
-          lipo -create -output dist/libnexuscore.dylib dist/arm64/libnexuscore.dylib dist/amd64/libnexuscore.dylib
-          lipo -info dist/libnexuscore.dylib
-          nm -gU dist/arm64/libnexuscore.dylib | grep ' _nx_'
-
-      # The macOS integration helper: menu bar status item, app menu, Dock
-      # reopen and nexus:// URL events (desktop/uno/macos/native/NexusMac.m).
-      # A small Objective-C library with a C ABI, called from C# through
-      # LibraryImport; see the file header for why not objc_msgSend.
-      - name: Build libnexusmac.dylib (arm64 + x86_64, universal)
-        run: |
-          set -euo pipefail
-          clang -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -fobjc-arc -Wall -Wextra -Wno-unused-parameter             -dynamiclib -framework AppKit -framework CoreServices             -install_name @rpath/libnexusmac.dylib -o dist/libnexusmac.dylib desktop/uno/macos/native/NexusMac.m
-          lipo -info dist/libnexusmac.dylib
-          nm -gU dist/libnexusmac.dylib | grep ' _nx_mac_'
-
-      # Uno's own bundler lays the .app out the way codesign wants it (managed
-      # assemblies outside Contents/MacOS) and signs it; CodesignKey=- is ad hoc.
-      - name: Publish Nexus.app with Uno (osx-arm64, self-contained)
-        working-directory: desktop/uno
-        run: |
-          set -euo pipefail
-          dotnet publish Nexus.Uno.csproj -c Release -f net10.0-desktop -r osx-arm64 \
-            --self-contained true -p:TargetFrameworks=net10.0-desktop -p:PackageFormat=app -p:CodesignKey=- \
-            > "$GITHUB_WORKSPACE/dist/publish.log" 2>&1 || { tail -80 "$GITHUB_WORKSPACE/dist/publish.log"; exit 1; }
-          grep -E 'warning NU|error|->' "$GITHUB_WORKSPACE/dist/publish.log" | tail -20 || true
-          built=$(find bin/Release/net10.0-desktop/osx-arm64/publish -maxdepth 1 -name '*.app' | head -1)
-          test -n "$built" || { echo "no .app produced"; find bin/Release -maxdepth 4 | head -50; exit 1; }
-          rm -rf "$APP"; cp -R "$built" "$APP"
-          echo "--- bundle layout"
-          find "$APP" -maxdepth 3 | sed "s#$APP#Nexus.app#" | head -40
-          find "$APP" -type f | wc -l
-
-      - name: Info.plist, icon and the Go core
-        run: |
-          set -euo pipefail
-          PL="$APP/Contents/Info.plist"
-          echo "--- Uno's Info.plist"; plutil -p "$PL"
-          short=$(sed -n 's:.*<ApplicationDisplayVersion>\(.*\)</ApplicationDisplayVersion>.*:\1:p' desktop/uno/Nexus.Uno.csproj)
-          sed -e "s/__SHORT_VERSION__/${short}/" -e "s/__BUILD_VERSION__/${GITHUB_RUN_NUMBER}/"             desktop/uno/macos/Info.plist > "$RUNNER_TEMP/nexus.plist"
-          # Our keys win over Uno's defaults, except the executable name Uno chose.
-          exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PL")
-          for key in CFBundleIdentifier CFBundleName CFBundleDisplayName CFBundleShortVersionString CFBundleVersion                      LSMinimumSystemVersion LSApplicationCategoryType NSHighResolutionCapable                      NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription CFBundleURLTypes; do
-            /usr/libexec/PlistBuddy -c "Delete :$key" "$PL" 2>/dev/null || true
-          done
-          /usr/libexec/PlistBuddy -c "Merge $RUNNER_TEMP/nexus.plist" "$PL"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleExecutable $exe" "$PL"
-          plutil -lint "$PL"; plutil -p "$PL"
-          # The Dock icon: Uno's packager names it icon.icns (from Resizetizer).
-          icon=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$PL")
-          test -f "$APP/Contents/Resources/${icon%.icns}.icns" || { echo "CFBundleIconFile $icon is missing"; exit 1; }
-          ls "$APP/Contents/Resources" | grep -i icns || echo "no .icns in Resources"
-          # The core goes where the other native libraries (SkiaSharp) are,
-          # which is where [LibraryImport("nexuscore")] probes.
-          skia=$(find "$APP" -name 'libSkiaSharp.dylib' | head -1)
-          dest=$(dirname "$skia")
-          cp dist/libnexuscore.dylib "$dest/libnexuscore.dylib"
-          cp dist/libnexusmac.dylib "$dest/libnexusmac.dylib"
-          echo "core and mac helper -> ${dest#$APP/}"
-          du -sh "$APP"
-
-      - name: Ad-hoc codesign
-        run: |
-          set -euo pipefail
-          for lib in libnexuscore.dylib libnexusmac.dylib; do
-            codesign --force --sign - --timestamp=none "$(find "$APP" -name $lib)"
-          done
-          # The outer signature seals Info.plist and the new library.
-          codesign --force --sign - --timestamp=none "$APP"
-          codesign --verify --strict --verbose=2 "$APP"
+          bash scripts/macos/build-app.sh --build "$GITHUB_RUN_NUMBER" --out dist
+          plutil -p "$APP/Contents/Info.plist"
           codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Signature|Format|Info.plist'
 
       - name: Build the window probe
@@ -227,3 +158,85 @@ jobs:
             dist/publish.log
           if-no-files-found: warn
           retention-days: 14
+
+  # The download, end to end: package the app from mac-app twice (version A
+  # and B, the same build with different version stamps), make A's DMG and a
+  # local feed holding both, then scripts/macos/install-update-checks.sh.
+  mac-install:
+    name: DMG, Move to Applications, welcome, update A -> B
+    needs: mac-app
+    # Also when an integration check failed: the app artifact is still there.
+    if: ${{ !cancelled() }}
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      VERSION_A: 0.4.0-ci.${{ github.run_number }}.1
+      VERSION_B: 0.4.0-ci.${{ github.run_number }}.2
+      BUNDLE_A: '1001'
+      BUNDLE_B: '1002'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Install vpk (Velopack CLI)
+        run: |
+          dotnet tool install --global vpk --version 1.2.161
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nexus-macos-app
+          path: dist/app
+
+      - name: Unpack the app
+        run: |
+          set -euo pipefail
+          ditto -x -k dist/app/Nexus-macos-arm64-adhoc.zip dist/app
+          codesign --verify --strict "dist/app/Nexus.app"
+          swiftc -O -o dist/winlist scripts/macos/winlist.swift
+
+      - name: Package version A and B (vpk + DMG)
+        run: |
+          set -euo pipefail
+          FEED="$RUNNER_TEMP/feed"
+          bash scripts/macos/package-macos.sh --app dist/app/Nexus.app --version "$VERSION_A" --bundle-version "$BUNDLE_A"             --channel osx --out dist/pkg-a
+          bash scripts/macos/package-macos.sh --app dist/app/Nexus.app --version "$VERSION_B" --bundle-version "$BUNDLE_B"             --channel osx --out dist/pkg-b
+          # The local feed: A's and B's packages, B's index (which lists both).
+          mkdir -p "$FEED"
+          cp dist/pkg-a/releases/*.nupkg dist/pkg-b/releases/*.nupkg "$FEED/"
+          cp dist/pkg-b/releases/releases.osx.json "$FEED/"
+          ls -la "$FEED"; cat "$FEED/releases.osx.json"
+          echo "FEED=$FEED" >> "$GITHUB_ENV"
+          echo "DMG_A=$GITHUB_WORKSPACE/dist/pkg-a/Nexus-$VERSION_A-osx-arm64.dmg" >> "$GITHUB_ENV"
+
+      - name: Install and update checks
+        timeout-minutes: 20
+        run: bash scripts/macos/install-update-checks.sh
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-install-screenshots
+          path: |
+            shots-install/
+            logs-install/
+            dist/pkg-a/dmg-background/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-dmg
+          path: |
+            dist/pkg-a/Nexus-*.dmg
+            dist/pkg-a/SHA256SUMS-macos.txt
+          if-no-files-found: warn
+          retention-days: 7

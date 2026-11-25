@@ -66,6 +66,39 @@ internal static partial class MacNative
 
     public static bool HideWindows() => Try(nx_mac_hide_windows);
 
+    /// <summary>
+    /// App Translocation: true when <paramref name="bundle"/> is the read-only
+    /// copy Gatekeeper runs a never-moved quarantined app from; <paramref name="original"/>
+    /// is where the person actually put it ("" when unknown).
+    /// </summary>
+    public static unsafe bool IsTranslocated(string bundle, out string original)
+    {
+        original = "";
+        var found = "";
+        var translocated = false;
+        Try(() =>
+        {
+            var buffer = new byte[4096];
+            fixed (byte* p = buffer)
+            {
+                translocated = nx_mac_original_path(bundle, p, buffer.Length) != 0;
+            }
+            var end = Array.IndexOf(buffer, (byte)0);
+            found = System.Text.Encoding.UTF8.GetString(buffer, 0, end < 0 ? buffer.Length : end);
+        });
+        original = found;
+        // Without the helper the path itself still tells.
+        return translocated || bundle.Contains("/AppTranslocation/", StringComparison.Ordinal);
+    }
+
+    /// <summary>Moves a file or bundle to the Trash.</summary>
+    public static bool Trash(string path)
+    {
+        var ok = false;
+        Try(() => ok = nx_mac_trash(path) != 0);
+        return ok;
+    }
+
     private static bool Try(Action call)
     {
         if (!Available) return false;
@@ -115,4 +148,10 @@ internal static partial class MacNative
 
     [LibraryImport(Lib)]
     private static partial void nx_mac_hide_windows();
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    private static unsafe partial int nx_mac_original_path(string path, byte* output, int length);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial int nx_mac_trash(string path);
 }

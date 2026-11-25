@@ -42,13 +42,19 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Updates: the Windows head's Velopack UpdateService, shared. On macOS
+         `vpk pack` adds UpdateMac and sq.version to the .app; see
+         scripts/macos/package-macos.sh. Same version as desktop/windows. -->
+    <PackageReference Include="Velopack" Version="1.2.161" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Shared sources, linked (not copied). -->
     <Compile Include="$(WindowsSources)**\*.cs"
              Exclude="$(WindowsSources)bin\**;$(WindowsSources)obj\**;
                       $(WindowsSources)Program.cs;
                       $(WindowsSources)InstallerHooks.cs;
                       $(WindowsSources)UninstallPrompt.cs;
-                      $(WindowsSources)UpdateService.cs;
                       $(WindowsSources)SingleInstance.cs;
                       $(WindowsSources)Platform\WindowsDesktopIntegration.cs"
              Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />

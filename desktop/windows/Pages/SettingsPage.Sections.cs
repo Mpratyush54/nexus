@@ -64,7 +64,7 @@ public sealed partial class SettingsPage
         var updates = UpdateService.Shared;
         var staged = updates.IsAvailable ? updates.StagedVersion : "";
         _updateStatus.Text = !updates.IsAvailable
-            ? "Updates are installed by the Nexus installer. This copy was not installed with it, so it does not update itself."
+            ? updates.UnavailableText
             : staged.Length > 0 ? $"Version {staged} is ready. Restart Nexus to finish updating."
             : $"Version {updates.CurrentVersion}. Nexus checks for updates in the background and installs them when it restarts.";
         _updateButton.Visibility = updates.IsAvailable ? Visibility.Visible : Visibility.Collapsed;

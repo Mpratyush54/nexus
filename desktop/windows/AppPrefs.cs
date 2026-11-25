@@ -109,6 +109,10 @@ public static class AppPrefs
         public bool? SetupCompleted { get; set; }
         // Installed version seen at the last start ("Updated to vX" toast).
         public string LastVersion { get; set; } = "";
+        // macOS: the first-run "You're all set" screen was seen, and
+        // "Move to Applications" was declined (Platform/MacWelcome.cs).
+        public bool MacWelcomeSeen { get; set; }
+        public bool MacMoveDeclined { get; set; }
         public string ProjectId { get; set; } = "";
         public string ProjectName { get; set; } = "";
         public string LastNav { get; set; } = "timeline";
