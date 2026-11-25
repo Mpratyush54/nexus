@@ -142,7 +142,7 @@ func TestTailFileStreamsAndSkipsBlobRecords(t *testing.T) {
 	}
 	// The file is ~20 MB. Reading it whole, copying it to a string and
 	// decoding every blob into maps allocated well over 100 MB.
-	if limit := uint64(4 << 20); alloc > limit {
+	if limit := uint64(4 << 20); !raceEnabled && alloc > limit {
 		t.Fatalf("TailFile of a %d MB transcript allocated %.1f MB, want < %d MB",
 			st.Size()>>20, float64(alloc)/(1<<20), limit>>20)
 	}
@@ -237,7 +237,7 @@ func TestHarvesterCyclesStayBounded(t *testing.T) {
 	if late > early*1.5+256<<10 {
 		t.Fatalf("per-cycle allocation grew with the chat: early %.0f KB, late %.0f KB", early/1024, late/1024)
 	}
-	if late > 2<<20 {
+	if !raceEnabled && late > 2<<20 {
 		t.Fatalf("per-cycle allocation %.0f KB for %d new turns, want < 2 MB", late/1024, perCycle)
 	}
 	h.mu.Lock()
