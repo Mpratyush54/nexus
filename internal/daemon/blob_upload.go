@@ -61,7 +61,9 @@ func (s *HTTPMemoryStore) uploadTranscriptBlob(ctx context.Context, client *http
 		if err != nil {
 			return err
 		}
-		_, err = mirrorStream(ctx, client, http.MethodPut, base+"/v1/blobs/"+hash, token, length, open, nil)
+		uctx, cancel := context.WithTimeout(ctx, uploadTimeout(length))
+		defer cancel()
+		_, err = mirrorStream(uctx, s.uploadClient(), http.MethodPut, base+"/v1/blobs/"+hash, token, length, open, nil)
 		return err
 	}
 	err := s.uploadChunked(ctx, client, base, token, projectID, gz, hash, size)
@@ -126,7 +128,9 @@ func (s *HTTPMemoryStore) uploadChunked(ctx context.Context, client *http.Client
 			return err
 		}
 		if err := retryPiece(ctx, func() error {
-			_, err := mirrorStream(ctx, client, http.MethodPost, endpoint+"/chunks", token, length, open, nil)
+			uctx, cancel := context.WithTimeout(ctx, uploadTimeout(length))
+			defer cancel()
+			_, err := mirrorStream(uctx, s.uploadClient(), http.MethodPost, endpoint+"/chunks", token, length, open, nil)
 			return err
 		}); err != nil {
 			return fmt.Errorf("daemon: blob piece %d/%d: %w", index+1, total, err)
@@ -140,10 +144,13 @@ func (s *HTTPMemoryStore) uploadChunked(ctx context.Context, client *http.Client
 	var status int
 	err = retryPiece(ctx, func() error {
 		var err error
-		status, err = mirrorJSON(ctx, client, http.MethodPost, endpoint+"/assemble", token, body, nil)
+		// The server assembles and stores the whole file before answering.
+		actx, cancel := context.WithTimeout(ctx, assembleTimeout)
+		defer cancel()
+		status, err = mirrorJSON(actx, s.uploadClient(), http.MethodPost, endpoint+"/assemble", token, body, nil)
 		if status == http.StatusBadRequest && body["purpose"] != nil && strings.Contains(err.Error(), "unknown field") {
 			delete(body, "purpose")
-			status, err = mirrorJSON(ctx, client, http.MethodPost, endpoint+"/assemble", token, body, nil)
+			status, err = mirrorJSON(actx, s.uploadClient(), http.MethodPost, endpoint+"/assemble", token, body, nil)
 		}
 		if status == http.StatusConflict {
 			return nil // not transient: handled below

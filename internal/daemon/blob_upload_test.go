@@ -331,7 +331,7 @@ func TestChunkedUploadMemoryIsOnePiece(t *testing.T) {
 	if n := cloud.count("POST /v1/blobs/chunks"); n != int((int64(len(raw))+blobChunkBytes-1)/blobChunkBytes) {
 		t.Fatalf("pieces = %d (%v)", n, cloud.calls)
 	}
-	if limit := uint64(blobChunkBytes) + 6<<20; alloc > limit {
+	if limit := uint64(blobChunkBytes) + 6<<20; !raceEnabled && alloc > limit {
 		t.Fatalf("chunked upload of %d MB allocated %.1f MB, want < %.1f MB", len(raw)>>20, float64(alloc)/(1<<20), float64(limit)/(1<<20))
 	}
 }

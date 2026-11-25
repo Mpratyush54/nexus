@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
@@ -49,7 +50,10 @@ func envDur(key string) time.Duration {
 	return d
 }
 
+var chunkTotalRe = regexp.MustCompile(`"total":(\d+)`)
+
 type fakeCloud struct {
+	fail     bool // MEMH_FAIL: answer like the failing server seen in the field
 	mu       sync.Mutex
 	requests map[string]int
 	bytes    map[string]int64
@@ -84,8 +88,12 @@ func (f *fakeCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/memory/") || strings.HasPrefix(r.URL.Path, "/sessions/") {
 		limit = 1 << 62 // legacy routes, not part of this check
 	}
-	n, _ := io.Copy(io.Discard, io.LimitReader(r.Body, limit+1))
+	head := make([]byte, 512)
+	hn, _ := io.ReadFull(r.Body, head)
+	head = head[:hn]
+	rest, _ := io.Copy(io.Discard, io.LimitReader(r.Body, limit+1))
 	_, _ = io.Copy(io.Discard, r.Body)
+	n := int64(hn) + rest
 	f.mu.Lock()
 	f.requests[route]++
 	f.bytes[route] += n
@@ -98,6 +106,36 @@ func (f *fakeCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if tooBig {
 		http.Error(w, `{"error":"invalid JSON body: http: request body too large"}`, http.StatusBadRequest)
 		return
+	}
+	if f.fail {
+		// What the real server answered in the field (core log, beta.11):
+		// legacy snapshots 500 "could not record session owner", small
+		// blob PUTs failing transiently, large uploads refused (413) or
+		// dropped at assembly.
+		failWith := func(status int, msg string) {
+			f.mu.Lock()
+			f.requests["FAILED "+route]++
+			f.mu.Unlock()
+			http.Error(w, msg, status)
+		}
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/sessions/") && strings.HasSuffix(r.URL.Path, "/snapshot"):
+			failWith(http.StatusInternalServerError, `{"error":{"code":500,"message":"could not record session owner"}}`)
+			return
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/blobs/"):
+			failWith(http.StatusServiceUnavailable, `{"error":"unavailable"}`)
+			return
+		case strings.HasSuffix(r.URL.Path, "/chunks"):
+			if m := chunkTotalRe.FindSubmatch(head); m != nil {
+				if total, _ := strconv.Atoi(string(m[1])); total >= 10 {
+					failWith(http.StatusRequestEntityTooLarge, `<html>413 Payload Too Large</html>`)
+					return
+				}
+			}
+		case strings.HasSuffix(r.URL.Path, "/assemble"):
+			failWith(http.StatusInternalServerError, `{"error":"assemble failed"}`)
+			return
+		}
 	}
 	switch {
 	case r.URL.Path == "/v1/blobs/missing":
@@ -237,7 +275,16 @@ func TestMemHarness(t *testing.T) {
 		defer debug.SetMemoryLimit(old)
 	}
 
-	cloud := &fakeCloud{requests: map[string]int{}, bytes: map[string]int64{}}
+	cloud := &fakeCloud{requests: map[string]int{}, bytes: map[string]int64{}, fail: os.Getenv("MEMH_FAIL") != ""}
+	if scale := envInt("MEMH_BACKOFF_DIV", 0); scale > 1 {
+		// Time-compressed runs scale the publish backoff like the intervals.
+		old := snapshotBackoffSteps
+		snapshotBackoffSteps = nil
+		for _, d := range old {
+			snapshotBackoffSteps = append(snapshotBackoffSteps, d/time.Duration(scale))
+		}
+		defer func() { snapshotBackoffSteps = old }()
+	}
 	srv := httptest.NewServer(cloud)
 	if os.Getenv("MEMH_NOKEEPALIVE") != "" {
 		// Count goroutines without idle keep-alive connections.
@@ -399,6 +446,20 @@ func TestMemHarness(t *testing.T) {
 		last.cpuUser, last.cpuGC, baseGoroutines, last.goroutines, after)
 	for _, r := range routes {
 		t.Logf("cloud %s", r)
+	}
+	if cloud.fail {
+		// Under persistent upload failures the core must settle: after the
+		// history import, CPU and heap stay low instead of re-packing and
+		// re-sending every transcript every cycle.
+		mid := samples[len(samples)/2]
+		cpuRate := (last.cpuUser - mid.cpuUser) / (last.elapsed - mid.elapsed)
+		t.Logf("FAILMODE second-half cpu=%.2f cores, final live heap=%.1fMB", cpuRate, mb(last.heapLive))
+		if cpuRate > 0.25 {
+			t.Errorf("second-half CPU under persistent failures = %.2f cores, want < 0.25", cpuRate)
+		}
+		if mb(last.heapLive) > 96 {
+			t.Errorf("live heap under persistent failures = %.1f MB, want < 96 MB", mb(last.heapLive))
+		}
 	}
 }
 

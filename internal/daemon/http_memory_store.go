@@ -423,18 +423,19 @@ func (s *HTTPMemoryStore) PushSnapshot(ctx context.Context, snap *store.SessionS
 	req.GetBody = open
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := s.HTTP
-	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
-	}
-	resp, err := client.Do(req)
+	// Its own pool and a deadline sized to the body (snapshot_publish.go).
+	uctx, cancel := context.WithTimeout(ctx, uploadTimeout(length))
+	defer cancel()
+	req = req.WithContext(uctx)
+	resp, err := s.uploadClient().Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("daemon: push snapshot: %s %s", resp.Status, strings.TrimSpace(string(b)))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return &mirrorStatusError{status: resp.StatusCode,
+			msg: fmt.Sprintf("daemon: push snapshot: %s %s", resp.Status, firstLine(strings.TrimSpace(string(b))))}
 	}
 	return nil
 }
@@ -485,4 +486,13 @@ func (s *HTTPMemoryStore) PushOperations(ctx context.Context, sessionID, harness
 		return fmt.Errorf("daemon: push operations: %s %s", resp.Status, strings.TrimSpace(string(b)))
 	}
 	return nil
+}
+
+// firstLine keeps an error body to its first line (a proxy's HTML error
+// page otherwise spills into the log one line per tag).
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i]) + " …"
+	}
+	return s
 }

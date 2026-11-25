@@ -415,7 +415,7 @@ func TestSnapshotOfLargeTranscriptIsStreamed(t *testing.T) {
 		t.Fatalf("turn count = %d", snap.TurnCount)
 	}
 	// Old path: ReadFile + string copy + gzip buffer = > 3x the transcript.
-	if limit := uint64(len(snap.TranscriptPayload)) + 8<<20; collect > limit {
+	if limit := uint64(len(snap.TranscriptPayload)) + 8<<20; !raceEnabled && collect > limit {
 		t.Fatalf("CollectSnapshot of %d MB allocated %.1f MB (gzip payload %.1f MB)", len(raw)>>20,
 			float64(collect)/(1<<20), float64(len(snap.TranscriptPayload))/(1<<20))
 	}
@@ -435,7 +435,7 @@ func TestSnapshotOfLargeTranscriptIsStreamed(t *testing.T) {
 	})
 	// Old path: ungzip (grown by ReadAll) + base64 string + JSON body, twice
 	// over for the two endpoints: > 6x the transcript.
-	if limit := uint64(8 << 20); upload > limit {
+	if limit := uint64(8 << 20); !raceEnabled && upload > limit {
 		t.Fatalf("uploading a %d MB snapshot allocated %.1f MB, want < %d MB", len(raw)>>20, float64(upload)/(1<<20), limit>>20)
 	}
 	cloud.mu.Lock()
