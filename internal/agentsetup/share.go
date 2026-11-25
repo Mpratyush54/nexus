@@ -461,6 +461,11 @@ func (r roots) skillWrites(source, target string) ([]pendingWrite, error) {
 // As with other filesystem APIs, callers must exclude concurrent hostile path
 // replacement while sharing; this function is not a sandbox for untrusted users.
 func Share(o ShareOptions) (ShareResult, error) {
+	result, err := share(o)
+	return result, plainShareError(err, o)
+}
+
+func share(o ShareOptions) (ShareResult, error) {
 	result := ShareResult{Writes: []PlannedWrite{}, Skipped: []string{}}
 	r := resolve(ScanOptions{o.Home, o.Workspace, o.AppData})
 	if o.Scope != "user" && o.Scope != "project" {
@@ -499,7 +504,7 @@ func Share(o ShareOptions) (ShareResult, error) {
 		// the managed memory section): that would nest them on every share.
 		source = ownRules(source)
 		if len(bytes.TrimSpace(source)) == 0 {
-			result.Skipped = append(result.Skipped, fmt.Sprintf("%s rules only contain Nexus-managed sections", o.From))
+			result.Skipped = append(result.Skipped, agentLabel(o.From)+"'s rules only contain sections Nexus wrote, so there's nothing to copy.")
 			return result, nil
 		}
 	}
@@ -510,12 +515,12 @@ func Share(o ShareOptions) (ShareResult, error) {
 		}
 		seen[to] = true
 		if !compatible(o.From, to, i.Kind) {
-			result.Skipped = append(result.Skipped, fmt.Sprintf("%s has no supported %s conversion from %s", to, i.Kind, o.From))
+			result.Skipped = append(result.Skipped, incompatibleSkip(to, o.From, i.Kind))
 			continue
 		}
 		target, e := targetPath(r, to, i.Kind, o.Scope, i.Name)
 		if e != nil {
-			result.Skipped = append(result.Skipped, e.Error())
+			result.Skipped = append(result.Skipped, plainShareError(e, o).Error())
 			continue
 		}
 		if filepath.Clean(target) == filepath.Clean(i.Path) {
@@ -531,7 +536,7 @@ func Share(o ShareOptions) (ShareResult, error) {
 		if !r.safe(target) {
 			return result, fmt.Errorf("target path outside allowed roots")
 		}
-		conflict := fmt.Sprintf("a different %s named %s already exists in %s", i.Kind, i.Name, to)
+		conflict := conflictSkip(to, i.Kind, i.Name)
 		pending := []pendingWrite{}
 		if i.Kind == "skill" {
 			pending, e = r.skillWrites(i.Path, target)
@@ -592,7 +597,7 @@ func Share(o ShareOptions) (ShareResult, error) {
 				}
 			case "subagent":
 				if filepath.Ext(i.Path) != ".md" {
-					result.Skipped = append(result.Skipped, "OpenCode config agents cannot be shared as markdown")
+					result.Skipped = append(result.Skipped, "This OpenCode agent lives in OpenCode's settings, not in its own file, so it can't be copied.")
 					continue
 				}
 				data, e = convertedAgent(source, to)
