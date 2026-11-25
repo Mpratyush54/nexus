@@ -42,5 +42,8 @@
     <Compile Include="../windows/Core/ComposerAttachments.cs" Link="ComposerAttachments.cs" />
     <Compile Include="../windows/Core/AgentAvailability.cs" Link="AgentAvailability.cs" />
     <Compile Include="../windows/Core/ChatListRetry.cs" Link="ChatListRetry.cs" />
+    <Compile Include="../windows/Core/MarkdownBlocks.cs" Link="MarkdownBlocks.cs" />
+    <Compile Include="../windows/Core/MarkdownInline.cs" Link="MarkdownInline.cs" />
+    <Compile Include="../windows/Core/CodeSyntax.cs" Link="CodeSyntax.cs" />
   </ItemGroup>
 </Project>

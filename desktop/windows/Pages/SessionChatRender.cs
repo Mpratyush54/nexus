@@ -2,7 +2,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
 using Nexus.Core;
-using Windows.ApplicationModel.DataTransfer;
 
 namespace Nexus.Pages;
 
@@ -14,56 +13,6 @@ internal static class SessionChatRender
     internal static readonly Thickness AuxIndent = new(10, 0, 0, 0);
     internal static readonly Thickness UserBubblePad = new(14, 9, 14, 10);
     internal static readonly Thickness AssistantPad = new(2, 4, 8, 4);
-
-    // ── Markdown tables ──────────────────────────────────────────────────
-    internal static bool IsTableRow(string line)
-    {
-        var t = line.Trim();
-        return t.Length > 2 && t[0] == '|' && t.IndexOf('|', 1) > 0;
-    }
-
-    internal static bool IsTableRule(string line) =>
-        System.Text.RegularExpressions.Regex.IsMatch(line.Trim(), @"^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$");
-
-    internal static List<string> TableCells(string row)
-    {
-        var t = row.Trim();
-        if (t.StartsWith('|')) t = t[1..];
-        if (t.EndsWith('|')) t = t[..^1];
-        // An escaped \| belongs to the cell text.
-        return System.Text.RegularExpressions.Regex.Split(t, @"(?<!\\)\|").Select(c => c.Trim().Replace("\\|", "|")).ToList();
-    }
-
-    /// A table as a grid: bold header, wrapping cells, hairline row rules.
-    internal static FrameworkElement Table(List<string> rows, Action<Microsoft.UI.Xaml.Documents.InlineCollection, string> format)
-    {
-        var cells = rows.Select(TableCells).ToList();
-        var columns = cells.Max(r => r.Count);
-        var grid = new Grid { ColumnSpacing = 18, MaxWidth = 900, HorizontalAlignment = HorizontalAlignment.Left };
-        for (var c = 0; c < columns; c++)
-            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto), MaxWidth = 420 });
-        for (var r = 0; r < cells.Count; r++)
-        {
-            grid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            var rule = new Border { BorderBrush = NexusPalette.Hairline, BorderThickness = new Thickness(0, 0, 0, 1), Margin = new Thickness(0, 0, -18, 0) };
-            Grid.SetRow(rule, r);
-            Grid.SetColumnSpan(rule, columns);
-            grid.Children.Add(rule);
-            for (var c = 0; c < columns; c++)
-            {
-                var block = new RichTextBlock { IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap, FontSize = 13.5, LineHeight = 20, Margin = new Thickness(0, 6, 0, 6) };
-                var p = new Microsoft.UI.Xaml.Documents.Paragraph();
-                if (r == 0) p.FontWeight = Microsoft.UI.Text.FontWeights.SemiBold;
-                var text = c < cells[r].Count ? cells[r][c] : "";
-                format(p.Inlines, text.Length > 0 ? text : " ");
-                block.Blocks.Add(p);
-                Grid.SetRow(block, r);
-                Grid.SetColumn(block, c);
-                grid.Children.Add(block);
-            }
-        }
-        return grid;
-    }
 
     internal static Brush SubtleFill =>
         ResourceBrush("ControlFillColorSecondaryBrush", Windows.UI.Color.FromArgb(28, 255, 255, 255));
@@ -130,32 +79,8 @@ internal static class SessionChatRender
         Opacity = 0.78
     };
 
-    internal static UIElement CodeBlock(string text)
-    {
-        var copy = new Button { Content = "Copy", FontSize = 11, Padding = new Thickness(8, 3, 8, 3), HorizontalAlignment = HorizontalAlignment.Right };
-        copy.Click += (_, _) =>
-        {
-            var data = new DataPackage(); data.SetText(text); Clipboard.SetContent(data);
-        };
-        var code = Mono(text, 13);
-        code.TextWrapping = TextWrapping.NoWrap;
-        code.LineHeight = 20;
-        var content = new StackPanel { Spacing = 6 };
-        content.Children.Add(copy);
-        content.Children.Add(new ScrollViewer
-        {
-            Content = code, MaxHeight = 360,
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            Padding = new Thickness(0, 0, 0, 6)
-        });
-        return new Border
-        {
-            Child = content, Padding = new Thickness(14, 10, 14, 10), CornerRadius = new CornerRadius(8),
-            Background = CodeFill, BorderBrush = SubtleBorder, BorderThickness = new Thickness(1),
-            HorizontalAlignment = HorizontalAlignment.Stretch
-        };
-    }
+    /// A fenced code block card (language, Copy, sideways scroll, colour).
+    internal static UIElement CodeBlock(string text, string language = "") => new CodeBlockView(text, language).View;
 
     internal static Border PathChip(string path, string glyph = "·")
     {
