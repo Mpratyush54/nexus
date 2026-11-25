@@ -505,6 +505,11 @@ type RemoveResult struct {
 // backing the file up first. Everything else in the file is kept. DryRun
 // only reports.
 func RemoveMCP(o BrowseOptions, agent, name, path string, dryRun bool) (RemoveResult, error) {
+	res, err := removeMCP(o, agent, name, path, dryRun)
+	return res, plainRemoveError(err, agent, name)
+}
+
+func removeMCP(o BrowseOptions, agent, name, path string, dryRun bool) (RemoveResult, error) {
 	res := RemoveResult{Agent: agent, Name: name, Path: path, Nexus: name == NexusServerName}
 	r := resolve(o.scan())
 	it, ok := find(Browse(o), agent, "mcp", name, path)

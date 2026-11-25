@@ -235,7 +235,7 @@ internal sealed class SubagentCard : UserControl
                 await UiThread.Resume(DispatcherQueue);
                 _status.Text = StatusLine(run, start, total, end);
             }
-            catch (Exception ex) { turns = new(); total = 0; error = ex.Message; }
+            catch (Exception ex) { turns = new(); total = 0; error = NxErrors.ForException("Nexus couldn't read this sub-agent's work.", ex, "subagents"); }
         }
         else if (_chatId.Length > 0)
         {

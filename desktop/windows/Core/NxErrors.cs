@@ -20,10 +20,13 @@ internal static partial class NxErrors
             e.Contains("401 Unauthorized", StringComparison.OrdinalIgnoreCase) ||
             e.Contains("token expired", StringComparison.OrdinalIgnoreCase) ||
             e.Contains("not signed in", StringComparison.OrdinalIgnoreCase) ||
-            e.Contains("You're signed out of Nexus", StringComparison.Ordinal);
+            // Older engines said "offline" when there was simply no sign-in.
+            e.Contains("Nexus is offline; memory unavailable", StringComparison.OrdinalIgnoreCase) ||
+            e.Contains("You're signed out of Nexus", StringComparison.Ordinal) ||
+            e.Contains("You're not signed in to Nexus", StringComparison.Ordinal);
     }
 
-    internal const string SignedOutMessage = "You're signed out of Nexus on this computer (the sign-in may have expired). Sign in again in Settings > Account.";
+    internal const string SignedOutMessage = "You're not signed in to Nexus on this computer. Sign in from Settings > Account.";
     internal const string UnreachableMessage = "Can't reach the Nexus server right now. Nexus keeps trying and reconnects by itself.";
     internal const string UnsupportedMessage = "Your Nexus server doesn't support this yet.";
 
@@ -37,7 +40,7 @@ internal static partial class NxErrors
             e.Contains("actively refused") || e.Contains("no such host") || e.Contains("i/o timeout") ||
             e.Contains("context deadline exceeded") || e.Contains("client.timeout") || e.Contains("tls handshake timeout") ||
             e.Contains("connection reset") || e.Contains("forcibly closed") || e.Contains("network is unreachable") ||
-            e.Contains("nexus is offline") || e.Contains("unexpected eof") || e.EndsWith(": eof") ||
+            e.Contains("unexpected eof") || e.EndsWith(": eof") ||
             e.Contains("502 bad gateway") || e.Contains("503 service unavailable") || e.Contains("504 gateway");
     }
 
@@ -58,10 +61,68 @@ internal static partial class NxErrors
         "cannot unmarshal", "goroutine", "context canceled", "<html", "{\"", "internal server error"
     ];
 
+    // Words about how programs are installed and started. People never need
+    // them to act, so a message using them is shown as a plain sentence and
+    // the original goes to the log (or an "Advanced details" expander).
+    private static readonly string[] JargonMarkers =
+    [
+        "shim", "%path%", " on path", "path to", "not on path", "refresh path", "executable", "exec:", "look path",
+        "lookpath", " cli ", " cli.", " cli,", "cli to", "stderr", "stdout", "stdin", "argv", ".exe", ".cmd", ".ps1",
+        "file not found", "the system cannot find", "access is denied", "exit code", "signal:", "nx_call", "acp ",
+        "app-server", "native id", "native session", "headless", "harness", "workspace_root", "op_id", "<nil>",
+        "core response", "adapter", "catalog"
+    ];
+
+    /// True when a message talks about programs, paths or plumbing instead
+    /// of what the person can do.
+    internal static bool UsesJargon(string? message)
+    {
+        if (string.IsNullOrWhiteSpace(message)) return false;
+        var e = " " + message.ToLowerInvariant() + " ";
+        return JargonMarkers.Any(e.Contains);
+    }
+
     private static bool LooksTechnical(string error)
     {
         var e = error.ToLowerInvariant();
-        return TechnicalMarkers.Any(e.Contains) || StatusLine().IsMatch(error);
+        return TechnicalMarkers.Any(e.Contains) || StatusLine().IsMatch(error) || UsesJargon(error);
+    }
+
+    /// The engine marks technical detail with " [detail: …]" after the plain
+    /// sentence. Returns (sentence, detail); detail is "" when there is none.
+    internal static (string Sentence, string Detail) SplitDetail(string? raw)
+    {
+        var text = (raw ?? "").Trim();
+        var at = text.IndexOf(DetailMarker, StringComparison.Ordinal);
+        if (at < 0) return (text, "");
+        var detail = text[(at + DetailMarker.Length)..].TrimEnd();
+        if (detail.EndsWith(']')) detail = detail[..^1];
+        return (text[..at].Trim(), detail.Trim());
+    }
+
+    internal const string DetailMarker = " [detail: ";
+
+    internal const string GenericFailure = "Something went wrong.";
+
+    /// A failed agent turn: the generic "Something went wrong" becomes a
+    /// sentence about the agent (keeping the reference id); plain sentences
+    /// from the engine are kept as they are.
+    internal static string ForAgent(string? shown, string agentName)
+    {
+        var text = (shown ?? "").Trim();
+        if (text.Length == 0) return $"{agentName} stopped before it finished replying. Try sending again.";
+        if (!text.StartsWith(GenericFailure, StringComparison.Ordinal)) return text;
+        var reference = ServerRef().Match(text) is { Success: true } hit ? " (ref " + hit.Groups[1].Value + ")" : "";
+        return $"{agentName} stopped before it finished replying. Try sending again.{reference}";
+    }
+
+    /// A plain sentence for an exception the app caught: the exception goes to
+    /// the log under a reference id; people see the sentence and the id.
+    internal static string ForException(string sentence, Exception ex, string area = "app")
+    {
+        var reference = NewRef();
+        try { Diagnostics.DiagLog.Warn(area, $"{sentence} (ref {reference})", ex); } catch { }
+        return sentence.TrimEnd() + " (ref " + reference + ")";
     }
 
     [GeneratedRegex(@"^\s*[45]\d\d\b")]
@@ -81,13 +142,20 @@ internal static partial class NxErrors
         var text = (raw ?? "").Trim();
         if (text.Length == 0) return ("", "");
         if (IsSignedOut(text)) return (SignedOutMessage, "");
+        // "Plain sentence [detail: technical]": show the sentence, log the rest.
+        var (sentence, detail) = SplitDetail(text);
+        if (detail.Length > 0 && sentence.Length > 0 && !LooksTechnical(sentence))
+        {
+            var id = ServerRef().Match(text) is { Success: true } known ? known.Groups[1].Value : NewRef();
+            return (sentence + " (ref " + id + ")", id);
+        }
         string? message = null;
         if (IsUnreachable(text)) message = UnreachableMessage;
         else if (IsUnsupported(text)) message = UnsupportedMessage;
         else if (text.Contains("403", StringComparison.Ordinal) || text.Contains("forbidden", StringComparison.OrdinalIgnoreCase))
             message = "You don't have access to this.";
         else if (LooksTechnical(text))
-            message = ServerStatus().IsMatch(text) ? "The Nexus server ran into a problem. Try again in a moment." : "Something went wrong.";
+            message = ServerStatus().IsMatch(text) ? "The Nexus server ran into a problem. Try again in a moment." : "Something went wrong. Try again, and if it keeps happening, use Help > Report a problem.";
         if (message is null) return (text, "");
         var reference = ServerRef().Match(text) is { Success: true } hit ? hit.Groups[1].Value : NewRef();
         return (message + " (ref " + reference + ")", reference);

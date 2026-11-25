@@ -1,0 +1,25 @@
+#!/bin/sh
+# codesign wrapper for unsigned (ad-hoc) packaging, put first on PATH by
+# scripts/macos/package-macos.sh only when no Developer ID is configured.
+#
+# vpk signs the bundle after adding UpdateMac and sq.version (which breaks the
+# build's ad-hoc seal), always with --timestamp. An ad-hoc signature (-s -)
+# has no certificate to timestamp, so that one flag is dropped; everything
+# else (hardened runtime, entitlements, --deep) passes through unchanged, so
+# the unsigned build is signed exactly like the Developer ID one will be.
+adhoc=0
+prev=""
+for a in "$@"; do
+  if [ "$prev" = "-s" ] && [ "$a" = "-" ]; then adhoc=1; fi
+  prev="$a"
+done
+if [ "$adhoc" = 1 ]; then
+  n=$#
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    a="$1"; shift; i=$((i + 1))
+    [ "$a" = "--timestamp" ] && continue
+    set -- "$@" "$a"
+  done
+fi
+exec /usr/bin/codesign "$@"

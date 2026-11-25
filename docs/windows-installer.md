@@ -8,7 +8,48 @@ updates and uninstall.
 | --- | --- |
 | `Nexus-<ver>-win-x64-Setup.exe` | The branded installer. Per-user, no admin rights, no prerequisites. |
 | `Nexus-<ver>-win-x64-Portable.zip` | Same app, unzip anywhere. Updates itself like an installed copy. |
-| `nexus-desktop-windows-amd64.zip` | Plain app folder, kept for `install-windows.ps1`. |
+| `Nexus-Setup.exe` | The same installer under a fixed name, for `releases/latest/download` links. |
+| `install-windows.ps1` | The terminal install script (below). |
+| `nexus-desktop-windows-amd64.zip` | Plain app folder from before the installer. The install script no longer uses it. |
+
+## Install from a terminal
+
+```powershell
+irm https://nexus.pratyushes.dev/install.ps1 | iex
+```
+
+`nexus.pratyushes.dev/install.ps1` (and `/install`) redirects to
+`install-windows.ps1` on the latest GitHub release, which is
+`scripts/install-windows.ps1` from that release. The script:
+
+- downloads `Nexus-Setup.exe` and `nexus-windows-amd64.exe` from the release,
+  with a progress line, and checks each file's size and SHA-256 (from
+  `SHA256SUMS-windows.txt` or `SHA256SUMS.txt`);
+- installs the `nexus` command as `%LOCALAPPDATA%\Nexus\cli\nexus.exe` and
+  adds that folder to the user PATH (not next to `Nexus.exe`: Windows file
+  names ignore case);
+- moves people off the old zip install in `%LOCALAPPDATA%\Nexus\bin`: stops
+  processes running from it, takes it off PATH, and after the install removes
+  its Startup, Start menu and desktop shortcuts (an old autostart or desktop
+  shortcut moves to the installed app). The old files stay; user data in
+  `%APPDATA%\central-memory` and `%LOCALAPPDATA%\Nexus` is never touched;
+- opens the installer window, or with `-Silent` runs the Velopack `Setup.exe`
+  embedded in it with `--silent` and then opens Nexus.
+
+Switches need the script-block form, or an environment variable with `iex`:
+
+```powershell
+& ([scriptblock]::Create((irm https://nexus.pratyushes.dev/install.ps1))) -Silent
+& ([scriptblock]::Create((irm https://nexus.pratyushes.dev/install.ps1))) -DryRun   # or -WhatIf
+& ([scriptblock]::Create((irm https://nexus.pratyushes.dev/install.ps1))) -Demo     # installer --demo-install
+$env:NEXUS_INSTALL_SILENT = "1"; irm https://nexus.pratyushes.dev/install.ps1 | iex
+```
+
+`-DryRun` downloads and verifies everything into a temp folder, prints what
+it would do, and changes nothing. `-Version desktop-v0.4.1` pins a release.
+No admin rights; Windows PowerShell 5.1 and PowerShell 7.
+
+## Building
 
 Build locally (never stops a running Nexus, never installs):
 
@@ -75,7 +116,7 @@ After a background update, the app shows "Updated to Nexus X" with a
 - Adds "Nexus" with its version and icon to Apps & features.
 - Upgrades in place. Settings stay in `%APPDATA%\central-memory` (sign-in,
   server, capture choices), `%APPDATA%\Nexus` and `%LOCALAPPDATA%\Nexus`.
-- Retires the old `install-windows.ps1` shortcuts (Startup, Start menu,
+- Retires the shortcuts of the old zip install (Startup, Start menu,
   desktop) that pointed at `%LOCALAPPDATA%\Nexus\bin`. The old CLI stays.
 - Updates: installed and portable copies check
   `https://<bucket>.s3.ap-south-1.amazonaws.com/desktop/velopack` in the

@@ -39,7 +39,12 @@ public partial class App : Application
         // NEXUS_PROFILE: must run before anything loads the Go core, which
         // reads per-user folders from this process's environment.
         ProfilePaths.ApplyToProcess();
+#if HAS_UNO
+        // Uno's macOS launcher does not forward argv to the runtime.
+        var argv = Nexus.Platform.LaunchArgs.All();
+#else
         var argv = Environment.GetCommandLineArgs();
+#endif
         if (!SingleInstance.ClaimOrForward(argv))
         {
             Nexus.Core.Diagnostics.DiagLog.Info("startup", "another Nexus is running; handed the launch to it");
@@ -76,7 +81,19 @@ public partial class App : Application
         window.Activate();
         if (background)
         {
+#if HAS_UNO
+            // Uno shows the window on a later turn than Activate(), so a hide
+            // right here is undone: hide again once it has come up (first time only).
+            WindowExtensions.Hide(window);
+            void HideWhenShown(object sender, WindowActivatedEventArgs e)
+            {
+                window.Activated -= HideWhenShown;
+                window.DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => WindowExtensions.Hide(window));
+            }
+            window.Activated += HideWhenShown;
+#else
             window.AppWindow.Hide();
+#endif
         }
     }
 

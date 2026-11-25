@@ -1,0 +1,329 @@
+name: desktop-macos
+
+# Nexus for macOS: the WinUI sources in desktop/windows built as an Uno
+# Platform Skia desktop app (desktop/uno), bundled as an ad-hoc signed
+# Nexus.app with the universal Go core, launched on the runner and
+# screenshotted (mac-app); then packaged like a release (Velopack feed +
+# branded DMG) and checked as a user would meet it: the DMG window, Move to
+# Applications, the first-run welcome and a self-update from version A to B
+# through a local feed (mac-install). Build and evidence only: nothing here
+# signs for distribution, notarizes, publishes or deploys.
+
+on:
+  push:
+    branches-ignore: [master, main]
+    paths:
+      - 'desktop/**'
+      - 'bindings/**'
+      - 'cmd/nexuscore/**'
+      - 'internal/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'scripts/macos/**'
+      - '.github/workflows/desktop-macos.yml'
+  workflow_dispatch:
+    inputs:
+      app_run_id:
+        description: Reuse the Nexus.app built by this earlier run (skips mac-app; for packaging and install checks only)
+        required: false
+        default: ''
+
+concurrency:
+  group: desktop-macos-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  mac-app:
+    name: Nexus.app (Uno Skia, osx-arm64)
+    if: ${{ !inputs.app_run_id }}
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      APP: ${{ github.workspace }}/dist/Nexus.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Machine facts
+        run: |
+          sw_vers; uname -m
+          dotnet --info | head -20
+          system_profiler SPDisplaysDataType | sed -n 1,25p || true
+
+      # The Go core, the AppKit helper, the Uno publish, our Info.plist keys
+      # and an ad-hoc signature; the same script the release workflow uses.
+      - name: Build Nexus.app (scripts/macos/build-app.sh)
+        run: |
+          bash scripts/macos/build-app.sh --build "$GITHUB_RUN_NUMBER" --out dist
+          plutil -p "$APP/Contents/Info.plist"
+          codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Signature|Format|Info.plist'
+
+      - name: Build the window probe
+        run: swiftc -O -o dist/winlist scripts/macos/winlist.swift
+
+      # So LaunchServices knows this bundle handles nexus:// (Info.plist
+      # CFBundleURLTypes); an installed app is registered when first opened.
+      - name: Register the bundle with LaunchServices
+        run: |
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$APP"
+          /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -dump             | grep -B2 -A2 'nexus:' | head -20 || true
+
+      # Two launches in isolated profiles with no server and no credentials:
+      # a fresh one (first-run setup guide), then one seeded past setup (the
+      # main shell). Each waits for a window, captures the screen and the
+      # window alone, and records whether the app was still alive.
+      - name: Launch, wait for the window, screenshot
+        timeout-minutes: 8
+        run: |
+          set -uo pipefail
+          mkdir -p shots logs
+          EXE="$APP/Contents/MacOS/$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")"
+          screencapture -x shots/00-desktop-before.png || true
+          ok=1
+          run_case() {
+            local name=$1 seeded=$2
+            local root="$RUNNER_TEMP/nexus-profile-$name"
+            rm -rf "$root"
+            if [ "$seeded" = 1 ]; then
+              mkdir -p "$root/AppData/Local/Nexus"
+              printf '{ "SetupCompleted": true, "LastNav": "timeline", "Theme": "dark" }\n' > "$root/AppData/Local/Nexus/ui-prefs.json"
+            fi
+            env -u NEXUS_SERVER -u CENTRAL_SERVER_URL -u NEXUS_TOKEN -u CENTRAL_MEMORY_TOKEN \
+              NEXUS_PROFILE="$name" NEXUS_PROFILE_ROOT="$root" \
+              "$EXE" > "logs/$name-stdout.log" 2>&1 &
+            local pid=$! seen=0 alive=0 out wins wid
+            echo "== $name pid=$pid"
+            for i in $(seq 1 45); do
+              sleep 2
+              if ! kill -0 $pid 2>/dev/null; then echo "$name exited early"; break; fi
+              out=$(./dist/winlist $pid 2>/dev/null || echo 0)
+              # Normal windows only (layer 0); the menu bar item is a window too.
+              wins=$(echo "$out" | tail -n +2 | awk '$6==0' | wc -l | tr -d ' ')
+              if [ "${wins:-0}" -gt 0 ] 2>/dev/null; then seen=1; echo "t=$((i*2))s"; echo "$out"; break; fi
+            done
+            sleep 15
+            screencapture -x "shots/$name-screen.png" || echo "screencapture failed"
+            wid=$(./dist/winlist $pid 2>/dev/null | tail -n +2 | awk '$6==0' | sort -k5 -n -r | head -1 | cut -d' ' -f1)
+            if [ -n "$wid" ]; then screencapture -x -o -l "$wid" "shots/$name-window.png" || true; fi
+            sleep 10
+            screencapture -x "shots/$name-screen-later.png" || true
+            kill -0 $pid 2>/dev/null && alive=1
+            echo "$name: window_seen=$seen alive=$alive"
+            kill $pid 2>/dev/null; sleep 3; kill -9 $pid 2>/dev/null || true
+            echo "--- $name stdout/stderr (tail)"; tail -60 "logs/$name-stdout.log" || true
+            mkdir -p "logs/$name"
+            find "$root" -maxdepth 6 -name '*.log' -exec cp {} "logs/$name/" \; 2>/dev/null || true
+            find "$root" -maxdepth 6 -path '*reports*' -type f -exec cp {} "logs/$name/" \; 2>/dev/null || true
+            [ $seen = 1 ] && [ $alive = 1 ] || ok=0
+          }
+          run_case ci-mac-fresh 0
+          run_case ci-mac-shell 1
+          ls -la shots logs
+          for f in ~/Library/Logs/DiagnosticReports/*; do case "$f" in *Nexus*) cp "$f" logs/ ;; esac; done 2>/dev/null || true
+          test $ok = 1
+
+      # The macOS system integration against one running instance: menu bar
+      # item, app menu, close-hides and Dock reopen, nexus:// via LaunchServices,
+      # second-launch hand-off, and the start-at-login LaunchAgent.
+      - name: System integration checks
+        timeout-minutes: 12
+        run: bash scripts/macos/uno-integration-checks.sh
+
+      - name: Zip the app
+        if: ${{ !cancelled() }}
+        run: |
+          test -d "$APP" && ditto -c -k --keepParent "$APP" dist/Nexus-macos-arm64-adhoc.zip && ls -la dist/*.zip || true
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-app
+          path: dist/Nexus-macos-arm64-adhoc.zip
+          if-no-files-found: warn
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-screenshots
+          path: |
+            shots/
+            logs/
+            dist/publish.log
+          if-no-files-found: warn
+          retention-days: 14
+
+  # The download, end to end: package the app from mac-app twice (version A
+  # and B, the same build with different version stamps), make A's DMG and a
+  # local feed holding both, then scripts/macos/install-update-checks.sh.
+  mac-install:
+    name: DMG, Move to Applications, welcome, update A -> B
+    needs: mac-app
+    # Also when an integration check failed: the app artifact is still there.
+    if: ${{ !cancelled() }}
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      VERSION_A: 0.4.0-ci.${{ github.run_number }}.1
+      VERSION_B: 0.4.0-ci.${{ github.run_number }}.2
+      BUNDLE_A: '1001'
+      BUNDLE_B: '1002'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Install vpk (Velopack CLI)
+        run: |
+          dotnet tool install --global vpk --version 1.2.161
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nexus-macos-app
+          path: dist/app
+          run-id: ${{ inputs.app_run_id || github.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Unpack the app
+        run: |
+          set -euo pipefail
+          ditto -x -k dist/app/Nexus-macos-arm64-adhoc.zip dist/app
+          codesign --verify --strict "dist/app/Nexus.app"
+          swiftc -O -o dist/winlist scripts/macos/winlist.swift
+          swiftc -O -o dist/pointer scripts/macos/pointer.swift
+
+      - name: Package version A and B (vpk + DMG)
+        run: |
+          set -euo pipefail
+          FEED="$RUNNER_TEMP/feed"
+          bash scripts/macos/package-macos.sh --app dist/app/Nexus.app --version "$VERSION_A" --bundle-version "$BUNDLE_A"             --channel osx --out dist/pkg-a
+          bash scripts/macos/package-macos.sh --app dist/app/Nexus.app --version "$VERSION_B" --bundle-version "$BUNDLE_B"             --channel osx --out dist/pkg-b
+          # The local feed: A's and B's packages, B's index (which lists both).
+          mkdir -p "$FEED"
+          cp dist/pkg-a/releases/*.nupkg dist/pkg-b/releases/*.nupkg "$FEED/"
+          cp dist/pkg-b/releases/releases.osx.json "$FEED/"
+          ls -la "$FEED"; cat "$FEED/releases.osx.json"
+          echo "FEED=$FEED" >> "$GITHUB_ENV"
+          echo "DMG_A=$GITHUB_WORKSPACE/dist/pkg-a/Nexus-$VERSION_A-osx-arm64.dmg" >> "$GITHUB_ENV"
+
+      - name: Install and update checks
+        timeout-minutes: 20
+        run: bash scripts/macos/install-update-checks.sh
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-install-screenshots
+          path: |
+            shots-install/
+            logs-install/
+            dist/pkg-a/dmg-background/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-dmg
+          path: |
+            dist/pkg-a/Nexus-*.dmg
+            dist/pkg-a/SHA256SUMS-macos.txt
+          if-no-files-found: warn
+          retention-days: 7
+
+  # Production-readiness walk on real macOS: the DMG from mac-install
+  # installed into /Applications, signed in to a loopback demo server
+  # (Go server + Homebrew Postgres, fictional data), every screen
+  # screenshotted in Light and Dark (scripts/macos/mac-audit.sh).
+  mac-audit:
+    name: Audit every screen (DMG install, demo server, Light + Dark)
+    needs: mac-install
+    if: ${{ !cancelled() }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      APP: /Applications/Nexus.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nexus-macos-dmg
+          path: dist/dmg
+
+      - name: Install from the DMG
+        run: |
+          set -euo pipefail
+          swiftc -O -o dist/winlist scripts/macos/winlist.swift
+          swiftc -O -o dist/pointer scripts/macos/pointer.swift
+          swiftc -O -o dist/keys scripts/macos/keys.swift
+          DMG=$(ls dist/dmg/Nexus-*.dmg | head -1)
+          shasum -a 256 "$DMG"
+          hdiutil attach "$DMG" -noverify -nobrowse -mountpoint /Volumes/NexusAudit
+          ls -la /Volumes/NexusAudit
+          rm -rf "$APP"
+          ditto /Volumes/NexusAudit/Nexus.app "$APP"
+          echo "--- extended attributes on the DMG's Nexus.app (top level and Contents)"
+          xattr -l /Volumes/NexusAudit/Nexus.app || true
+          find /Volumes/NexusAudit/Nexus.app -maxdepth 3 -print0 | xargs -0 xattr 2>/dev/null | sort | uniq -c | sort -rn | head -20 || true
+          hdiutil detach /Volumes/NexusAudit -force
+          mkdir -p logs-audit
+          # What a user's dragged copy carries; Gatekeeper checks the same signature.
+          if codesign --verify --deep --strict --verbose=2 "$APP" > logs-audit/codesign-installed.txt 2>&1; then
+            echo "installed copy verifies (--deep --strict)"
+          else
+            echo "::warning::installed copy fails codesign --strict: $(tail -2 logs-audit/codesign-installed.txt | paste -sd' ' -)"
+            xattr -lr "$APP" 2>/dev/null | grep -v 'com.apple.provenance' | head -20 | tee -a logs-audit/codesign-installed.txt
+            codesign --verify --deep --verbose=2 "$APP" >> logs-audit/codesign-installed.txt 2>&1 && echo "verifies without --strict"
+          fi
+          spctl --assess --type execute -vv "$APP" >> logs-audit/codesign-installed.txt 2>&1 || true
+          du -sh "$APP"
+
+      - name: Demo server (Postgres + Go server, fictional data)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          mkdir -p logs-audit
+          bash scripts/macos/demo-server.sh
+          bash scripts/macos/demo-seed.sh | tee logs-audit/seed.log
+
+      - name: Walk every screen
+        timeout-minutes: 40
+        run: bash scripts/macos/mac-audit.sh
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-audit
+          path: |
+            shots-audit/
+            logs-audit/
+            logs/server.log
+          if-no-files-found: warn
+          retention-days: 14

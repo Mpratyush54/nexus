@@ -172,7 +172,7 @@ public sealed partial class SettingsPage
             await LoadSectionDataAsync(key);
             _sectionLoadedAt[key] = DateTimeOffset.UtcNow;
         }
-        catch (Exception ex) { Notify(ex.Message, true); }
+        catch (Exception ex) { Notify(NxErrors.ForException("This section couldn't load. Open it again to retry.", ex, "settings"), true); }
         finally { _sectionLoading.Remove(key); }
     }
 
@@ -333,7 +333,7 @@ public sealed partial class SettingsPage
         }
         catch (Exception ex)
         {
-            Notify(ex.Message, true);
+            Notify(NxErrors.ForException("That didn't work. Try again.", ex, "settings"), true);
             return;
         }
         Notify($"Open {label} from the sidebar.", true);

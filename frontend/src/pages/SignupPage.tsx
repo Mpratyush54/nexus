@@ -8,7 +8,8 @@ import {
   useSignup,
   useSignupStatus,
 } from '@/hooks/useAuthMutations'
-import { friendlyAuthError, type FriendlyError } from '@/auth/errors'
+import { friendlyAuthError, SUPPORT_EMAIL, type FriendlyError } from '@/auth/errors'
+import { authApi, type MailDelivery } from '@/api/auth'
 import { Field, FormAlert, PasswordField, SubmitButton } from '@/auth/fields'
 import { looksLikeEmail } from '@/auth/validation'
 import { afterAuthPath, handoff, prefetchApp, useReleaseHoldOnLeave } from '@/auth/handoff'
@@ -19,6 +20,19 @@ type Step = 'details' | 'resume' | 'verify'
 type Notice = { tone: 'info' | 'ok'; text: string } | null
 
 const minutes = (secs?: number) => Math.max(1, Math.round((secs ?? 60) / 60))
+
+/** Seconds before "Send a new code" works again after a code was sent. */
+const RESEND_COOLDOWN_SECS = 30
+/** How long to keep asking the server whether the code email went out. */
+const DELIVERY_WATCH_MS = 60_000
+const DELIVERY_POLL_MS = 3_000
+
+/** The message for a code email the server gave up on. */
+const mailFailedError: FriendlyError = {
+  title: 'We couldn’t send the code email',
+  detail: `Our email service is having trouble. Send a new code; if it fails again, contact ${SUPPORT_EMAIL}.`,
+  action: 'resend',
+}
 
 export function SignupPage() {
   const navigate = useNavigate()
@@ -41,6 +55,11 @@ export function SignupPage() {
     draft?.step === 'verify' ? { tone: 'info', text: `You left verification unfinished for ${draft.email}.` } : null,
   )
   const [done, setDone] = useState(false)
+  // Resend cooldown and background-delivery watch for the last code email.
+  const [cooldownUntil, setCooldownUntil] = useState(0)
+  const [now, setNow] = useState(() => Date.now())
+  const [watching, setWatching] = useState<{ email: string; since: number } | null>(null)
+  const cooldown = Math.max(0, Math.ceil((cooldownUntil - now) / 1000))
   const next = params.get('next')
   const keep = next ? `?next=${encodeURIComponent(next)}` : ''
   useReleaseHoldOnLeave()
@@ -74,11 +93,50 @@ export function SignupPage() {
   }
 
   const persist = (nextStep: 'details' | 'verify', mail = email, user = username) => {
-    if (looksLikeEmail(mail.trim()) && user.trim().length >= 2) {
+    if (looksLikeEmail(mail.trim())) {
       storage.setSignupDraft({ email: mail.trim(), username: user.trim(), step: nextStep })
-    } else if (looksLikeEmail(mail.trim())) {
-      storage.setSignupDraft({ email: mail.trim(), username: user.trim() || 'pending', step: nextStep })
     }
+  }
+
+  useEffect(() => {
+    if (cooldownUntil <= Date.now()) return
+    const t = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(t)
+  }, [cooldownUntil])
+
+  // The server emails the code in the background; ask how it went so a
+  // failed send shows up here instead of as a code that never arrives.
+  useEffect(() => {
+    if (!watching || step !== 'verify') return
+    let stopped = false
+    const poll = async () => {
+      if (stopped) return
+      const res = await authApi.signupStatus(watching.email).catch(() => null)
+      if (stopped) return
+      const delivery: MailDelivery | undefined = res?.delivery
+      if (delivery === 'failed') {
+        setWatching(null)
+        setCooldownUntil(0)
+        setError(mailFailedError)
+        return
+      }
+      if (delivery === 'sent' || !res?.pending || Date.now() - watching.since > DELIVERY_WATCH_MS) {
+        setWatching(null)
+        return
+      }
+      timer = window.setTimeout(poll, DELIVERY_POLL_MS)
+    }
+    let timer = window.setTimeout(poll, DELIVERY_POLL_MS)
+    return () => {
+      stopped = true
+      window.clearTimeout(timer)
+    }
+  }, [watching, step])
+
+  const codeSent = (mail: string, delivery?: MailDelivery) => {
+    setCooldownUntil(Date.now() + RESEND_COOLDOWN_SECS * 1000)
+    setNow(Date.now())
+    setWatching(delivery === 'sending' ? { email: mail, since: Date.now() } : null)
   }
 
   const startOver = () => {
@@ -121,7 +179,10 @@ export function SignupPage() {
     sendCode.mutate(
       { username: user, password, email: mail },
       {
-        onSuccess: (res) => enterVerify(mail, user, null, res.dev_code),
+        onSuccess: (res) => {
+          enterVerify(mail, user, null, res.dev_code)
+          codeSent(mail, res.delivery)
+        },
         onError: (err) => setError(friendlyAuthError(err, 'signup')),
       },
     )
@@ -155,7 +216,7 @@ export function SignupPage() {
   }
 
   const resend = (mail = email.trim()) => {
-    if (!looksLikeEmail(mail)) return
+    if (!looksLikeEmail(mail) || resendCode.isPending) return
     setError(null)
     resendCode.mutate(mail, {
       onSuccess: (res) => {
@@ -166,6 +227,7 @@ export function SignupPage() {
           push({ title: 'New dev code filled in', detail: res.dev_code })
         }
         setNotice({ tone: 'ok', text: `New code sent to ${res.email}.` })
+        codeSent(mail, res.delivery)
       },
       onError: (err) => setError(friendlyAuthError(err, 'resend')),
     })
@@ -203,8 +265,8 @@ export function SignupPage() {
       </p>
     ) : error?.action === 'resend' && step === 'verify' ? (
       <p style={{ marginTop: 6 }}>
-        <button type="button" onClick={() => resend()}>
-          Send a new code
+        <button type="button" onClick={() => resend()} disabled={resendCode.isPending || cooldown > 0}>
+          {cooldown > 0 ? `Send a new code (${cooldown}s)` : 'Send a new code'}
         </button>
       </p>
     ) : error?.action === 'restart' ? (
@@ -361,8 +423,8 @@ export function SignupPage() {
               >
                 Edit details
               </button>
-              <button type="button" className="au-link" disabled={resendCode.isPending} onClick={() => resend()}>
-                {resendCode.isPending ? 'Sending…' : 'Send a new code'}
+              <button type="button" className="au-link" disabled={resendCode.isPending || cooldown > 0} onClick={() => resend()}>
+                {resendCode.isPending ? 'Sending…' : cooldown > 0 ? `Send a new code (${cooldown}s)` : 'Send a new code'}
               </button>
             </div>
             <p className="au-note">

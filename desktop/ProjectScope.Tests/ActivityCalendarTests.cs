@@ -66,7 +66,9 @@ public class ActivityCalendarTests
     [Theory]
     [InlineData("Missing or invalid bearer token", true)]
     [InlineData("401 Unauthorized", true)]
-    [InlineData("Nexus is offline; memory unavailable", false)]
+    [InlineData("Nexus is offline; memory unavailable", true)]
+    [InlineData("Not signed in to Nexus on this computer", true)]
+    [InlineData("dial tcp 127.0.0.1:443: connectex: refused", false)]
     [InlineData("", false)]
     [InlineData(null, false)]
     public void SignedOutErrorsAreRecognised(string? error, bool signedOut) => Assert.Equal(signedOut, NxErrors.IsSignedOut(error));

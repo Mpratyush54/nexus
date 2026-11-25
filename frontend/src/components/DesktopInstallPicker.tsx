@@ -70,7 +70,7 @@ export function DesktopInstallPicker({
           Install from a terminal instead
         </summary>
         <div className="space-y-3 border-t border-border px-3 py-3">
-          <p className="text-xs text-fg-dim">Paste this into PowerShell. It installs the same app.</p>
+          <p className="text-xs text-fg-dim">Paste this into PowerShell. It runs the same installer and adds the <code className="font-mono">nexus</code> command.</p>
           <pre className="overflow-x-auto rounded-lg border border-border bg-base/50 p-3 font-mono text-[11px] leading-relaxed break-all whitespace-pre-wrap text-fg sm:whitespace-pre sm:break-normal">
             {DESKTOP_INSTALL_PS1}
           </pre>

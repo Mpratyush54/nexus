@@ -441,7 +441,7 @@ public sealed class SetupWizardPage : NexusPage
             {
                 IsOpen = true, IsClosable = false, Severity = InfoBarSeverity.Informational,
                 Title = "Environment variables in use",
-                Message = "NEXUS_SERVER or NEXUS_TOKEN is set for your Windows account. Those take precedence over what you save here."
+                Message = $"NEXUS_SERVER or NEXUS_TOKEN is set for your {PlatformText.UserAccount}. Those take precedence over what you save here."
             });
         }
         return panel;
@@ -465,7 +465,7 @@ public sealed class SetupWizardPage : NexusPage
         }
         _accountState.Text = _signedIn
             ? SignedInText + $" on {HostOf(ServerInUse)}."
-            : "Not signed in yet. Nexus still captures on this computer and uploads once you sign in.";
+            : "Not signed in yet. Sign in to keep your chats and memories in your Nexus account.";
         UpdateServerHint();
         if (_signedIn) StopAuthPoll();
         UpdateButtons();
@@ -678,7 +678,7 @@ public sealed class SetupWizardPage : NexusPage
             _agentReport.Children.Add(Para(response.Error ?? "Could not connect your agents.", 0.85, NexusTokens.FontCaption));
             return;
         }
-        var changes = AgentSetupPage.RenderInstallReport(_agentReport, result, preview: !_agentPreviewed);
+        var changes = AgentSetupPage.RenderInstallReport(_agentReport, result, preview: !_agentPreviewed, foldFiles: true);
         if (!_agentPreviewed && changes > 0)
         {
             _agentPreviewed = true;
@@ -727,7 +727,7 @@ public sealed class SetupWizardPage : NexusPage
         // Privacy in two sentences above the list, and the list kept short,
         // so the consent and the crash-report choice are in view without
         // scrolling.
-        _workspaceHost.Children.Add(Para("Nexus saves your agents' chats and what they did (including bits of code they read or changed) from these folders only, and syncs them to your private account. Nothing outside these folders is read, and you can pause capture from the tray at any time.", 0.75, NexusTokens.FontCaption));
+        _workspaceHost.Children.Add(Para("Nexus saves your agents' chats and what they did (including bits of code they read or changed) from these folders only, and syncs them to your private account. Nothing outside these folders is read, and you can pause capture from " + PlatformText.TrayPlace + " at any time.", 0.75, NexusTokens.FontCaption));
         _workspaceHost.Children.Add(new ScrollViewer { Content = _chooser.View, MaxHeight = 210, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled });
         _workspaceHost.Children.Add(_consent);
         _workspaceHost.Children.Add(_workspaceState);
@@ -814,7 +814,7 @@ public sealed class SetupWizardPage : NexusPage
             _loginStartWired = true;
             _loginStart.Toggled += (_, _) => ApplyToggle(_loginStart, on => DesktopIntegration.Current.SetStartsAtLogin(on));
         }
-        return ToggleRow("Start Nexus when I sign in to Windows", "Nexus waits in the system tray so capture keeps running.", _loginStart);
+        return ToggleRow($"Start Nexus when I sign in to {PlatformText.Os}", $"Nexus waits in {PlatformText.TrayPlace} so capture keeps running.", _loginStart);
     }
 
     private void SyncStartup()
@@ -839,7 +839,7 @@ public sealed class SetupWizardPage : NexusPage
             _startupSync = true;
             toggle.IsOn = !toggle.IsOn;
             _startupSync = false;
-            ToolTipService.SetToolTip(toggle, "Windows didn't allow this change. Try again from Settings.");
+            ToolTipService.SetToolTip(toggle, $"{PlatformText.Os} didn't allow this change. Try again from Settings.");
         }
     }
 
@@ -970,8 +970,17 @@ public sealed class SetupWizardPage : NexusPage
         return grid;
     }
 
+    // The row each reused toggle sits in (see ToggleRow).
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ToggleSwitch, Panel> s_toggleRows = new();
+
     private static Border ToggleRow(string label, string description, ToggleSwitch toggle)
     {
+        // The Done summary is rebuilt each time it is shown: the same toggle
+        // must leave its old row first, or WinUI throws ("No installed
+        // components were detected") and the step stops half drawn.
+        // FrameworkElement.Parent is not reliable for a row that is no
+        // longer on screen, so the row is remembered here.
+        if (s_toggleRows.TryGetValue(toggle, out var previous)) previous.Children.Remove(toggle);
         AutomationProperties.SetName(toggle, label);
         AutomationProperties.SetHelpText(toggle, description);
         var grid = new Grid { ColumnSpacing = 24 };
@@ -984,6 +993,7 @@ public sealed class SetupWizardPage : NexusPage
         toggle.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(toggle, 1);
         grid.Children.Add(toggle);
+        s_toggleRows.AddOrUpdate(toggle, grid);
         return new Border { Padding = new Thickness(0, 12, 0, 12), BorderBrush = NexusPalette.Hairline, BorderThickness = new Thickness(0, 0, 0, 1), Child = grid };
     }
 

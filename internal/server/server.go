@@ -137,6 +137,9 @@ type Server struct {
 
 	// Mail delivers signup OTP emails. Nil selects mail.FromEnv at first use.
 	Mail mail.Sender
+	// mailbox sends codes in the background (mail_delivery.go).
+	mailOnce sync.Once
+	mailbox  *mailOutbox
 
 	// Project brief debounce (project_brief.go): last check per project.
 	// briefNow overrides the clock in tests.
@@ -302,11 +305,17 @@ const maxRequestBodyBytes = 2 << 20
 
 // decodeJSON decodes a JSON request body, disallowing trailing garbage.
 func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	return decodeJSONLimit(w, r, dst, maxRequestBodyBytes)
+}
+
+// decodeJSONLimit is decodeJSON with a route-specific body limit (desktop
+// turns with images need more than the default).
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, dst any, limit int64) bool {
 	if r.Body == nil {
 		writeError(w, http.StatusBadRequest, "request body is required")
 		return false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {

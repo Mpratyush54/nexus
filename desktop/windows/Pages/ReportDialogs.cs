@@ -15,9 +15,9 @@ namespace Nexus.Pages;
 /// </summary>
 internal static class ReportDialogs
 {
-    public const string WhatIsSent =
-        "A report has the error, where in Nexus's code it happened, your Nexus and Windows versions, and recent lines from Nexus's own log. " +
-        "It never has your chats, memories, prompts, files or sign-in tokens. Email addresses and your Windows user name are removed before anything leaves this computer.";
+    public static string WhatIsSent =>
+        $"A report has the error, where in Nexus's code it happened, your Nexus and {PlatformText.Os} versions, and recent lines from Nexus's own log. " +
+        $"It never has your chats, memories, prompts, files or sign-in tokens. Email addresses and your {(PlatformText.IsMac ? "Mac" : "Windows")} user name are removed before anything leaves this computer.";
 
     private static bool s_open;
 
@@ -56,7 +56,7 @@ internal static class ReportDialogs
     /// automatically" on, they go without asking (anonymously).
     public static async Task OfferHeldReportsAsync(XamlRoot root)
     {
-        var held = AppDiagnostics.HeldReports();
+        var held = ProblemReport.FromEarlierRuns(AppDiagnostics.HeldReports(), AppDiagnostics.RunStarted);
         if (held.Count == 0) return;
         if (AppPrefs.Data.AutoSendCrashReports)
         {
@@ -152,7 +152,7 @@ internal static class ReportDialogs
             body.Children.Add(note);
             body.Children.Add(logs);
             body.Children.Add(Para(WhatIsSent, 0.7));
-            body.Children.Add(PreviewExpander(preview, open: true));
+            body.Children.Add(PreviewExpander(preview, open: false));
             var dialog = new ContentDialog
             {
                 Title = "Report a problem",

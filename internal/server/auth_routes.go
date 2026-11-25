@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -83,8 +82,16 @@ func (s *Server) handleSignupSendCode(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "too many signup attempts")
 		return
 	}
-	if !s.login.allow("signup-otp-mail:" + email) {
+	if !s.login.allow("signup-otp-mail:"+email) || s.mailQueuedWithin(signupMailKey(email), mailResendGap) {
 		writeError(w, http.StatusTooManyRequests, "too many codes for this email — try again shortly")
+		return
+	}
+	// Say so at once when no code can be emailed, before storing anything.
+	mailer := s.mailer()
+	devCodes := !mailer.Configured() && devMailCodes()
+	if !mailer.Configured() && !devCodes {
+		s.Log.Printf("signup: refused, %s", mail.Describe(mailer))
+		writeError(w, http.StatusServiceUnavailable, mailUnavailable)
 		return
 	}
 	if s.Accounts == nil {
@@ -124,33 +131,38 @@ func (s *Server) handleSignupSendCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := fmt.Sprintf(
+	s.respondCodeQueued(w, signupMailKey(email), email, "Your Nexus verification code", signupCodeBody(code), code, devCodes, nil)
+}
+
+func signupCodeBody(code string) string {
+	return fmt.Sprintf(
 		"Your Nexus verification code is %s\n\nIt expires in %d minutes. If you did not request this, ignore this email.\n",
 		code, int(signupOTPTTL.Minutes()),
 	)
-	mailer := s.mailer()
-	localDev := strings.TrimSpace(os.Getenv("CENTRAL_MEMORY_LOCAL_DEV")) == "1"
-	if !mailer.Configured() && !localDev {
-		writeError(w, http.StatusServiceUnavailable, "email delivery is not configured")
-		return
-	}
-	if err := mailer.Send(email, "Your Nexus verification code", body); err != nil {
-		s.Log.Printf("signup otp mail failed for %s: %v", email, err)
-		writeError(w, http.StatusBadGateway, "could not send verification email")
-		return
-	}
+}
 
+// respondCodeQueued answers a code request. With a mailer the email goes out
+// in the background and the reply is 202 with delivery "sending"
+// (/auth/signup/status reports how it went). In local dev without a mailer
+// the code comes back in the reply as dev_code.
+func (s *Server) respondCodeQueued(w http.ResponseWriter, key, email, subject, body, code string, devCodes bool, extra map[string]any) {
 	out := map[string]any{
 		"ok":         true,
 		"email":      email,
 		"expires_in": int(signupOTPTTL.Seconds()),
 	}
-	// Local/dev without a real mailer: surface the code so signup still works.
-	if !mailer.Configured() {
-		out["dev_code"] = code
-		s.Log.Printf("signup otp for %s: %s (dev/local)", email, code)
+	for k, v := range extra {
+		out[k] = v
 	}
-	writeJSON(w, http.StatusOK, out)
+	if devCodes {
+		out["dev_code"] = code
+		s.Log.Printf("%s code: %s (dev/local, no mailer)", key, code)
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	s.queueMail(key, email, subject, body)
+	out["delivery"] = mailSending
+	writeJSON(w, http.StatusAccepted, out)
 }
 
 // handleSignupResend re-emails a code for an existing pending signup (other device / lost code).
@@ -168,8 +180,15 @@ func (s *Server) handleSignupResend(w http.ResponseWriter, r *http.Request) {
 	if s.login == nil {
 		s.login = newRateGate(1, 5)
 	}
-	if !s.login.allow("signup-resend:"+clientIP(r)) || !s.login.allow("signup-otp-mail:"+email) {
+	if !s.login.allow("signup-resend:"+clientIP(r)) || !s.login.allow("signup-otp-mail:"+email) || s.mailQueuedWithin(signupMailKey(email), mailResendGap) {
 		writeError(w, http.StatusTooManyRequests, "too many codes for this email — try again shortly")
+		return
+	}
+	mailer := s.mailer()
+	devCodes := !mailer.Configured() && devMailCodes()
+	if !mailer.Configured() && !devCodes {
+		s.Log.Printf("signup resend: refused, %s", mail.Describe(mailer))
+		writeError(w, http.StatusServiceUnavailable, mailUnavailable)
 		return
 	}
 	if s.Accounts == nil {
@@ -198,33 +217,8 @@ func (s *Server) handleSignupResend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := fmt.Sprintf(
-		"Your Nexus verification code is %s\n\nIt expires in %d minutes. If you did not request this, ignore this email.\n",
-		code, int(signupOTPTTL.Minutes()),
-	)
-	mailer := s.mailer()
-	localDev := strings.TrimSpace(os.Getenv("CENTRAL_MEMORY_LOCAL_DEV")) == "1"
-	if !mailer.Configured() && !localDev {
-		writeError(w, http.StatusServiceUnavailable, "email delivery is not configured")
-		return
-	}
-	if err := mailer.Send(email, "Your Nexus verification code", body); err != nil {
-		s.Log.Printf("signup resend mail failed for %s: %v", email, err)
-		writeError(w, http.StatusBadGateway, "could not send verification email")
-		return
-	}
-
-	out := map[string]any{
-		"ok":         true,
-		"email":      email,
-		"username":   pending.Username,
-		"expires_in": int(signupOTPTTL.Seconds()),
-	}
-	if !mailer.Configured() {
-		out["dev_code"] = code
-		s.Log.Printf("signup otp resend for %s: %s (dev/local)", email, code)
-	}
-	writeJSON(w, http.StatusOK, out)
+	s.respondCodeQueued(w, signupMailKey(email), email, "Your Nexus verification code", signupCodeBody(code), code, devCodes,
+		map[string]any{"username": pending.Username})
 }
 
 func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
@@ -279,6 +273,9 @@ func (s *Server) handleSignup(w http.ResponseWriter, r *http.Request) {
 		n, _ := s.Accounts.IncrementSignupOTPAttempts(r.Context(), email)
 		if n >= signupOTPMaxAttempts {
 			_ = s.Accounts.DeleteSignupOTP(r.Context(), email)
+			// Say so now; otherwise the next try reads "request a code first".
+			writeError(w, http.StatusTooManyRequests, "too many incorrect codes — start signup again")
+			return
 		}
 		writeError(w, http.StatusUnauthorized, "incorrect verification code")
 		return
@@ -389,13 +386,19 @@ func (s *Server) handleSignupStatus(w http.ResponseWriter, r *http.Request) {
 	if secs < 0 {
 		secs = 0
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"pending":    true,
 		"expired":    expired,
 		"email":      pending.Email,
 		"username":   pending.Username,
 		"expires_in": secs,
-	})
+	}
+	// How the last code email went: sending, sent or failed. Absent after a
+	// restart or for codes older than an hour.
+	if d, ok := s.mailState(signupMailKey(email)); ok {
+		out["delivery"] = d.Status
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 type passwordForgotRequest struct {
@@ -421,8 +424,17 @@ func (s *Server) handlePasswordForgot(w http.ResponseWriter, r *http.Request) {
 	if s.login == nil {
 		s.login = newRateGate(1, 5)
 	}
-	if !s.login.allow("pw-forgot:"+clientIP(r)) || !s.login.allow("pw-forgot-mail:"+email) {
+	if !s.login.allow("pw-forgot:"+clientIP(r)) || !s.login.allow("pw-forgot-mail:"+email) || s.mailQueuedWithin(resetMailKey(email), mailResendGap) {
 		writeError(w, http.StatusTooManyRequests, "too many reset attempts — try again shortly")
+		return
+	}
+	// Checked before the account lookup so the answer does not depend on
+	// whether the email has an account.
+	mailer := s.mailer()
+	devCodes := !mailer.Configured() && devMailCodes()
+	if !mailer.Configured() && !devCodes {
+		s.Log.Printf("password reset: refused, %s", mail.Describe(mailer))
+		writeError(w, http.StatusServiceUnavailable, mailUnavailable)
 		return
 	}
 	if s.Accounts == nil {
@@ -443,7 +455,14 @@ func (s *Server) handlePasswordForgot(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "could not look up account")
 			return
 		}
-		writeJSON(w, http.StatusOK, okOut)
+		// Same status and shape as a real send, so the reply does not reveal
+		// whether the email has an account.
+		if devCodes {
+			writeJSON(w, http.StatusOK, okOut)
+			return
+		}
+		okOut["delivery"] = mailSending
+		writeJSON(w, http.StatusAccepted, okOut)
 		return
 	}
 
@@ -462,22 +481,7 @@ func (s *Server) handlePasswordForgot(w http.ResponseWriter, r *http.Request) {
 		"Your Nexus password reset code is %s\n\nIt expires in %d minutes. If you did not request this, ignore this email.\n",
 		code, int(signupOTPTTL.Minutes()),
 	)
-	mailer := s.mailer()
-	localDev := strings.TrimSpace(os.Getenv("CENTRAL_MEMORY_LOCAL_DEV")) == "1"
-	if !mailer.Configured() && !localDev {
-		writeError(w, http.StatusServiceUnavailable, "email delivery is not configured")
-		return
-	}
-	if err := mailer.Send(email, "Reset your Nexus password", body); err != nil {
-		s.Log.Printf("password reset mail failed for %s: %v", email, err)
-		writeError(w, http.StatusBadGateway, "could not send reset email")
-		return
-	}
-	if !mailer.Configured() {
-		okOut["dev_code"] = code
-		s.Log.Printf("password reset otp for %s: %s (dev/local)", email, code)
-	}
-	writeJSON(w, http.StatusOK, okOut)
+	s.respondCodeQueued(w, resetMailKey(email), email, "Reset your Nexus password", body, code, devCodes, nil)
 }
 
 func (s *Server) handlePasswordReset(w http.ResponseWriter, r *http.Request) {

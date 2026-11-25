@@ -7,7 +7,14 @@ name: Release Desktop (all OS)
 #    plain nexus-desktop-windows-amd64.zip (install-windows.ps1) and the
 #    auto-update feed (S3 desktop/velopack/). Built for stable AND beta tags;
 #    betas use the separate "win-beta" update channel and a prerelease.
-#  - macOS / Linux: legacy Fyne shell until the native ports ship.
+#  - macOS (Apple silicon): the Uno app packaged with Velopack and a branded
+#    DMG (scripts/macos/build-app.sh + package-macos.sh): Nexus-<ver>-osx-arm64.dmg,
+#    a fixed-name Nexus.dmg, a portable zip, and the update feed in the same
+#    S3 folder (pack id NexusMac, channels "osx" / "osx-beta"). Built on
+#    desktop-v* tags and manual runs. Unsigned (ad hoc) until the MACOS_*
+#    signing secrets exist; see the build-macos job.
+#  - The retired Fyne desktop (nexus-desktop-darwin-*/linux-*) is no longer
+#    built. The CLI and the macOS/Linux daemon still are.
 # latest.json is promoted only for tagged / explicit stable versions.
 
 on:
@@ -123,62 +130,6 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  # Windows ships the native WinUI shell. The legacy Fyne shell remains only
-  # for the non-Windows migration path until the SwiftUI replacement ships.
-  build-desktop:
-    needs: meta
-    if: needs.meta.outputs.prerelease != 'true'
-    name: desktop-${{ matrix.goos }}-${{ matrix.goarch }}
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - goos: darwin
-            goarch: arm64
-            runner: macos-latest
-          - goos: darwin
-            goarch: amd64
-            runner: macos-latest
-          - goos: linux
-            goarch: amd64
-            runner: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.26.x'
-      - name: Install Linux GUI deps
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc libgl1-mesa-dev xorg-dev libxkbcommon-dev libwayland-dev
-      - name: Build desktop
-        shell: bash
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: "1"
-          VER: ${{ needs.meta.outputs.version }}
-          BUILT_AT: ${{ needs.meta.outputs.built_at }}
-        run: |
-          set -euo pipefail
-          mkdir -p dist
-          EXT=""
-          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          LD_COMMON="-s -w -X central-memory/internal/buildinfo.Version=${VER} -X central-memory/internal/buildinfo.Commit=${GITHUB_SHA} -X central-memory/internal/buildinfo.BuiltAt=${BUILT_AT} -X main.defaultServerURL=${API_URL}"
-          DESKTOP_LD="${LD_COMMON}"
-          if [ "$GOOS" = "windows" ]; then DESKTOP_LD="${LD_COMMON} -H windowsgui"; fi
-          # On macOS runners, GOARCH may need explicit set for amd64 under arm host.
-          export GOOS GOARCH CGO_ENABLED
-          go build -trimpath -ldflags "${DESKTOP_LD}" -o "dist/nexus-desktop-${GOOS}-${GOARCH}${EXT}" ./cmd/nexus-desktop
-          ls -la dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: desktop-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: dist/
-          if-no-files-found: error
-
   # Windows installer (Velopack). Self-contained: .NET 8 and the Windows App
   # SDK are inside the app, so Setup.exe needs no prerequisites or admin.
   build-windows:
@@ -242,48 +193,164 @@ jobs:
           path: dist/windows/releases/
           if-no-files-found: error
 
-  # Beta tags: GitHub prerelease with the Windows installer only. Never
-  # touches desktop/latest.json; the update feed uses the win-beta channel.
+  # macOS installer and update feed (Velopack, osx-arm64). Only on desktop-v*
+  # tags and manual runs: a macOS runner is slow, and branch pushes are
+  # covered by desktop-macos.yml. Unsigned until a Developer ID exists; set
+  #   MACOS_CERT_P12_BASE64, MACOS_CERT_PASSWORD   Developer ID Application cert (.p12)
+  #   MACOS_SIGN_IDENTITY                          "Developer ID Application: Name (TEAMID)"
+  #   APPLE_ID, APPLE_TEAM_ID, APPLE_APP_PASSWORD  notarization (app-specific password)
+  # and the app, its update packages and the DMG are signed, notarized and
+  # stapled with no other change (scripts/macos/package-macos.sh). Until then
+  # the app is signed ad hoc and Gatekeeper asks once on first open.
+  build-macos:
+    needs: meta
+    if: startsWith(github.ref, 'refs/tags/desktop-v') || github.event_name == 'workflow_dispatch'
+    name: desktop-macos-arm64
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+      - name: Install vpk (Velopack CLI)
+        run: |
+          dotnet tool install --global vpk --version 1.2.161
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+      - name: Import Developer ID (optional)
+        env:
+          CERT_P12: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CERT_P12:-}" ] || [ -z "${SIGN_IDENTITY:-}" ]; then
+            echo "No Developer ID: building unsigned (ad hoc)."; exit 0
+          fi
+          KC="$RUNNER_TEMP/nexus-signing.keychain-db"
+          KCPASS="$(uuidgen)"
+          security create-keychain -p "$KCPASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KCPASS" "$KC"
+          echo "$CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KC" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KCPASS" "$KC" > /dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          {
+            echo "MACOS_SIGN_IDENTITY=$SIGN_IDENTITY"
+            echo "MACOS_KEYCHAIN=$KC"
+          } >> "$GITHUB_ENV"
+          if [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ]; then
+            xcrun notarytool store-credentials nexus-notary --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" \
+              --password "$APPLE_APP_PASSWORD" --keychain "$KC"
+            echo "MACOS_NOTARY_PROFILE=nexus-notary" >> "$GITHUB_ENV"
+          fi
+      - name: Build Nexus.app
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+        run: bash scripts/macos/build-app.sh --version "$VER" --build "$GITHUB_RUN_NUMBER" --out dist
+      - name: Package (Velopack feed + DMG)
+        env:
+          VER: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
+          if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
+          CHANNEL=osx; if [ "$PRERELEASE" = "true" ]; then CHANNEL=osx-beta; fi
+          bash scripts/macos/package-macos.sh --app dist/Nexus.app --version "$VER" --bundle-version "$GITHUB_RUN_NUMBER" \
+            --channel "$CHANNEL" --out dist/macos \
+            --previous-feed "https://$BUCKET.s3.${AWS_REGION}.amazonaws.com/desktop/velopack"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-macos-arm64
+          if-no-files-found: error
+          path: |
+            dist/macos/Nexus-*-osx-arm64.dmg
+            dist/macos/Nexus-*-osx-arm64.zip
+            dist/macos/SHA256SUMS-macos.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: velopack-feed-osx
+          path: dist/macos/releases/
+          if-no-files-found: error
+
+  # Beta tags: GitHub prerelease with the Windows installer and the macOS DMG.
+  # Never touches desktop/latest.json; the update feeds use the win-beta and
+  # osx-beta channels.
   publish-windows-beta:
-    needs: [meta, build-windows]
-    if: needs.meta.outputs.prerelease == 'true' && startsWith(github.ref, 'refs/tags/')
+    needs: [meta, build-windows, build-macos]
+    if: >-
+      !cancelled() && needs.meta.outputs.prerelease == 'true' && startsWith(github.ref, 'refs/tags/')
+      && needs.build-windows.result == 'success'
+      && (needs.build-macos.result == 'success' || needs.build-macos.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
       - name: Assemble
+        env:
+          VER: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
           mkdir -p dist
           cp artifacts/desktop-windows-amd64/* dist/
+          if [ -d artifacts/desktop-macos-arm64 ]; then
+            cp artifacts/desktop-macos-arm64/* dist/
+            dmg=$(ls dist/Nexus-*-osx-arm64.dmg | head -1)
+            cp -f "$dmg" dist/Nexus.dmg
+          fi
+          bash scripts/release-notes.sh "$VER" dist > release-body.md
+          cat release-body.md
           ls -la dist
       - name: GitHub prerelease
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
+          body_path: release-body.md
+          generate_release_notes: false
           files: dist/*
       - name: Configure AWS Credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
-      - name: Publish update feed (win-beta)
+      - name: Publish update feeds (win-beta, osx-beta)
         run: |
           set -euo pipefail
           BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
           if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
-          FEED=artifacts/velopack-feed
-          # Packages first, the feed index last: clients never see an index
-          # that points at a package that is not uploaded yet.
-          aws s3 sync "$FEED" "s3://${BUCKET}/desktop/velopack/" --exclude "releases.*.json" --exclude "RELEASES*" --exclude "assets.*.json"
-          for f in "$FEED"/releases.*.json "$FEED"/assets.*.json "$FEED"/RELEASES*; do
-            [ -f "$f" ] && aws s3 cp "$f" "s3://${BUCKET}/desktop/velopack/$(basename "$f")" --cache-control "no-cache, max-age=60"
+          for FEED in artifacts/velopack-feed artifacts/velopack-feed-osx; do
+            [ -d "$FEED" ] || continue
+            # Packages first, the feed index last: clients never see an index
+            # that points at a package that is not uploaded yet.
+            aws s3 sync "$FEED" "s3://${BUCKET}/desktop/velopack/" --exclude "releases.*.json" --exclude "RELEASES*" --exclude "assets.*.json"
+            for f in "$FEED"/releases.*.json "$FEED"/assets.*.json "$FEED"/RELEASES*; do
+              [ -f "$f" ] && aws s3 cp "$f" "s3://${BUCKET}/desktop/velopack/$(basename "$f")" --cache-control "no-cache, max-age=60"
+            done
           done
 
   publish:
-    needs: [meta, build-tools, build-desktop, build-windows]
-    if: needs.meta.outputs.prerelease != 'true'
+    needs: [meta, build-tools, build-windows, build-macos]
+    if: >-
+      !cancelled() && needs.meta.outputs.prerelease != 'true'
+      && needs.build-tools.result == 'success' && needs.build-windows.result == 'success'
+      && (needs.build-macos.result == 'success' || needs.build-macos.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -300,12 +367,15 @@ jobs:
           # nexus-mcp-proxy.exe ships inside the desktop zip only; flattening it
           # here would read as a bogus "mcp-proxy" CLI platform below. The
           # Velopack feed is published separately (desktop/velopack/).
-          find artifacts -type f ! -name 'nexus-mcp-proxy.exe' ! -path 'artifacts/velopack-feed/*' -exec cp -f {} dist/ \;
+          find artifacts -type f ! -name 'nexus-mcp-proxy.exe' ! -path 'artifacts/velopack-feed/*' ! -path 'artifacts/velopack-feed-osx/*' -exec cp -f {} dist/ \;
           # A fixed-name copy of the installer, so
           # releases/latest/download/Nexus-Setup.exe (and nexus.pratyushes.dev/download)
           # always points at the newest one.
           setup=$(ls dist/Nexus-*-win-x64-Setup.exe 2>/dev/null | head -1 || true)
           if [ -n "$setup" ]; then cp -f "$setup" dist/Nexus-Setup.exe; fi
+          # Likewise releases/latest/download/Nexus.dmg for macOS.
+          dmg=$(ls dist/Nexus-*-osx-arm64.dmg 2>/dev/null | head -1 || true)
+          if [ -n "$dmg" ]; then cp -f "$dmg" dist/Nexus.dmg; fi
           ls -la dist
           BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
           if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
@@ -358,12 +428,16 @@ jobs:
           open("dist/latest.json", "w", encoding="utf-8").write(json.dumps(manifest, indent=2) + "\n")
           print("platforms:", ", ".join(sorted(platforms)))
           PY
-          (cd dist && sha256sum nexus-* Nexus-* install-* latest.json > SHA256SUMS.txt) || true
+          (cd dist && sha256sum nexus-* Nexus-* Nexus.dmg install-* latest.json > SHA256SUMS.txt) || true
+          bash scripts/release-notes.sh "$VER" dist > release-body.md
+          cat release-body.md
 
       - name: GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          body_path: release-body.md
+          generate_release_notes: false
           files: dist/*
 
       - name: Configure AWS Credentials (OIDC)
@@ -379,7 +453,7 @@ jobs:
           set -euo pipefail
           BUCKET="${{ vars.RELEASES_S3_BUCKET }}"
           if [ -z "$BUCKET" ]; then BUCKET="${RELEASES_BUCKET}"; fi
-          aws s3 sync dist "s3://${BUCKET}/desktop/${VER}/" --exclude "*" --include "nexus-*" --include "Nexus-*" --include "install-*" --include "SHA256SUMS*.txt" --include "latest.json"
+          aws s3 sync dist "s3://${BUCKET}/desktop/${VER}/" --exclude "*" --include "nexus-*" --include "Nexus-*" --include "Nexus.dmg" --include "install-*" --include "SHA256SUMS*.txt" --include "latest.json"
           aws s3 sync dist "s3://${BUCKET}/cli/${VER}/" --exclude "*" --include "nexus-*" --include "install-*" --include "SHA256SUMS.txt"
 
           PROMOTE=0
@@ -388,12 +462,17 @@ jobs:
           if [[ "$VER" == 0.0.0-* ]]; then PROMOTE=0; fi
 
           if [ "$PROMOTE" = "1" ]; then
-            # Velopack update feed (channel "win"): packages first, index last.
-            FEED=artifacts/velopack-feed
-            aws s3 sync "$FEED" "s3://${BUCKET}/desktop/velopack/" --exclude "releases.*.json" --exclude "RELEASES*" --exclude "assets.*.json"
-            for f in "$FEED"/releases.*.json "$FEED"/assets.*.json "$FEED"/RELEASES*; do
-              [ -f "$f" ] && aws s3 cp "$f" "s3://${BUCKET}/desktop/velopack/$(basename "$f")" --cache-control "no-cache, max-age=60"
+            # Velopack update feeds (channels "win" and "osx"): packages first, index last.
+            for FEED in artifacts/velopack-feed artifacts/velopack-feed-osx; do
+              [ -d "$FEED" ] || continue
+              aws s3 sync "$FEED" "s3://${BUCKET}/desktop/velopack/" --exclude "releases.*.json" --exclude "RELEASES*" --exclude "assets.*.json"
+              for f in "$FEED"/releases.*.json "$FEED"/assets.*.json "$FEED"/RELEASES*; do
+                [ -f "$f" ] && aws s3 cp "$f" "s3://${BUCKET}/desktop/velopack/$(basename "$f")" --cache-control "no-cache, max-age=60"
+              done
             done
+            if [ -f dist/Nexus.dmg ]; then
+              aws s3 cp dist/Nexus.dmg "s3://${BUCKET}/desktop/latest/Nexus.dmg" --cache-control "no-cache, max-age=60"
+            fi
             aws s3 cp dist/latest.json "s3://${BUCKET}/desktop/latest.json" --cache-control "no-cache, max-age=60" --content-type application/json
             for f in install-windows.ps1 install-macos.sh install-linux.sh; do
               if [ -f "dist/$f" ]; then

@@ -14,9 +14,11 @@ namespace Nexus.Pages;
 /// </summary>
 internal static class AccessibleNames
 {
-    public static void Fill(DependencyObject? root)
+    /// <summary>Names unnamed controls under <paramref name="root"/>; returns how many it named.</summary>
+    public static int Fill(DependencyObject? root)
     {
-        if (root is null) return;
+        if (root is null) return 0;
+        var named = 0;
         var stack = new Stack<DependencyObject>();
         stack.Push(root);
         var visited = 0;
@@ -26,11 +28,12 @@ internal static class AccessibleNames
             if (node is Control control && IsInteractive(control) && string.IsNullOrWhiteSpace(AutomationProperties.GetName(control)))
             {
                 var name = Derive(control);
-                if (name.Length > 0) AutomationProperties.SetName(control, name);
+                if (name.Length > 0) { AutomationProperties.SetName(control, name); named++; }
             }
             var count = VisualTreeHelper.GetChildrenCount(node);
             for (var i = 0; i < count; i++) stack.Push(VisualTreeHelper.GetChild(node, i));
         }
+        return named;
     }
 
     private static bool IsInteractive(Control control) =>
@@ -44,10 +47,10 @@ internal static class AccessibleNames
                 return "";
             case ComboBox combo:
                 return First(combo.Header as string, combo.PlaceholderText, Tip(combo));
-            case TextBox box:
-                return First(box.Header as string, box.PlaceholderText, Tip(box));
             case PasswordBox password:
                 return First(password.Header as string, password.PlaceholderText, Tip(password));
+            case TextBox box:
+                return First(box.Header as string, box.PlaceholderText, Tip(box));
             case ToggleSwitch toggle:
                 return First(toggle.Header as string, Tip(toggle));
         }

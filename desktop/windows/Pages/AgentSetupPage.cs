@@ -202,7 +202,11 @@ public sealed partial class AgentSetupPage : NexusPage
         root.Children.Add(bodyFrame);
         Content = root;
         WatchShellProject(() => LoadAsync());
+        Loaded += (_, _) => { AgentAvailabilityService.Changed += AgentsChanged; AgentAvailabilityService.Refresh(); };
+        Unloaded += (_, _) => AgentAvailabilityService.Changed -= AgentsChanged;
     }
+
+    private void AgentsChanged() => DispatcherQueue.TryEnqueue(() => { if (_agents.Count > 0) RenderAgents(); });
 
     protected override void OnEnter(object? parameter)
     {
@@ -272,6 +276,7 @@ public sealed partial class AgentSetupPage : NexusPage
             });
         }
         var connected = _agents.Count(a => Flag(a, "installed") && Flag(a, "nexus_mcp"));
+        if (_installButton is not null) _installButton.Visibility = _installed.Count > 0 && connected == _installed.Count ? Visibility.Collapsed : Visibility.Visible;
         _status.Text = _installed.Count == 0 ? "No coding agents found on this computer yet."
             : connected == _installed.Count ? $"All {_installed.Count} agents on this computer are connected to Nexus."
             : $"{connected} of {_installed.Count} agents on this computer are connected to Nexus.";
@@ -332,8 +337,26 @@ public sealed partial class AgentSetupPage : NexusPage
             }
             else if (installed) state.Children.Add(Tiny("· Not connected"));
             text.Children.Add(state);
+            // Agents that can't run chats here are left out of the chat
+            // pickers; this is where they get set up.
+            if (AgentAvailabilityService.For(id) is { Usable: false } chat)
+            {
+                var setup = new HyperlinkButton { Content = "Set up for chats", Padding = new Thickness(0), FontSize = 11, MinHeight = 0 };
+                ToolTipService.SetToolTip(setup, chat.Problem);
+                Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(setup, "Set up " + chat.Name + " for chats");
+                setup.Click += async (_, _) =>
+                {
+                    if (await AgentProblemDialog.ShowAsync(XamlRoot, chat, canUseAnother: false) == AgentProblemDialog.Choice.Fix)
+                        _status.Text = AgentAvailability.FixSentence(chat);
+                };
+                var line = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 5 };
+                line.Children.Add(Tiny(chat.State == "signed_out" ? "Not signed in ·" : "Can't run chats yet ·"));
+                line.Children.Add(setup);
+                text.Children.Add(line);
+            }
 
-            var counts = Sections.Select(s => (s.Short, N: Arr(agent, s.Key).Count())).Where(c => c.N > 0).Select(c => c.N + " " + c.Short).ToList();
+            // "1 tool", not "1 tools": every short label is a plain -s plural.
+            var counts = Sections.Select(s => (s.Short, N: Arr(agent, s.Key).Count())).Where(c => c.N > 0).Select(c => c.N + " " + (c.N == 1 ? c.Short[..^1] : c.Short)).ToList();
             text.Children.Add(Tiny(counts.Count > 0 ? string.Join(" · ", counts) : "No skills or tools yet"));
 
             var button = RowButton(text, id == _selectedAgent);
@@ -940,12 +963,12 @@ public sealed partial class AgentSetupPage : NexusPage
         try
         {
             if (System.IO.File.Exists(path))
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "/select,\"" + path + "\"") { UseShellExecute = false });
+                PlatformText.Reveal(path);
             else if (System.IO.Path.GetDirectoryName(path) is { } dir && System.IO.Directory.Exists(dir))
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("explorer.exe", "\"" + dir + "\"") { UseShellExecute = false });
+                PlatformText.Reveal(dir);
             else _status.Text = "That file no longer exists.";
         }
-        catch (Exception e) { _status.Text = "Could not open the folder: " + e.Message; }
+        catch (Exception e) { _status.Text = NxErrors.ForException("Nexus couldn't open that folder.", e, "agents"); }
     }
 
     private async Task RemoveMcpAsync(string agent, string name, string path)
@@ -1013,7 +1036,7 @@ public sealed partial class AgentSetupPage : NexusPage
                 body.Children.Add(new TextBlock { Text = "Changed files are backed up next to the original first (.nexus-backup-…).", FontSize = 12, Opacity = 0.6, TextWrapping = TextWrapping.Wrap });
         }
         foreach (var reason in skipped.Where(r => r.Length > 0))
-            body.Children.Add(new TextBlock { Text = "Skipped: " + reason, FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
+            body.Children.Add(new TextBlock { Text = "Skipped: " + PlainReason(reason), FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
         if (writes.Count == 0 && skipped.Count == 0)
             body.Children.Add(new TextBlock { Text = "Nothing to do.", FontSize = 12.5 });
 
@@ -1099,7 +1122,11 @@ public sealed partial class AgentSetupPage : NexusPage
 
         public RowFactory(Func<object, UIElement> build) => _build = build;
 
-        public UIElement GetElement(ElementFactoryGetArgs args)
+        public UIElement GetElement(Microsoft.UI.Xaml.ElementFactoryGetArgs args) => Realize(args.Data);
+
+        public void RecycleElement(Microsoft.UI.Xaml.ElementFactoryRecycleArgs args) => Release(args.Element);
+
+        private UIElement Realize(object data)
         {
             // A recycled host stays a (hidden) child of the repeater, as with
             // the framework's own recycle pool, and is handed back here.
@@ -1107,17 +1134,27 @@ public sealed partial class AgentSetupPage : NexusPage
             {
                 HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch, IsTabStop = false
             };
-            host.Content = _build(args.Data);
+            host.Content = _build(data);
             _live.Add(host);
             return host;
         }
 
-        public void RecycleElement(ElementFactoryRecycleArgs args)
+        private void Release(UIElement element)
         {
-            if (args.Element is not ContentControl host) return;
+            if (element is not ContentControl host) return;
             host.Content = null;
             _live.Remove(host);
             _pool.Push(host);
         }
     }
+
+#if HAS_UNO
+    // Uno's ItemsRepeater takes custom factories only through its
+    // IElementFactoryShim (Microsoft.UI.Xaml.Controls); same behaviour.
+    private sealed partial class RowFactory : Microsoft.UI.Xaml.Controls.IElementFactoryShim
+    {
+        public UIElement GetElement(Microsoft.UI.Xaml.Controls.ElementFactoryGetArgs args) => Realize(args.Data);
+        public void RecycleElement(Microsoft.UI.Xaml.Controls.ElementFactoryRecycleArgs args) => Release(args.Element);
+    }
+#endif
 }

@@ -32,7 +32,7 @@ internal sealed class FilePreviewPanel : UserControl
     private readonly ComboBox _picker = new() { HorizontalAlignment = HorizontalAlignment.Stretch, Visibility = Visibility.Collapsed, FontSize = 12 };
     private readonly ToggleButton _source = new() { Content = "Source", Padding = new Thickness(8, 3, 8, 3), FontSize = 12, Visibility = Visibility.Collapsed };
     private readonly Button _open = ActionButton("Open", "Open in the default app");
-    private readonly Button _reveal = ActionButton("Reveal", "Show in File Explorer");
+    private readonly Button _reveal = ActionButton("Reveal", "Show in " + PlatformText.FileManager);
     private readonly Button _copy = ActionButton("Copy path", "Copy the full path");
     private readonly TextBlock _status = new() { FontSize = 12.5, TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
     private readonly ScrollViewer _scroll = new() { HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
@@ -122,7 +122,7 @@ internal sealed class FilePreviewPanel : UserControl
         var roots = await KnownFolders.GetAsync();
         FileRefResolution result;
         try { result = await Task.Run(() => Resolve(reference, workspace, roots)); }
-        catch (Exception ex) { if (generation == _generation) Status("Could not look up this file: " + ex.Message); return; }
+        catch (Exception ex) { if (generation == _generation) Status(NxErrors.ForException("Nexus couldn't find this file. It may have moved.", ex, "files")); return; }
         if (generation != _generation) return;
         switch (result.Status)
         {
@@ -136,7 +136,7 @@ internal sealed class FilePreviewPanel : UserControl
                 var exists = await Task.Run(() => File.Exists(result.Candidate) || Directory.Exists(Path.GetDirectoryName(result.Candidate) ?? ""));
                 if (generation != _generation) return;
                 SetActions(open: false, reveal: exists, copy: true);
-                Status("File is outside this chat's folder, so it isn't previewed here." + (exists ? " Use Reveal to see it in File Explorer." : ""));
+                Status("File is outside this chat's folder, so it isn't previewed here." + (exists ? " Use Reveal to see it in " + PlatformText.FileManager + "." : ""));
                 break;
             case FileRefStatus.NoWorkspace:
                 SetActions(open: false, reveal: false, copy: false);
@@ -202,7 +202,7 @@ internal sealed class FilePreviewPanel : UserControl
         try { read = await Task.Run(() => Read(file)); }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            if (generation == _generation) Status("Could not read this file: " + ex.Message);
+            if (generation == _generation) Status(NxErrors.ForException("Nexus couldn't open this file. Check that it isn't locked by another app.", ex, "files"));
             return;
         }
         if (generation != _generation) return;
@@ -342,8 +342,8 @@ internal sealed class FilePreviewPanel : UserControl
         if (file.Length == 0) return;
         try
         {
-            if (File.Exists(file)) Process.Start("explorer.exe", "/select,\"" + file + "\"");
-            else if (Path.GetDirectoryName(file) is { Length: > 0 } folder && Directory.Exists(folder)) Process.Start("explorer.exe", "\"" + folder + "\"");
+            if (File.Exists(file)) PlatformText.Reveal(file);
+            else if (Path.GetDirectoryName(file) is { Length: > 0 } folder && Directory.Exists(folder)) PlatformText.Reveal(folder);
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException) { }
     }

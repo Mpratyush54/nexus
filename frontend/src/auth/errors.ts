@@ -9,6 +9,15 @@ export type FriendlyError = {
   action?: 'forgot' | 'login' | 'resend' | 'restart'
 }
 
+export const SUPPORT_EMAIL = 'support@pratyushes.dev'
+
+/** Contexts whose request sends an email with a code. */
+const MAIL_CONTEXTS: AuthContext[] = ['signup', 'resend', 'forgot', 'resume']
+
+function withRef(text: string, ref?: string) {
+  return ref ? `${text} (ref ${ref})` : text
+}
+
 /**
  * Turns what the server (internal/server/auth_routes.go, routes.go) or the
  * browser said into plain words. Unknown messages fall through as the
@@ -16,24 +25,38 @@ export type FriendlyError = {
  */
 export function friendlyAuthError(err: unknown, ctx: AuthContext): FriendlyError {
   if (!(err instanceof ApiError)) {
-    // fetch() rejects with a TypeError when the network is down or blocked.
+    // fetch() rejects with a TypeError when the network is down, and also
+    // when a proxy in front of the API answers an error page without CORS
+    // headers (a 502/524 from a slow upstream looks the same to the page).
     const offline = typeof navigator !== 'undefined' && navigator.onLine === false
+    if (offline) {
+      return { title: 'You are offline', detail: 'Reconnect to the internet, then try again.' }
+    }
+    const mail = MAIL_CONTEXTS.includes(ctx)
     return {
-      title: offline ? 'You are offline' : 'Can’t reach Nexus',
-      detail: offline
-        ? 'Reconnect to the internet, then try again.'
-        : 'Check your connection and try again. If it keeps happening, Nexus may be briefly down.',
+      title: 'No answer from Nexus',
+      detail: mail
+        ? `The request did not get a reply. The code email may still arrive, so check your inbox before trying again. If it keeps happening, contact ${SUPPORT_EMAIL}.`
+        : `The request did not get a reply. Try again in a minute. If it keeps happening, contact ${SUPPORT_EMAIL}.`,
     }
   }
   const msg = (err.message || '').toLowerCase()
   const status = err.status
+  const ref = err.requestId
 
   if (status === 429) {
     if (msg.includes('incorrect code')) {
+      if (ctx === 'verify') {
+        return {
+          title: 'Too many wrong codes',
+          detail: 'For your safety this sign-up was cancelled. Start over to get a new code.',
+          action: 'restart',
+        }
+      }
       return { title: 'Too many wrong codes', detail: 'For your safety that code is locked. Send a new code and try again.', action: 'resend' }
     }
     if (msg.includes('too many codes')) {
-      return { title: 'Too many codes requested', detail: 'Wait a minute before asking for another code. The last one still works.' }
+      return { title: 'A code was just sent', detail: 'Wait a few seconds before asking for another. The last code still works.' }
     }
     return { title: 'Too many attempts', detail: 'Wait a minute, then try again.' }
   }
@@ -74,10 +97,20 @@ export function friendlyAuthError(err: unknown, ctx: AuthContext): FriendlyError
     }
   }
   if (msg.includes('email delivery is not configured')) {
-    return { title: 'Email isn’t set up on this server', detail: 'Ask the person who runs your Nexus server to configure email.' }
+    return {
+      title: 'Email sending isn’t set up',
+      detail: withRef(`Nexus can’t email codes right now, so sign-up can’t finish. Contact ${SUPPORT_EMAIL}.`, ref),
+    }
   }
-  if (msg.includes('could not send verification email') || status === 502) {
-    return { title: 'We couldn’t send the email', detail: 'Try again in a minute.' }
+  if (msg.includes('could not send') || ((status === 502 || status === 504 || status === 524) && MAIL_CONTEXTS.includes(ctx))) {
+    return {
+      title: 'We couldn’t send the code email',
+      detail: withRef(`Our email service is slow right now. Try again in a minute, or contact ${SUPPORT_EMAIL}.`, ref),
+      action: 'resend',
+    }
+  }
+  if (status === 502 || status === 504 || status === 524) {
+    return { title: 'Nexus is not answering right now', detail: withRef(`Try again in a minute. If it keeps happening, contact ${SUPPORT_EMAIL}.`, ref) }
   }
   if (msg.includes('authentication not configured') || status === 503) {
     return { title: 'Sign-in is unavailable right now', detail: 'The server is not accepting sign-ins. Try again later.' }
@@ -87,7 +120,7 @@ export function friendlyAuthError(err: unknown, ctx: AuthContext): FriendlyError
     return { title: 'Not allowed', detail: err.message }
   }
   if (status >= 500) {
-    return { title: 'Something went wrong on our side', detail: 'Nothing was changed. Try again in a moment.' }
+    return { title: 'Something went wrong on our side', detail: withRef('Nothing was changed. Try again in a moment.', ref) }
   }
   const text = err.message ? err.message.charAt(0).toUpperCase() + err.message.slice(1) : 'Request failed'
   return { title: text.endsWith('.') ? text : `${text}.` }

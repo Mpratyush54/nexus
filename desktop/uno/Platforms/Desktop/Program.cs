@@ -1,0 +1,79 @@
+using Nexus.Platform;
+using Uno.UI.Hosting;
+
+namespace Nexus;
+
+/// <summary>
+/// Skia desktop entry point (macOS AppKit, and Win32 for the Windows
+/// preview). Velopack starts first, as in the Windows head's Program.cs:
+/// when an update was downloaded in an earlier run, it applies it here
+/// (UpdateMac swaps Nexus.app) and relaunches the new version.
+/// </summary>
+public static class Program
+{
+    [STAThread]
+    public static int Main(string[] args)
+    {
+        if (OperatingSystem.IsMacOS())
+        {
+            // Uno's .app launcher does not forward argv to Main.
+            if (args.Length == 0) args = LaunchArgs.Arguments();
+            // Flags only: links can carry sign-in codes.
+            var flags = string.Join(" ", args.Where(a => a.StartsWith("--", StringComparison.Ordinal)).Select(a => a.Split('=')[0]));
+            Console.Error.WriteLine($"[nexus-mac] launch: {args.Length} argument(s) {flags}");
+            // NEXUS_PROFILE before anything reads per-user folders.
+            Nexus.Core.ProfilePaths.ApplyToProcess();
+
+            // A downloaded update is applied on the next start, before any
+            // UI; not from a copy that can't be replaced in place (the disk
+            // image, a translocated copy), nor for the command-line forms.
+            var command = args.Any(a => a.StartsWith("--set-start-at-login=", StringComparison.OrdinalIgnoreCase));
+            Velopack.VelopackApp.Build()
+                .SetArgs(args)
+                .SetAutoApplyOnStartup(!command && MacInstall.CanSelfUpdate)
+                .Run();
+
+            // Command-line form of Settings > Start at login (same code path),
+            // used by scripts and CI: --set-start-at-login=on|off.
+            var login = args.FirstOrDefault(a => a.StartsWith("--set-start-at-login=", StringComparison.OrdinalIgnoreCase));
+            if (login is not null)
+            {
+                return SetStartAtLogin(login["--set-start-at-login=".Length..]);
+            }
+
+            // Before the host exists, so a second launch never shows a Dock icon.
+            if (!SingleInstance.ClaimOrForward(args))
+            {
+                Console.Error.WriteLine("[nexus-mac] Nexus is already running; handed this launch to it");
+                return 0;
+            }
+            MacShell.ListenForLinks();
+        }
+
+        var host = UnoPlatformHostBuilder.Create()
+            .App(() => new App())
+            .UseMacOS()
+            .UseWin32()
+            .UseX11()
+            .Build();
+        host.Run();
+        return 0;
+    }
+
+    private static int SetStartAtLogin(string value)
+    {
+        var on = value.Equals("on", StringComparison.OrdinalIgnoreCase) || value == "1" || value.Equals("true", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            LoginStart.SetEnabled(on);
+            var where = DesktopIntegration.Current is MacDesktopIntegration mac ? mac.AgentPath : DesktopIntegration.Current.GetType().Name;
+            Console.WriteLine($"start-at-login: {(LoginStart.IsEnabled() ? "on" : "off")} ({where})");
+            return LoginStart.IsEnabled() == on ? 0 : 1;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("start-at-login: " + ex.Message);
+            return 1;
+        }
+    }
+}

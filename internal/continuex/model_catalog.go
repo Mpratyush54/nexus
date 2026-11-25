@@ -95,7 +95,7 @@ func DiscoverHarnessModels(ctx context.Context, agent string, refresh bool) (Har
 	agent = normalizeAgent(agent)
 	status := DetectHarness(agent)
 	catalog := HarnessModelCatalog{Agent: agent}
-	if !status.Installed {
+	if status.Executable == "" {
 		if agent == "claude" {
 			catalog = claudeStaticModels(status.Problem)
 			catalog.normalize()
@@ -168,7 +168,7 @@ func readModelCommand(ctx context.Context, status HarnessAvailability, args []st
 		if problem := providerDiagnostic(status.Agent, diagnostic.String()); problem != nil {
 			return "", problem
 		}
-		return "", fmt.Errorf("Could not load %s models. Check its sign-in and CLI version", status.Name)
+		return "", fmt.Errorf("Could not load %s models. Check that you're signed in to %s and that it's up to date", status.Name, status.Name)
 	}
 	if out.truncated {
 		return "", errors.New("Model catalog exceeded the local discovery limit")

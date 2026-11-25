@@ -102,16 +102,18 @@ public sealed class DashboardPage : NexusPage
 
     private UIElement BuildStartComposer()
     {
-        foreach (var (name, value) in new[] { ("Claude Code", "claude"), ("Codex", "codex"), ("Cursor", "cursor"), ("OpenCode", "opencode"), ("Gemini", "gemini") })
-            _startAgent.Items.Add(new ComboBoxItem { Content = name, Tag = value });
-        _startAgent.SelectedItem = _startAgent.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == _lastStartAgent) ?? _startAgent.Items[0];
-        ToolTipService.SetToolTip(_startAgent, "Agent that runs this chat on your computer");
+        FillStartAgents();
         AutomationProperties.SetName(_startAgent, "Agent");
         // The choice shown here is what the next new chat uses (also from the sidebar's New chat).
         _startAgent.SelectionChanged += (_, _) =>
         {
+            if (_fillingAgents) return;
             if ((_startAgent.SelectedItem as ComboBoxItem)?.Tag is string chosen && chosen != _lastStartAgent) RememberAgent(chosen);
         };
+        // Only agents that can run here are listed; the list follows installs
+        // and sign-ins when the window regains focus.
+        Loaded += (_, _) => { AgentAvailabilityService.Changed += AgentsChanged; AgentAvailabilityService.Refresh(); };
+        Unloaded += (_, _) => AgentAvailabilityService.Changed -= AgentsChanged;
         AutomationProperties.SetName(_startPrompt, "Message for a new chat");
         AutomationProperties.SetName(_startSend, "Start chat");
         ToolTipService.SetToolTip(_startSend, "Start chat · Enter (Shift+Enter for a new line)");
@@ -202,6 +204,31 @@ public sealed class DashboardPage : NexusPage
             : NexusTokens.Brush("TextFillColorSecondaryBrush", Windows.UI.Color.FromArgb(255, 0xA3, 0xA3, 0xA3));
     }
 
+    private bool _fillingAgents;
+
+    private void AgentsChanged() => DispatcherQueue.TryEnqueue(FillStartAgents);
+
+    private void FillStartAgents()
+    {
+        var choices = AgentAvailabilityService.PickerChoices();
+        var shown = _startAgent.Items.OfType<ComboBoxItem>().Select(i => i.Tag as string ?? "").ToList();
+        var current = (_startAgent.SelectedItem as ComboBoxItem)?.Tag as string;
+        var pick = AgentAvailability.Choose(choices, current ?? _lastStartAgent);
+        _fillingAgents = true;
+        try
+        {
+            if (!shown.SequenceEqual(choices.Select(c => c.Value)))
+            {
+                _startAgent.Items.Clear();
+                foreach (var (value, name) in choices) _startAgent.Items.Add(new ComboBoxItem { Content = name, Tag = value });
+            }
+            _startAgent.SelectedItem = _startAgent.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == pick);
+        }
+        finally { _fillingAgents = false; }
+        _startAgent.PlaceholderText = choices.Count == 0 ? "No agent ready" : "Agent";
+        ToolTipService.SetToolTip(_startAgent, choices.Count == 0 ? AgentAvailability.NoneReady : "Agent that runs this chat on your computer");
+    }
+
     private static void RememberAgent(string agent)
     {
         _lastStartAgent = agent;
@@ -228,11 +255,12 @@ public sealed class DashboardPage : NexusPage
     // one calm line (the typed prompt is kept) and comes back by itself.
     private void ApplyOffline()
     {
+        if (_lastMetrics is { } last && _metricsOffline != ShellState.Current.Offline) RenderMetrics(last.Metrics, last.Error);
         var offline = ShellState.Current.Offline;
         _startSend.IsEnabled = !offline;
         _startPrompt.IsEnabled = !offline;
         _startAgent.IsEnabled = !offline;
-        if (offline) { StartStatus("Starting chats is paused until Nexus reconnects. What you typed is kept."); _offlineShown = true; }
+        if (offline) { StartStatus(ShellState.Current.SignedOut ? "Sign in to Nexus to start chats (Settings > Account). What you typed is kept." : "Starting chats is paused until Nexus reconnects. What you typed is kept."); _offlineShown = true; }
         else if (_offlineShown) { _offlineShown = false; StartStatus(""); }
     }
 
@@ -248,7 +276,8 @@ public sealed class DashboardPage : NexusPage
         if (prompt.Length == 0 || !_startSend.IsEnabled) return;
         var project = ShellProjectId();
         if (project.Length == 0) { StartStatus("Choose a project first."); _startProject.Focus(FocusState.Programmatic); return; }
-        var agent = (_startAgent.SelectedItem as ComboBoxItem)?.Tag as string ?? "claude";
+        var agent = (_startAgent.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
+        if (agent.Length == 0) { StartStatus(AgentAvailability.NoneReady); return; }
         RememberAgent(agent);
         _startSend.IsEnabled = false;
         StartStatus("Starting chat…");
@@ -256,6 +285,22 @@ public sealed class DashboardPage : NexusPage
         {
             var workspace = await ProjectFolders.ResolveAsync(Core, project, ShellProjectLabel());
             await UiThread.Resume(DispatcherQueue);
+            if (workspace.Length == 0)
+            {
+                // Ask for the folder before anything is created: the chat then
+                // opens and sends at once, and cancelling leaves only the
+                // typed text here, never an empty chat.
+                StartStatus($"Choose the folder for {ShellProjectLabel()} on this computer. Your message is sent right after.");
+                workspace = await CaptureSetup.PickFolderAsync();
+                await UiThread.Resume(DispatcherQueue);
+                if (workspace.Length == 0)
+                {
+                    StartStatus($"Choose the folder for {ShellProjectLabel()} to start the chat. What you typed is kept.");
+                    return;
+                }
+                ProjectFolders.Remember(project, workspace);
+                StartStatus("Starting chat…");
+            }
             var firstLine = prompt.Split('\n', 2)[0].Trim();
             var title = firstLine.Length > 72 ? firstLine[..69] + "…" : firstLine;
             var created = await Core.CallAsync(NxMethods.SessionsCreate, new
@@ -302,8 +347,13 @@ public sealed class DashboardPage : NexusPage
 
     // Memories, items to review and devices online, for one project or
     // added up over every project.
+    private (IReadOnlyList<JsonElement> Metrics, string? Error)? _lastMetrics;
+    private bool _metricsOffline;
+
     private void RenderMetrics(IReadOnlyList<JsonElement> metrics, string? error)
     {
+        _lastMetrics = (metrics, error);
+        _metricsOffline = ShellState.Current.Offline;
         _metrics.Children.Clear();
         if (metrics.Count == 0)
         {
@@ -313,15 +363,20 @@ public sealed class DashboardPage : NexusPage
         long Sum(string key) => metrics.Sum(m => long.TryParse(NxJson.Text(m, key), out var n) ? n : 0);
         long Max(string key) => metrics.Max(m => long.TryParse(NxJson.Text(m, key), out var n) ? n : 0);
         var memories = Sum("memories"); var online = Max("online");
-        var stats = new (long Value, string Label, string Tip, Brush Tone)[]
+        // Offline, "devices online" is a guess from before the outage, and
+        // this computer isn't online itself: say so instead of a count.
+        var offline = _metricsOffline;
+        var stats = new (string Value, string Label, string Tip, Brush Tone)[]
         {
-            (memories, memories == 1 ? "Memory" : "Memories", "Decisions and facts Nexus keeps for your agents", NexusPalette.Accent),
-            (Sum("proposed"), "To review", "Suggested memories waiting for your OK (Memory page)", NexusPalette.Amber),
-            (online, online == 1 ? "Device online" : "Devices online", "Computers signed in to Nexus right now", NexusTokens.Brush("TextFillColorPrimaryBrush", Microsoft.UI.Colors.White))
+            (memories.ToString("N0"), memories == 1 ? "Memory" : "Memories", "Decisions and facts Nexus keeps for your agents", NexusPalette.Accent),
+            (Sum("proposed").ToString("N0"), "To review", "Suggested memories waiting for your OK (Memory page)", NexusPalette.Amber),
+            offline
+                ? ("—", "Offline", "Nexus can't reach the server right now, so it can't tell which computers are online", NexusPalette.Muted)
+                : (online.ToString("N0"), online == 1 ? "Device online" : "Devices online", "Computers signed in to Nexus right now", NexusTokens.Brush("TextFillColorPrimaryBrush", Microsoft.UI.Colors.White))
         };
         for (var i = 0; i < stats.Length; i++)
         {
-            var value = new TextBlock { Text = stats[i].Value.ToString("N0"), Foreground = stats[i].Tone, FontSize = 26, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
+            var value = new TextBlock { Text = stats[i].Value, Foreground = stats[i].Tone, FontSize = 26, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
             var tile = Tile(value, NexusTokens.Caption(stats[i].Label));
             ToolTipService.SetToolTip(tile, stats[i].Tip);
             AutomationProperties.SetName(tile, stats[i].Label + ": " + stats[i].Value);
@@ -349,9 +404,9 @@ public sealed class DashboardPage : NexusPage
         _notice.Visibility = Visibility.Collapsed;
         if (signedOut && _signedOut.Content is null)
         {
-            var card = StateView.Empty("", "You're signed out",
-                "Your sign-in on this computer expired or was removed. Sign in again to see your chats and memories.",
-                "Sign in", () => MainWindow.Current?.ShowSettings(), primary: true);
+            var card = StateView.Empty("", "You're not signed in",
+                "Sign in to see your chats and memories on this computer.",
+                "Sign in", () => MainWindow.Current?.ShowSettings("account"), primary: true);
             _signedOut.Content = card;
         }
         _signedOut.Visibility = signedOut ? Visibility.Visible : Visibility.Collapsed;

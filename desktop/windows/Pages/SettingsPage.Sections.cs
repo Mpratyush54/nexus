@@ -19,7 +19,7 @@ public sealed partial class SettingsPage
     private UIElement BuildGeneralSection()
     {
         var theme = new ComboBox { MinWidth = 160 };
-        foreach (var (label, value) in new[] { ("Use Windows setting", ThemeService.System), ("Light", ThemeService.Light), ("Dark", ThemeService.Dark) })
+        foreach (var (label, value) in new[] { (PlatformText.SystemThemeChoice, ThemeService.System), ("Light", ThemeService.Light), ("Dark", ThemeService.Dark) })
             theme.Items.Add(new ComboBoxItem { Content = label, Tag = value });
         theme.SelectedItem = theme.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (string)i.Tag == ThemeService.Preference) ?? theme.Items[0];
         AutomationProperties.SetName(theme, "Theme");
@@ -29,7 +29,7 @@ public sealed partial class SettingsPage
                 ThemeService.Set(window, chosen);
         };
         var appearance = SettingsGroup("Appearance",
-            SettingRow(RowText("Theme", "Light, dark, or the same as Windows. High contrast always follows Windows."), theme));
+            SettingRow(RowText("Theme", PlatformText.IsMac ? "Light, dark, or the same as macOS." : "Light, dark, or the same as Windows. High contrast always follows Windows."), theme));
 
         _loginStartSync = true;
         _loginStart.IsOn = LoginStart.IsEnabled();
@@ -38,11 +38,13 @@ public sealed partial class SettingsPage
         {
             if (_loginStartSync) return;
             try { LoginStart.SetEnabled(_loginStart.IsOn); }
-            catch (Exception ex) { Notify(ex.Message, true); }
+            catch (Exception ex) { Notify(NxErrors.ForException($"{PlatformText.Os} didn't let Nexus change whether it starts when you sign in.", ex, "settings"), true); }
         };
         var startup = SettingsGroup("Startup & window",
-            SettingRow(RowText("Start Nexus when I sign in", "Starts Nexus with Windows so capture keeps running in the background."), _loginStart),
-            SettingRow(RowText("Closing the window", "Closing hides Nexus to the system tray and capture keeps running. Quit from the tray icon's menu.")));
+            SettingRow(RowText("Start Nexus when I sign in", $"Starts Nexus when you sign in to {PlatformText.Os} so capture keeps running in the background."), _loginStart),
+            SettingRow(RowText("Closing the window", PlatformText.IsMac
+                ? "Closing hides Nexus to the menu bar and capture keeps running. Quit with ⌘Q or from the Nexus icon's menu."
+                : "Closing hides Nexus to the system tray and capture keeps running. Quit from the tray icon's menu.")));
         var rerun = new Button { Content = "Run setup" };
         rerun.Click += (_, _) => MainWindow.Current?.ShowSetup();
         var setup = SettingsGroup("Setup",
@@ -64,7 +66,7 @@ public sealed partial class SettingsPage
         var updates = UpdateService.Shared;
         var staged = updates.IsAvailable ? updates.StagedVersion : "";
         _updateStatus.Text = !updates.IsAvailable
-            ? "Updates are installed by the Nexus installer. This copy was not installed with it, so it does not update itself."
+            ? updates.UnavailableText
             : staged.Length > 0 ? $"Version {staged} is ready. Restart Nexus to finish updating."
             : $"Version {updates.CurrentVersion}. Nexus checks for updates in the background and installs them when it restarts.";
         _updateButton.Visibility = updates.IsAvailable ? Visibility.Visible : Visibility.Collapsed;
@@ -193,10 +195,11 @@ public sealed partial class SettingsPage
     // ---- Agents
 
     private readonly TextBlock _mcpStatus = Muted("Checking your agents…");
+    private Button? _mcpConnect;
 
     private UIElement BuildAgentsSection()
     {
-        var install = new Button { Content = "Connect Nexus to your agents" };
+        var install = _mcpConnect = new Button { Content = "Connect Nexus to your agents" };
         if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style) install.Style = style;
         AutomationProperties.SetName(install, "Connect Nexus to your agents (opens the Agents page)");
         install.Click += (_, _) => OpenShellDestination("FooterAgents", "Agents");
@@ -245,6 +248,8 @@ public sealed partial class SettingsPage
             _mcpStatus.Text = "No supported agents were found on this computer.";
             return;
         }
+        // Nothing left to connect: no call to action for a finished job.
+        if (_mcpConnect is not null) _mcpConnect.Visibility = missing.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         var text = connected.Count > 0 ? "Connected in " + string.Join(", ", connected) + "." : "Not connected to any agent yet.";
         if (missing.Count > 0) text += " Not yet in " + string.Join(", ", missing) + ".";
         _mcpStatus.Text = text + " Each agent gets its own revocable token (see Account).";
@@ -391,7 +396,7 @@ public sealed partial class SettingsPage
         }
         await LoadUploadsAsync();
         var cloud = await Call(NxMethods.ProjectsList);
-        _connection.Text = cloud.Ok ? "Cloud API reachable. Captured sessions sync to your signed-in account." : cloud.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
+        _connection.Text = cloud.Ok ? "Connected. Your chats sync to your Nexus account." : cloud.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
     }
 
     private async Task LoadUploadsAsync()
@@ -416,6 +421,9 @@ public sealed partial class SettingsPage
         var plus = info.IndexOf('+');
         var version = plus > 0 ? info[..plus] : info;
         var commit = plus > 0 ? info[(plus + 1)..] : "";
+        // macOS: the installed release (as in Updates above and in reports),
+        // not the build's assembly version, which said "0.4.0-beta.3".
+        if (AppDiagnostics.Version is { Length: > 0 } installed) version = installed;
         return "Nexus " + version + (commit.Length > 0 ? " · commit " + commit[..Math.Min(10, commit.Length)] : "") + " · .NET " + Environment.Version;
     }
 
@@ -429,6 +437,6 @@ public sealed partial class SettingsPage
             Clipboard.SetContent(data);
             Notify(done);
         }
-        catch (Exception ex) { Notify(ex.Message, true); }
+        catch (Exception ex) { Notify(NxErrors.ForException("Nexus couldn't copy that. Try again.", ex, "settings"), true); }
     }
 }

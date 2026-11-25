@@ -72,7 +72,8 @@ export const storage = {
     if (!raw) return null
     try {
       const d = JSON.parse(raw) as SignupDraft
-      if (!d?.email || !d?.username) return null
+      if (!d?.email) return null
+      d.username = typeof d.username === 'string' && d.username !== 'pending' ? d.username : ''
       // Drafts older than 24h are dropped.
       if (Date.now() - (d.savedAt || 0) > 24 * 60 * 60 * 1000) {
         sessionStorage.removeItem(SIGNUP_DRAFT_KEY)

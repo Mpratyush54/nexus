@@ -1,7 +1,9 @@
 using System.Text.Json;
 using Microsoft.UI.Dispatching;
 using CommunityToolkit.Mvvm.Input;
+#if !HAS_UNO
 using H.NotifyIcon;
+#endif
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -68,6 +70,9 @@ public sealed partial class MainWindow : Window
         TrayQuitCommand = new AsyncRelayCommand(QuitAsync);
         TrayReportCommand = new RelayCommand(() => { RestoreWindow(); ShowReportProblem(); });
         InitializeComponent();
+        // Ctrl+K / Ctrl+P / Ctrl+N become Command+K / P / N on macOS.
+        Shortcuts.UseCommandKey(RootGrid);
+        ToolTipService.SetToolTip(NewChatButton, $"New chat ({PlatformText.Shortcut("N")})");
         // One memory line a minute in the desktop log (Core/Diagnostics/DesktopMemoryLog.cs).
         Nexus.Core.Diagnostics.UiStats.Sidebar = () => (_chatEntries.Count, _chatRows.Count);
         Nexus.Core.Diagnostics.DesktopMemoryLog.Start(DispatcherQueue);
@@ -90,17 +95,29 @@ public sealed partial class MainWindow : Window
         filterMenu.Opening += (_, _) => BuildProjectFilterMenu(filterMenu);
         ProjectFilterButton.Flyout = filterMenu;
         ChatTags.Changed += (_, _) => { _chatRows.Clear(); RenderChats(); };
-        Tray.ForceCreate();
+#if !HAS_UNO
+        Tray.ForceCreate(); // Uno/macOS: the menu bar item replaces the tray (desktop/uno strips it from the XAML)
+#endif
         Current = this;
+#if HAS_UNO
+        // macOS: menu bar status item, app menu, Dock reopen and nexus:// links.
+        Nexus.Platform.MacShell.Attach(this);
+#endif
         ResizeForDisplay(1240, 820);
         AppWindow.SetIcon(Path.Combine(AppContext.BaseDirectory, "Assets", "Nexus.ico"));
         ExtendsContentIntoTitleBar = true;
         // Mica only behind the sidebar (its tint is translucent); the reading
         // canvas stays solid so content never sits on a grey wash.
+#if HAS_UNO
+        // Uno draws no Mica, and a transparent root lets stale frames show
+        // through where nothing repaints: always use the solid canvas.
+        RootGrid.Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
+#else
         if (Microsoft.UI.Composition.SystemBackdrops.MicaController.IsSupported())
             SystemBackdrop = new Microsoft.UI.Xaml.Media.MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base };
         else
             RootGrid.Background = ThemeService.Brush("NexusCanvasBrush", NexusTokens.BrandInk);
+#endif
         ThemeService.Apply(this);
         ThemeService.Watch(this);
         // After the handler that changed the theme has returned (Settings'
@@ -118,8 +135,18 @@ public sealed partial class MainWindow : Window
         _a11yTimer = DispatcherQueue.CreateTimer();
         _a11yTimer.Interval = TimeSpan.FromMilliseconds(900);
         _a11yTimer.IsRepeating = false;
-        _a11yTimer.Tick += (_, _) => AccessibleNames.Fill(Content);
+        // Anything that re-lays out every frame (a caret, a spinner, Uno's
+        // layout passes) restarted this scan every 0.9 s for good, walking
+        // thousands of elements: most of the idle CPU on macOS. A scan that
+        // finds nothing to name waits twice as long next time (up to ~30 s);
+        // a page or chat change goes back to 0.9 s.
+        _a11yTimer.Tick += (_, _) =>
+        {
+            _a11yQuiet = AccessibleNames.Fill(Content) > 0 ? 0 : Math.Min(_a11yQuiet + 1, 5);
+            _a11yTimer.Interval = TimeSpan.FromMilliseconds(900 << _a11yQuiet);
+        };
         RootGrid.LayoutUpdated += (_, _) => { if (!_a11yTimer.IsRunning) _a11yTimer.Start(); };
+        ContentFrame.RegisterPropertyChangedCallback(ContentControl.ContentProperty, (_, _) => ResetAccessibleNameScan());
         Connectivity.Changed += () => DispatcherQueue.TryEnqueue(ApplyConnectivity);
         Connectivity.Start();
         _ = RefreshBannerAsync();
@@ -130,9 +157,22 @@ public sealed partial class MainWindow : Window
         _ = Task.Run(UpdateService.Shared.SyncDisplayVersion);
         if (!AppPrefs.SetupCompleted) ShowSetup();
         else DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ShowUpdatedToast);
+#if HAS_UNO
+        // macOS first run: "You're all set" over the setup guide, or the
+        // "Move to Applications" offer when running from the disk image.
+        Nexus.Platform.MacWelcome.MaybeShow(this);
+#endif
         // A crash in an earlier run left a report: ask once the window is up
         // (not over the setup guide, not while hidden in the tray).
         Activated += (_, _) => DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, OfferCrashReports);
+        // Agents installed or signed in while Nexus was in the background show
+        // up in the pickers when the window comes back (checked off the UI thread).
+#if HAS_UNO
+        // Uno types the activation state as CoreWindowActivationState.
+        Activated += (_, e) => { if (e.WindowActivationState != Windows.UI.Core.CoreWindowActivationState.Deactivated) AgentAvailabilityService.Refresh(); };
+#else
+        Activated += (_, e) => { if (e.WindowActivationState != WindowActivationState.Deactivated) AgentAvailabilityService.Refresh(); };
+#endif
     }
 
     private bool _crashOfferDone;
@@ -158,6 +198,15 @@ public sealed partial class MainWindow : Window
         if (Content is Grid root) root.Children.Remove(dim);
     }
     private readonly DispatcherQueueTimer _a11yTimer;
+    private int _a11yQuiet;
+
+    private void ResetAccessibleNameScan()
+    {
+        _a11yQuiet = 0;
+        _a11yTimer.Stop();
+        _a11yTimer.Interval = TimeSpan.FromMilliseconds(900);
+        _a11yTimer.Start();
+    }
 
     // A live theme switch: XAML-bound resources follow the root's theme by
     // themselves; everything built in code is rebuilt with brushes of the
@@ -259,9 +308,15 @@ public sealed partial class MainWindow : Window
     {
         if (Content is Grid root && _setup is not null) root.Children.Remove(_setup);
         _setup = null;
+        // The shell comes in with the saved theme (the macOS first run held
+        // dark through the welcome and the guide).
+        ThemeService.Release(this);
         Nav.Visibility = Visibility.Visible;
         OfflineBar.Visibility = Visibility.Visible;
         ApplyConnectivity();
+        // Setup may have signed in: re-read the engine's state so the shell
+        // never keeps a signed-out banner or an empty chat list.
+        _ = RefreshBannerAsync();
         // The shell rises in as the guide fades out.
         ContentFrame.Transitions = new Microsoft.UI.Xaml.Media.Animation.TransitionCollection
         {
@@ -288,6 +343,11 @@ public sealed partial class MainWindow : Window
     // page. Capped to 90% of the work area.
     private void ResizeForDisplay(int width, int height)
     {
+#if HAS_UNO
+        // Uno sizes windows in layout pixels already. TODO(mac): cap to the
+        // screen's visible frame like the Windows path does.
+        AppWindow.Resize(new SizeInt32 { Width = width, Height = height });
+#else
         try
         {
             var scale = GetDpiForWindow(WinRT.Interop.WindowNative.GetWindowHandle(this)) / 96.0;
@@ -301,6 +361,7 @@ public sealed partial class MainWindow : Window
         {
             AppWindow.Resize(new SizeInt32(width, height));
         }
+#endif
     }
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
@@ -324,7 +385,7 @@ public sealed partial class MainWindow : Window
             DiagLog.Error("startup", "shell initialisation failed", ex);
             if (_chatEntries.Count == 0)
             {
-                _chatStatus = "Could not finish loading the shell. Retrying next time the window is activated. " + ex.Message;
+                _chatStatus = NxErrors.ForException("Nexus couldn't finish starting. It tries again when you come back to this window.", ex, "startup");
                 RenderChats();
             }
         }
@@ -717,8 +778,11 @@ public sealed partial class MainWindow : Window
     private void NewChat_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
-        NewChatButton_Click(NewChatButton, new RoutedEventArgs());
+        StartNewChat();
     }
+
+    /// Ctrl+N, and File > New Chat in the macOS menu bar.
+    public void StartNewChat() => NewChatButton_Click(NewChatButton, new RoutedEventArgs());
 
     /// Projects in the account (id, name), for pickers outside the sidebar.
     public IReadOnlyList<(string Id, string Name)> Projects => SwitcherProjects();
@@ -763,8 +827,11 @@ public sealed partial class MainWindow : Window
     private void ProjectSwitch_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
-        _projectSwitcher.Open(Nav.IsPaneOpen ? null : ProjectCompactButton);
+        OpenProjectSwitcher();
     }
+
+    /// Ctrl+P, and File > Switch Project in the macOS menu bar.
+    public void OpenProjectSwitcher() => _projectSwitcher.Open(Nav.IsPaneOpen ? null : ProjectCompactButton);
 
     /// Turn count the chat list reported for a chat (-1 when unknown).
     public long ChatTurnCountFor(string sessionId) =>
@@ -884,7 +951,15 @@ public sealed partial class MainWindow : Window
         try
         {
             NxResponse response;
-            try { response = await FetchChatsAsync(filter, query, "", cts.Token); }
+            try
+            {
+                var fetch = FetchChatsAsync(filter, query, "", cts.Token);
+                // No answer yet after a few seconds: check the server now
+                // instead of at the next heartbeat. If it is down, the
+                // connectivity change updates this list (ApplyConnectivity).
+                if (await Task.WhenAny(fetch, Task.Delay(ChatListRetry.FirstAnswer)) != fetch) Connectivity.ProbeNow();
+                response = await fetch;
+            }
             catch (OperationCanceledException) { return; }
             await UiThread.Resume(DispatcherQueue);
             if (version != _chatLoadVersion) return;
@@ -892,13 +967,20 @@ public sealed partial class MainWindow : Window
             System.Diagnostics.Trace.WriteLine($"[perf] chats: server answer {watch.ElapsedMilliseconds} ms (ok={response.Ok})");
             if (!response.Ok)
             {
-                // Unreachable: the banner says so once; the list keeps what it has.
-                _chatStatus = NxErrors.IsUnreachable(response.RawError)
-                    ? (_chatEntries.Count > 0 ? "" : "Your chats appear here when Nexus reconnects.")
-                    : response.Error ?? "Could not load chats.";
+                // What is on screen may be only a preview (this project's
+                // chats found in the all-projects list). Say so and retry, so
+                // a slow or briefly unreachable server doesn't leave the
+                // project's earlier chats missing for good.
+                var attempt = _chatRetryKey == key ? _chatRetryAttempt : 0;
+                var wait = ChatListRetry.ShouldRetry(response.RawError) ? ChatListRetry.NextDelay(attempt) : null;
+                _chatRetryKey = key;
+                _chatRetryAttempt = attempt + 1;
+                _chatStatus = ChatListRetry.Status(filter.Length > 0, VisibleChatCount(_chatEntries), NxErrors.IsUnreachable(response.RawError), wait is not null, response.Error);
                 RenderChats();
+                if (wait is { } delay) _ = RetryChatsAsync(key, delay);
                 return;
             }
+            if (_chatRetryKey == key) { _chatRetryKey = ""; _chatRetryAttempt = 0; }
             var entries = new List<ChatPaneEntry>();
             AppendChats(response, filter, entries);
             var cursor = response.Result is { } result ? NxJson.Text(result, "next_cursor") : "";
@@ -936,6 +1018,18 @@ public sealed partial class MainWindow : Window
             }
             FinishChatLoading(version);
         }
+    }
+
+    private string _chatRetryKey = "";
+    private int _chatRetryAttempt;
+
+    private async Task RetryChatsAsync(string key, TimeSpan delay)
+    {
+        await Task.Delay(delay);
+        await UiThread.Resume(DispatcherQueue);
+        // Only while the same project and search are still on screen.
+        if (ChatCacheKey(_projectFilter, ChatQuery) != key || _chatRetryKey != key) return;
+        await LoadChatsAsync();
     }
 
     private void StoreChatCache(string key, List<ChatPaneEntry> entries, string cursor)
@@ -1086,12 +1180,13 @@ public sealed partial class MainWindow : Window
         if (_chatStatus.Length > 0)
             items.Add(new ChatListNotice(NxErrors.IsSignedOut(_chatStatus) ? NxErrors.SignedOutMessage : _chatStatus));
         else if (seen.Count == 0)
-            items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press Ctrl+N."));
+            items.Add(new ChatListNotice(_chatRefreshing ? LoadingNotice : _tagFilter.Length > 0 ? $"No loaded chats are tagged #{_tagFilter}." : ChatQuery.Length > 0 ? "No chats match your search." : "No chats yet. Start one with the pencil above, or press " + Shortcuts.Label("N") + "."));
         _chatItems = items;
         ChatList.ItemTemplate ??= new ChatRowFactory(this);
         ChatList.ItemsSource = items;
         MoreChatsButton.Visibility = _chatCursor.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         System.Diagnostics.Trace.WriteLine($"[perf] chats: render {seen.Count} rows (virtualized) {watch.Elapsed.TotalMilliseconds:0.0} ms");
+        if (_a11yQuiet > 0) ResetAccessibleNameScan();
     }
 
     private List<object> _chatItems = new();
@@ -1148,9 +1243,19 @@ public sealed partial class MainWindow : Window
     {
         private readonly MainWindow _owner;
         public ChatRowFactory(MainWindow owner) => _owner = owner;
-        public UIElement GetElement(ElementFactoryGetArgs args) => _owner.ChatListElement(args.Data);
-        public void RecycleElement(ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
+        public UIElement GetElement(Microsoft.UI.Xaml.ElementFactoryGetArgs args) => _owner.ChatListElement(args.Data);
+        public void RecycleElement(Microsoft.UI.Xaml.ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
     }
+
+#if HAS_UNO
+    // Uno's ItemsRepeater takes custom factories only through its
+    // IElementFactoryShim (Microsoft.UI.Xaml.Controls); same behaviour.
+    private sealed partial class ChatRowFactory : Microsoft.UI.Xaml.Controls.IElementFactoryShim
+    {
+        public UIElement GetElement(Microsoft.UI.Xaml.Controls.ElementFactoryGetArgs args) => _owner.ChatListElement(args.Data);
+        public void RecycleElement(Microsoft.UI.Xaml.Controls.ElementFactoryRecycleArgs args) => _owner.ChatListRecycle(args.Element, args.Parent);
+    }
+#endif
 
     private static void ApplyChatRowSelection((Button Button, TextBlock Title) row, bool selected)
     {
@@ -1466,12 +1571,12 @@ public sealed partial class MainWindow : Window
         ShowPage(PageCache.HomeHub, new HubNavigation(HomeHubPage.SegmentSessions, filter));
     }
 
-    public void ShowSettings()
+    public void ShowSettings(string? section = null)
     {
         _navLock = true;
         Nav.SelectedItem = SettingsItem;
         _navLock = false;
-        ShowPage(PageCache.Settings);
+        ShowPage(PageCache.Settings, section);
     }
 
     public void OpenTeleport(string? teleportId = null)
@@ -1561,7 +1666,15 @@ public sealed partial class MainWindow : Window
             return;
         }
         args.Cancel = true;
+#if HAS_UNO
+        // macOS: the menu bar item and the Dock bring a hidden window back, so
+        // closing hides it, as the tray does on Windows. Without the native
+        // helper (or on the Win32 preview) nothing could, so closing quits.
+        if (Nexus.Platform.MacShell.HasStatusItem) WindowExtensions.Hide(this);
+        else _ = QuitAsync();
+#else
         WindowExtensions.Hide(this);
+#endif
     }
 
     private void Nav_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
@@ -1593,11 +1706,15 @@ public sealed partial class MainWindow : Window
         await UiThread.Resume(DispatcherQueue);
         if (!response.Ok)
         {
+#if !HAS_UNO
             PauseItem.Text = response.Error ?? "Pause capture";
+#endif
             return;
         }
         State.CapturePaused = !State.CapturePaused;
+#if !HAS_UNO
         PauseItem.Text = State.CapturePaused ? "Resume capture" : "Pause capture";
+#endif
     }
 
     private async Task QuitAsync()
@@ -1619,7 +1736,9 @@ public sealed partial class MainWindow : Window
         try
         {
             _chatSearchTimer?.Stop();
+#if !HAS_UNO
             try { Tray.Dispose(); } catch (Exception ex) { DiagLog.Warn("shutdown", "tray dispose failed", ex); }
+#endif
             try { SingleInstance.Stop(); } catch (Exception ex) { DiagLog.Warn("shutdown", "single-instance stop failed", ex); }
         }
         finally { uiCleaned.TrySetResult(); }
@@ -1629,6 +1748,12 @@ public sealed partial class MainWindow : Window
     private async void Search_Invoked(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
         args.Handled = true;
+        await ShowSearchAsync();
+    }
+
+    /// Ctrl+K, and File > Search in the macOS menu bar.
+    public async Task ShowSearchAsync()
+    {
         var box = new TextBox { PlaceholderText = "Sessions, memories, files, projects" };
         var dialog = new ContentDialog
         {
@@ -1696,6 +1821,21 @@ public sealed partial class MainWindow : Window
             var model = NxJson.Text(body, "model");
             content.Children.Add(new TextBlock { Text = "Model: " + (model.Length > 0 ? model : "the agent's default"), TextWrapping = TextWrapping.Wrap });
             content.Children.Add(new ScrollViewer { MaxHeight = 240, Content = new TextBlock { Text = prompt, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true } });
+            // Images sent from the browser, already checked and saved here:
+            // shown before anything runs so the person sees what goes in.
+            if (body.TryGetProperty("images", out var images) && images.ValueKind == JsonValueKind.Array && images.GetArrayLength() > 0)
+            {
+                var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
+                foreach (var image in images.EnumerateArray().Take(4))
+                {
+                    var path = image.GetString() ?? "";
+                    if (path.Length == 0 || !System.IO.File.Exists(path)) continue;
+                    var bitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage { DecodePixelWidth = 144, UriSource = new Uri(path) };
+                    row.Children.Add(new Border { Width = 72, Height = 72, CornerRadius = new CornerRadius(8), Child = new Image { Source = bitmap, Stretch = Microsoft.UI.Xaml.Media.Stretch.UniformToFill } });
+                }
+                content.Children.Add(new TextBlock { Text = images.GetArrayLength() == 1 ? "With 1 image:" : $"With {images.GetArrayLength()} images:", Opacity = 0.75 });
+                content.Children.Add(row);
+            }
             content.Children.Add(new TextBlock { Text = "Allowing this turn lets the agent read and modify this workspace using its installed permissions. Approval applies only to this message.", TextWrapping = TextWrapping.Wrap });
             _desktopApproval = new ContentDialog { Title = "Allow browser request?", Content = content, PrimaryButtonText = "Allow this turn", CloseButtonText = "Decline", DefaultButton = ContentDialogButton.Close, XamlRoot = Content.XamlRoot };
             var answer = await _desktopApproval.ShowThemedAsync();
@@ -1748,7 +1888,9 @@ public sealed partial class MainWindow : Window
         await Task.WhenAll(netTask, uploadsTask);
         var net = netTask.Result; var uploads = uploadsTask.Result;
         await UiThread.Resume(DispatcherQueue);
-        _networkDown = net.Ok && net.Result is { } netBody && netBody.TryGetProperty("online", out var flag) && flag.ValueKind == JsonValueKind.False;
+        // The desktop always starts the engine online, so "online": false
+        // means there is no saved sign-in, not a network problem.
+        _signedOut = net.Ok && net.Result is { } netBody && netBody.TryGetProperty("online", out var flag) && flag.ValueKind == JsonValueKind.False;
         var pending = 0;
         if (uploads.Ok && uploads.Result is { } uploadBody &&
             uploadBody.TryGetProperty("pending", out var pendingEl) &&
@@ -1760,7 +1902,7 @@ public sealed partial class MainWindow : Window
         ApplyConnectivity();
     }
 
-    private bool _networkDown;
+    private bool _signedOut;
     private bool _wasOffline;
     private Button? _retryNow;
 
@@ -1770,24 +1912,39 @@ public sealed partial class MainWindow : Window
     // and clears by itself when the server answers again.
     private void ApplyConnectivity()
     {
-        var offline = _networkDown || Connectivity.Offline;
+        var signedOut = _signedOut;
+        var offline = signedOut || Connectivity.Offline;
         var pending = State.PendingUploads;
         var waiting = pending > 0 ? $" {pending} item{(pending == 1 ? "" : "s")} will upload then." : "";
         State.Banner = !offline ? ""
-            : _networkDown ? "You're offline. Your chats on this computer are still here; Nexus reconnects when you're back." + waiting
+            : signedOut ? "Sign in to see your chats and memories and keep them in sync."
             : $"Can't reach the Nexus server{(Connectivity.Host.Length > 0 ? " (" + Connectivity.Host + ")" : "")}. Nexus keeps trying and reconnects by itself." + waiting;
+        State.SignedOut = signedOut;
         State.Offline = offline;
         OfflineBar.Severity = InfoBarSeverity.Informational;
-        OfflineBar.Title = offline ? "Offline" : "";
+        OfflineBar.Title = signedOut ? "Not signed in" : offline ? "Offline" : "";
         OfflineBar.Message = State.Banner;
         if (_retryNow is null)
         {
-            _retryNow = new Button { Content = "Try now" };
-            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_retryNow, "Try to reconnect now");
-            _retryNow.Click += (_, _) => { Connectivity.ProbeNow(); _ = RefreshBannerAsync(); };
+            _retryNow = new Button();
+            _retryNow.Click += (_, _) =>
+            {
+                if (_signedOut) { ShowSettings("account"); return; }
+                Connectivity.ProbeNow();
+                _ = RefreshBannerAsync();
+            };
             OfflineBar.ActionButton = _retryNow;
         }
+        _retryNow.Content = signedOut ? "Sign in" : "Try now";
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_retryNow, signedOut ? "Sign in to Nexus" : "Try to reconnect now");
         OfflineBar.IsOpen = offline && _setup is null;
+        // A first chat request still waiting on a server that turned out to
+        // be down: show the outage now, not "Loading" until it times out.
+        if (offline && _chatLoading && VisibleChatCount(_chatEntries) == 0 && _chatStatus.Length == 0)
+        {
+            _chatStatus = signedOut ? NxErrors.SignedOutMessage : ChatListRetry.UnreachableEmpty;
+            RenderChats();
+        }
         if (_wasOffline && !offline) OnReconnected();
         _wasOffline = offline;
     }

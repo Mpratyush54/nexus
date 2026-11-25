@@ -42,6 +42,9 @@ public sealed partial class MemoryPage : NexusPage
     private readonly TextBlock _count = new() { Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
     private readonly Button _prevPage = new() { Content = "Previous", MinWidth = 96, IsEnabled = false };
     private readonly Button _nextPage = new() { Content = "Next", MinWidth = 96, IsEnabled = false };
+    // The Previous / page / Next row. Referenced directly: Parent of a
+    // control in a row that isn't on screen can be null.
+    private readonly Grid _pagerBar = new() { ColumnSpacing = 8, Visibility = Visibility.Collapsed };
     private readonly TextBlock _pageInfo = new() { VerticalAlignment = VerticalAlignment.Center, Opacity = 0.85, TextWrapping = TextWrapping.Wrap };
     private readonly Grid _split;
     private readonly Dictionary<string, JsonElement> _itemsById = new(StringComparer.Ordinal);
@@ -117,7 +120,7 @@ public sealed partial class MemoryPage : NexusPage
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_tagPicker, "Tag");
         ToolTipService.SetToolTip(_scopePicker, "Who the memories are for");
 
-        var pagerBar = new Grid { ColumnSpacing = 8 };
+        var pagerBar = _pagerBar;
         pagerBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         pagerBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         pagerBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -267,12 +270,13 @@ public sealed partial class MemoryPage : NexusPage
             _pageInfo.Text = "";
             _prevPage.IsEnabled = false;
             _nextPage.IsEnabled = false;
+            _pagerBar.Visibility = Visibility.Collapsed;
             _detailPane.Visibility = Visibility.Collapsed;
             _selectedId = null;
             _briefProjectId = "";
             _briefCard.Visibility = Visibility.Collapsed;
             _cards.Children.Add(StateView.Empty("\uE8B7", "Pick a project",
-                "Memories belong to a project. Choose one at the top of the sidebar (Ctrl+P)."));
+                "Memories belong to a project. Choose one at the top of the sidebar (" + Shortcuts.Label("P") + ")."));
             return;
         }
         if (!string.Equals(_briefProjectId, projectId, StringComparison.Ordinal))
@@ -314,6 +318,9 @@ public sealed partial class MemoryPage : NexusPage
         _categoryBar.Children.Clear();
         _count.Text = "";
         _pageInfo.Text = "";
+        // Shown again by UpdatePaginationUi when there is more than one page;
+        // an empty, offline or failed list has nothing to page.
+        _pagerBar.Visibility = Visibility.Collapsed;
         _cards.Children.Add(Skeleton.Cards(3));
 
         var fill = await FillVisiblePageAsync(projectId, apiOffset, pageCarry);
@@ -387,7 +394,7 @@ public sealed partial class MemoryPage : NexusPage
         _nextPage.IsEnabled = !_loading && hasNext;
         // One page needs no pager.
         var paged = _pageIndex > 0 || hasNext;
-        if (_prevPage.Parent is FrameworkElement pager) pager.Visibility = paged ? Visibility.Visible : Visibility.Collapsed;
+        _pagerBar.Visibility = paged ? Visibility.Visible : Visibility.Collapsed;
 
         if (_visibleCount > 0)
         {

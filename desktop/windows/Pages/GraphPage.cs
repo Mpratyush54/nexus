@@ -95,7 +95,15 @@ public sealed class GraphPage : NexusPage
     private readonly GraphScene3D _scene = new();
     private readonly ToggleButton _mode3D;
     private readonly ToggleButton _spin;
-    private bool _is3D = true;
+#if HAS_UNO
+    // Uno head (macOS): the Composition 3D scene is not verified on Skia yet
+    // (LoadedImageSurface is missing there), so the flat 2D map is the
+    // default. NEXUS_GRAPH_3D=1 turns the 3D scene back on to test it.
+    private static readonly bool Default3D = Environment.GetEnvironmentVariable("NEXUS_GRAPH_3D") == "1";
+#else
+    private static readonly bool Default3D = true;
+#endif
+    private bool _is3D = Default3D;
     private bool _layout2DReady;
     private bool _drawn2D;
     private bool _loaded;
@@ -175,7 +183,8 @@ public sealed class GraphPage : NexusPage
         BuildLegend();
         // The 2D canvas and the 3D scene share one stage; the legend, hover
         // card and empty state float over whichever is showing.
-        _host.Visibility = Visibility.Collapsed;
+        _host.Visibility = _is3D ? Visibility.Collapsed : Visibility.Visible;
+        _scene.Visibility = _is3D ? Visibility.Visible : Visibility.Collapsed;
         _stageGrid.Children.Add(_host);
         _stageGrid.Children.Add(_scene);
         _stageGrid.Children.Add(_legend);
@@ -224,7 +233,7 @@ public sealed class GraphPage : NexusPage
         };
         _search.TextChanged += Search_TextChanged;
         _search.QuerySubmitted += Search_QuerySubmitted;
-        ToolTipService.SetToolTip(_search, "Find a memory, chat or file and focus it (Ctrl+F)");
+        ToolTipService.SetToolTip(_search, "Find a memory, chat or file and focus it (" + Shortcuts.Label("F") + ")");
 
         _view = new ComboBox { MinHeight = 30, FontSize = 12, VerticalAlignment = VerticalAlignment.Center };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_view, "Graph view");
@@ -249,12 +258,12 @@ public sealed class GraphPage : NexusPage
 
         var zoomOut = ToolButton("", "Zoom out (wheel)", () => ZoomBy(1 / 1.3));
         var zoomIn = ToolButton("", "Zoom in (wheel)", () => ZoomBy(1.3));
-        var fit = ToolButton("", "Fit everything in view (Ctrl+0)", FitView);
+        var fit = ToolButton("", "Fit everything in view (" + Shortcuts.Label("0") + ")", FitView);
         var reset = ToolButton("\uE72C", "Reset view", ResetView);
         _mode3D = new ToggleButton
         {
             Content = "3D",
-            IsChecked = true,
+            IsChecked = Default3D,
             MinHeight = 30,
             MinWidth = 40,
             FontSize = 12,
@@ -267,6 +276,7 @@ public sealed class GraphPage : NexusPage
         {
             Content = new FontIcon { Glyph = "\uE7AD", FontSize = 13 },
             IsChecked = false,
+            IsEnabled = Default3D,
             MinHeight = 30,
             MinWidth = 34,
             Padding = new Thickness(8, 4, 8, 4)
@@ -495,12 +505,13 @@ public sealed class GraphPage : NexusPage
         ClearGraph();
         if (projectId.Length == 0)
         {
-            ShowEmpty("Choose a project", "Choose a project on the Timeline page to see its memory graph.");
+            ShowEmpty("Choose a project", "Choose a project in the sidebar to see its memory graph.");
             return;
         }
         if (ShellState.Current.Offline)
         {
-            ShowEmpty("Offline", "The memory graph is drawn from the cloud. Reconnect to see it.", retry: true);
+            if (ShellState.Current.SignedOut) ShowEmpty("Not signed in", "Sign in to Nexus to see your memory graph (Settings > Account).");
+            else ShowEmpty("Offline", "The memory graph comes from your Nexus account. It shows up again when Nexus reconnects.", retry: true);
             return;
         }
         _status.Text = $"Loading the graph for {ShellProjectLabel()}…";
@@ -526,7 +537,7 @@ public sealed class GraphPage : NexusPage
         {
             _status.Text = "";
             ShowEmpty("Nothing to draw yet",
-                "Memories appear here once chats are harvested. Files show up when agents edit code in a captured chat.");
+                "Memories appear here once Nexus has learned from your chats. Files show up when agents edit code in a saved chat.");
             return;
         }
         HideEmpty();
@@ -1177,7 +1188,7 @@ public sealed class GraphPage : NexusPage
         if (delta == 0) return;
         e.Handled = true;
         // Ctrl + wheel (and touchpad pinch, which arrives as Ctrl + wheel) zooms.
-        var ctrl = (e.KeyModifiers & Windows.System.VirtualKeyModifiers.Control) != 0;
+        var ctrl = (e.KeyModifiers & (Windows.System.VirtualKeyModifiers.Control | Shortcuts.Primary)) != 0;
         if (!ctrl)
         {
             // Plain wheel scrolls; Shift scrolls sideways.
@@ -1304,8 +1315,7 @@ public sealed class GraphPage : NexusPage
 
     private void Page_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        var ctrl = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Control)
-            .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
+        var ctrl = Shortcuts.IsPrimaryDown();
         if (e.Key == Windows.System.VirtualKey.Escape && _selected is not null)
         {
             e.Handled = true;
@@ -1429,11 +1439,11 @@ public sealed class GraphPage : NexusPage
         if (_is3D)
         {
             _side.Children.Add(Muted("Drag to turn the graph, right-drag or Shift+drag to pan, wheel or pinch to zoom toward the pointer. Drag an item to move it."));
-            _side.Children.Add(Muted("Click an item to fly to it, double-click to focus on its neighbours. Ctrl+F finds, Ctrl+0 fits, Esc clears."));
+            _side.Children.Add(Muted($"Click an item to fly to it, double-click to focus on its neighbours. {Shortcuts.Label("F")} finds, {Shortcuts.Label("0")} fits, Esc clears."));
         }
         else
         {
-            _side.Children.Add(Muted("Click an item for its details and links. Drag to pan, Ctrl + wheel or pinch to zoom, Ctrl+F to find, Esc to clear."));
+            _side.Children.Add(Muted($"Click an item for its details and links. Drag to pan, {(Shortcuts.UseCommand ? "⌘" : "Ctrl")} + wheel or pinch to zoom, {Shortcuts.Label("F")} to find, Esc to clear."));
             _side.Children.Add(Muted("Focus (top bar) shows just the selected item and its neighbours."));
         }
         if (_nodes.Count > 0)

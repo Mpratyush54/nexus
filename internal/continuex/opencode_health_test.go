@@ -15,8 +15,8 @@ import (
 func TestOpenCodeErrorEventsAreActionableAndSessionScoped(t *testing.T) {
 	cases := []struct{ kind, payload, want string }{
 		{"session.error", `{"sessionID":"ses_test","error":{"name":"ModelNotFoundError","data":{"message":"secret-token"}}}`, "model"},
-		{"session.error", `{"sessionID":"ses_test","error":{"name":"APIError","data":{"statusCode":401}}}`, "authentication"},
-		{"message.updated", `{"info":{"sessionID":"ses_test","error":{"name":"APIError","data":{"statusCode":429}}}}`, "rate limit"},
+		{"session.error", `{"sessionID":"ses_test","error":{"name":"APIError","data":{"statusCode":401}}}`, "signed in"},
+		{"message.updated", `{"info":{"sessionID":"ses_test","error":{"name":"APIError","data":{"statusCode":429}}}}`, "limiting requests"},
 		{"session.error", `{"sessionID":"ses_test","error":{"name":"QuotaExceeded"}}`, "quota"},
 		{"permission.asked", `{"sessionID":"ses_test"}`, "permission"},
 		{"question.asked", `{"sessionID":"ses_test"}`, "question"},

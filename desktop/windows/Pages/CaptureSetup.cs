@@ -13,6 +13,16 @@ internal static class CaptureSetup
     // "discovered_workspaces" (folders where agents have actually run).
     private static readonly Dictionary<string, string> Discovered = new(StringComparer.OrdinalIgnoreCase);
 
+    /// The system folder picker over the main window; "" when cancelled.
+    internal static async Task<string> PickFolderAsync()
+    {
+        if (MainWindow.Current is not { } window) return "";
+        var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
+        picker.FileTypeFilter.Add("*");
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(window));
+        return await picker.PickSingleFolderAsync() is { } folder ? folder.Path : "";
+    }
+
     internal static void ReadDiscovered(System.Text.Json.JsonElement capture)
     {
         if (capture.ValueKind != System.Text.Json.JsonValueKind.Object ||
@@ -53,14 +63,11 @@ internal static class CaptureSetup
             foreach (var root in suggested ?? Array.Empty<string>()) if (Directory.Exists(root)) Add(root, false);
             AutomationProperties.SetName(_choices, "Workspace folders");
             _selectAll.Click += (_, _) => { foreach (var check in _checks) check.IsChecked = true; };
-            var add = new Button { Content = "Choose another folder…" };
+            // "another" only when there is a list to add to.
+            var add = new Button { Content = _checks.Count == 0 ? "Choose a folder…" : "Choose another folder…" };
             add.Click += async (_, _) =>
             {
-                if (MainWindow.Current is not { } window) return;
-                var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
-                picker.FileTypeFilter.Add("*");
-                InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(window));
-                if (await picker.PickSingleFolderAsync() is { } folder) Add(folder.Path, true);
+                if (await PickFolderAsync() is { Length: > 0 } folder) { Add(folder, true); add.Content = "Choose another folder…"; }
             };
             if (_checks.Count == 0)
                 View.Children.Add(new TextBlock { Text = "No projects with agent sessions found yet. You can choose a folder yourself.", TextWrapping = TextWrapping.Wrap, Opacity = 0.65, FontSize = 12 });

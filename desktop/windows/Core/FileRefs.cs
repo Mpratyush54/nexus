@@ -210,7 +210,7 @@ internal static class FileRefs
         var queue = new Queue<(string Dir, int Depth)>();
         queue.Enqueue((workspace, 0));
         var visited = 0;
-        var options = new EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = false, AttributesToSkip = FileAttributes.ReparsePoint | FileAttributes.System };
+        var options = new EnumerationOptions { IgnoreInaccessible = true, RecurseSubdirectories = false, AttributesToSkip = System.IO.FileAttributes.ReparsePoint | System.IO.FileAttributes.System };
         while (queue.Count > 0 && matches.Count < MaxSearchMatches && visited++ < MaxFoldersVisited)
         {
             var (dir, depth) = queue.Dequeue();

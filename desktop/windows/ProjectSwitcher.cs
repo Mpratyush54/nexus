@@ -100,7 +100,7 @@ internal sealed class ProjectSwitcher : UserControl
         _button.Padding = new Thickness(8, 6, 10, 6);
         _button.CornerRadius = new CornerRadius(8);
         _button.BorderThickness = new Thickness(1);
-        ToolTipService.SetToolTip(_button, "Switch project (Ctrl+P)");
+        ToolTipService.SetToolTip(_button, "Switch project (" + Shortcuts.Label("P") + ")");
         _button.Click += (_, _) => Open(_button);
         Content = _button;
 
@@ -123,6 +123,15 @@ internal sealed class ProjectSwitcher : UserControl
                 first.Focus(FocusState.Keyboard);
             }
         };
+        // Esc closes the list from the search box or a row. WinUI's light
+        // dismiss does this already; Uno on macOS did not.
+        // Also when the text box already handled the key (Uno's does).
+        panel.AddHandler(UIElement.KeyDownEvent, new Microsoft.UI.Xaml.Input.KeyEventHandler((_, e) =>
+        {
+            if (e.Key != Windows.System.VirtualKey.Escape) return;
+            e.Handled = true;
+            _flyout.Hide();
+        }), true);
         _flyout.Opened += (_, _) => _search.Focus(FocusState.Programmatic);
         Refresh();
     }
@@ -147,7 +156,7 @@ internal sealed class ProjectSwitcher : UserControl
         _name.Text = name;
         // Says what the list shows. Where a new chat starts is on Home's
         // project chip, not here.
-        _hint.Text = filter.Length == 0 ? "Chats from every project" : "Switch project · Ctrl+P";
+        _hint.Text = filter.Length == 0 ? "Chats from every project" : "Switch project · " + Shortcuts.Label("P");
         var color = NexusPalette.BadgeInk(BadgeColor(filter.Length == 0 ? "*" : name));
         _badge.Background = new SolidColorBrush(Windows.UI.Color.FromArgb(46, color.R, color.G, color.B));
         _badge.Child = new TextBlock

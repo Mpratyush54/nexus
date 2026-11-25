@@ -37,30 +37,30 @@ func harnessName(agent string) string {
 }
 
 func (e *harnessFailure) Error() string {
-	prefix := harnessName(e.agent)
+	name := harnessName(e.agent)
 	var message string
 	switch e.kind {
 	case "quota":
-		message = "free usage, quota, or billing limit reached. Choose another available model/provider or check the account plan and quota reset before retrying."
+		message = name + " has used up its free usage, quota or plan limit. Pick another model, or check your " + name + " plan, then try again."
 	case "auth":
-		message = "provider authentication failed. Sign in or reconnect the provider in the native agent, then retry."
+		message = name + " isn't signed in to its AI provider. Open " + name + " on its own, sign in, then try again."
 	case "rate_limit":
-		message = "provider rate limit reached. Wait for the limit to reset or choose another available model/provider, then retry explicitly."
+		message = name + "'s AI provider is limiting requests right now. Wait a minute or pick another model, then try again."
 	case "model":
-		message = "selected or saved model is unavailable or no longer supported. Select an available model/provider before retrying."
+		message = "The model chosen for " + name + " isn't available any more. Pick another model, then try again."
 	case "context":
-		message = "model context limit was exceeded. Fork with a shorter summary or choose a larger context window."
+		message = "This chat is too long for the model " + name + " is using. Fork it with a shorter summary, or pick a model that takes longer chats."
 	case "unavailable":
-		message = "provider is unavailable or overloaded. Wait or choose another available model/provider, then retry explicitly."
+		message = name + "'s AI provider is busy or down right now. Wait a bit or pick another model, then try again."
 	case "retry":
-		message = "automatic retry exceeded the in-app limit. Nexus stopped this request; check the provider or choose another model before retrying."
+		message = name + " kept retrying, so Nexus stopped this request. Pick another model, or try again later."
 	default:
-		message = "reported an execution failure. Review the native agent session before retrying; any workspace changes already made are not undone."
+		message = name + " ran into a problem and stopped. Changes it already made to your files are kept; review them before trying again."
 	}
 	if e.wait > 0 {
-		message += " The provider scheduled its next retry in " + e.wait.Round(time.Second).String() + "."
+		message += " " + name + " said it would retry in " + e.wait.Round(time.Second).String() + "."
 	}
-	return prefix + " " + message
+	return message
 }
 
 var diagnosticCode = regexp.MustCompile(`\b(?:401|402|403|429|503)\b`)

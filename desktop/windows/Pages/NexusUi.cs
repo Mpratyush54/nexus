@@ -87,6 +87,12 @@ internal static partial class Motion
     public static void FadeIn(UIElement element, double rise = 8, int delayMs = 0, TimeSpan? duration = null)
     {
         if (!Enabled) return;
+#if HAS_UNO
+        // On Uno an opacity animation started before the element is in the
+        // tree (chat rows handed to the ItemsRepeater) stayed at its first
+        // key frame: the rows were there but invisible on macOS.
+        if (element is FrameworkElement { IsLoaded: false }) return;
+#endif
         try
         {
             var visual = ElementCompositionPreview.GetElementVisual(element);
@@ -307,9 +313,16 @@ internal static class Skeleton
         host.SizeChanged += (_, _) => Size();
         host.Unloaded += (_, _) =>
         {
+#if HAS_UNO
+            // Uno 6.7 throws on a null child visual: hide it and let the next
+            // Loaded replace it (disposing an attached visual is not safe there).
+            if (sprite is not null) sprite.IsVisible = false;
+            sprite = null; brush = null;
+#else
             ElementCompositionPreview.SetElementChildVisual(host, null);
             sprite?.Dispose(); brush?.Dispose();
             sprite = null; brush = null;
+#endif
         };
     }
 }
@@ -348,7 +361,10 @@ internal static class StateView
         // not a second red error.
         if ((detail ?? "").StartsWith(Nexus.Core.NxErrors.UnreachableMessage, StringComparison.Ordinal) || Nexus.Core.NxErrors.IsUnreachable(detail))
             return Empty("", "Waiting for the connection", "This shows up again as soon as Nexus reconnects to the server.");
-        var plain = Nexus.Core.NxErrors.IsSignedOut(detail) ? Nexus.Core.NxErrors.SignedOutMessage : Friendly(detail);
+        // Not signed in is a state with one fix, not a failure: no red error.
+        if (Nexus.Core.NxErrors.IsSignedOut(detail))
+            return Empty("", "Not signed in", Nexus.Core.NxErrors.SignedOutMessage);
+        var plain = Friendly(detail);
         var stack = new StackPanel { Spacing = 6, MaxWidth = 560, HorizontalAlignment = HorizontalAlignment.Left };
         var head = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
         head.Children.Add(new FontIcon { Glyph = "", FontSize = 16, Foreground = NexusTokens.Brush("NexusDangerBrush", Windows.UI.Color.FromArgb(255, 0xF2, 0x8B, 0x8B)), VerticalAlignment = VerticalAlignment.Center });

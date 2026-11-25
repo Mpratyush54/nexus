@@ -12,7 +12,8 @@ package main
 //	live.supported {agent}                                  -> {live}
 //	live.start     {session_id, agent, workspace_root, resume_id?, model?,
 //	                permission_mode?, context?}             -> {live_id}
-//	live.send      {live_id, text}
+//	live.send      {live_id, text, images?}  images: local files, sent in
+//	                the agent's own image format (see continuex.ImageSender)
 //	live.approve   {live_id, request_id, allow, reason?}
 //	live.interrupt {live_id}
 //	live.close     {live_id}
@@ -88,19 +89,20 @@ func normalizeLiveAgent(agent string) string {
 
 func liveCall(name string, args json.RawMessage) (any, error) {
 	var body struct {
-		LiveID         string `json:"live_id"`
-		SessionID      string `json:"session_id"`
-		ProjectID      string `json:"project_id"`
-		Agent          string `json:"agent"`
-		WorkspaceRoot  string `json:"workspace_root"`
-		ResumeID       string `json:"resume_id"`
-		Model          string `json:"model"`
-		PermissionMode string `json:"permission_mode"`
-		Context        string `json:"context"`
-		Text           string `json:"text"`
-		RequestID      string `json:"request_id"`
-		Allow          bool   `json:"allow"`
-		Reason         string `json:"reason"`
+		LiveID         string   `json:"live_id"`
+		SessionID      string   `json:"session_id"`
+		ProjectID      string   `json:"project_id"`
+		Agent          string   `json:"agent"`
+		WorkspaceRoot  string   `json:"workspace_root"`
+		ResumeID       string   `json:"resume_id"`
+		Model          string   `json:"model"`
+		PermissionMode string   `json:"permission_mode"`
+		Context        string   `json:"context"`
+		Text           string   `json:"text"`
+		Images         []string `json:"images"`
+		RequestID      string   `json:"request_id"`
+		Allow          bool     `json:"allow"`
+		Reason         string   `json:"reason"`
 	}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &body); err != nil {
@@ -116,23 +118,43 @@ func liveCall(name string, args json.RawMessage) (any, error) {
 	}
 	value, ok := liveSessions.Load(body.LiveID)
 	if !ok {
-		return nil, errors.New("this chat is no longer running; send again to restart it")
+		return nil, errors.New("This chat stopped running. Send your message again to restart it")
 	}
 	entry := value.(*liveEntry)
 	switch name {
 	case "live.send":
 		text := strings.TrimSpace(body.Text)
 		if text == "" || len(text) > 16000 {
-			return nil, errors.New("enter a message of up to 16,000 characters")
+			return nil, errors.New("Write a message of up to 16,000 characters")
+		}
+		if len(body.Images) > continuex.MaxImages {
+			return nil, errors.New("Attach up to four images at a time")
+		}
+		for _, path := range body.Images {
+			if !continuex.AllowedImage(path) {
+				return nil, errors.New("Attach a PNG, JPEG, GIF or WebP image under 20 MB")
+			}
+		}
+		var sender continuex.ImageSender
+		if len(body.Images) > 0 {
+			var ok bool
+			if sender, ok = entry.session.(continuex.ImageSender); !ok {
+				return nil, errors.New(continuex.AgentDisplayName(entry.agent) + " can't take images in Nexus yet. Remove the image, or pick another agent")
+			}
 		}
 		entry.mu.Lock()
 		if entry.prompt.Len() > 0 {
 			entry.prompt.WriteString("\n\n")
 		}
-		entry.prompt.WriteString(text)
+		// The recorded message names its images (never their bytes) so the
+		// chat shows them; the agent gets the plain text plus the images.
+		entry.prompt.WriteString(continuex.ImageTags(text, body.Images))
 		entry.mu.Unlock()
 		// Background: drivers queue the message and must not tie the turn
 		// to this call's lifetime.
+		if sender != nil {
+			return map[string]any{"sent": true}, sender.SendWithImages(context.Background(), text, body.Images)
+		}
 		return map[string]any{"sent": true}, entry.session.Send(context.Background(), text)
 	case "live.approve":
 		reason := strings.TrimSpace(body.Reason)
@@ -175,18 +197,18 @@ func nexusMemoryServer(projectID string) []continuex.MCPServer {
 func startLive(sessionID, projectID, agent, workspace, resumeID, model, permissionMode, seed string) (any, error) {
 	start, ok := liveStarters[agent]
 	if !ok {
-		return nil, errors.New(agent + " does not support live chat yet")
+		return nil, errors.New(continuex.AgentDisplayName(agent) + " can't chat inside Nexus yet")
 	}
 	workspace = strings.TrimSpace(workspace)
 	if workspace == "" {
-		return nil, errors.New("select the project folder before sending")
+		return nil, errors.New("Choose a project folder on this computer before sending")
 	}
 	abs, err := filepath.Abs(workspace)
 	if err != nil {
 		return nil, err
 	}
 	if st, err := os.Stat(abs); err != nil || !st.IsDir() {
-		return nil, errors.New("the project folder does not exist on this machine")
+		return nil, errors.New("That project folder isn't on this computer. Choose one that is, then send again")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	session, err := start(ctx, continuex.LiveOptions{
@@ -196,7 +218,7 @@ func startLive(sessionID, projectID, agent, workspace, resumeID, model, permissi
 	})
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, continuex.AsAgentError(agent, "cannot_start", err)
 	}
 	entry := &liveEntry{id: newLiveID(), sessionID: sessionID, projectID: projectID, agent: agent, workspace: abs, session: session, cancel: cancel, resumeID: strings.TrimSpace(resumeID)}
 	entry.markOwned(session.NativeID())

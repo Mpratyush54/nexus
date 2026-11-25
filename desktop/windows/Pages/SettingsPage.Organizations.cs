@@ -56,7 +56,7 @@ public sealed partial class SettingsPage
         {
             button.IsEnabled = false;
             try { await action(); }
-            catch (Exception ex) { Notify(ex.Message, true); }
+            catch (Exception ex) { Notify(NxErrors.ForException("That didn't work. Try again.", ex, "orgs"), true); }
             finally { button.IsEnabled = true; }
         };
         return button;
@@ -169,7 +169,9 @@ public sealed partial class SettingsPage
             if (userID == _orgUser) name += " (you)";
             var role = NxJson.Text(member, "role");
             StackPanel? actions = null;
-            if (manages && (owner || role != "OWNER"))
+            // Your own row has no role or remove buttons: removing yourself
+            // (or demoting the only owner) here would lock you out.
+            if (manages && userID != _orgUser && (owner || role != "OWNER"))
             {
                 var label = name;
                 var change = OrgAction("Change role", () => ChangeOrganizationRoleAsync(orgID, userID, label, role, owner));

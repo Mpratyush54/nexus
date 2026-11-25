@@ -61,9 +61,17 @@ public sealed partial class SettingsPage : NexusPage
         Content = BuildShell();
     }
 
-    // Returning to Settings shows the last section at once and refreshes it.
+    // Returning to Settings shows the last section at once and refreshes it;
+    // a section key ("account") opens that section instead.
     protected override void OnEnter(object? parameter) =>
-        ShowSection(_section.Length > 0 ? _section : s_lastSection, forceLoad: true);
+        ShowSection(parameter is string { Length: > 0 } key ? key : _section.Length > 0 ? _section : s_lastSection, forceLoad: true);
+
+    private static string FolderCount(string count) => count switch
+    {
+        "" or "0" => "No project folders allowed yet",
+        "1" => "1 project folder allowed",
+        _ => count + " project folders allowed"
+    };
 
     private async Task RefreshBrowserExecutionAsync()
     {
@@ -80,7 +88,7 @@ public sealed partial class SettingsPage : NexusPage
             ? "Not available yet: your Nexus server does not support browser-to-desktop execution." +
               (stored ? " Your choice to allow it is kept for when it does." : "")
             : response.Ok && response.Result is { } status
-            ? $"{NxJson.Text(status, "mapped_projects")} mapped projects · Approval required for every turn. {NxJson.Text(status, "problem")}"
+            ? $"{FolderCount(NxJson.Text(status, "mapped_projects"))} · You approve every message. {NxJson.Text(status, "problem")}".TrimEnd()
             : response.Error ?? "Browser execution is unavailable in this core build.";
         _browserExecution.Visibility = Visibility.Visible;
         _browserExecution.IsEnabled = response.Ok && !unsupported;
@@ -187,7 +195,7 @@ public sealed partial class SettingsPage : NexusPage
         catch (Exception ex)
         {
             Nexus.Core.Diagnostics.DiagLog.Warn("auth", "could not open the sign-in page", ex);
-            Notify("Could not open the browser: " + ex.Message, true);
+            Notify(NxErrors.ForException("Nexus couldn't open your browser. Try again.", ex, "settings"), true);
         }
     }
 
@@ -374,7 +382,7 @@ public sealed partial class SettingsPage : NexusPage
         _projects.Children.Add(NoteRow("Loading project policies…"));
         var response = await Call(NxMethods.ProjectsList);
         _projects.Children.Clear();
-        _connection.Text = response.Ok ? "Cloud API reachable. Captured sessions sync to your signed-in account." : response.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
+        _connection.Text = response.Ok ? "Connected. Your chats sync to your Nexus account." : response.Error ?? "Cloud sync is unavailable. Check your connection and sign-in.";
         if (!response.Ok) { _projects.Children.Add(NoteRow(response.Error ?? "Project policies unavailable.")); return; }
         using var limit = new SemaphoreSlim(4);
         var pending = NxJson.Items(response.Result).Select(async project =>

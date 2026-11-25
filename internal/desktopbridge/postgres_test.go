@@ -53,12 +53,14 @@ func TestPostgresDurableExecution(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer db.Close()
-	sql, e := os.ReadFile("../../migrations/050_desktop_execution.up.sql")
-	if e != nil {
-		t.Fatal(e)
-	}
-	if _, e = db.DB().Exec(ctx, string(sql)); e != nil {
-		t.Fatal(e)
+	for _, name := range []string{"050_desktop_execution.up.sql", "053_desktop_attachments.up.sql"} {
+		sql, e := os.ReadFile("../../migrations/" + name)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = db.DB().Exec(ctx, string(sql)); e != nil {
+			t.Fatal(e)
+		}
 	}
 	repo := NewPostgres(db.DB())
 	now := time.Now().UTC()

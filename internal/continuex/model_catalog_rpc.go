@@ -73,7 +73,7 @@ func (p *modelProbe) rpc(id int, method string, params any) (json.RawMessage, er
 			if problem := providerDiagnostic("codex", string(row.Error)); problem != nil {
 				return nil, problem
 			}
-			return nil, errors.New("Installed Codex did not accept model discovery; update the CLI or enter a model ID manually")
+			return nil, errors.New("Codex didn't list its models. Update Codex, or type a model name")
 		}
 		return row.Result, nil
 	}

@@ -194,7 +194,7 @@ func (h harnessSpec) configPath(r roots, scope string) (string, error) {
 	var p string
 	if scope == "project" {
 		if h.project == nil {
-			return "", fmt.Errorf("%s only reads MCP servers from its user settings", h.name)
+			return "", fmt.Errorf("%s can only be connected for all projects, not one project folder", h.name)
 		}
 		p = filepath.Join(append([]string{r.workspace}, h.project...)...)
 	} else {
@@ -232,7 +232,7 @@ func runMCP(o InstallOptions, uninstall bool) ([]HarnessReport, error) {
 	}
 	base := strings.TrimRight(strings.TrimSpace(o.ServerURL), "/")
 	if !uninstall && base == "" {
-		return nil, fmt.Errorf("sign in to Nexus first: no cloud server URL")
+		return nil, fmt.Errorf("Sign in to Nexus first, then connect your agents.")
 	}
 	out := []HarnessReport{}
 	for _, h := range harnesses {
@@ -262,29 +262,29 @@ func runMCP(o InstallOptions, uninstall bool) ([]HarnessReport, error) {
 
 func (h harnessSpec) apply(r roots, o InstallOptions, base, path string, uninstall bool, rep *HarnessReport) error {
 	if !r.safe(path) {
-		return fmt.Errorf("config path is outside the home and project folders")
+		return fmt.Errorf("Nexus only changes settings inside your user folder or project folder, so this agent was skipped")
 	}
 	old, readErr := r.read(path)
 	exists := readErr == nil
 	if readErr != nil && !os.IsNotExist(readErr) {
-		return fmt.Errorf("cannot read %s", filepath.Base(path))
+		return fmt.Errorf("Nexus couldn't open %s. Close the agent if it's running, then try again", filepath.Base(path))
 	}
 	doc := map[string]any{}
 	if exists && len(bytes.TrimSpace(old)) > 0 {
 		m, e := r.config(path)
 		if e != nil {
-			return fmt.Errorf("%s is not valid; left untouched", filepath.Base(path))
+			return fmt.Errorf("%s has a mistake in it, so Nexus left it as it was. Fix the file (or open the agent once to repair it), then try again", filepath.Base(path))
 		}
 		doc = m
 	}
 	if doc[h.key] != nil && object(doc[h.key]) == nil {
-		return fmt.Errorf("%s has an unexpected %q value; left untouched", filepath.Base(path), h.key)
+		return fmt.Errorf("%s is set up in a way Nexus doesn't recognise, so it was left as it was"+" [detail: unexpected %q value]", filepath.Base(path), h.key)
 	}
 	servers := object(doc[h.key])
 	prev, hasPrev := servers[NexusServerName]
 	prevEntry := object(prev)
 	if hasPrev && prevEntry == nil {
-		return fmt.Errorf("the existing %q entry is not an object; left untouched", NexusServerName)
+		return fmt.Errorf("This agent already has a different \"nexus\" entry, so Nexus left it as it was")
 	}
 
 	var next map[string]any // nil: remove the entry
@@ -320,15 +320,15 @@ func (h harnessSpec) apply(r roots, o InstallOptions, base, path string, uninsta
 			entry.token = PendingToken
 		} else {
 			if o.Token == nil {
-				return fmt.Errorf("no agent token available; sign in to Nexus")
+				return fmt.Errorf("Sign in to Nexus first, then connect your agents.")
 			}
 			tok, e := o.Token(h.id)
 			if e != nil {
-				return fmt.Errorf("could not create an agent token: %v", e)
+				return fmt.Errorf("Nexus couldn't create a key for this agent. Check your connection, then try again"+" [detail: %v]", e)
 			}
 			tok = strings.TrimSpace(tok)
 			if tok == "" || tok == strings.TrimSpace(o.SessionToken) {
-				return fmt.Errorf("could not create a separate agent token")
+				return fmt.Errorf("Nexus couldn't create a key for this agent. Try again in a moment")
 			}
 			entry.token = tok
 		}
@@ -356,14 +356,28 @@ func (h harnessSpec) apply(r roots, o InstallOptions, base, path string, uninsta
 			servers[NexusServerName] = next
 		}
 		doc[h.key] = servers
-		var buf bytes.Buffer
-		enc := json.NewEncoder(&buf)
-		enc.SetEscapeHTML(false)
-		enc.SetIndent("", "  ")
-		if e := enc.Encode(doc); e != nil {
-			return fmt.Errorf("cannot encode %s", filepath.Base(path))
+		// Edit only Nexus's entry in place, so the user's comments, key
+		// order and formatting stay exactly as they were.
+		hasText := exists && len(bytes.TrimSpace(old)) > 0
+		patched, perr := []byte(nil), errNotPatchable
+		if hasText {
+			patched, perr = patchServer(old, h.key, NexusServerName, next, doc)
 		}
-		data = buf.Bytes()
+		if perr == nil {
+			data = patched
+		} else {
+			if hasText && hasJSONComments(old) {
+				return fmt.Errorf("Nexus couldn't safely edit %s, so it was left as it was", filepath.Base(path))
+			}
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			enc.SetIndent("", "  ")
+			if e := enc.Encode(doc); e != nil {
+				return fmt.Errorf("cannot encode %s", filepath.Base(path))
+			}
+			data = buf.Bytes()
+		}
 	}
 
 	switch {
@@ -554,7 +568,7 @@ func ShareAll(o ShareAllOptions) (ShareAllResult, error) {
 				sort.Strings(to)
 				out, e := Share(ShareOptions{Home: o.Home, Workspace: o.Workspace, Item: i, From: a.Agent, To: to, Scope: scope, DryRun: o.DryRun})
 				if e != nil {
-					note(fmt.Sprintf("%s %s from %s: %v", i.Kind, i.Name, a.Agent, e))
+					note(agentLabel(a.Agent) + " " + strings.TrimSuffix(kindLabel(i.Kind), "s") + " " + i.Name + ": " + e.Error())
 					continue
 				}
 				res.Writes = append(res.Writes, out.Writes...)

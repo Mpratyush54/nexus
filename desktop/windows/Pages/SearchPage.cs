@@ -60,7 +60,7 @@ public sealed class SearchPage : NexusPage
         _query = _input.Text.Trim();
         if (projectId.Length == 0)
         {
-            _cards.Children.Add(Card(Line("Choose a project", title: true), Line("Choose a project on the Timeline page before searching.")));
+            _cards.Children.Add(Card(Line("Choose a project", title: true), Line("Choose a project in the sidebar before searching.")));
             return;
         }
         if (_query.Length == 0)

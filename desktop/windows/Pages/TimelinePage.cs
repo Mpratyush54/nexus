@@ -113,7 +113,7 @@ public sealed class TimelinePage : NexusPage
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             var header = PageHeader(
                 "Timeline",
-                "Browse captured chats for the project selected in the shell. Open a session to continue in its harness or pick another locally.");
+                "Chats Nexus saved for this project. Open one to continue it with the same agent or another one.");
             Grid.SetRow(header, row++);
             root.Children.Add(header);
         }
@@ -426,10 +426,10 @@ public sealed class TimelinePage : NexusPage
             var agentFiltered = AgentFilterValue().Length > 0;
             var subagentsHidden = _includeSubagents.IsChecked != true && _loadedCount > 0;
             var emptyBody = agentFiltered
-                ? "No sessions match this agent filter. Clear the filter or pick another harness."
+                ? "No chats from this agent in this project. Clear the filter or pick another agent."
                 : subagentsHidden
                     ? "Sessions exist for this project but are all sub-agent runs. Enable Include sub-agents to list them."
-                    : "Captured harness sessions appear here after harvest. Confirm capture is on in Settings and resume from the tray if paused.";
+                    : $"Chats appear here once Nexus saves them. Check that chat saving is on in Settings and not paused in {PlatformText.TrayPlace}.";
             _list.Items.Add(EmptyStateCard(_pageIndex == 0 ? "No sessions yet" : "No sessions on this page", emptyBody));
         }
         if (reset)

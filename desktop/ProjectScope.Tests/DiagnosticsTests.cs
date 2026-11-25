@@ -216,3 +216,17 @@ public class MarkdownTextTests
         Assert.True(MarkdownText.LooksLikeMarkdown("# Project brief\n- x"));
     }
 }
+
+public class HeldReportOfferTests
+{
+    [Fact]
+    public void OnlyReportsFromEarlierRunsAreOffered()
+    {
+        var started = new DateTimeOffset(2026, 11, 25, 12, 0, 0, TimeSpan.Zero);
+        var earlier = new ProblemReport { Kind = ProblemReport.KindCrash, Timestamp = started.AddMinutes(-30) };
+        var thisRun = new ProblemReport { Kind = ProblemReport.KindError, Timestamp = started.AddMinutes(5) };
+        var undated = new ProblemReport { Kind = ProblemReport.KindError, Timestamp = null };
+        var offered = ProblemReport.FromEarlierRuns([earlier, thisRun, undated], started);
+        Assert.Equal([earlier.ReportId, undated.ReportId], offered.Select(r => r.ReportId));
+    }
+}

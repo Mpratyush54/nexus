@@ -46,4 +46,23 @@ public class ModelPickerCatalogTests
         Assert.True(cached.SameAs(fresh));
         Assert.False(cached.SameAs(changed));
     }
+
+    [Theory]
+    [InlineData("", "")]
+    [InlineData("This harness has no supported account-wide model-list adapter here. Configured choices are shown when present; use its default or enter a model ID. Access and quota are not verified.", "")]
+    [InlineData("Cached model catalog; refresh to check the CLI catalog. Entries do not guarantee account access or available quota.", "")]
+    [InlineData("Live Codex discovery failed; showing its local cached catalog. Availability and quota are not verified. exit status 1", "Couldn't refresh Kimi's models, so the last list is shown.")]
+    [InlineData("Couldn't refresh models: OpenCode model discovery timed out. Showing the last loaded list.", "Couldn't refresh Kimi's models, so the last list is shown.")]
+    [InlineData("Couldn't load models: Claude Code is not installed, using defaults. This is a built-in list of Claude Code aliases, not your account's catalog.", "Couldn't get Kimi's models, so its usual ones are shown.")]
+    [InlineData("Pick a smaller model for long chats.", "Pick a smaller model for long chats.")]
+    public void WarningsBecomePlainNotices(string warning, string expected)
+        => Assert.Equal(expected, ModelPickerCatalog.Notice(warning, "Kimi"));
+
+    [Fact]
+    public void JargonWarningsNeverReachTheComposer()
+    {
+        var notice = ModelPickerCatalog.Notice("Invalid model catalog; use the default or enter a model ID.", "Kimi");
+        Assert.DoesNotContain("catalog", notice);
+        Assert.Contains("Kimi", notice);
+    }
 }

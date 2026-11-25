@@ -20,7 +20,28 @@ internal static class ThemeService
 
     private static readonly Windows.UI.ViewManagement.UISettings s_ui = new();
 
-    public static string Preference => Normalize(AppPrefs.Data.Theme);
+    public static string Preference => s_hold ?? Normalize(AppPrefs.Data.Theme);
+
+    // A theme held for one stretch of the session without saving it: the
+    // macOS first run keeps the setup guide on the welcome's dark canvas
+    // (Platform/MacWelcome.cs) and lets go when setup ends.
+    private static string? s_hold;
+
+    /// <summary>Holds <paramref name="theme"/> until <see cref="Release"/>, only while the preference is "system".</summary>
+    public static void Hold(Window window, string theme)
+    {
+        if (Normalize(AppPrefs.Data.Theme) != System) return;
+        s_hold = Normalize(theme);
+        Apply(window);
+    }
+
+    /// <summary>Back to the saved preference (no-op without a hold).</summary>
+    public static void Release(Window window)
+    {
+        if (s_hold is null) return;
+        s_hold = null;
+        Apply(window);
+    }
 
     public static string Normalize(string? value) => (value ?? "").Trim().ToLowerInvariant() switch
     {
