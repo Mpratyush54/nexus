@@ -678,7 +678,7 @@ public sealed class SetupWizardPage : NexusPage
             _agentReport.Children.Add(Para(response.Error ?? "Could not connect your agents.", 0.85, NexusTokens.FontCaption));
             return;
         }
-        var changes = AgentSetupPage.RenderInstallReport(_agentReport, result, preview: !_agentPreviewed);
+        var changes = AgentSetupPage.RenderInstallReport(_agentReport, result, preview: !_agentPreviewed, foldFiles: true);
         if (!_agentPreviewed && changes > 0)
         {
             _agentPreviewed = true;
@@ -972,6 +972,10 @@ public sealed class SetupWizardPage : NexusPage
 
     private static Border ToggleRow(string label, string description, ToggleSwitch toggle)
     {
+        // The Done summary is rebuilt each time it is shown: the same toggle
+        // must leave its old row first, or WinUI throws and the step stops
+        // half drawn.
+        if (toggle.Parent is Panel previous) previous.Children.Remove(toggle);
         AutomationProperties.SetName(toggle, label);
         AutomationProperties.SetHelpText(toggle, description);
         var grid = new Grid { ColumnSpacing = 24 };

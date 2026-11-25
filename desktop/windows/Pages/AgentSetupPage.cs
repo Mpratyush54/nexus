@@ -1034,7 +1034,7 @@ public sealed partial class AgentSetupPage : NexusPage
                 body.Children.Add(new TextBlock { Text = "Changed files are backed up next to the original first (.nexus-backup-…).", FontSize = 12, Opacity = 0.6, TextWrapping = TextWrapping.Wrap });
         }
         foreach (var reason in skipped.Where(r => r.Length > 0))
-            body.Children.Add(new TextBlock { Text = "Skipped: " + reason, FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
+            body.Children.Add(new TextBlock { Text = "Skipped: " + PlainReason(reason), FontSize = 12, Opacity = 0.7, TextWrapping = TextWrapping.Wrap });
         if (writes.Count == 0 && skipped.Count == 0)
             body.Children.Add(new TextBlock { Text = "Nothing to do.", FontSize = 12.5 });
 

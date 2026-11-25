@@ -170,7 +170,7 @@ public sealed partial class AgentSetupPage
             {
                 var action = NxJson.Text(h, "action");
                 if (action == "removed") removed++;
-                else if (action == "error") problems.Add(NxJson.Text(h, "name") + ": " + NxJson.Text(h, "reason"));
+                else if (action == "error") problems.Add(NxJson.Text(h, "name") + ": " + PlainReason(NxJson.Text(h, "reason")));
             }
         }
         _status.Text = (removed > 0 ? $"Removed Nexus from {removed} agent config{(removed == 1 ? "" : "s")}." : "Nothing removed.") +
@@ -178,17 +178,38 @@ public sealed partial class AgentSetupPage
         await LoadAsync();
     }
 
-    /// <summary>Renders a per-harness report; returns how many things change.</summary>
-    internal static int RenderInstallReport(Panel into, JsonElement result, bool preview, bool onlyChanges = false)
+    /// <summary>
+    /// A setup reason from the engine as a sentence people can act on. Its
+    /// " [detail: …]" part (file paths, parser errors) goes to the log only.
+    /// </summary>
+    internal static string PlainReason(string reason)
+    {
+        reason = reason.Trim();
+        if (reason.Length == 0) return "";
+        var (sentence, detail) = NxErrors.SplitDetail(reason);
+        var (message, reference) = NxErrors.Friendly(sentence.Length > 0 ? sentence : reason);
+        if (detail.Length > 0 || reference.Length > 0)
+            Nexus.Core.Diagnostics.DiagLog.Warn("agents", "setup: " + reason + (reference.Length > 0 ? " (ref " + reference + ")" : ""));
+        return message.Length > 0 ? message : sentence;
+    }
+
+    /// <summary>
+    /// Renders a per-harness report; returns how many things change.
+    /// foldFiles keeps the changed settings files behind one expander, for
+    /// people who only need to know which agents change (the setup guide).
+    /// </summary>
+    internal static int RenderInstallReport(Panel into, JsonElement result, bool preview, bool onlyChanges = false, bool foldFiles = false)
     {
         var changes = 0;
         var notInstalled = new List<string>();
+        var folded = new List<string>();
         foreach (var h in ArrayOf(result, "harnesses"))
         {
             var name = NxJson.Text(h, "name");
             var action = NxJson.Text(h, "action");
-            var reason = NxJson.Text(h, "reason");
-            if (action == "skipped" && reason == "not installed") { notInstalled.Add(name); continue; }
+            var rawReason = NxJson.Text(h, "reason");
+            if (action == "skipped" && rawReason == "not installed") { notInstalled.Add(name); continue; }
+            var reason = PlainReason(rawReason);
             var changed = action is "added" or "updated" or "removed";
             if (changed) changes++;
             if (onlyChanges && !changed) continue;
@@ -206,8 +227,22 @@ public sealed partial class AgentSetupPage
             row.Children.Add(new TextBlock { Text = name + " — " + label, FontSize = 12.5, TextWrapping = TextWrapping.Wrap, Opacity = action is "unchanged" or "skipped" ? 0.6 : 1 });
             if (changed)
                 foreach (var file in ArrayOf(h, "changed_files"))
-                    row.Children.Add(Mono(file.GetString() ?? ""));
+                {
+                    if (foldFiles) folded.Add(file.GetString() ?? "");
+                    else row.Children.Add(Mono(file.GetString() ?? ""));
+                }
             into.Children.Add(row);
+        }
+        if (folded.Count > 0)
+        {
+            var files = new StackPanel { Spacing = 2 };
+            foreach (var file in folded) files.Children.Add(Mono(file));
+            into.Children.Add(new Expander
+            {
+                Header = preview ? "Settings files Nexus will change" : "Settings files Nexus changed",
+                Content = files, HorizontalAlignment = HorizontalAlignment.Stretch, HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                Margin = new Thickness(0, 4, 0, 0)
+            });
         }
         if (notInstalled.Count > 0 && !onlyChanges)
             into.Children.Add(Small("Not installed: " + string.Join(", ", notInstalled), 0.5));
@@ -224,7 +259,7 @@ public sealed partial class AgentSetupPage
             if (writes.Count > 12) into.Children.Add(Small($"…and {writes.Count - 12} more", 0.6));
             var skipped = ArrayOf(share, "skipped").Select(s => s.GetString() ?? "").Where(s => s.Length > 0).ToList();
             if (skipped.Count > 0) into.Children.Add(Small($"{skipped.Count} item{(skipped.Count == 1 ? "" : "s")} left alone (already different or not convertible).", 0.6));
-            if (NxJson.Text(share, "error") is { Length: > 0 } shareError) into.Children.Add(Small("Problem: " + shareError, 0.85));
+            if (NxJson.Text(share, "error") is { Length: > 0 } shareError) into.Children.Add(Small("Problem: " + PlainReason(shareError), 0.85));
         }
 
         if (result.TryGetProperty("memory_files", out var memory) && memory.ValueKind == JsonValueKind.Object)
