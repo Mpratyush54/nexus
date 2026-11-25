@@ -99,6 +99,14 @@ func mirrorStream(ctx context.Context, client *http.Client, method, endpoint, to
 	return mirrorDo(client, req, token, out)
 }
 
+// mirrorStatusError is a non-2xx response from the cloud.
+type mirrorStatusError struct {
+	status int
+	msg    string
+}
+
+func (e *mirrorStatusError) Error() string { return e.msg }
+
 func mirrorDo(client *http.Client, req *http.Request, token string, out any) (int, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -112,7 +120,8 @@ func mirrorDo(client *http.Client, req *http.Request, token string, out any) (in
 		return resp.StatusCode, err
 	}
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return resp.StatusCode, fmt.Errorf("daemon: cloud session mirror: %s %s", resp.Status, strings.TrimSpace(string(data)))
+		return resp.StatusCode, &mirrorStatusError{status: resp.StatusCode,
+			msg: fmt.Sprintf("daemon: cloud session mirror: %s %s", resp.Status, strings.TrimSpace(string(data)))}
 	}
 	if out != nil && len(data) > 0 {
 		if err := json.Unmarshal(data, out); err != nil {
@@ -384,15 +393,7 @@ func (s *HTTPMemoryStore) PublishAgentSessionVersion(ctx context.Context, snap *
 	if err != nil {
 		return err
 	}
-	length, open, err := streamingJSONBody(map[string]any{
-		"project_id": projectID,
-		"kind":       "plain",
-		"purpose":    "transcript",
-	}, []b64Field{gunzipField("body_b64", snap.TranscriptPayload, size)})
-	if err != nil {
-		return err
-	}
-	if _, err := mirrorStream(ctx, client, http.MethodPut, base+"/v1/blobs/"+hash, token, length, open, nil); err != nil {
+	if err := s.uploadTranscriptBlob(ctx, client, base, token, projectID, snap.TranscriptPayload, hash, size); err != nil {
 		return err
 	}
 	var version struct {

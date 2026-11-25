@@ -360,8 +360,11 @@ type countingCloud struct {
 func (c *countingCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	n, _ := io.Copy(io.Discard, r.Body)
 	key := r.Method + " " + r.URL.Path
-	if strings.HasPrefix(r.URL.Path, "/v1/blobs/") {
+	if parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/"); len(parts) >= 3 && parts[1] == "blobs" && len(parts[2]) == 64 {
 		key = r.Method + " /v1/blobs"
+		if len(parts) == 4 {
+			key += "/" + parts[3]
+		}
 	}
 	if strings.HasPrefix(r.URL.Path, "/sessions/") && strings.HasSuffix(r.URL.Path, "/snapshot") {
 		key = r.Method + " /sessions/snapshot"
@@ -436,7 +439,7 @@ func TestSnapshotOfLargeTranscriptIsStreamed(t *testing.T) {
 		t.Fatalf("uploading a %d MB snapshot allocated %.1f MB, want < %d MB", len(raw)>>20, float64(upload)/(1<<20), limit>>20)
 	}
 	cloud.mu.Lock()
-	sent := cloud.bytes["PUT /v1/blobs"]
+	sent := cloud.bytes["PUT /v1/blobs"] + cloud.bytes["POST /v1/blobs/chunks"]
 	cloud.mu.Unlock()
 	if want := int64(base64.StdEncoding.EncodedLen(len(raw))); sent < want {
 		t.Fatalf("blob body %d bytes, want at least the base64 transcript (%d)", sent, want)

@@ -30,6 +30,9 @@ type HTTPMemoryStore struct {
 	// mirrored caches what each cloud session was last upserted with, so a
 	// session is upserted only when its title or parent link changes.
 	mirrored map[string]mirroredSession
+	// chunksDone counts the acknowledged pieces of chunked transcript
+	// uploads in progress, so a failed upload resumes (blob_upload.go).
+	chunksDone map[string]int
 }
 
 // NewHTTPMemoryStore builds a portal-backed store. projectID must be the

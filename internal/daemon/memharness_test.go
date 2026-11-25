@@ -73,14 +73,39 @@ func (f *fakeCloud) route(path string) string {
 }
 
 func (f *fakeCloud) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	n, _ := io.Copy(io.Discard, r.Body)
 	route := r.Method + " " + f.route(r.URL.Path)
+	// The real server's request caps (internal/server): 2 MB for JSON
+	// bodies (decodeJSON), 32 MB on the blob chunk routes. Bodies are
+	// counted, not decoded, so the fake adds no heap to the measurement.
+	limit := int64(2 << 20)
+	if strings.HasSuffix(r.URL.Path, "/chunks") || strings.HasSuffix(r.URL.Path, "/assemble") {
+		limit = 32 << 20
+	}
+	if strings.HasPrefix(r.URL.Path, "/memory/") || strings.HasPrefix(r.URL.Path, "/sessions/") {
+		limit = 1 << 62 // legacy routes, not part of this check
+	}
+	n, _ := io.Copy(io.Discard, io.LimitReader(r.Body, limit+1))
+	_, _ = io.Copy(io.Discard, r.Body)
 	f.mu.Lock()
 	f.requests[route]++
 	f.bytes[route] += n
+	tooBig := n > limit
+	if tooBig {
+		f.requests["REJECTED(too large) "+route]++
+	}
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
+	if tooBig {
+		http.Error(w, `{"error":"invalid JSON body: http: request body too large"}`, http.StatusBadRequest)
+		return
+	}
 	switch {
+	case r.URL.Path == "/v1/blobs/missing":
+		// Report every blob missing so each publish uploads (the body was
+		// drained above, so echo nothing: an absent list means "upload").
+		io.WriteString(w, `{}`)
+	case strings.HasSuffix(r.URL.Path, "/assemble"):
+		io.WriteString(w, `{"chunk_count":1}`)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/agent-sessions":
 		id := f.sessions.Add(1)
 		fmt.Fprintf(w, `{"id":"00000000-0000-4000-8000-%012d"}`, id%1000)
@@ -198,6 +223,14 @@ func TestMemHarness(t *testing.T) {
 
 	cloud := &fakeCloud{requests: map[string]int{}, bytes: map[string]int64{}}
 	srv := httptest.NewServer(cloud)
+	if os.Getenv("MEMH_NOKEEPALIVE") != "" {
+		// Count goroutines without idle keep-alive connections.
+		srv.Config.SetKeepAlivesEnabled(false)
+		if tr, ok := http.DefaultTransport.(*http.Transport); ok {
+			tr.DisableKeepAlives = true
+			defer func() { tr.DisableKeepAlives = false }()
+		}
+	}
 	defer srv.Close()
 
 	baseGoroutines := runtime.NumGoroutine()
