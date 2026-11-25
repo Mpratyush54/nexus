@@ -9,8 +9,9 @@
 #   - --set-start-at-login=on|off (the Settings toggle's code path) writes and
 #     removes the LaunchAgent plist, in the profile and in ~/Library
 #   - a system quit (Apple event) runs the app's own shutdown
-# Checks that need Accessibility (System Events) are reported, not required:
-# the app and status menus, close-hides, reopen, Cmd+K and copy/paste.
+# Checks that need Accessibility (System Events) are required when it is
+# available and skipped with a note otherwise: the app and status menus,
+# close-hides, Open Nexus, Cmd+K and copy/paste in a text box.
 #
 # Needs: APP (path of Nexus.app), RUNNER_TEMP, dist/winlist.
 set -uo pipefail
@@ -103,7 +104,7 @@ if echo "$BAR" | grep -q "Edit" && echo "$BAR" | grep -q "Window"; then
   if echo "$STATUS_MENU" | grep -q "Open Nexus" && echo "$STATUS_MENU" | grep -q "Pause capture" && echo "$STATUS_MENU" | grep -q "Quit Nexus"; then
     pass "status item menu: $STATUS_MENU"
   else
-    note "status item menu not as expected: $STATUS_MENU"
+    fail "status item menu not as expected: $STATUS_MENU"
   fi
   # Screenshots with the menus open.
   (se 'click menu bar item 1 of menu bar 2' > /dev/null &)
@@ -123,14 +124,14 @@ fi
 # ---- 3. Close hides, menu bar item and Dock reopen ---------------------------
 if [ $AX = 1 ]; then
   se 'click menu item "Close Window" of menu 1 of menu bar item 3 of menu bar 1' > /dev/null
-  if wait_for 6 no_window && alive; then pass "Close Window hides the window; the app keeps running"; else note "window still visible after Close Window"; fi
+  if wait_for 6 no_window && alive; then pass "Close Window hides the window; the app keeps running"; else fail "window still visible after Close Window"; fi
   sleep 2
   if alive && [ -n "$(windows_at 25)" ]; then pass "status item still there with the window hidden"; else fail "status item gone after hiding (alive=$(alive && echo 1 || echo 0))"; fi
   screencapture -x shots/20-after-close.png
   (se 'click menu bar item 1 of menu bar 2' > /dev/null &)
   sleep 1.5
   se 'click menu item "Open Nexus" of menu 1 of menu bar item 1 of menu bar 2' > /dev/null
-  if wait_for 8 has_window; then pass "Open Nexus (menu bar item) shows the window again"; else note "Open Nexus did not show the window"; fi
+  if wait_for 8 has_window; then pass "Open Nexus (menu bar item) shows the window again"; else fail "Open Nexus did not show the window"; fi
   se 'click menu item "Close Window" of menu 1 of menu bar item 3 of menu bar 1' > /dev/null
   wait_for 6 no_window || true
 fi
@@ -201,7 +202,7 @@ if [ $AX = 1 ]; then
   keys 'keystroke "a" using command down' > /dev/null
   keys 'keystroke "c" using command down' > /dev/null
   sleep 1
-  if [ "$(pbpaste)" = "nexus copy check" ]; then pass "Cmd+K opened Search; Cmd+A, Cmd+C copied from its text box"; else note "Cmd+C from the text box gave '$(pbpaste)'"; fi
+  if [ "$(pbpaste)" = "nexus copy check" ]; then pass "Cmd+K opened Search; Cmd+A, Cmd+C copied from its text box"; else fail "Cmd+C from the text box gave '$(pbpaste)'"; fi
   printf 'pasted by CI' | pbcopy
   se 'click menu item "Select All" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
   se 'click menu item "Paste" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
@@ -210,7 +211,7 @@ if [ $AX = 1 ]; then
   se 'click menu item "Select All" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
   se 'click menu item "Copy" of menu 1 of menu bar item 4 of menu bar 1' > /dev/null
   sleep 1
-  if [ "$(pbpaste)" = "pasted by CI" ]; then pass "Edit menu Select All, Paste and Copy work in the text box"; else note "Edit menu paste/copy round trip gave '$(pbpaste)'"; fi
+  if [ "$(pbpaste)" = "pasted by CI" ]; then pass "Edit menu Select All, Paste and Copy work in the text box"; else fail "Edit menu paste/copy round trip gave '$(pbpaste)'"; fi
   screencapture -x shots/31-after-paste.png
   sample_app after-shortcuts
   keys 'key code 53' > /dev/null
