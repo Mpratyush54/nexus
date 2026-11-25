@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -100,10 +99,7 @@ func TestSessionACLOwnerGrantAndAuditChain(t *testing.T) {
 }
 
 func TestSessionACLPostgres(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testPostgresDSN(t)
 	ctx := t.Context()
 	s, err := NewPostgresStore(ctx, dsn)
 	if err != nil {
@@ -126,7 +122,18 @@ func TestSessionACLPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.pool.QueryRow(ctx, `SELECT id::text FROM projects LIMIT 1`).Scan(&projectID); err != nil {
+	// CI's shared Postgres may have users but no project yet: seed one.
+	err = s.pool.QueryRow(ctx, `SELECT id::text FROM projects LIMIT 1`).Scan(&projectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		if err := s.pool.QueryRow(ctx, `INSERT INTO projects (folder_name, display_name, created_by)
+			VALUES ('session-acl-pg-test', 'Session ACL PG', $1::uuid) RETURNING id::text`, ownerID).Scan(&projectID); err != nil {
+			t.Fatal(err)
+		}
+		seeded := projectID
+		t.Cleanup(func() {
+			_, _ = s.pool.Exec(context.Background(), `DELETE FROM projects WHERE id = $1::uuid`, seeded)
+		})
+	} else if err != nil {
 		t.Fatal(err)
 	}
 

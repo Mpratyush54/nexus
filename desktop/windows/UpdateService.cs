@@ -1,24 +1,116 @@
+using Velopack;
+
 namespace Nexus;
 
 /// <summary>
-/// Velopack auto-update placeholder (product-spec D5 / P2).
-/// TODO: reference Velopack NuGet, call UpdateManager on launch / quit.
-/// No-ops until the packing pipeline ships (<c>vpk pack</c> on Windows).
+/// Velopack auto-update. Installed copies check the release feed in the
+/// background and download new versions (as deltas when possible); the
+/// update is applied the next time Nexus starts, or at once from Settings.
+/// Development builds and unzipped copies without Update.exe are not
+/// "installed" and never check.
 /// </summary>
 public sealed class UpdateService
 {
-    public bool IsAvailable => false;
+    // Velopack feed (releases.{channel}.json + packages) published by
+    // .github/workflows/release-desktop.yml. NEXUS_UPDATE_URL overrides it
+    // for testing a feed.
+    private const string DefaultFeed = "https://central-memory-releases.s3.ap-south-1.amazonaws.com/desktop/velopack";
 
-    public Task CheckForUpdatesAsync(CancellationToken ct = default)
+    public static UpdateService Shared { get; } = new();
+
+    private readonly UpdateManager? _manager;
+    private UpdateInfo? _staged;
+
+    private UpdateService()
     {
-        _ = ct;
-        return Task.CompletedTask;
+        try
+        {
+            var feed = Environment.GetEnvironmentVariable("NEXUS_UPDATE_URL");
+            _manager = new UpdateManager(string.IsNullOrWhiteSpace(feed) ? DefaultFeed : feed.Trim());
+        }
+        catch (Exception ex)
+        {
+            Nexus.Core.Diagnostics.DiagLog.Warn("update", "update manager unavailable", ex);
+            _manager = null;
+        }
     }
 
-    public Task ApplyUpdatesAndRestartAsync(CancellationToken ct = default)
+    public bool IsAvailable => _manager?.IsInstalled == true;
+
+    public string CurrentVersion => _manager?.CurrentVersion?.ToString() ?? "";
+
+    /// <summary>The version downloaded and waiting for a restart, or "".</summary>
+    public string StagedVersion => _staged?.TargetFullRelease.Version.ToString()
+        ?? _manager?.UpdatePendingRestart?.Version.ToString() ?? "";
+
+    /// <summary>Checks the feed and downloads a newer version. Returns its version, or "" when up to date.</summary>
+    public async Task<string> CheckForUpdatesAsync(CancellationToken ct = default)
     {
-        _ = ct;
-        // Velopack applies into a new version directory on quit/relaunch.
-        return Task.CompletedTask;
+        if (!IsAvailable || _manager is null) return "";
+        var info = await _manager.CheckForUpdatesAsync().ConfigureAwait(false);
+        if (info is null) return "";
+        await _manager.DownloadUpdatesAsync(info, null, ct).ConfigureAwait(false);
+        _staged = info;
+        return info.TargetFullRelease.Version.ToString();
+    }
+
+    /// <summary>
+    /// Background check a little after start, then every few hours. Failures
+    /// (offline, feed down or not published) are never shown: they are logged
+    /// once per kind of failure, not on every attempt, so a missing feed
+    /// does not fill the log either.
+    /// </summary>
+    public void CheckInBackground(TimeSpan delay)
+    {
+        if (!IsAvailable) return;
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(delay).ConfigureAwait(false);
+            var lastFailure = "";
+            while (true)
+            {
+                try
+                {
+                    await CheckForUpdatesAsync().ConfigureAwait(false);
+                    lastFailure = "";
+                }
+                catch (Exception ex)
+                {
+                    if (ex.Message != lastFailure) Nexus.Core.Diagnostics.DiagLog.Warn("update", "background update check failed", ex);
+                    lastFailure = ex.Message;
+                }
+                if (StagedVersion.Length > 0) return;
+                await Task.Delay(TimeSpan.FromHours(6)).ConfigureAwait(false);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Velopack writes Apps &amp; features' DisplayVersion without the prerelease
+    /// label (0.4.0 for 0.4.0-beta.6). Keep the full version there, including
+    /// after background updates. Never under NEXUS_PROFILE.
+    /// </summary>
+    public void SyncDisplayVersion()
+    {
+        if (!IsAvailable || _manager is null || !OperatingSystem.IsWindows() || Nexus.Core.ProfilePaths.Active) return;
+        try
+        {
+            var version = CurrentVersion;
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\" + _manager.AppId, true);
+            if (key is not null && version.Length > 0 && !string.Equals(key.GetValue("DisplayVersion") as string, version, StringComparison.Ordinal))
+                key.SetValue("DisplayVersion", version);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or System.Security.SecurityException or IOException)
+        {
+        }
+    }
+
+    /// <summary>Restarts into the downloaded version. The caller should shut the core down first.</summary>
+    public void ApplyAndRestart()
+    {
+        if (_manager is null) return;
+        var target = _staged?.TargetFullRelease ?? _manager.UpdatePendingRestart;
+        if (target is null) return;
+        _manager.ApplyUpdatesAndRestart(target);
     }
 }

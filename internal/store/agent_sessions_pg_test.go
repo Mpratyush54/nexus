@@ -5,17 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"os"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 )
 
 func TestAgentSessionPostgresRoundTrip(t *testing.T) {
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		t.Skip("DATABASE_URL not set")
-	}
+	dsn := testPostgresDSN(t)
 	ctx := t.Context()
 	s, err := NewPostgresStore(ctx, dsn)
 	if err != nil {

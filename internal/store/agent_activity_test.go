@@ -4,16 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"testing"
 	"time"
 )
 
 func TestAgentActivityPostgresSourceDateAndDuplicateRepair(t *testing.T) {
-	dsn := os.Getenv("TEST_POSTGRES_DSN")
-	if dsn == "" {
-		t.Skip("no isolated TEST_POSTGRES_DSN")
-	}
+	dsn := testPostgresDSN(t)
 	s, err := NewPostgresStore(t.Context(), dsn)
 	if err != nil {
 		t.Fatal(err)

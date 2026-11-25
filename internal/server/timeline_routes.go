@@ -60,6 +60,9 @@ func (s *Server) handleAgentSessionUpsert(w http.ResponseWriter, r *http.Request
 		WorkspaceRootHint string `json:"workspace_root_hint"`
 		Visibility        string `json:"visibility"`
 		Summary           string `json:"summary"`
+		// ParentNativeID: the native id of the session that started this
+		// sub-agent run, when the daemon knows it.
+		ParentNativeID string `json:"parent_native_id"`
 	}
 	if !decodeJSON(w, r, &body) {
 		return
@@ -74,6 +77,7 @@ func (s *Server) handleAgentSessionUpsert(w http.ResponseWriter, r *http.Request
 		ProjectID: body.ProjectID, OwnerUserID: authSubject(r), Harness: body.Harness,
 		NativeID: body.NativeID, OriginMachineID: body.OriginMachineID, Title: body.Title,
 		WorkspaceRootHint: body.WorkspaceRootHint, Visibility: body.Visibility, Summary: body.Summary,
+		ParentNativeID: body.ParentNativeID,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrConflict) {
@@ -123,6 +127,31 @@ func (s *Server) requireAgentRead(w http.ResponseWriter, r *http.Request, sessio
 	return row, true
 }
 
+func (s *Server) requireAgentLive(w http.ResponseWriter, r *http.Request, sessionID string) (*store.AgentSession, bool) {
+	row, ok := s.requireAgentRead(w, r, sessionID)
+	if !ok {
+		return nil, false
+	}
+	if row.LineageKind == "legacy_snapshot" {
+		return row, true
+	}
+	cs, ok := s.agentCloud()
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
+		return nil, false
+	}
+	allowed, err := cs.CanReadAgentSessionLive(r.Context(), authSubject(r), sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return nil, false
+	}
+	if !allowed {
+		writeError(w, http.StatusForbidden, "session content is only shared as a point-in-time version")
+		return nil, false
+	}
+	return row, true
+}
+
 func (s *Server) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
 	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
 	if !ok {
@@ -139,6 +168,19 @@ func (s *Server) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	if row.LineageKind != "legacy_snapshot" {
+		cs, _ := s.agentCloud()
+		live, err := cs.CanReadAgentSessionLive(r.Context(), authSubject(r), row.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not check live access")
+			return
+		}
+		if !live {
+			copy := *row
+			copy.Summary = ""
+			row = &copy
+		}
+	}
 	writeJSON(w, http.StatusOK, row)
 }
 
@@ -148,7 +190,7 @@ func (s *Server) handleAgentSessionForks(w http.ResponseWriter, r *http.Request)
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+	if _, ok := s.requireAgentOwner(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	items, err := cs.ListAgentSessionForks(r.Context(), r.PathValue("id"))
@@ -169,7 +211,7 @@ func (s *Server) handleAgentSessionFork(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	parent, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	parent, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -190,7 +232,7 @@ func (s *Server) handleAgentSessionMergeCode(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	target, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	target, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -205,7 +247,7 @@ func (s *Server) handleAgentSessionMergeCode(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "from_session_id is required")
 		return
 	}
-	from, ok := s.requireAgentRead(w, r, fromID)
+	from, ok := s.requireAgentOwner(w, r, fromID)
 	if !ok {
 		return
 	}
@@ -306,7 +348,7 @@ func (s *Server) handleAgentTurnPost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -354,7 +396,7 @@ func (s *Server) handleAgentTurnBatchPost(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -405,7 +447,7 @@ func (s *Server) handleAgentTurnList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, r.PathValue("id")); !ok {
+	if _, ok := s.requireAgentLive(w, r, r.PathValue("id")); !ok {
 		return
 	}
 	turns, err := cs.ListSessionTurns(r.Context(), r.PathValue("id"))
@@ -491,7 +533,7 @@ func (s *Server) handleAgentVersionCreate(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -512,7 +554,7 @@ func (s *Server) handleAgentVersionComplete(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusNotImplemented, "agent sessions unavailable")
 		return
 	}
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentOwner(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -639,10 +681,12 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	// hide_empty=1 drops chats with no turns (captured but never written to).
 	hideEmpty := queryFlag(r.URL.Query().Get("hide_empty"))
+	// Sub-agent runs are left out unless include_subagents=1 asks for them.
+	includeSubagents := queryFlag(r.URL.Query().Get("include_subagents"))
 	items, modernNext, err := cs.ListTimeline(r.Context(), store.TimelineQuery{
 		UserID: authSubject(r), ProjectID: projectID,
 		Harness: harness, Query: query, Cursor: cursor, Limit: limit,
-		HideEmpty: hideEmpty,
+		HideEmpty: hideEmpty, IncludeSubagents: includeSubagents,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -665,6 +709,9 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		if hideEmpty && item.TurnCount == 0 {
 			return true // hide_empty also drops archived snapshots with no turns
 		}
+		if !includeSubagents && store.IsSubagentRun(item.NativeID, item.Title, "") {
+			return true // archived sub-agent runs too
+		}
 		return seen[item.SessionID] || (item.NativeID != "" && seen[item.Harness+"\x00"+item.NativeID])
 	}
 	// Historical snapshots and agent sessions coexist. Query both on every
@@ -675,6 +722,11 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not list captured snapshots")
 		return
+	}
+	for i := range legacy {
+		if store.IsSubagentRun(legacy[i].NativeID, legacy[i].Title, "") {
+			legacy[i].LineageKind = "subagent" // listed only with include_subagents
+		}
 	}
 	items = append(items, legacy...)
 	sort.Slice(items, func(i, j int) bool {

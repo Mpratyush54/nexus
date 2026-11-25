@@ -3,88 +3,58 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"central-memory/internal/config"
-	"central-memory/internal/daemon"
 )
 
-// captureRoots maps local Codex history back to the repositories that
-// produced it. Session metadata is a hint, never a command: only existing
-// Git workspaces are auto-added, and the selected root always comes first.
-func captureRoots(primary string) []string {
-	roots := []string{primary}
-	seenPaths := map[string]bool{strings.ToLower(filepath.Clean(primary)): true}
-	seenRepos := map[string]bool{}
-	repoKey := func(path string) string {
-		origin, root := daemon.FingerprintOf(path)
-		if origin == "" || root == "" {
-			return ""
-		}
-		return strings.ToLower(origin + "|" + root)
+// Only explicitly approved folders may be monitored. Transcript cwd hints
+// and the recent-folder list are suggestions, never authorization.
+func captureRoots(_ string) []string {
+	saved, err := config.LoadFile()
+	if err != nil || saved.CaptureConsentVersion < 1 {
+		return nil
 	}
-	if key := repoKey(primary); key != "" {
-		seenRepos[key] = true
+	roots, _ := validateCaptureRoots(saved.CaptureWorkspaces, false)
+	return roots
+}
+
+func validateCaptureRoots(input []string, strict bool) ([]string, error) {
+	if len(input) > 20 {
+		return nil, fmt.Errorf("choose at most 20 workspaces")
 	}
-	add := func(path string) {
-		if len(roots) >= 20 || !filepath.IsAbs(path) {
-			return
+	roots := make([]string, 0, len(input))
+	seen := map[string]bool{}
+	for _, value := range input {
+		path := strings.TrimSpace(value)
+		invalid := ""
+		if !filepath.IsAbs(path) {
+			invalid = "choose an absolute folder path"
 		}
 		path = filepath.Clean(path)
-		if seenPaths[strings.ToLower(path)] {
-			return
+		if filepath.Dir(path) == path {
+			invalid = "choose a project folder, not an entire drive"
 		}
 		if home, err := os.UserHomeDir(); err == nil && samePath(path, home) {
-			return
+			invalid = "choose a project folder, not your home directory"
 		}
-		if filepath.Dir(path) == path {
-			return // drive or filesystem root
+		if info, err := os.Stat(path); err != nil || !info.IsDir() {
+			invalid = "workspace folder is unavailable: " + path
 		}
-		if st, err := os.Stat(path); err != nil || !st.IsDir() {
-			return
-		}
-		if _, err := os.Stat(filepath.Join(path, ".git")); err != nil {
-			return
-		}
-		key := repoKey(path)
-		if key != "" && seenRepos[key] {
-			return // another checkout/worktree of an already captured repo
-		}
-		seenPaths[strings.ToLower(path)] = true
-		if key != "" {
-			seenRepos[key] = true
-		}
-		roots = append(roots, path)
-	}
-	if saved, err := config.LoadFile(); err == nil {
-		for _, path := range saved.RecentWorkspaces {
-			add(path)
-		}
-	}
-	codexHome := strings.TrimSpace(os.Getenv("CODEX_HOME"))
-	if codexHome == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			codexHome = filepath.Join(home, ".codex")
-		}
-	}
-	if codexHome == "" {
-		return roots
-	}
-	for _, name := range []string{"sessions", "archived_sessions"} {
-		count := 0
-		_ = filepath.Walk(filepath.Join(codexHome, name), func(path string, info os.FileInfo, err error) error {
-			if err != nil || info == nil || info.IsDir() || !strings.EqualFold(filepath.Ext(path), ".jsonl") {
-				return nil
+		if invalid != "" {
+			if strict {
+				return nil, fmt.Errorf("%s", invalid)
 			}
-			count++
-			if count > 10000 || len(roots) >= 20 {
-				return filepath.SkipAll
-			}
-			add(daemon.PeekTranscriptCwd(path))
-			return nil
-		})
+			continue
+		}
+		key := strings.ToLower(path)
+		if !seen[key] {
+			roots = append(roots, path)
+			seen[key] = true
+		}
 	}
-	return roots
+	return roots, nil
 }

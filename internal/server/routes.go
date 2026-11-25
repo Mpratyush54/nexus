@@ -60,6 +60,8 @@ func (s *Server) registerRoutes() {
 	s.registerCloudContractRoutes()
 	s.registerSessionDeleteRoutes()
 	s.registerOpsRoutes()
+	s.registerDesktopExecutionRoutes()
+	s.registerDiagnosticsRoutes()
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -496,6 +498,45 @@ func (s *Server) handleMemoryCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, &item)
 }
 
+type memoryVectorSearcher interface {
+	SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
+}
+
+type memoryVectorPager interface {
+	SearchMemoryVectorPage(ctx context.Context, projectID string, queryVec []float32, limit, offset int, level string) ([]*store.MemoryItem, error)
+}
+
+var errMemoryVectorPagination = errors.New("vector pagination not supported by configured store")
+var errMemoryVectorFiltering = errors.New("vector filtering not supported by configured store")
+
+func (s *Server) searchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit, offset int, level string) ([]*store.MemoryItem, bool, error) {
+	if pager, ok := s.Store.(memoryVectorPager); ok {
+		items, err := pager.SearchMemoryVectorPage(ctx, projectID, queryVec, limit, offset, level)
+		return items, true, err
+	}
+	if vs, ok := s.Store.(memoryVectorSearcher); ok {
+		if offset != 0 {
+			return nil, true, errMemoryVectorPagination
+		}
+		if level != "" {
+			return nil, true, errMemoryVectorFiltering
+		}
+		items, err := vs.SearchMemoryVector(ctx, projectID, queryVec, limit)
+		return items, true, err
+	}
+	return nil, false, nil
+}
+
+func writeMemoryVectorPage(w http.ResponseWriter, items []*store.MemoryItem, limit, offset int) {
+	if items == nil {
+		items = []*store.MemoryItem{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items": items, "count": len(items), "total": offset + len(items),
+		"limit": limit, "offset": offset, "has_more": len(items) >= limit,
+	})
+}
+
 func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	projectID := strings.TrimSpace(q.Get("project_id"))
@@ -521,6 +562,11 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	if offset < 0 {
 		return
 	}
+	level := strings.ToLower(strings.TrimSpace(q.Get("level")))
+	if level != "" && !store.IsValidMemoryLevel(level) {
+		writeError(w, http.StatusBadRequest, "invalid level: want organization, project, personal, session, or ephemeral")
+		return
+	}
 	// Use tracking (plan §1.7): only agent retrieval counts as use. The
 	// desktop Memory page lists through this same route, and browsing must
 	// not bump use_count (that would defeat archival of never-used rows), so
@@ -538,14 +584,19 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid embedding: "+err.Error())
 			return
 		}
-		vs, ok := s.Store.(interface {
-			SearchMemoryVector(ctx context.Context, projectID string, queryVec []float32, limit int) ([]*store.MemoryItem, error)
-		})
-		if !ok {
+		items, supported, err := s.searchMemoryVector(viewerCtx, projectID, vec, limit, offset, level)
+		if !supported {
 			writeError(w, http.StatusBadRequest, "vector search not supported by configured store")
 			return
 		}
-		items, err := vs.SearchMemoryVector(viewerCtx, projectID, vec, limit)
+		if errors.Is(err, errMemoryVectorPagination) {
+			writeError(w, http.StatusBadRequest, "vector pagination not supported by configured store")
+			return
+		}
+		if errors.Is(err, errMemoryVectorFiltering) {
+			writeError(w, http.StatusBadRequest, "vector filtering not supported by configured store")
+			return
+		}
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "vector search failed: "+err.Error())
 			return
@@ -554,35 +605,34 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 		if recordUse {
 			recordMemoryUse(r.Context(), s.Store, items)
 		}
-		if items == nil {
-			items = []*store.MemoryItem{}
-		}
-		writeJSON(w, http.StatusOK, map[string]any{
-			"items": items, "count": len(items), "total": len(items),
-			"limit": limit, "offset": 0, "has_more": false,
-		})
+		writeMemoryVectorPage(w, items, limit, offset)
 		return
 	}
 	// Text query → embed via configured provider, then vector search
 	// (issue #165). Falls back to keyword SearchMemory when the store has
 	// no vector path or vector ranking returns nothing.
 	query := q.Get("q")
-	if strings.TrimSpace(query) != "" && offset == 0 {
-		if search := s.modelVectorSearch(); search != nil {
+	if strings.TrimSpace(query) != "" {
+		if search := s.modelVectorSearchPage(); search != nil {
 			// A failing embedding model skips straight to keyword search
 			// (embedQuery never substitutes a hash vector for a model), and
 			// only rows embedded by the query's model are compared.
 			if vec, ok := s.embedQuery(r.Context(), query); ok {
-				if items, err := search(viewerCtx, projectID, vec, limit); err == nil && len(items) > 0 {
+				if items, err := search(viewerCtx, projectID, vec, limit, offset, level); err == nil {
 					items = s.filterMemoriesByVisibility(r, items, authSubject(r))
-					if len(items) > 0 {
+					vectorMode := len(items) > 0
+					if !vectorMode && offset > 0 {
+						// Keep the same search mode across pages. An empty vector
+						// index uses keyword fallback on every page, whereas an
+						// exhausted vector page must not switch to keyword ranking.
+						first, firstErr := search(viewerCtx, projectID, vec, 1, 0, level)
+						vectorMode = firstErr == nil && len(s.filterMemoriesByVisibility(r, first, authSubject(r))) > 0
+					}
+					if vectorMode {
 						if recordUse {
 							recordMemoryUse(r.Context(), s.Store, items)
 						}
-						writeJSON(w, http.StatusOK, map[string]any{
-							"items": items, "count": len(items), "total": len(items),
-							"limit": limit, "offset": 0, "has_more": false,
-						})
+						writeMemoryVectorPage(w, items, limit, offset)
 						return
 					}
 				}
@@ -592,10 +642,10 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	var items []*store.MemoryItem
 	total := 0
 	if pager, ok := s.Store.(interface {
-		SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int) ([]*store.MemoryItem, int, error)
+		SearchMemoryPage(ctx context.Context, projectID string, query string, tags []string, limit, offset int, level string) ([]*store.MemoryItem, int, error)
 	}); ok {
 		var err error
-		items, total, err = pager.SearchMemoryPage(viewerCtx, projectID, query, tags, limit, offset)
+		items, total, err = pager.SearchMemoryPage(viewerCtx, projectID, query, tags, limit, offset, level)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
 			return
@@ -607,6 +657,15 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "search failed: "+err.Error())
 			return
 		}
+		if level != "" {
+			filtered := make([]*store.MemoryItem, 0, len(items))
+			for _, item := range items {
+				if item != nil && strings.EqualFold(item.Level, level) {
+					filtered = append(filtered, item)
+				}
+			}
+			items = filtered
+		}
 		total = len(items)
 	}
 	if recordUse {
@@ -615,14 +674,18 @@ func (s *Server) handleMemorySearch(w http.ResponseWriter, r *http.Request) {
 	if items == nil {
 		items = []*store.MemoryItem{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+	response := map[string]any{
 		"items":    items,
 		"count":    len(items),
 		"total":    total,
 		"limit":    limit,
 		"offset":   offset,
 		"has_more": offset+len(items) < total,
-	})
+	}
+	if level != "" {
+		response["level"] = level
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 // --- episodes ---

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { platformApi, type AppRelease, type ReleaseArtifact } from '@/api/platform'
+import { diagnosticsApi } from '@/api/diagnostics'
 import { queryKeys } from '@/lib/query-keys'
 import { useAuth } from '@/providers/AuthProvider'
 
@@ -68,6 +69,27 @@ export function useYankRelease() {
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: queryKeys.admin.releases })
     },
+  })
+}
+
+/** Problem reports grouped by fingerprint (platform admins only). */
+export function useProblemGroups(source: string, kind: string, enabled = true) {
+  const { isAuthenticated } = useAuth()
+  return useQuery({
+    queryKey: queryKeys.admin.problems(source, kind),
+    enabled: isAuthenticated && enabled,
+    queryFn: () => diagnosticsApi.groups({ source, kind }),
+    retry: false,
+  })
+}
+
+export function useProblemReports(fingerprint: string | null) {
+  const { isAuthenticated } = useAuth()
+  return useQuery({
+    queryKey: queryKeys.admin.problem(fingerprint ?? ''),
+    enabled: isAuthenticated && Boolean(fingerprint),
+    queryFn: async () => (await diagnosticsApi.group(fingerprint!)).items,
+    retry: false,
   })
 }
 

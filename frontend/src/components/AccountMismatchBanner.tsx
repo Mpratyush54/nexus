@@ -1,4 +1,4 @@
-import { AlertTriangle, ExternalLink } from 'lucide-react'
+import { AlertTriangle } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
 import { daemonApi } from '@/api/daemon'
@@ -18,8 +18,8 @@ export function AccountMismatchBanner() {
     const base = bridge.local.data?.baseUrl
     if (!base) {
       push({
-        title: 'Desktop offline',
-        detail: 'Start Nexus Desktop from the Start Menu, then try again.',
+        title: 'Desktop app not running',
+        detail: 'Open Nexus from the Start menu, then try again.',
         tone: 'danger',
       })
       return
@@ -29,7 +29,7 @@ export function AccountMismatchBanner() {
       .then(() =>
         push({
           title: 'Sign-in opened',
-          detail: 'Complete login in the browser — use the same account as this portal.',
+          detail: 'Finish signing in in the browser, with the same account as this page.',
           tone: 'teal',
         }),
       )
@@ -47,16 +47,16 @@ export function AccountMismatchBanner() {
       <div className="mb-6 flex flex-wrap items-start gap-3 rounded-lg border border-amber/40 bg-amber/10 px-4 py-3 text-sm text-fg">
         <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber" />
         <div className="min-w-0 flex-1">
-          <p className="font-medium">Desktop is not signed in</p>
+          <p className="font-medium">The desktop app isn’t signed in</p>
           <p className="mt-1 text-fg-dim">
-            Nexus Desktop is running on this machine but has no account. Sign in with the{' '}
-            <span className="text-fg">same</span> Nexus user as this portal (
-            <span className="font-mono">{bridge.webUsername ?? 'you'}</span>) before harvest can
-            sync here.
+            Nexus is open on this computer but not signed in. Sign it in with the{' '}
+            <span className="text-fg">same</span> account as this page (
+            <span className="font-mono">{bridge.webUsername ?? 'you'}</span>) so your chats show up
+            here.
           </p>
         </div>
         <Button type="button" size="sm" onClick={relink}>
-          Sign in Desktop
+          Sign in the desktop app
         </Button>
       </div>
     )
@@ -66,31 +66,23 @@ export function AccountMismatchBanner() {
     <div className="mb-6 flex flex-wrap items-start gap-3 rounded-lg border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-fg">
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
       <div className="min-w-0 flex-1">
-        <p className="font-medium">Different accounts on Desktop and portal</p>
+        <p className="font-medium">The desktop app uses a different account</p>
         <p className="mt-1 text-fg-dim">
-          Desktop is signed in as{' '}
+          The desktop app is signed in as{' '}
           <span className="font-mono text-fg">{bridge.desktopUsername || bridge.desktopUserId}</span>
-          , but this portal is{' '}
-          <span className="font-mono text-fg">{bridge.webUsername || bridge.webUserId}</span>. Local
-          harvest and file access are blocked so one account cannot see the other&apos;s workspace.
+          , but this page is{' '}
+          <span className="font-mono text-fg">{bridge.webUsername || bridge.webUserId}</span>. Chats
+          from this computer stay hidden here so one account can&apos;t see the other&apos;s work.
         </p>
         <p className="mt-2 text-xs text-muted">
-          Fix: sign Desktop in as {bridge.webUsername || 'this portal user'}, or log out of the
-          portal and use the Desktop account.
+          To fix it, sign the desktop app in as {bridge.webUsername || 'this account'}, or sign out here
+          and use the desktop app&apos;s account.
         </p>
       </div>
       <div className="flex flex-wrap gap-2">
         <Button type="button" size="sm" onClick={relink}>
-          Re-link Desktop
+          Sign in again
         </Button>
-        <a
-          className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-xs text-fg-dim hover:text-fg"
-          href={bridge.local.data?.baseUrl || 'http://127.0.0.1:7272/'}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Desktop status <ExternalLink size={12} />
-        </a>
       </div>
     </div>
   )

@@ -36,6 +36,10 @@ type VectorQuery struct {
 	// MinSimilarity is the cosine floor; values outside (0,1) mean
 	// MinVectorSimilarity.
 	MinSimilarity float64
+	// Level, when set, keeps only rows of that memory tier.
+	Level string
+	// Offset skips that many visible, ranked rows (pagination).
+	Offset int
 }
 
 func (q VectorQuery) floor() float64 {

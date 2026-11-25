@@ -773,9 +773,9 @@ func (d *Daemon) HeartbeatOnce(ctx context.Context, serverURL string) error {
 	if wsID == "" {
 		return fmt.Errorf("daemon: heartbeat without workspace id (register first)")
 	}
-	branch, commit, dirty, _, _ := GitStatus(d.Root)
+	branch, commit, dirty, _, _ := GitStatusCached(d.Root)
 	gitLog := ""
-	if out, err := GitLog(d.Root, 12); err == nil {
+	if out, err := GitLogCached(d.Root, 12); err == nil {
 		gitLog = out
 		const maxGitLog = 8 << 10
 		if len(gitLog) > maxGitLog {

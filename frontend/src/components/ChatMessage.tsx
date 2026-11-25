@@ -148,11 +148,20 @@ function ToolStep({ tool }: { tool: ToolView }) {
           <span className="chat-envelope-label">Sub-agent</span>
           <span className="chat-envelope-title">{tool.subagent}</span>
         </summary>
-        {tool.output ? (
-          <Markdown>{tool.output}</Markdown>
-        ) : (
-          <p className="chat-turn-note">No report was captured.</p>
-        )}
+        <div className="chat-subagent-body">
+          {tool.brief ? (
+            <>
+              <p className="chat-subagent-heading">What it was asked</p>
+              <Markdown>{tool.brief}</Markdown>
+            </>
+          ) : null}
+          <p className="chat-subagent-heading">What it found</p>
+          {tool.output ? (
+            <Markdown>{tool.output}</Markdown>
+          ) : (
+            <p className="chat-turn-note">No report was captured.</p>
+          )}
+        </div>
       </details>
     );
   return (

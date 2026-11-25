@@ -366,9 +366,23 @@ func (s *Server) handleUngrantTeam(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleStorageUsage(w http.ResponseWriter, r *http.Request) {
+	subject := authSubject(r)
 	scope := strings.TrimSpace(r.URL.Query().Get("scope"))
-	if scope == "" {
-		scope = "user:" + authSubject(r)
+	switch {
+	case scope == "":
+		scope = "user:" + subject
+	case scope == "user:"+subject:
+	case strings.HasPrefix(scope, "user:"):
+		writeError(w, http.StatusForbidden, "storage usage is only visible to its owner")
+		return
+	case strings.HasPrefix(scope, "project:"):
+		if !s.authorizeProject(w, r, strings.TrimPrefix(scope, "project:")) {
+			return
+		}
+	default:
+		if !s.authorizeProject(w, r, scope) {
+			return
+		}
 	}
 	var used, cap int64
 	var err error
@@ -599,7 +613,7 @@ func (s *Server) handleContinue(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &req) {
 		return
 	}
-	if _, ok := s.requireAgentRead(w, r, req.SessionID); !ok {
+	if _, ok := s.requireAgentOwner(w, r, req.SessionID); !ok {
 		return
 	}
 	argv, err := continuex.Command(req)
@@ -663,7 +677,15 @@ func (s *Server) listTeleports(w http.ResponseWriter, r *http.Request, box strin
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items)})
+	pending := 0
+	for _, item := range items {
+		switch strings.ToLower(strings.TrimSpace(item.Status)) {
+		case "accepted", "revoked", "expired":
+		default:
+			pending++
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items, "count": len(items), "pending": pending})
 }
 
 func (s *Server) handleTeleportRevoke(w http.ResponseWriter, r *http.Request) {

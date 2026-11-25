@@ -7,92 +7,206 @@ namespace Nexus.Pages;
 public sealed class AgentsPage : NexusPage
 {
     private readonly StackPanel _cards = new() { Spacing = 10, HorizontalAlignment = HorizontalAlignment.Stretch };
-    private readonly ComboBox _project = new() { PlaceholderText = "Select a project", Width = 240 };
-    private bool _projectsLoaded;
+    private readonly TextBlock _summary = new() { Opacity = 0.7, TextWrapping = TextWrapping.Wrap };
+    private bool _loading;
+    private readonly bool _hubChrome;
 
-    public AgentsPage()
+    public AgentsPage(bool hubChrome = false)
     {
+        _hubChrome = hubChrome;
         var refresh = new Button { Content = "Refresh", MinWidth = 88 };
         refresh.Click += async (_, _) => await LoadAsync();
-        _project.SelectionChanged += async (_, _) => { if (_projectsLoaded) await LoadAsync(); };
+        var toolbar = Row(refresh);
 
-        var header = new StackPanel { Spacing = 4 };
-        header.Children.Add(Line("Captured agents", title: true));
-        header.Children.Add(Line("Agents with captured sessions in the selected project appear here."));
-
-        var root = new Grid { Padding = new Thickness(32, 24, 32, 24), RowSpacing = 16 };
+        var root = new Grid
+        {
+            Padding = _hubChrome ? new Thickness(0) : new Thickness(32, 24, 32, 24),
+            RowSpacing = 16,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        var scroller = new ScrollViewer { Content = _cards, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
-        var filters = Row(_project, refresh);
-        Grid.SetRow(filters, 1);
-        Grid.SetRow(scroller, 2);
-        root.Children.Add(header);
-        root.Children.Add(filters);
+        root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 0 });
+        var scroller = new ScrollViewer
+        {
+            Content = _cards,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalAlignment = VerticalAlignment.Stretch,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+        scroller.SetValue(FrameworkElement.MinHeightProperty, 0.0);
+        var row = 0;
+        if (!_hubChrome)
+        {
+            var header = PageHeader(
+                "Agents & harnesses",
+                "Capture status and session history for the project selected in the shell. Resume behavior follows each harness.");
+            Grid.SetRow(header, row++);
+            root.Children.Add(header);
+        }
+        Grid.SetRow(toolbar, row++);
+        Grid.SetRow(_summary, row++);
+        Grid.SetRow(scroller, row);
+        root.Children.Add(toolbar);
+        root.Children.Add(_summary);
         root.Children.Add(scroller);
         Content = root;
-        Loaded += async (_, _) => await LoadProjectsAsync();
+        WatchShellProject(() => LoadAsync());
     }
 
-    private async Task LoadProjectsAsync()
+    protected override void OnEnter(object? parameter)
     {
-        var status = await Call(NxMethods.StatusGet);
-        var preferred = status.Result is { } result && result.TryGetProperty("capture", out var capture)
-            ? NxJson.Text(capture, "project_id") : "";
-        var projects = await Call(NxMethods.ProjectsList);
-        _project.Items.Clear();
-        _projectsLoaded = false;
-        _cards.Children.Clear();
-        if (!projects.Ok) { ShowError(_cards, projects); return; }
-        foreach (var project in NxJson.Items(projects.Result))
-        {
-            var id = NxJson.Text(project, "id", "project_id");
-            if (id.Length == 0) continue;
-            _project.Items.Add(new ComboBoxItem { Content = ProjectLabels.Name(project), Tag = id });
-        }
-        _projectsLoaded = true;
-        for (var i = 0; i < _project.Items.Count; i++)
-            if ((_project.Items[i] as ComboBoxItem)?.Tag as string == preferred) { _project.SelectedIndex = i; return; }
-        if (_project.Items.Count == 1) _project.SelectedIndex = 0;
-        else _cards.Children.Add(Line(_project.Items.Count == 0 ? "No accessible projects. Connect a workspace in Settings." : "Choose a project to see its captured agents."));
+        _ = LoadAsync();
     }
 
     private async Task LoadAsync()
     {
-        var projectId = (_project.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
-        if (projectId.Length == 0) return;
+        if (_loading) return;
+        var projectId = ShellProjectId();
+        _cards.Children.Clear();
+        if (projectId.Length == 0)
+        {
+            _summary.Text = "";
+            _cards.Children.Add(Card(
+                Line("Choose a project", title: true),
+                Line("Choose a project in the nav pane to see which agent harnesses have captured sessions."),
+                Line("After the first harvest completes, harnesses appear here with session counts and resume guidance.")));
+            return;
+        }
+
+        _loading = true;
+        _summary.Text = $"Loading agents for {ShellProjectLabel()}…";
+        var status = await Call(NxMethods.StatusGet);
+        var captureRunning = false;
+        var capturePaused = false;
+        if (status.Result is { } st && st.TryGetProperty("capture", out var capture))
+        {
+            captureRunning = NxJson.Text(capture, "running") == "true";
+            capturePaused = NxJson.Text(capture, "paused") == "true";
+        }
+
         var response = await Call(NxMethods.AgentsList, new { project_id = projectId });
+        _loading = false;
         _cards.Children.Clear();
         if (!response.Ok)
         {
+            _summary.Text = "";
             ShowError(_cards, response);
             return;
         }
+
         var agents = NxJson.Items(response.Result).ToList();
-        foreach (var agent in agents)
-        {
-            var name = NxJson.Text(agent, "name", "agent", "harness");
-            var harness = NxJson.Text(agent, "harness");
-            var project = (_project.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "";
-            var status = NxJson.Text(agent, "status");
-            var resume = NxJson.Text(agent, "resume_mode");
-            var count = NxJson.Text(agent, "captured_count", "count");
-            var view = Action("View sessions", () => MainWindow.Current?.ShowAgentSessions(harness.Length > 0 ? harness : name));
-            var detail = string.Join(" · ", new[] { status, count.Length > 0 ? count + " sessions" : "", project }.Where(x => x.Length > 0));
-            _cards.Children.Add(Card(
-                Line(name.Length > 0 ? name : "Unknown harness", title: true),
-                Line(detail.Length > 0 ? detail : "Captured session history"),
-                Line(resume.Length > 0 ? resume : "Open a session from Timeline to continue."),
-                view));
-        }
+        var captureChip = capturePaused ? "Capture paused" :
+            captureRunning ? "Capture active" : "Capture idle";
+        _summary.Text = $"{Nexus.Core.FriendlyTime.Count(agents.Count, "agent")} with chats · {ShellProjectLabel()} · {captureChip}";
+
         if (agents.Count == 0)
         {
             _cards.Children.Add(Card(
                 Line("No captured agents yet", title: true),
-                Line("Nexus adds a harness here after its first session is harvested and reaches your account."),
-                Line("Make sure capture is resumed from the tray and the workspace is selected.")));
+                Line("Nexus lists a harness here after its first session is harvested for this project."),
+                Line("Confirm capture is on in Settings (per project) and resumed from the tray, then run a session in Cursor, Codex, Claude Code, or another supported harness.")));
+            _cards.Children.Add(SectionHeader("Supported harnesses"));
+            foreach (var harness in AgentCatalog.All.Take(8))
+            {
+                _cards.Children.Add(ListItem(
+                    Line(harness.Name, title: true),
+                    Muted("Waiting for first captured session"),
+                    Muted("Resume: " + harness.Resume)));
+            }
+            await AppendSpawnedSessionsAsync();
+            return;
+        }
+
+        foreach (var agent in agents
+                     .OrderByDescending(CapturedCount)
+                     .ThenBy(a => NxJson.Text(a, "name", "agent", "harness"), StringComparer.OrdinalIgnoreCase))
+        {
+            var name = NxJson.Text(agent, "name", "agent", "harness");
+            var harness = NxJson.Text(agent, "harness");
+            if (harness.Length == 0) harness = name;
+            var catalog = FindCatalog(harness, name);
+            var statusText = NxJson.Text(agent, "status");
+            var resume = NxJson.Text(agent, "resume_mode");
+            if (resume.Length == 0 && catalog.HasValue)
+            {
+                resume = catalog.Value.Resume;
+            }
+            var count = NxJson.Text(agent, "captured_count", "count");
+            var last = FormatLastActivity(NxJson.Text(agent, "last_activity", "last_seen", "updated_at"));
+            var view = Action("View sessions", () => MainWindow.Current?.ShowAgentSessions(harness, projectId));
+            var chips = Row(
+                Chip(statusText.Length > 0 ? statusText : "Captured"),
+                Chip(count.Length > 0 ? count + " sessions" : "Sessions available"));
+            if (last.Length > 0)
+            {
+                chips.Children.Add(Chip("Last activity · " + last));
+            }
+            _cards.Children.Add(Card(
+                Line(name.Length > 0 ? name : harness, title: true),
+                chips,
+                Line(resume.Length > 0 ? "Resume: " + resume : "Open Timeline to continue a session."),
+                view));
+        }
+        await AppendSpawnedSessionsAsync();
+    }
+
+    private async Task AppendSpawnedSessionsAsync()
+    {
+        var response = await Call(NxMethods.TimelineList, new { project_id = ShellProjectId(), limit = 50, include_subagents = true });
+        if (!response.Ok)
+        {
+            return;
+        }
+        var spawned = NxJson.Items(response.Result).Where(SessionLineage.IsSubagentSession).Take(24).ToList();
+        if (spawned.Count == 0)
+        {
+            return;
+        }
+        _cards.Children.Add(SectionHeader("Sessions spawned by agents"));
+        _cards.Children.Add(Muted("Sub-agent runs from Cursor and other harnesses — not shown in the main Sessions feed."));
+        var projectId = ShellProjectId();
+        foreach (var item in spawned)
+        {
+            if (!ProjectScope.TimelineItemMatches(item, projectId))
+            {
+                continue;
+            }
+            var id = NxJson.Text(item, "session_id", "id", "sessionId");
+            var title = NxJson.Text(item, "title", "native_id", "summary");
+            var harness = NxJson.Text(item, "harness", "agent");
+            var when = NxJson.Text(item, "last_active_at");
+            var open = Action("Open session", () => MainWindow.Current?.OpenSession(id));
+            open.IsEnabled = id.Length > 0;
+            _cards.Children.Add(ListItem(
+                Line(title.Length > 0 ? title : id, title: true),
+                Muted(string.Join(" · ", new[] { harness, when }.Where(p => p.Length > 0))),
+                open));
         }
     }
 
+    private static int CapturedCount(System.Text.Json.JsonElement agent)
+    {
+        var text = NxJson.Text(agent, "captured_count", "count");
+        return int.TryParse(text, out var count) ? count : 0;
+    }
+
+    private static string FormatLastActivity(string raw) =>
+        DateTimeOffset.TryParse(raw, out var at) ? at.ToLocalTime().ToString("MMM d, h:mm tt") : raw;
+
+    private static AgentCatalog.Harness? FindCatalog(string harness, string name)
+    {
+        foreach (var item in AgentCatalog.All)
+        {
+            if (item.Name.Equals(harness, StringComparison.OrdinalIgnoreCase) ||
+                item.Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+            {
+                return item;
+            }
+        }
+        return null;
+    }
 }

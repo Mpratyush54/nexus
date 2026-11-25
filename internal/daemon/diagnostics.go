@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"central-memory/internal/platform"
 )
 
 // DiagnosticResult is the JSON payload for GET /local/diagnostics.
@@ -106,13 +108,12 @@ func harnessProbePaths() map[string]string {
 		"antigravity": filepath.Join(home, ".gemini", "antigravity"),
 		"claude":      filepath.Join(home, ".claude"),
 	}
-	if runtime.GOOS == "windows" {
-		out["cursor"] = filepath.Join(appData, "Cursor")
-		out["copilot"] = filepath.Join(appData, "GitHub Copilot")
-	} else {
-		out["cursor"] = filepath.Join(home, ".config", "Cursor")
-		out["copilot"] = filepath.Join(home, ".config", "GitHub Copilot")
+	if runtime.GOOS != "windows" || appData == "" {
+		// ~/Library/Application Support on macOS, ~/.config on Linux.
+		appData = platform.AppDataDir()
 	}
+	out["cursor"] = filepath.Join(appData, "Cursor")
+	out["copilot"] = filepath.Join(appData, "GitHub Copilot")
 	return out
 }
 

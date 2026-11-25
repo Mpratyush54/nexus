@@ -2,10 +2,13 @@ package mcpconfig
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"central-memory/internal/mcpproxy"
 )
 
 func TestConfigureCursorRemote(t *testing.T) {
@@ -45,14 +48,63 @@ func TestConfigureCursorRemote(t *testing.T) {
 	}
 }
 
+func TestConfigureAntigravityBundledProxy(t *testing.T) {
+	dir := t.TempDir()
+	app := t.TempDir()
+	bundled := filepath.Join(app, mcpproxy.BinaryName())
+	if err := os.WriteFile(bundled, []byte("stub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "mcp_config.json")
+	// A nexus CLI on PATH must not win over the app's own proxy.
+	look := func(string) (string, error) { return "/usr/bin/nexus", nil }
+	res, err := Configure(Options{Agent: "antigravity", Path: path, AppDir: app, LookPath: look})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Transport != "proxy" || res.Command != bundled {
+		t.Fatalf("result=%+v", res)
+	}
+	raw, _ := os.ReadFile(path)
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	nexus := doc["mcpServers"].(map[string]any)["nexus"].(map[string]any)
+	if nexus["command"] != bundled || len(nexus["args"].([]any)) != 0 {
+		t.Fatalf("entry=%v", nexus)
+	}
+}
+
+func TestConfigureAntigravityMissingProxy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp_config.json")
+	missing := func(string) (string, error) { return "", errors.New("not found") }
+	_, err := Configure(Options{Agent: "antigravity", Path: path, AppDir: t.TempDir(), LookPath: missing})
+	if err == nil || !strings.Contains(err.Error(), mcpproxy.BinaryName()) {
+		t.Fatalf("err=%v", err)
+	}
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Fatal("config written without a proxy")
+	}
+}
+
 func TestConfigureAntigravityProxy(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mcp_config.json")
+	// No bundled proxy: falls back to the nexus CLI on PATH.
+	look := func(name string) (string, error) {
+		if name == "nexus" {
+			return "nexus", nil
+		}
+		return "", errors.New("not found")
+	}
 	res, err := Configure(Options{
 		Agent:     "antigravity",
 		Path:      path,
 		ProjectID: "p1",
 		ServerURL: "https://api.example.test",
+		AppDir:    t.TempDir(),
+		LookPath:  look,
 	})
 	if err != nil {
 		t.Fatal(err)

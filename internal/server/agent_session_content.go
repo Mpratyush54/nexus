@@ -64,7 +64,7 @@ func (s *Server) sessionOperations(r *http.Request, row *store.AgentSession) ([]
 }
 
 func (s *Server) handleAgentSessionFiles(w http.ResponseWriter, r *http.Request) {
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentLive(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -114,7 +114,7 @@ func (s *Server) handleAgentSessionFiles(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleAgentSessionOperations(w http.ResponseWriter, r *http.Request) {
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentLive(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}
@@ -206,7 +206,7 @@ func nestedToolMap(call map[string]any, key string) map[string]any {
 }
 
 func (s *Server) handleAgentSessionMemories(w http.ResponseWriter, r *http.Request) {
-	row, ok := s.requireAgentRead(w, r, r.PathValue("id"))
+	row, ok := s.requireAgentLive(w, r, r.PathValue("id"))
 	if !ok {
 		return
 	}

@@ -56,6 +56,8 @@ type HarvestStatus struct {
 	Files           []HarvestFileHit   `json:"files,omitempty"`
 	Recent          []HarvestLogLine   `json:"recent"`
 	Message         string             `json:"message,omitempty"`
+	// Skipped lists owned transcripts capture does not read (size caps).
+	Skipped []SkippedTranscript `json:"skipped_files,omitempty"`
 }
 
 // SetPipeline attaches the extraction Runtime so /local/harvest can report it.
@@ -125,6 +127,11 @@ func (d *Daemon) TriggerHarvestScan() string {
 	rt := d.Pipeline()
 	if rt == nil || rt.Harvester == nil {
 		return "No harvester running"
+	}
+	if rt.Shared != nil && rt.Shared.Attached(rt.Harvester) {
+		// A private full walk here would duplicate the shared scanner's reads.
+		rt.Shared.ReconcileNow()
+		return "Scan started"
 	}
 	nFiles, nTurns, err := rt.Harvester.ScanAndTailCounted()
 	_ = rt.Harvester.CheckIdle()
@@ -265,6 +272,7 @@ func (r *Runtime) pushLogLocked(line HarvestLogLine) {
 // HarvestSnapshot assembles Connect telemetry from harvester + processor.
 func (r *Runtime) HarvestSnapshot() HarvestStatus {
 	st := HarvestStatus{OK: true, Running: true, Agents: []HarvestAgentStat{}, Recent: []HarvestLogLine{}}
+	st.Skipped = SkippedTranscripts()
 	if r == nil {
 		st.Running = false
 		st.Message = "pipeline nil"

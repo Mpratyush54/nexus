@@ -39,6 +39,9 @@ type snapshotPostBody struct {
 	SourceMachineID    string `json:"source_machine_id"`
 }
 
+// maxSnapshotPostBytes caps a legacy snapshot post.
+var maxSnapshotPostBytes int64 = 16 << 20
+
 func (s *Server) handleSnapshotPost(w http.ResponseWriter, r *http.Request) {
 	ps := provenanceStore(s.Store)
 	if ps == nil {
@@ -47,8 +50,9 @@ func (s *Server) handleSnapshotPost(w http.ResponseWriter, r *http.Request) {
 	}
 	sessionID := r.PathValue("id")
 	var body snapshotPostBody
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	// Bounded: the body is base64 transcript and artifacts, held decoded
+	// alongside; unbounded, one post could take hundreds of megabytes.
+	if !decodeLimitedJSON(w, r, &body, maxSnapshotPostBytes) {
 		return
 	}
 	if strings.TrimSpace(body.ProjectID) == "" {

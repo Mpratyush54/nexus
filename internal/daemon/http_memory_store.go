@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +27,12 @@ type HTTPMemoryStore struct {
 
 	mu    sync.Mutex
 	local []MemoryRecord // recent saves for in-process dedup
+	// mirrored caches what each cloud session was last upserted with, so a
+	// session is upserted only when its title or parent link changes.
+	mirrored map[string]mirroredSession
+	// chunksDone counts the acknowledged pieces of chunked transcript
+	// uploads in progress, so a failed upload resumes (blob_upload.go).
+	chunksDone map[string]int
 }
 
 // NewHTTPMemoryStore builds a portal-backed store. projectID must be the
@@ -384,44 +389,53 @@ func (s *HTTPMemoryStore) PushSnapshot(ctx context.Context, snap *store.SessionS
 	if snap.ProjectID == "" {
 		snap.ProjectID = projectID
 	}
-	body := map[string]any{
-		"project_id":             snap.ProjectID,
-		"harness":                snap.Harness,
-		"conversation_id":        snap.ConversationID,
-		"turn_count":             snap.TurnCount,
-		"git_branch":             snap.GitBranch,
-		"git_commit":             snap.GitCommit,
-		"git_dirty":              snap.GitDirty,
-		"uncommitted_diff_b64":   encodeB64(snap.UncommittedDiff),
-		"diff_size_bytes":        snap.DiffSizeBytes,
-		"diff_truncated":         snap.DiffTruncated,
-		"transcript_payload_b64": encodeB64(snap.TranscriptPayload),
-		"artifacts_bundle_b64":   encodeB64(snap.ArtifactsBundle),
-		"source_machine_id":      snap.SourceMachineID,
+	// The payloads go out as base64 streamed into the request; building the
+	// JSON in memory copied a large transcript several times over.
+	length, open, err := streamingJSONBody(map[string]any{
+		"project_id":        snap.ProjectID,
+		"harness":           snap.Harness,
+		"conversation_id":   snap.ConversationID,
+		"turn_count":        snap.TurnCount,
+		"git_branch":        snap.GitBranch,
+		"git_commit":        snap.GitCommit,
+		"git_dirty":         snap.GitDirty,
+		"diff_size_bytes":   snap.DiffSizeBytes,
+		"diff_truncated":    snap.DiffTruncated,
+		"source_machine_id": snap.SourceMachineID,
+	}, []b64Field{
+		bytesField("uncommitted_diff_b64", snap.UncommittedDiff),
+		bytesField("transcript_payload_b64", snap.TranscriptPayload),
+		bytesField("artifacts_bundle_b64", snap.ArtifactsBundle),
+	})
+	if err != nil {
+		return err
 	}
-	raw, err := json.Marshal(body)
+	body, err := open()
 	if err != nil {
 		return err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		base+"/sessions/"+url.PathEscape(snap.SessionID)+"/snapshot", bytes.NewReader(raw))
+		base+"/sessions/"+url.PathEscape(snap.SessionID)+"/snapshot", body)
 	if err != nil {
 		return err
 	}
+	req.ContentLength = length
+	req.GetBody = open
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := s.HTTP
-	if client == nil {
-		client = &http.Client{Timeout: 60 * time.Second}
-	}
-	resp, err := client.Do(req)
+	// Its own pool and a deadline sized to the body (snapshot_publish.go).
+	uctx, cancel := context.WithTimeout(ctx, uploadTimeout(length))
+	defer cancel()
+	req = req.WithContext(uctx)
+	resp, err := s.uploadClient().Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return fmt.Errorf("daemon: push snapshot: %s %s", resp.Status, strings.TrimSpace(string(b)))
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
+		return &mirrorStatusError{status: resp.StatusCode,
+			msg: fmt.Sprintf("daemon: push snapshot: %s %s", resp.Status, firstLine(strings.TrimSpace(string(b))))}
 	}
 	return nil
 }
@@ -474,9 +488,11 @@ func (s *HTTPMemoryStore) PushOperations(ctx context.Context, sessionID, harness
 	return nil
 }
 
-func encodeB64(b []byte) string {
-	if len(b) == 0 {
-		return ""
+// firstLine keeps an error body to its first line (a proxy's HTML error
+// page otherwise spills into the log one line per tag).
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i]) + " …"
 	}
-	return base64.StdEncoding.EncodeToString(b)
+	return s
 }

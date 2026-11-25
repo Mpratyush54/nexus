@@ -81,19 +81,20 @@ type ExecRunner struct {
 
 // Start runs argv[0] with the remaining args. Returns a fresh op_id.
 func (e *ExecRunner) Start(ctx context.Context, plan LaunchPlan) (string, error) {
+	if !processSpawnAllowed() {
+		return "", errors.New("continue: process spawn is disabled")
+	}
 	if len(plan.Argv) == 0 {
 		return "", errors.New("continue: empty argv")
 	}
-	bin := plan.Argv[0]
 	look := exec.LookPath
 	if e != nil && e.LookPath != nil {
 		look = e.LookPath
 	}
-	path, err := look(bin)
+	cmd, err := commandForPlan(ctx, plan, look)
 	if err != nil {
-		return "", fmt.Errorf("continue: look path %q: %w", bin, err)
+		return "", err
 	}
-	cmd := exec.CommandContext(ctx, path, plan.Argv[1:]...)
 	cmd.Env = os.Environ()
 	opID := newOpID()
 	if e != nil && e.Wait {
@@ -119,3 +120,13 @@ func newOpID() string {
 }
 
 var fallbackSeq uint64
+
+// newUUID returns a random RFC 4122 version-4 UUID.
+func newUUID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b[:])
+	return h[:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
+}

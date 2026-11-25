@@ -14,18 +14,22 @@ package daemon
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
+	"hash/fnv"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"central-memory/adapters"
+	"central-memory/internal/platform"
 	"central-memory/internal/usage"
 )
 
@@ -88,7 +92,8 @@ type TranscriptSource struct {
 	// cwd/workdir hint and matches that against the workspace.
 	CwdMatch bool
 	// Global: always include files under Dirs (machine-wide stores with no
-	// per-project path segment, e.g. Cursor ai-tracking.db).
+	// per-project path segment, e.g. OpenCode's opencode.db). The reader
+	// must still scope rows to the workspace.
 	Global bool
 }
 
@@ -139,10 +144,38 @@ type Harvester struct {
 	completed  map[string]bool      // path -> SESSION_TRANSCRIPT_COMPLETE sent
 	agents     map[string]string    // path -> agent name
 	batch      map[string][]Turn    // path -> turns since session start
-	models     map[string]string    // path -> last model announced (Codex turn_context)
+	// batchDropped counts turns trimmed from batch (see addBatchLocked).
+	batchDropped map[string]int
+	models       map[string]string // path -> last model announced (Codex turn_context)
 	// extractors holds per-agent SQLite row extractors (nil value or absent
 	// agent = built-in fallback, then liveness-only). Issue #33/#77.
 	extractors map[string]SQLiteExtractor
+	// fallbackSeen dedupes stdlib SQLite fallback turns, which have no row
+	// timestamps and would otherwise re-emit the same window on every mtime
+	// change.
+	fallbackSeen map[string]map[uint64]struct{}
+	// lastFallback rate-limits the content-scanning SQLite fallback per file.
+	// IDE workspace databases change every few seconds while the IDE is open,
+	// and scanning them on every change made the whole machine sluggish.
+	lastFallback map[string]time.Time
+	// titles remembers the latest native chat title per transcript. Claude
+	// appends its ai-title record after the turns it names, so the title
+	// often lands in a read with no turns; it then names the next turns.
+	titles map[string]nativeTitles
+	// cursorSourceAt carries the latest prompt time per Cursor transcript so
+	// replies read in a later poll inherit the prompt they answer.
+	cursorSourceAt map[string]time.Time
+
+	// routeFilter, when set, replaces the per-workspace attribution check:
+	// the machine-wide SharedScanner decides once per transcript which
+	// workspaces (if any) own it, and unowned files are never read.
+	routeFilter func(path string, src TranscriptSource) bool
+	// offsetsVersion increments whenever a read cursor moves, so the shared
+	// scanner persists cursors only when they changed.
+	offsetsVersion uint64
+	// readThrottle, when set, is told how many bytes TailFile just read so
+	// the shared scanner can pace history imports.
+	readThrottle func(n int)
 
 	// Telemetry for the portal Connect page (/local/harvest).
 	lastScanAt    time.Time
@@ -221,6 +254,9 @@ func NewHarvesterWithPoll(workspaceRoot string, emitter EventEmitter, poll, idle
 		agents:       make(map[string]string),
 		batch:        make(map[string][]Turn),
 		extractors:   make(map[string]SQLiteExtractor),
+		fallbackSeen: make(map[string]map[uint64]struct{}),
+		lastFallback: make(map[string]time.Time),
+		titles:       make(map[string]nativeTitles),
 		agentFiles:   make(map[string]int),
 	}
 }
@@ -299,7 +335,10 @@ func (h *Harvester) emit(ev Event) {
 //	zcode (JSONL + SQLite), deepseek, hermes (SQLite).
 func ResolveSources() []TranscriptSource {
 	home, _ := os.UserHomeDir()
-	appData := os.Getenv("APPDATA")
+	// %APPDATA% on Windows, ~/Library/Application Support on macOS,
+	// $XDG_CONFIG_HOME or ~/.config on Linux: where Cursor, VS Code,
+	// Windsurf and Antigravity keep User/workspaceStorage.
+	appData := platform.AppDataDir()
 	if appData == "" {
 		appData = filepath.Join(home, ".config")
 	}
@@ -347,10 +386,6 @@ func ResolveSources() []TranscriptSource {
 			filepath.Join(home, ".cursor", "chats"),
 			codeWS,
 		}, Format: FormatSQLite},
-		// Cursor AI code-tracking DB — machine-global, no project slug in path
-		{Agent: "cursor", Dirs: []string{
-			filepath.Join(home, ".cursor", "ai-tracking"),
-		}, Format: FormatSQLite, Global: true},
 		// Codex CLI / Desktop — date-sharded rollouts (CODEX_HOME override)
 		{Agent: "codex", Dirs: []string{
 			filepath.Join(codexHome, "sessions"),
@@ -515,7 +550,7 @@ func ClassifyWorkspaceMatch(origin, rootCommit, folderName, candOrigin, candRoot
 		return MatchNone
 	}
 	if folderName != "" && folderName != "." && folderName != string(filepath.Separator) {
-		if strings.Contains(strings.ToLower(candPath), strings.ToLower(folderName)) {
+		if workspaceFolderInPath(candPath, folderName) {
 			return MatchFolderName
 		}
 	} else {
@@ -523,6 +558,30 @@ func ClassifyWorkspaceMatch(origin, rootCommit, folderName, candOrigin, candRoot
 		return MatchFolderName
 	}
 	return MatchNone
+}
+
+// workspaceFolderInPath reports whether folder appears as a whole path
+// segment (or a dash-delimited token inside an encoded segment). Plain
+// substring matching is deliberately avoided so a generic workspace name
+// like "api" cannot claim "capital".
+func workspaceFolderInPath(path, folder string) bool {
+	want := strings.ToLower(strings.TrimSpace(folder))
+	if want == "" || want == "." || want == string(filepath.Separator) {
+		return false
+	}
+	for _, seg := range strings.FieldsFunc(strings.ToLower(path), func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if seg == want || strings.HasSuffix(seg, "-"+want) || strings.Contains(seg, "-"+want+"-") {
+			return true
+		}
+		for _, tok := range strings.Split(seg, "-") {
+			if tok == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // MatchesCandidate reports whether a transcript with the given origin/root
@@ -563,20 +622,7 @@ func (h *Harvester) MatchesWorkspace(path string) bool {
 	}
 	// Fallback: exact path-segment match on the folder name (not substring).
 	// Cursor uses slugs like "d-central-memory" for folder "central-memory".
-	want := strings.ToLower(h.folderName)
-	for _, seg := range strings.FieldsFunc(low, func(r rune) bool { return r == '/' || r == '\\' }) {
-		if seg == want || strings.HasSuffix(seg, "-"+want) || strings.Contains(seg, "-"+want+"-") {
-			return true
-		}
-		// Claude-style encoded dirs use "-" for "/" (e.g. "--home--user--proj"):
-		// accept when the segment contains the folder as a dash-delimited token.
-		for _, tok := range strings.Split(seg, "-") {
-			if tok == want {
-				return true
-			}
-		}
-	}
-	return false
+	return workspaceFolderInPath(path, h.folderName)
 }
 
 // MatchesTranscript reports whether path belongs to this workspace. Path
@@ -631,6 +677,25 @@ func (h *Harvester) matchesWorkspaceJSON(path string) bool {
 	if !found {
 		return false
 	}
+	// Direct answer first: the folder workspace.json names is this workspace
+	// (or lives inside it), or carries its folder name after a move.
+	if folder := adapters.WorkspaceFolderOf(path); folder != "" {
+		if ws := strings.TrimSpace(h.workspace); ws != "" && pathWithin(folder, ws) {
+			return true
+		}
+		if h.folderName != "" && strings.EqualFold(lastPathSegment(folder), h.folderName) {
+			return true
+		}
+	}
+	if runtime.GOOS != "windows" {
+		// adapters.ProjectOf resolves through project.CachedLeaves, which
+		// walks every project root. Off Windows the default root is $HOME,
+		// and on macOS walking it reaches ~/Documents, ~/Desktop,
+		// ~/Downloads and ~/Library/Containers: each one is a privacy (TCC)
+		// prompt, raised just because a Cursor database changed. The direct
+		// check above is the whole answer here.
+		return false
+	}
 	home, _ := os.UserHomeDir()
 	leaf := adapters.ProjectOf(path, home)
 	if leaf == "" || leaf == "global" {
@@ -643,8 +708,28 @@ func (h *Harvester) matchesWorkspaceJSON(path string) bool {
 	if ws == "" {
 		return false
 	}
-	return strings.EqualFold(filepath.Base(ws), leaf) ||
-		strings.Contains(strings.ToLower(ws), strings.ToLower(leaf))
+	return strings.EqualFold(filepath.Base(ws), leaf)
+}
+
+// pathWithin reports whether p is root or below it. Case-insensitive, as
+// the default Windows and macOS file systems are.
+func pathWithin(p, root string) bool {
+	a := strings.ToLower(filepath.Clean(p))
+	b := strings.ToLower(filepath.Clean(root))
+	if a == b {
+		return true
+	}
+	return strings.HasPrefix(a, strings.TrimSuffix(b, string(filepath.Separator))+string(filepath.Separator))
+}
+
+// lastPathSegment returns the final element of a path written with either
+// separator (workspace.json folders may be Windows paths on any host).
+func lastPathSegment(p string) string {
+	p = strings.TrimRight(p, `/\`)
+	if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 // defaultKeepTail is how much of an unseen transcript we ingest on first
@@ -678,34 +763,144 @@ func firstSightOffset(size int64) int64 {
 // fileMentionsFolder reports whether the first ~512KiB of path contains the
 // workspace folder name (case-insensitive). Used when structured cwd peeks
 // miss nested Antigravity tool_call Cwd fields.
+//
+// Results are cached per (file, folder): only the head is read, so a match
+// stays valid while the file only grows, and a miss stays valid once the
+// file is longer than the peek window. A file that shrank (truncated or
+// replaced) is read again.
 func fileMentionsFolder(path, folder string) bool {
 	folder = strings.TrimSpace(folder)
 	if folder == "" || len(folder) < 4 {
 		return false
 	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	key := path + "\x00" + strings.ToLower(folder)
+	headCache.Lock()
+	e, ok := headCache.mentions[key]
+	headCache.Unlock()
+	if ok && st.Size() >= e.size && (e.found || e.size >= mentionPeekBytes || st.Size() == e.size) {
+		if st.Size() > e.size {
+			// Track the latest size so a later truncation is noticed.
+			e.size = st.Size()
+			headCache.Lock()
+			headCache.mentions[key] = e
+			headCache.Unlock()
+		}
+		return e.found
+	}
+	found := fileMentionsFolderUncached(path, folder)
+	headCache.Lock()
+	if len(headCache.mentions) >= headCacheMax {
+		headCache.mentions = map[string]headCacheEntry{}
+	}
+	headCache.mentions[key] = headCacheEntry{size: st.Size(), found: found}
+	headCache.Unlock()
+	return found
+}
+
+const (
+	mentionPeekBytes = 512 << 10
+	cwdPeekBytes     = 64 << 10
+	headCacheMax     = 8192
+)
+
+// headCache holds results derived from transcript heads (fileMentionsFolder,
+// PeekTranscriptCwd). Attribution and discovery ask the same questions about
+// the same files on every change notification and reconcile pass; without
+// it each question re-read up to 512 KiB of the file.
+var headCache = struct {
+	sync.Mutex
+	mentions map[string]headCacheEntry
+	cwd      map[string]headCacheEntry
+}{mentions: map[string]headCacheEntry{}, cwd: map[string]headCacheEntry{}}
+
+type headCacheEntry struct {
+	size  int64 // file size when the head was read
+	found bool
+	cwd   string
+}
+
+func fileMentionsFolderUncached(path, folder string) bool {
 	f, err := os.Open(path)
 	if err != nil {
 		return false
 	}
 	defer f.Close()
-	buf := make([]byte, 512<<10)
+	buf := make([]byte, mentionPeekBytes)
 	n, _ := io.ReadFull(f, buf)
 	if n <= 0 {
 		return false
 	}
-	return strings.Contains(strings.ToLower(string(buf[:n])), strings.ToLower(folder))
+	text := strings.ToLower(string(buf[:n]))
+	want := strings.ToLower(folder)
+	for offset := 0; offset < len(text); {
+		i := strings.Index(text[offset:], want)
+		if i < 0 {
+			return false
+		}
+		i += offset
+		end := i + len(want)
+		if (i == 0 || folderBoundary(text[i-1])) && (end == len(text) || folderBoundary(text[end])) {
+			return true
+		}
+		offset = i + 1
+	}
+	return false
+}
+
+func folderBoundary(c byte) bool {
+	switch c {
+	case '/', '\\', '"', '\'', ' ', '\t', '\n', '\r', ':', '=', '(', '[', ',':
+		return true
+	}
+	return false
 }
 
 // PeekTranscriptCwd reads the first ~64KiB of a transcript and returns a
 // workspace hint (cwd / working_directory / directory / workspace_path).
 // Used for global session stores whose on-disk path has no project folder.
+//
+// The hint comes from the head of the file, which appends do not change, so
+// it is cached per path and read again only when the file shrank (truncated
+// or replaced), or when no hint was found and the head was still growing.
 func PeekTranscriptCwd(path string) string {
+	st, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	headCache.Lock()
+	e, ok := headCache.cwd[path]
+	headCache.Unlock()
+	if ok && st.Size() >= e.size && (e.cwd != "" || e.size >= cwdPeekBytes || st.Size() == e.size) {
+		if st.Size() > e.size {
+			// Track the latest size so a later truncation is noticed.
+			e.size = st.Size()
+			headCache.Lock()
+			headCache.cwd[path] = e
+			headCache.Unlock()
+		}
+		return e.cwd
+	}
+	cwd := peekTranscriptCwdUncached(path)
+	headCache.Lock()
+	if len(headCache.cwd) >= headCacheMax {
+		headCache.cwd = map[string]headCacheEntry{}
+	}
+	headCache.cwd[path] = headCacheEntry{size: st.Size(), cwd: cwd}
+	headCache.Unlock()
+	return cwd
+}
+
+func peekTranscriptCwdUncached(path string) string {
 	f, err := os.Open(path)
 	if err != nil {
 		return ""
 	}
 	defer f.Close()
-	buf := make([]byte, 64<<10)
+	buf := make([]byte, cwdPeekBytes)
 	n, _ := io.ReadFull(f, buf)
 	if n <= 0 {
 		return ""
@@ -787,13 +982,69 @@ func originTail(origin string) string {
 	return s
 }
 
-// sessionID derives a stable session id from the transcript path.
+// containerTranscriptStems are transcript file names (without extension)
+// that never identify one conversation: either the file holds many
+// conversations (VS Code/Cursor state.vscdb, Cursor ai-code-tracking.db,
+// opencode.db) or the conversation id is a parent folder (Antigravity/Gemini
+// brain transcript*.jsonl). Using the stem as a session id merged unrelated
+// chats into one empty "state"/"opencode"/"transcript" chat in Timeline.
+var containerTranscriptStems = map[string]bool{
+	"state":              true,
+	"opencode":           true,
+	"ai-code-tracking":   true,
+	"transcript":         true,
+	"transcript_full":    true,
+	"harvest-smoke-test": true, // capture self-test leftover
+}
+
+// folderIDTranscriptStems name per-conversation transcript files whose
+// conversation id is an ancestor folder (…/brain/<id>/.system_generated/logs/
+// transcript_full.jsonl).
+var folderIDTranscriptStems = map[string]bool{
+	"transcript":      true,
+	"transcript_full": true,
+}
+
+// sessionID derives a stable native session id from the transcript path. It
+// is the single place a harvested turn's session id comes from (turns that
+// carry Turn.SessionID, e.g. OpenCode, override it). It returns "" when the
+// path does not identify a single conversation; such turns still feed memory
+// extraction but are not mirrored as a Timeline chat.
 func sessionID(path string) string {
 	base := filepath.Base(path)
 	if ext := filepath.Ext(base); ext != "" {
 		base = strings.TrimSuffix(base, ext)
 	}
-	return base
+	stem := strings.ToLower(strings.TrimSpace(base))
+	if !containerTranscriptStems[stem] {
+		return base
+	}
+	if folderIDTranscriptStems[stem] {
+		return conversationFolderID(filepath.Dir(path))
+	}
+	return ""
+}
+
+// conversationFolderID walks up from dir to the conversation folder of a
+// brain transcript: the folder directly under "brain", else the nearest
+// UUID-named ancestor. "" when neither exists.
+func conversationFolderID(dir string) string {
+	var uuidAncestor string
+	for i := 0; i < 6; i++ {
+		name := filepath.Base(dir)
+		parent := filepath.Dir(dir)
+		if name == "" || name == "." || parent == dir {
+			break
+		}
+		if strings.EqualFold(filepath.Base(parent), "brain") {
+			return name
+		}
+		if uuidAncestor == "" && looksLikeUUID(name) {
+			uuidAncestor = name
+		}
+		dir = parent
+	}
+	return uuidAncestor
 }
 
 // noiseTypes are JSONL record types that carry no dialogue or structured
@@ -802,7 +1053,9 @@ func sessionID(path string) string {
 // (ParseToolCalls → pushParsedToolOps) is non-empty for file-edit sessions.
 var noiseTypes = map[string]bool{
 	"tool_result": true, "function_result": true, "function_call_output": true,
-	"api_request": true, "api_response": true,
+	// api-request-blob: Claude Code logs each raw API request body as its own
+	// line; it repeats the assistant message and must not become a turn.
+	"api_request": true, "api_response": true, "api-request-blob": true,
 	"system": true, "summary": true, "snapshot": true,
 	"file-history-snapshot": true, "queue-operation": true,
 	"background_task": true, "mcp_tool_call": true, "mcp_tool_result": true,
@@ -830,11 +1083,16 @@ const maxJSONLLineBytes = 1 << 20
 // (>1MB) are skipped, never stalling the scan.
 func ParseTurns(r io.Reader) ([]Turn, error) {
 	var turns []Turn
+	var titles nativeTitles
+	defer func() { titles.apply(turns) }()
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), maxJSONLLineBytes)
 	for sc.Scan() {
 		line := sc.Bytes()
 		if len(line) > maxJSONLLineBytes {
+			continue
+		}
+		if titles.observe(line) {
 			continue
 		}
 		t, ok := parseTurnLine(line)
@@ -858,7 +1116,7 @@ func ParseTurns(r io.Reader) ([]Turn, error) {
 // rollout envelopes ({type, payload:{role|message|content}}). Structured
 // tool_use / function_call blocks are retained on Turn.ToolCalls (F3).
 func parseTurnLine(line []byte) (t Turn, ok bool) {
-	if len(strings.TrimSpace(string(line))) == 0 {
+	if len(bytes.TrimSpace(line)) == 0 {
 		return Turn{}, false
 	}
 	var m map[string]any
@@ -869,6 +1127,9 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 	if noiseTypes[typ] {
 		return Turn{}, false
 	}
+	// Codex keeps its original timestamp on the envelope, not the payload.
+	// Save it before unwrapping dialogue fields.
+	envelopeTime := extractTime(m)
 	// Codex / OpenAI Responses-style: unwrap payload for dialogue fields.
 	if p, ok := m["payload"].(map[string]any); ok {
 		pt := strings.ToLower(strField(p, "type"))
@@ -947,10 +1208,21 @@ func parseTurnLine(line []byte) (t Turn, ok bool) {
 	if strings.TrimSpace(content) == "" && len(toolCalls) == 0 {
 		return Turn{}, false
 	}
+	sourceTime := extractTime(m)
+	if sourceTime.IsZero() {
+		sourceTime = envelopeTime
+	}
+	if sourceTime.IsZero() && normalizeSpeaker(role) == "user" {
+		// Cursor agent transcripts have no time field; the prompt text
+		// itself starts with a <timestamp> header.
+		if at, ok := cursorPromptTime(content); ok {
+			sourceTime = at
+		}
+	}
 	t = Turn{
 		Speaker:   normalizeSpeaker(role),
 		Content:   strings.TrimSpace(content),
-		Timestamp: extractTime(m),
+		Timestamp: sourceTime,
 		ToolCalls: toolCalls,
 	}
 	if t.Speaker == "unknown" && len(toolCalls) > 0 {
@@ -1285,15 +1557,6 @@ func firstNonEmpty(ss ...string) string {
 	return ""
 }
 
-func lastNewline(b []byte) int {
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] == '\n' {
-			return i
-		}
-	}
-	return -1
-}
-
 // turnPayload renders a Turn into the CONVERSATION_TURN payload shape.
 // Content is secret-screened (issue #132): transcripts routinely contain
 // pasted secrets, and the event stream lands in Postgres. Structured
@@ -1376,32 +1639,51 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 	if _, err := f.Seek(off, io.SeekStart); err != nil {
 		return nil, err
 	}
-	// Only consume through the last full line so torn writes (no trailing
-	// newline) are retried on the next poll instead of failing JSON parse.
-	buf, err := io.ReadAll(f)
-	if err != nil {
-		return nil, err
+	h.mu.Lock()
+	titles, knownTitle := h.titles[path]
+	h.mu.Unlock()
+	if !knownTitle && off > 0 {
+		// Resumed past the title (restart cursor or first-sight window):
+		// recover it from the bytes just before the cursor.
+		titles = titlesBefore(f, off)
 	}
-	consumable := buf
-	if len(buf) > 0 && buf[len(buf)-1] != '\n' {
-		if i := lastNewline(buf); i >= 0 {
-			consumable = buf[:i+1]
-		} else {
-			h.mu.Lock()
-			h.offsets[path] = off // nothing consumable yet
-			h.mu.Unlock()
-			return nil, nil
-		}
-	}
-
+	// Stream the new bytes line by line instead of buffering them: a first
+	// read of a long chat is megabytes, mostly api-request-blob records that
+	// are dropped unparsed. Only complete lines are consumed, so a torn
+	// write (no trailing newline) is read again on the next poll. Reading
+	// stops at the size stat'ed above; later appends wait for the next call.
+	lr := newTranscriptLineReader(io.LimitReader(f, st.Size()-off), maxJSONLLineBytes)
 	var turns []Turn
-	sc := bufio.NewScanner(strings.NewReader(string(consumable)))
-	sc.Buffer(make([]byte, 64<<10), maxJSONLLineBytes)
+	var consumed, unthrottled int64
 	position := off
-	for sc.Scan() {
-		position += int64(len(sc.Bytes())) + 1
-		t, ok := parseTurnLine(sc.Bytes())
-		u, key, model := parseLineUsage(sc.Bytes())
+	for {
+		line, size, overlong, ok := lr.next()
+		if !ok {
+			break
+		}
+		consumed += int64(size)
+		if h.readThrottle != nil {
+			if unthrottled += int64(size); unthrottled >= 1<<20 {
+				h.readThrottle(int(unthrottled))
+				unthrottled = 0
+			}
+		}
+		if overlong {
+			// Overlong single line: skip it, keep reading the rest.
+			position += int64(size)
+			continue
+		}
+		// Source positions count each line without its line ending plus one,
+		// as they always have: they key cloud turns, so they must not change.
+		position += int64(len(line)) + 1
+		if skippableTranscriptLine(line) {
+			continue
+		}
+		if titles.observe(line) {
+			continue
+		}
+		t, ok := parseTurnLine(line)
+		u, key, model := parseLineUsage(line)
 		if model != "" {
 			h.setModel(path, model)
 		}
@@ -1410,7 +1692,7 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 				u.Model = h.modelFor(path)
 			}
 			if !ok {
-				t, ok = Turn{Speaker: "assistant", Timestamp: lineTime(sc.Bytes())}, true
+				t, ok = Turn{Speaker: "assistant", Timestamp: lineTime(line)}, true
 			}
 			t.Usage, t.UsageKey = u, key
 		}
@@ -1419,23 +1701,43 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 			turns = append(turns, t)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		// Overlong single line: skip it but still advance the offset below.
-		if err != bufio.ErrTooLong {
-			return nil, err
-		}
+	if h.readThrottle != nil && unthrottled > 0 {
+		h.readThrottle(int(unthrottled))
+	}
+	titles.apply(turns)
+	if consumed == 0 {
+		return nil, nil // nothing complete yet
 	}
 
 	now := h.now().UTC()
 	h.mu.Lock()
-	h.offsets[path] = off + int64(len(consumable))
 	agent := h.agents[path]
+	carry, knownCarry := h.cursorSourceAt[path]
+	h.mu.Unlock()
+	cursorTranscript := len(turns) > 0 && isCursorTranscript(agent, path)
+	if cursorTranscript {
+		if !knownCarry && off > 0 {
+			carry = sourceTimeBefore(f, off)
+		}
+		carry = fillCursorSourceTimes(turns, carry, historicalMtime(st.ModTime(), now))
+	}
+
+	h.mu.Lock()
+	if cursorTranscript && !carry.IsZero() {
+		if h.cursorSourceAt == nil {
+			h.cursorSourceAt = make(map[string]time.Time)
+		}
+		h.cursorSourceAt[path] = carry
+	}
+	h.offsets[path] = off + consumed
+	h.offsetsVersion++
+	if h.titles == nil {
+		h.titles = make(map[string]nativeTitles)
+	}
+	h.titles[path] = titles
 	if len(turns) > 0 {
 		last := now
 		for i := range turns {
-			if turns[i].Timestamp.IsZero() {
-				turns[i].Timestamp = now
-			}
 			if turns[i].Timestamp.After(last) {
 				last = turns[i].Timestamp
 			}
@@ -1444,7 +1746,7 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 		delete(h.completed, path) // new activity re-arms idle detection
 		for _, t := range turns {
 			if !t.UsageOnly() {
-				h.batch[path] = append(h.batch[path], t)
+				h.addBatchLocked(path, t)
 			}
 		}
 	}
@@ -1458,6 +1760,49 @@ func (h *Harvester) TailFile(path string) ([]Turn, error) {
 		})
 	}
 	return turns, nil
+}
+
+// maxFallbackSeen bounds the per-database dedupe set of fallbackTurnKey
+// hashes (8 bytes each; it used to keep every turn's full text forever).
+const maxFallbackSeen = 20000
+
+func fallbackTurnKey(t Turn) uint64 {
+	f := fnv.New64a()
+	f.Write([]byte(t.Speaker))
+	f.Write([]byte{0})
+	f.Write([]byte(t.Content))
+	return f.Sum64()
+}
+
+func (h *Harvester) freshFallbackTurns(path string, turns []Turn) []Turn {
+	if len(turns) == 0 {
+		return nil
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := h.fallbackSeen[path]
+	if seen == nil || len(seen) > maxFallbackSeen {
+		// Each scan reads the newest window of the database, so keys that
+		// fell out of the window never come back: keep only this window's.
+		old := seen
+		seen = make(map[uint64]struct{}, len(turns))
+		for _, turn := range turns {
+			if _, ok := old[fallbackTurnKey(turn)]; ok {
+				seen[fallbackTurnKey(turn)] = struct{}{}
+			}
+		}
+		h.fallbackSeen[path] = seen
+	}
+	fresh := make([]Turn, 0, len(turns))
+	for _, turn := range turns {
+		key := fallbackTurnKey(turn)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		fresh = append(fresh, turn)
+	}
+	return fresh
 }
 
 // TrackSQLite records the mtime/size of a SQLite/vscdb transcript file.
@@ -1510,23 +1855,26 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 		}
 		h.mu.Lock()
 		for i := range turns {
-			if turns[i].Timestamp.IsZero() {
-				turns[i].Timestamp = now
+			// Receipt time drives idle detection only. Missing source timestamps
+			// stay missing in the emitted turn and archived transcript.
+			activityAt := turns[i].Timestamp
+			if activityAt.IsZero() {
+				activityAt = now
 			}
 			turnPath := path
 			if turns[i].SessionID != "" {
 				turnPath = filepath.Join(filepath.Dir(path), ".nexus-opencode-sessions", turns[i].SessionID+".jsonl")
 				h.agents[turnPath] = agent
 			}
-			if turns[i].Timestamp.After(h.lastActive[turnPath]) {
-				h.lastActive[turnPath] = turns[i].Timestamp
+			if activityAt.After(h.lastActive[turnPath]) {
+				h.lastActive[turnPath] = activityAt
 			}
 			delete(h.completed, turnPath)
 			if !turns[i].UsageOnly() {
-				h.batch[turnPath] = append(h.batch[turnPath], turns[i])
+				h.addBatchLocked(turnPath, turns[i])
 			}
-			if turns[i].Timestamp.After(h.lastActive[path]) {
-				h.lastActive[path] = turns[i].Timestamp
+			if activityAt.After(h.lastActive[path]) {
+				h.lastActive[path] = activityAt
 			}
 		}
 		h.mu.Unlock()
@@ -1557,7 +1905,17 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 			return false
 		}
 	}
-	if turns := extractSQLiteFallback(path, since); runExtract(turns) {
+	if h.fallbackDue(path, now) {
+		if turns := h.freshFallbackTurns(path, extractSQLiteFallback(path, since)); runExtract(turns) {
+			return true
+		}
+	} else if !firstSight {
+		// Change seen but the content scan is rate-limited: keep the session
+		// alive without re-reading the database.
+		h.mu.Lock()
+		h.lastActive[path] = now
+		delete(h.completed, path)
+		h.mu.Unlock()
 		return true
 	}
 	if firstSight {
@@ -1575,6 +1933,31 @@ func (h *Harvester) TrackSQLite(path string, info os.FileInfo) bool {
 	delete(h.completed, path)
 	h.mu.Unlock()
 	return true
+}
+
+// maxIdleBatchTurns bounds the turns a session keeps for its end-of-session
+// batch. Every turn has already been emitted on its own; the batch only
+// feeds the end-of-session extraction, which reads the speaker and text of
+// at most 120 turns. A chat that stays active for hours never goes idle,
+// and keeping all its turns (tool inputs included) grew the heap with the
+// length of the chat — and a history import held every imported chat's.
+const maxIdleBatchTurns = 120
+
+// addBatchLocked queues t for path's end-of-session batch, keeping the
+// latest maxIdleBatchTurns (up to twice that between trims) and only the
+// fields the batch carries. h.mu must be held.
+func (h *Harvester) addBatchLocked(path string, t Turn) {
+	b := append(h.batch[path], Turn{Speaker: t.Speaker, Content: t.Content, Timestamp: t.Timestamp})
+	if len(b) > 2*maxIdleBatchTurns {
+		drop := len(b) - maxIdleBatchTurns
+		if h.batchDropped == nil {
+			h.batchDropped = make(map[string]int)
+		}
+		h.batchDropped[path] += drop
+		// Copy so the dropped turns' backing array is released.
+		b = append([]Turn(nil), b[drop:]...)
+	}
+	h.batch[path] = b
 }
 
 // CheckIdle emits SESSION_TRANSCRIPT_COMPLETE for every session with no new
@@ -1596,11 +1979,13 @@ func (h *Harvester) CheckIdle() []Event {
 	for _, path := range due {
 		h.completed[path] = true
 		turns := append([]Turn(nil), h.batch[path]...)
+		harvested := len(turns) + h.batchDropped[path]
 		// Drain the batch (issue #132): without this the session's turns
 		// accumulate forever and every re-armed idle re-emits all old
 		// turns to the Memory Processor (duplicate extraction + LLM cost).
 		delete(h.batch, path)
-		detail := strconv.Itoa(len(turns)) + " turns harvested"
+		delete(h.batchDropped, path)
+		detail := strconv.Itoa(harvested) + " turns harvested"
 		if _, isSQLite := h.sqlite[path]; isSQLite && len(turns) == 0 {
 			detail = "sqlite/vscdb source: rows not parsed (no driver); " +
 				"deep extraction must read the store out-of-band"
@@ -1627,7 +2012,7 @@ func (h *Harvester) CheckIdle() []Event {
 				"agent":      h.agents[path],
 				"path":       path,
 				"session_id": sessionID(path),
-				"turn_count": len(turns),
+				"turn_count": harvested,
 				"turns":      flat,
 				"detail":     detail,
 			},
@@ -1648,7 +2033,8 @@ const (
 	maxWalkFiles = 2000
 	// maxWalkDepth caps directory depth below each source dir.
 	maxWalkDepth = 8
-	// maxWalkFileBytes skips sqlite/jsonl files larger than 64MB.
+	// maxWalkFileBytes caps whole-file formats (single-object JSON, IDE
+	// SQLite stores other than OpenCode's). JSONL transcripts are uncapped.
 	maxWalkFileBytes = 64 << 20
 )
 
@@ -1796,79 +2182,9 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 			return nil
 		}
 		visited++
-		// SQLite extractors query by SQL — allow large DBs (OpenCode ~GB).
-		tooBig := info.Size() > maxWalkFileBytes
-		if tooBig && !(src.Format == FormatSQLite && strings.EqualFold(filepath.Base(p), "opencode.db")) {
-			return nil
-		}
-		if adapters.ClassifyPath(p) == adapters.Never {
-			return nil
-		}
-		if !src.Global && !h.MatchesTranscript(p, src.CwdMatch) {
-			return nil
-		}
-		ext := strings.ToLower(filepath.Ext(p))
-		hit := HarvestFileHit{
-			Agent:  src.Agent,
-			Format: src.Format,
-			Path:   p,
-			Name:   filepath.Base(p),
-		}
-		switch src.Format {
-		case FormatJSONL:
-			if ext != ".jsonl" {
-				return nil
-			}
-			base := filepath.Base(p)
-			// Antigravity brains: only the canonical transcript logs.
-			if src.Agent == "antigravity" {
-				if base != "transcript_full.jsonl" && base != "transcript.jsonl" {
-					return nil
-				}
-				if base == "transcript.jsonl" {
-					full := filepath.Join(filepath.Dir(p), "transcript_full.jsonl")
-					if _, err := os.Stat(full); err == nil {
-						return nil // prefer the full transcript sibling
-					}
-				}
-			}
-			h.mu.Lock()
-			h.agents[p] = src.Agent
-			h.mu.Unlock()
-			got, _ := h.TailFile(p)
+		if hit, got, ok := h.considerFile(src, p, info); ok {
 			files++
-			turns += len(got)
-			hits = append(hits, hit)
-			if agentFiles != nil {
-				agentFiles[src.Agent]++
-			}
-		case FormatJSON:
-			if ext != ".json" {
-				return nil
-			}
-			h.mu.Lock()
-			h.agents[p] = src.Agent
-			h.mu.Unlock()
-			got, _ := h.TailFile(p)
-			files++
-			turns += len(got)
-			hits = append(hits, hit)
-			if agentFiles != nil {
-				agentFiles[src.Agent]++
-			}
-		case FormatSQLite:
-			if ext != ".db" && ext != ".sqlite" && ext != ".sqlite3" && ext != ".vscdb" {
-				return nil
-			}
-			// OpenCode: only the main DB (ignore snapshots / sidecars).
-			if src.Agent == "opencode" && !strings.EqualFold(filepath.Base(p), "opencode.db") {
-				return nil
-			}
-			h.mu.Lock()
-			h.agents[p] = src.Agent
-			h.mu.Unlock()
-			_ = h.TrackSQLite(p, info)
-			files++
+			turns += got
 			hits = append(hits, hit)
 			if agentFiles != nil {
 				agentFiles[src.Agent]++
@@ -1877,6 +2193,144 @@ func (h *Harvester) scanDirCounted(src TranscriptSource, dir string, agentFiles 
 		return nil
 	})
 	return files, turns, hits, walkErr
+}
+
+// considerFile applies the per-file capture rules (size, secrets, workspace
+// attribution, format) and reads new content. It is shared by the periodic
+// walk and by file-change notifications so both follow identical rules.
+// ok=false means the file is not a transcript this harvester captures.
+func (h *Harvester) considerFile(src TranscriptSource, p string, info os.FileInfo) (hit HarvestFileHit, turns int, ok bool) {
+	if adapters.ClassifyPath(p) == adapters.Never {
+		return hit, 0, false
+	}
+	ext := strings.ToLower(filepath.Ext(p))
+	switch src.Format {
+	case FormatJSONL:
+		if ext != ".jsonl" {
+			return hit, 0, false
+		}
+		base := filepath.Base(p)
+		// Antigravity brains: only the canonical transcript logs.
+		if src.Agent == "antigravity" {
+			if base != "transcript_full.jsonl" && base != "transcript.jsonl" {
+				return hit, 0, false
+			}
+			if base == "transcript.jsonl" {
+				full := filepath.Join(filepath.Dir(p), "transcript_full.jsonl")
+				if _, err := os.Stat(full); err == nil {
+					return hit, 0, false // prefer the full transcript sibling
+				}
+			}
+		}
+	case FormatJSON:
+		if ext != ".json" {
+			return hit, 0, false
+		}
+	case FormatSQLite:
+		if ext != ".db" && ext != ".sqlite" && ext != ".sqlite3" && ext != ".vscdb" {
+			return hit, 0, false
+		}
+		// OpenCode: only the main DB (ignore snapshots / sidecars).
+		if src.Agent == "opencode" && !strings.EqualFold(filepath.Base(p), "opencode.db") {
+			return hit, 0, false
+		}
+	default:
+		return hit, 0, false
+	}
+	// Chats run inside Nexus are saved by Nexus; their agent transcript
+	// would be a duplicate.
+	if isNexusOwnedTranscript(p) {
+		return hit, 0, false
+	}
+	// Attribution last: it may peek file contents, so cheap name/format
+	// checks above filter first.
+	if h.routeFilter != nil {
+		if !h.routeFilter(p, src) {
+			return hit, 0, false
+		}
+	} else if !src.Global && !h.MatchesTranscript(p, src.CwdMatch) {
+		return hit, 0, false
+	}
+	// JSONL transcripts have no size cap: TailFile streams them from the
+	// saved offset, so a long chat costs only its new lines. (A cap here used
+	// to drop every chat past 64 MB without a word.) Whole-file formats keep
+	// the cap, and a skipped file is logged once and shown in capture status.
+	if fileTooBigToCapture(src, p, info.Size()) {
+		noteSkippedTranscript(src.Agent, p, info.Size())
+		return hit, 0, false
+	}
+	hit = HarvestFileHit{Agent: src.Agent, Format: src.Format, Path: p, Name: filepath.Base(p)}
+	h.mu.Lock()
+	h.agents[p] = src.Agent
+	h.mu.Unlock()
+	if src.Format == FormatSQLite {
+		_ = h.TrackSQLite(p, info)
+		return hit, 0, true
+	}
+	got, _ := h.TailFile(p)
+	return hit, len(got), true
+}
+
+// sqliteFallbackInterval bounds how often one IDE database is content-scanned.
+var sqliteFallbackInterval = 2 * time.Minute
+
+// fallbackDue reports whether the content-scanning SQLite fallback may run
+// for path now, and records the attempt when it may.
+func (h *Harvester) fallbackDue(path string, now time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lastFallback == nil {
+		h.lastFallback = make(map[string]time.Time)
+	}
+	if last, ok := h.lastFallback[path]; ok && now.Sub(last) < sqliteFallbackInterval {
+		return false
+	}
+	h.lastFallback[path] = now
+	return true
+}
+
+// cursorSnapshot copies the read cursors and their version for persistence.
+func (h *Harvester) cursorSnapshot() (map[string]int64, uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make(map[string]int64, len(h.offsets))
+	for k, v := range h.offsets {
+		out[k] = v
+	}
+	return out, h.offsetsVersion
+}
+
+// restoreCursors seeds read cursors saved by a previous run, so a restart
+// continues where it stopped instead of re-reading every transcript. Files
+// that shrank since are re-read from the start by TailFile.
+func (h *Harvester) restoreCursors(saved map[string]int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for path, off := range saved {
+		if off >= 0 {
+			if _, ok := h.offsets[path]; !ok {
+				h.offsets[path] = off
+			}
+		}
+	}
+}
+
+// setSharedScanStats publishes the shared scanner's per-workspace view so
+// the existing status surfaces (Stats) keep working for attached harvesters.
+func (h *Harvester) setSharedScanStats(at time.Time, files, turns int, agentFiles map[string]int, hits []HarvestFileHit, scanErr string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !at.IsZero() {
+		h.lastScanAt = at
+	}
+	h.lastScanFiles = files
+	h.lastScanTurns = turns
+	h.lastScanErr = scanErr
+	h.agentFiles = agentFiles
+	if len(hits) > 40 {
+		hits = hits[:40]
+	}
+	h.recentFiles = hits
 }
 
 // Start runs the poll loop (ScanAndTail + CheckIdle every PollInterval)
@@ -1898,6 +2352,84 @@ func (h *Harvester) Start(ctx context.Context) {
 			}
 			_ = h.ScanAndTail()
 			_ = h.CheckIdle()
+		}
+	}
+}
+
+// nativeTitles collects the chat title an agent writes into its transcript:
+// Claude Code records {"type":"ai-title","aiTitle":...} and, when the user
+// renames the chat, {"type":"custom-title","customTitle":...}. Without it a
+// captured chat was named after a fragment of its latest message.
+type nativeTitles struct {
+	ai, custom string
+}
+
+// observe reports whether line is a title record (and records it).
+func (n *nativeTitles) observe(line []byte) bool {
+	if !bytes.Contains(line, []byte(`-title"`)) {
+		return false
+	}
+	var rec struct {
+		Type        string `json:"type"`
+		AITitle     string `json:"aiTitle"`
+		CustomTitle string `json:"customTitle"`
+	}
+	if json.Unmarshal(line, &rec) != nil {
+		return false
+	}
+	switch rec.Type {
+	case "ai-title":
+		if t := strings.TrimSpace(rec.AITitle); t != "" {
+			n.ai = t
+		}
+		return true
+	case "custom-title":
+		if t := strings.TrimSpace(rec.CustomTitle); t != "" {
+			n.custom = t
+		}
+		return true
+	}
+	return false
+}
+
+// titleLookbackBytes bounds how much already-read transcript titlesBefore
+// scans when a cursor resumes past the title records.
+const titleLookbackBytes = 1 << 20
+
+// titlesBefore recovers the latest title records from the window of f just
+// before off. Claude re-appends its title as the chat grows, so a bounded
+// window normally holds the current one; a miss only means no title yet.
+func titlesBefore(f *os.File, off int64) nativeTitles {
+	var n nativeTitles
+	start := off - titleLookbackBytes
+	if start < 0 {
+		start = 0
+	}
+	buf := make([]byte, off-start)
+	read, err := f.ReadAt(buf, start)
+	if err != nil && err != io.EOF {
+		return n
+	}
+	for _, line := range bytes.Split(buf[:read], []byte{'\n'}) {
+		n.observe(line)
+	}
+	return n
+}
+
+// apply names every turn of the batch after the chat (a person's own name
+// for it wins over the generated one).
+func (n *nativeTitles) apply(turns []Turn) {
+	title := n.custom
+	if title == "" {
+		title = n.ai
+	}
+	if title == "" {
+		return
+	}
+	title = redact(title)
+	for i := range turns {
+		if turns[i].SessionTitle == "" {
+			turns[i].SessionTitle = title
 		}
 	}
 }

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Check, Copy, FileCode2 } from "lucide-react";
-import { diffRows } from "@/lib/chat-content";
+import { BARE_HUNK, diffRows } from "@/lib/chat-content";
 
 export function ChatDiff({
   path,
@@ -13,7 +13,10 @@ export function ChatDiff({
 }) {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState(false);
-  const rows = diffRows(diff);
+  // A bare "@@ @@" only separates an edit saved without line numbers: don't show it.
+  const rows = diffRows(diff).filter(
+    (row) => !(row.kind === "header" && row.text.trim() === BARE_HUNK),
+  );
   const added = rows.filter((row) => row.kind === "added").length;
   const removed = rows.filter((row) => row.kind === "removed").length;
   return (

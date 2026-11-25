@@ -1,4 +1,5 @@
 @import 'tailwindcss';
+@import './fonts.css';
 @import './conversation.css';
 @import './theme.css';
 
@@ -27,7 +28,7 @@
   --color-danger-soft: rgba(196, 92, 92, 0.14);
 
   --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
-  --font-display: 'Syne', 'IBM Plex Sans', system-ui, sans-serif;
+  --font-display: 'Bricolage Grotesque', 'IBM Plex Sans', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
 
   --shadow-glass: 0 10px 40px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.04);
@@ -225,6 +226,84 @@
   .app-nav-link.is-active {
     color: var(--color-fg);
     background: var(--color-raised);
+  }
+
+  .app-nav-section {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .app-nav-section + .app-nav-section {
+    margin-top: 0.85rem;
+  }
+
+  .app-nav-bottom {
+    margin-top: auto !important;
+    padding-top: 0.75rem;
+  }
+
+  .app-nav-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin: 0 0 0.25rem;
+    padding: 0 0.625rem;
+    border: 0;
+    background: transparent;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-muted);
+    text-align: left;
+  }
+
+  .app-nav-heading.is-toggle {
+    cursor: pointer;
+    padding-block: 0.25rem;
+    border-radius: 0.375rem;
+  }
+
+  .app-nav-heading.is-toggle:hover {
+    color: var(--color-fg);
+  }
+
+  .app-tabbar {
+    position: fixed;
+    inset-inline: 0;
+    bottom: 0;
+    z-index: 40;
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    padding: 0.25rem max(0.25rem, env(safe-area-inset-right)) max(0.25rem, env(safe-area-inset-bottom)) max(0.25rem, env(safe-area-inset-left));
+    border-top: 1px solid var(--color-border);
+    background: color-mix(in srgb, var(--color-base) 94%, transparent);
+    backdrop-filter: blur(10px);
+  }
+
+  .app-tab {
+    display: flex;
+    min-height: 3.25rem;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.2rem;
+    border: 0;
+    border-radius: 0.5rem;
+    background: transparent;
+    color: var(--color-muted);
+    font-size: 11px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .app-tab.is-active {
+    color: var(--color-amber);
+  }
+
+  .is-conversation .app-tabbar {
+    display: none;
   }
 
   .app-sidebar-foot {
@@ -435,7 +514,8 @@
     }
 
     .app-mobile-bar,
-    .app-drawer-root {
+    .app-drawer-root,
+    .app-tabbar {
       display: none;
     }
 
@@ -447,6 +527,17 @@
 
 /* Mobile app density — prevent horizontal spill, tighten touch targets */
 @media (max-width: 767px) {
+  /* "More" in the bottom tab bar opens the menu; the top-bar button is only
+     for chat view, where the tab bar is hidden. Unlayered so it beats the
+     Button's display utility. */
+  .app-mobile-actions .app-menu-btn {
+    display: none;
+  }
+
+  .is-conversation .app-mobile-actions .app-menu-btn {
+    display: inline-flex;
+  }
+
   .app-mobile-bar {
     padding-inline: max(0.75rem, env(safe-area-inset-left))
       max(0.75rem, env(safe-area-inset-right));
@@ -456,7 +547,12 @@
   .app-main {
     padding-inline: max(0.85rem, env(safe-area-inset-left))
       max(0.85rem, env(safe-area-inset-right));
-    padding-bottom: max(2rem, env(safe-area-inset-bottom));
+    /* clear the bottom tab bar */
+    padding-bottom: calc(5rem + env(safe-area-inset-bottom));
+  }
+
+  .is-conversation .app-main {
+    padding-bottom: 0;
   }
 
   .app-main-inner {
@@ -911,4 +1007,68 @@
   .landing-feature-title {
     max-width: none;
   }
+}
+
+/* "Report a problem" dialog: the chat modal's look, wider for the preview. */
+dialog.report-dialog {
+  margin: auto;
+  width: 100%;
+  max-width: 640px;
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  padding: 22px;
+  color: var(--chat-fg);
+  border: 1px solid var(--chat-line-strong);
+  border-radius: 16px;
+  background: var(--chat-surface);
+  box-shadow: 0 20px 100px var(--chat-shadow);
+}
+dialog.report-dialog::backdrop {
+  background: var(--chat-backdrop);
+  backdrop-filter: blur(5px);
+}
+@media (max-width: 640px) {
+  dialog.report-dialog {
+    max-width: calc(100vw - 32px);
+    padding: 18px;
+  }
+}
+
+/* Markdown memories (the project brief) when a memory card is expanded. */
+.memory-prose {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--color-fg-dim);
+  overflow-wrap: anywhere;
+}
+.memory-prose > :first-child { margin-top: 0; }
+.memory-prose > :last-child { margin-bottom: 0; }
+.memory-prose :is(p, ul, ol, pre, table, blockquote) { margin: 8px 0; }
+.memory-prose :is(ul, ol) { padding-left: 20px; }
+.memory-prose ul { list-style: disc; }
+.memory-prose ol { list-style: decimal; }
+.memory-prose li + li { margin-top: 2px; }
+.memory-prose :is(h1, h2, h3, h4) { margin: 16px 0 6px; color: var(--color-fg); font-weight: 600; line-height: 1.35; }
+.memory-prose h1 { font-size: 16px; }
+.memory-prose :is(h2, h3, h4) { font-size: 14px; }
+.memory-prose strong { color: var(--color-fg); font-weight: 600; }
+.memory-prose a { color: var(--color-fg); text-decoration: underline; text-underline-offset: 3px; }
+.memory-prose code { font-family: var(--font-mono); font-size: 0.88em; padding: 1px 4px; border-radius: 4px; background: var(--color-raised); color: var(--color-fg); }
+.memory-prose pre { padding: 10px 12px; border: 1px solid var(--color-border); border-radius: 8px; background: var(--color-raised); overflow: auto; }
+.memory-prose pre code { padding: 0; background: transparent; }
+.memory-prose blockquote { padding-left: 12px; border-left: 2px solid var(--color-border-strong); }
+.memory-prose table { display: block; overflow: auto; border-collapse: collapse; font-size: 12.5px; }
+.memory-prose :is(td, th) { padding: 5px 9px; border: 1px solid var(--color-border); }
+
+/* Settings tabs on small screens: fade the right edge while more tabs are off-screen. */
+.settings-tabs-row:not([data-end]) {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 48px), transparent);
+}
+
+/* Checkboxes, radios and sliders use the brand gold, not the browser's blue. */
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--color-amber);
 }

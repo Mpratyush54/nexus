@@ -45,6 +45,19 @@ func TestLiveVsPointInTimeGrants(t *testing.T) {
 	if err := m.GrantAgentSessionOpts(ctx, parent.ID, "live-user", "owner", SessionGrantOpts{Live: true}); err != nil {
 		t.Fatal(err)
 	}
+	for _, tc := range []struct {
+		user string
+		want bool
+	}{
+		{user: "owner", want: true},
+		{user: "live-user", want: true},
+		{user: "pit-user", want: false},
+	} {
+		got, err := m.CanReadAgentSessionLive(ctx, tc.user, parent.ID)
+		if err != nil || got != tc.want {
+			t.Fatalf("live access for %s = %v, %v; want %v", tc.user, got, err, tc.want)
+		}
+	}
 
 	body2 := []byte("version-two-newer")
 	sum2 := sha256.Sum256(body2)

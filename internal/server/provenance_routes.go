@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"net/http"
 	"strings"
 
@@ -35,8 +34,7 @@ func (s *Server) handleSessionOperationsPost(w http.ResponseWriter, r *http.Requ
 	sessionID := r.PathValue("id")
 	userID := authSubject(r)
 	var body operationsBatch
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+	if !decodeLimitedJSON(w, r, &body, maxRequestBodyBytes) {
 		return
 	}
 	if strings.TrimSpace(body.ProjectID) == "" {

@@ -18,6 +18,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
 	"sync"
@@ -115,6 +116,10 @@ type Runtime struct {
 
 	Materializer MaterializerRunner
 
+	// Shared, when set before Start, makes this runtime receive transcripts
+	// from the machine-wide SharedScanner instead of running its own scan
+	// loop (the desktop core sets it; tests and the CLI daemon leave it nil).
+	Shared *SharedScanner
 	// harvestCh carries Layer-2 harvester Events to the processor loop.
 	// Buffered (DefaultToolEventBuffer); harvester drops under backpressure.
 	harvestCh chan Event
@@ -142,6 +147,28 @@ type Runtime struct {
 	lastSnapshotTurnCount map[string]int
 	sessionTurnCount      map[string]int
 	sessionHarness        map[string]string // session_id -> harvest agent/harness
+	lastSnapshotAttempt   map[string]time.Time
+	lastSnapshotStamp     map[string]string // session_id -> transcript size:mtime at last upload
+	lastSnapshotUpload    map[string]time.Time
+	snapTracks            snapshotTracks // per-session publish backoff (snapshot_publish.go)
+	// snapQueue feeds the snapshot worker; snapQueued dedupes it (value:
+	// force). Guarded by snapQueueMu.
+	snapQueueMu sync.Mutex
+	snapQueue   chan string
+	snapQueued  map[string]bool
+	// LargeSnapshotMinInterval spaces periodic snapshots of a transcript
+	// over LargeSnapshotBytes; <=0 selects DefaultLargeSnapshotMinInterval.
+	LargeSnapshotMinInterval time.Duration
+	// SnapshotMinInterval spaces periodic (non-idle) snapshots of one
+	// session; <=0 selects DefaultSnapshotMinInterval.
+	SnapshotMinInterval time.Duration
+
+	// Cloud side-features wired in Start (files-changed reporting and the
+	// opt-in agent instruction file sync). Guarded by extraMu.
+	extraMu      sync.Mutex
+	filesChanged *FilesChangedReporter
+	codeLinks    *CodeLinksReporter
+	agentFiles   *AgentFilesSyncer
 }
 
 // NewRuntime builds the pipeline for daemon d. Harvester/Watcher/Processor
@@ -303,7 +330,17 @@ func (r *Runtime) Start(ctx context.Context) {
 
 	var wg sync.WaitGroup
 	// Harvester + Watcher background loops.
-	if r.Harvester != nil {
+	if r.Harvester != nil && r.Shared != nil {
+		// Machine-wide reading: the shared scanner does the file I/O once for
+		// every workspace and delivers this workspace's events to Harvester.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			r.Shared.Attach(r.Harvester)
+			<-ctx.Done()
+			r.Shared.Detach(r.Harvester)
+		}()
+	} else if r.Harvester != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -317,6 +354,23 @@ func (r *Runtime) Start(ctx context.Context) {
 			r.Watcher.Start(ctx)
 		}()
 	}
+
+	// Cloud side-features: report changed source files (memory staleness)
+	// and keep the opt-in agent instruction files in sync.
+	r.startCloudSideFeatures(ctx, &wg)
+
+	// Snapshots (collect, gzip, upload) run on their own worker, so a slow
+	// or failing upload never stalls the capture loop.
+	startMemLog()
+	snapCh := make(chan string, 256)
+	r.snapQueueMu.Lock()
+	r.snapQueue = snapCh
+	r.snapQueueMu.Unlock()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		r.snapshotWorker(ctx, snapCh)
+	}()
 
 	// Materializer (issue #81): push-file regenerator when wired.
 	if r.Materializer != nil {
@@ -397,6 +451,7 @@ func (r *Runtime) Start(ctx context.Context) {
 					cloudSessionID = sid
 				}
 				r.pushParsedToolOps(ctx, cloudSessionID, harness, batch, inter)
+				r.noteCodeLinks(cloudSessionID, sid, harness, batch)
 				memoryBatch := batch
 				if looksLikeUUID(cloudSessionID) && cloudSessionID != sid {
 					memoryBatch = make([]Event, len(batch))
@@ -414,7 +469,7 @@ func (r *Runtime) Start(ctx context.Context) {
 				}
 				for _, ev := range batch {
 					if ev.Type == EventSessionComplete {
-						r.maybePushSnapshot(ctx, sid, true)
+						r.queueSnapshot(sid, true)
 					}
 				}
 			}
@@ -521,8 +576,38 @@ func (r *Runtime) pushDueSnapshots(ctx context.Context) {
 	}
 	r.snapshotMu.Unlock()
 	for _, sid := range sessions {
-		r.maybePushSnapshot(ctx, sid, false)
+		if r.snapQueue != nil {
+			r.queueSnapshot(sid, false)
+		} else {
+			r.maybePushSnapshot(ctx, sid, false)
+		}
 	}
+}
+
+// DefaultSnapshotMinInterval is the default spacing of periodic snapshots
+// of one live session.
+const DefaultSnapshotMinInterval = 5 * time.Minute
+
+// A transcript over LargeSnapshotBytes is published at most every
+// DefaultLargeSnapshotMinInterval while it is live, plus when it goes idle:
+// every version uploads the whole transcript.
+const (
+	LargeSnapshotBytes              = 8 << 20
+	DefaultLargeSnapshotMinInterval = 30 * time.Minute
+)
+
+func (r *Runtime) largeSnapshotMinInterval() time.Duration {
+	if r.LargeSnapshotMinInterval > 0 {
+		return r.LargeSnapshotMinInterval
+	}
+	return DefaultLargeSnapshotMinInterval
+}
+
+func (r *Runtime) snapshotMinInterval() time.Duration {
+	if r.SnapshotMinInterval > 0 {
+		return r.SnapshotMinInterval
+	}
+	return DefaultSnapshotMinInterval
 }
 
 func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force bool) {
@@ -537,44 +622,173 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 	turns := r.sessionTurnCount[sessionID]
 	last := r.lastSnapshotTurnCount[sessionID]
 	harness := r.sessionHarness[sessionID]
-	r.snapshotMu.Unlock()
 	if !force && turns <= last {
+		r.snapshotMu.Unlock()
 		return
 	}
+	// A live chat gains turns every minute. Each snapshot reads, scans for
+	// secrets, gzips and uploads the whole transcript plus artifacts, so
+	// periodic snapshots of one session (and retries after a failure) run at
+	// most every SnapshotMinInterval. The idle-session snapshot (force)
+	// always runs.
+	now := time.Now()
+	if !force {
+		if at, ok := r.lastSnapshotAttempt[sessionID]; ok && now.Sub(at) < r.snapshotMinInterval() {
+			r.snapshotMu.Unlock()
+			return
+		}
+	}
+	if r.lastSnapshotAttempt == nil {
+		r.lastSnapshotAttempt = map[string]time.Time{}
+	}
+	r.lastSnapshotAttempt[sessionID] = now
+	r.snapshotMu.Unlock()
 	if harness == "" {
 		harness = DetectHarnessForConversation(sessionID, r.Daemon.Root)
 	}
 	if harness == "" {
 		harness = "antigravity"
 	}
-	snap, err := CollectSnapshot(r.Daemon.Root, sessionID, harness, r.Daemon.MachineID)
+	// An unchanged transcript was already uploaded: packing it again re-reads
+	// and re-uploads the whole chat (an idle snapshot right after a periodic
+	// one did exactly that). The stamp is taken before reading, so a write
+	// that lands during the read still differs next time.
+	stamp, size := snapshotTranscriptStamp(r.Daemon.Root, sessionID, harness)
+	if stamp == "" {
+		// SQLite-only harnesses (OpenCode) have no transcript file: what a
+		// snapshot would hold changes only with new turns.
+		stamp = turnsStamp(turns)
+	}
+	r.snapshotMu.Lock()
+	unchanged := r.lastSnapshotStamp[sessionID] == stamp
+	if unchanged && r.lastSnapshotTurnCount != nil {
+		r.lastSnapshotTurnCount[sessionID] = turns
+	}
+	// Each version uploads the whole transcript. A large live chat is
+	// published at most every LargeSnapshotMinInterval (it used to be
+	// every few minutes: a gzip copy of tens of megabytes each time);
+	// the idle snapshot (force) still always runs.
+	tooSoon := !force && size > LargeSnapshotBytes && !r.lastSnapshotUpload[sessionID].IsZero() &&
+		now.Sub(r.lastSnapshotUpload[sessionID]) < r.largeSnapshotMinInterval()
+	// Failed steps back off (snapshot_publish.go). Collection, the
+	// expensive part, runs only when some step is due.
+	tr := &r.snapTracks
+	collectT := tr.get(&tr.collect, sessionID)
+	versionT := tr.get(&tr.version, sessionID)
+	legacyT := tr.get(&tr.legacy, sessionID)
+	versionDue := versionT.due(now, stamp, size)
+	// The legacy snapshot is only a fallback for sessions without a cloud
+	// version, and the server keys it by UUID: a native id such as
+	// OpenCode's "ses_..." can never be stored there.
+	legacyAllowed := !tr.published[sessionID] && isStrictUUID(sessionID)
+	legacyDue := legacyAllowed && legacyT.due(now, stamp, size)
+	collectDue := collectT.due(now, stamp, size)
+	r.snapshotMu.Unlock()
+	if unchanged || tooSoon || !collectDue || (!versionDue && !legacyDue) {
+		return
+	}
+	// A transcript over MaxRawTranscriptBytes is never read: not uploadable
+	// anyway, and reading, scanning and compressing it every cycle was most
+	// of the core's memory and CPU in real use. Marked like the gzip cap,
+	// so it is not looked at again until it is smaller than now.
+	if size > MaxRawTranscriptBytes {
+		r.snapshotMu.Lock()
+		versionT.markTooLarge(size, stamp)
+		legacyT.markTooLarge(size, stamp)
+		r.snapshotMu.Unlock()
+		if noteSkipped(harness, "session "+sessionID, size, "too large to back up right now") {
+			log.Printf("daemon: session=%s not backed up: %d MB transcript is over the %d MB limit (until it shrinks)",
+				sessionID, size>>20, MaxRawTranscriptBytes>>20)
+		}
+		return
+	}
+	snapStats.collected.Add(1)
+	snapStats.bytesRead.Add(size)
+	snap, layout, err := collectSnapshotTranscript(r.Daemon.Root, sessionID, harness, r.Daemon.MachineID)
+	if errors.Is(err, errSubagentTranscriptGone) {
+		return // the run's transcript was removed with its parent chat
+	}
 	if err != nil {
 		// Retry once with auto-detect when the hinted harness has no files yet.
 		if alt := DetectHarnessForConversation(sessionID, r.Daemon.Root); alt != "" && alt != harness {
-			snap, err = CollectSnapshot(r.Daemon.Root, sessionID, alt, r.Daemon.MachineID)
+			if altStamp, _ := snapshotTranscriptStamp(r.Daemon.Root, sessionID, alt); altStamp != "" {
+				stamp = altStamp
+			}
+			snap, layout, err = collectSnapshotTranscript(r.Daemon.Root, sessionID, alt, r.Daemon.MachineID)
 			harness = alt
 		}
 	}
 	if err != nil {
-		log.Printf("daemon: collect snapshot session=%s harness=%s: %v", sessionID, harness, err)
+		r.snapshotMu.Lock()
+		permanent := collectT.fail(now, err, stamp, size)
+		r.snapshotMu.Unlock()
+		logPublishFailure("collect snapshot harness="+harness, sessionID, err, permanent, collectT)
 		return
 	}
+	r.snapshotMu.Lock()
+	collectT.succeed()
+	r.snapshotMu.Unlock()
 	snap.SessionID = sessionID
 	snap.ProjectID = hs.ProjectID
-	legacyOK := true
-	if err := hs.PushSnapshot(ctx, snap); err != nil {
-		// Keep the historical endpoint best-effort during the transition.
-		// A legacy endpoint failure must not stop the real session/version
-		// publisher below; the latter is what makes Timeline and Teleport work.
-		legacyOK = false
-		log.Printf("daemon: push legacy snapshot session=%s: %v", sessionID, err)
+	// Hard cap on what one session upload may be (MaxUploadGzipBytes): the
+	// server assembles a blob in memory, and a huge live transcript took it
+	// down. Above the cap nothing is uploaded, version or legacy, until the
+	// transcript is smaller than it was.
+	if gz := int64(len(snap.TranscriptPayload)); gz > MaxUploadGzipBytes {
+		r.snapshotMu.Lock()
+		versionT.markTooLarge(size, stamp)
+		legacyT.markTooLarge(size, stamp)
+		r.snapshotMu.Unlock()
+		if noteSkipped(harness, "session "+sessionID, gz, "too large to back up right now") {
+			log.Printf("daemon: session=%s not backed up: %d MB compressed is over the %d MB upload limit (until the transcript shrinks)",
+				sessionID, gz>>20, MaxUploadGzipBytes>>20)
+		}
+		return
 	}
-	currentOK := true
-	if err := hs.PublishAgentSessionVersion(ctx, snap, r.Daemon.Root); err != nil {
-		currentOK = false
-		log.Printf("daemon: publish cloud session version session=%s: %v", sessionID, err)
+	forgetSkipped("session " + sessionID)
+
+	published := false
+	if versionDue {
+		err := hs.PublishAgentSessionVersion(ctx, snap, r.Daemon.Root)
+		r.snapshotMu.Lock()
+		if err == nil {
+			versionT.succeed()
+			legacyT.succeed()
+			if tr.published == nil {
+				tr.published = map[string]bool{}
+			}
+			tr.published[sessionID] = true
+			published = true
+		}
+		r.snapshotMu.Unlock()
+		if err != nil && ctx.Err() == nil {
+			r.snapshotMu.Lock()
+			permanent := versionT.fail(now, err, stamp, size)
+			r.snapshotMu.Unlock()
+			logPublishFailure("publish cloud session version", sessionID, err, permanent, versionT)
+		}
 	}
-	if !legacyOK && !currentOK {
+	if !published && legacyDue {
+		// The legacy snapshot also carries artifacts and the git diff; they
+		// are packed only now that it is actually being sent.
+		err := addSnapshotExtras(snap, layout, r.Daemon.Root)
+		if err == nil {
+			err = hs.PushSnapshot(ctx, snap)
+		}
+		r.snapshotMu.Lock()
+		if err == nil {
+			legacyT.succeed()
+			published = true
+		}
+		r.snapshotMu.Unlock()
+		if err != nil && ctx.Err() == nil {
+			r.snapshotMu.Lock()
+			permanent := legacyT.fail(now, err, stamp, size)
+			r.snapshotMu.Unlock()
+			logPublishFailure("push legacy snapshot", sessionID, err, permanent, legacyT)
+		}
+	}
+	if !published {
 		return
 	}
 	r.snapshotMu.Lock()
@@ -586,6 +800,14 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 		r.sessionHarness = map[string]string{}
 	}
 	r.sessionHarness[sessionID] = harness
+	if r.lastSnapshotStamp == nil {
+		r.lastSnapshotStamp = map[string]string{}
+	}
+	r.lastSnapshotStamp[sessionID] = stamp
+	if r.lastSnapshotUpload == nil {
+		r.lastSnapshotUpload = map[string]time.Time{}
+	}
+	r.lastSnapshotUpload[sessionID] = now
 	r.snapshotMu.Unlock()
 }
 
@@ -595,6 +817,11 @@ func (r *Runtime) maybePushSnapshot(ctx context.Context, sessionID string, force
 // (session_id, idx) boundary.  Full transcript fidelity is committed by
 // maybePushSnapshot once the harvester declares the session idle.
 func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness string, batch []Event) string {
+	// "" means the source file holds many conversations (or none could be
+	// identified): never invent a Timeline chat for it.
+	if strings.TrimSpace(nativeID) == "" {
+		return ""
+	}
 	hs, ok := r.httpStore()
 	if !ok || hs == nil || r.Daemon == nil || strings.TrimSpace(hs.ProjectID) == "" {
 		return ""
@@ -602,12 +829,19 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 	byMillisecond := map[int64]int64{}
 	turns := make([]MirroredTurn, 0, len(batch))
 	title := ""
+	parent := ""
 	for _, ev := range batch {
 		if ev.Type != EventConversationTurn || ev.Payload == nil {
 			continue
 		}
 		if title == "" {
 			title, _ = ev.Payload["session_title"].(string)
+		}
+		if parent == "" {
+			// A Claude Code sub-agent transcript names its parent session:
+			// <project>/<parent>/subagents/agent-<hex>.jsonl.
+			path, _ := ev.Payload["path"].(string)
+			parent = subagentParentNativeID(path)
 		}
 		at := ev.CreatedAt
 		var sourceAt *time.Time
@@ -630,10 +864,13 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 		role, _ := ev.Payload["speaker"].(string)
 		content, _ := ev.Payload["content"].(string)
 		used, usageKey := usageFromPayload(ev.Payload["usage"])
-		// Keep tool-only events for provenance, but do not fill Chat with
-		// hundreds of blank OpenCode tool steps or make one HTTP turn call each.
-		// Their token usage still goes to the usage ledger.
-		if strings.TrimSpace(content) == "" {
+		calls := mirroredToolCalls(ev.Payload["tool_calls"])
+		// A record with neither text nor tool calls carries only token usage:
+		// that goes to the usage ledger, never to Chat. Tool-only records stay:
+		// Claude Code writes each tool_use (Agent/Task sub-agent runs included)
+		// on its own line with no text, and the apps build the work log from
+		// these turns. Turns upload in batches of 50, not one call each.
+		if strings.TrimSpace(content) == "" && len(calls) == 0 {
 			if used != nil {
 				turns = append(turns, MirroredTurn{Idx: idx, SourceAt: sourceAt, Usage: used, UsageKey: usageKey, UsageOnly: true})
 			}
@@ -643,13 +880,13 @@ func (r *Runtime) mirrorSessionTurns(ctx context.Context, nativeID, harness stri
 			Idx:         idx,
 			Role:        role,
 			TextPreview: boundedTurnPreview(content),
-			ToolCalls:   mirroredToolCalls(ev.Payload["tool_calls"]),
+			ToolCalls:   calls,
 			SourceAt:    sourceAt,
 			Usage:       used,
 			UsageKey:    usageKey,
 		})
 	}
-	id, err := hs.MirrorAgentSessionTurns(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, turns, title)
+	id, err := hs.MirrorAgentSessionTurnsWithParent(ctx, harness, nativeID, r.Daemon.MachineID, r.Daemon.Root, parent, turns, title)
 	if err != nil {
 		log.Printf("daemon: mirror cloud session turns session=%s: %v", nativeID, err)
 		return ""
@@ -697,6 +934,11 @@ func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID, harness stri
 	if !ok || hs == nil || strings.TrimSpace(hs.ProjectID) == "" {
 		return
 	}
+	// The server keys operations by the cloud session UUID; without one
+	// (the mirror failed) a native id such as "ses_..." can never be stored.
+	if !isStrictUUID(strings.TrimSpace(sessionID)) {
+		return
+	}
 	harness = normalizeHarness(harness)
 	root := ""
 	if r.Daemon != nil {
@@ -734,6 +976,18 @@ func (r *Runtime) pushParsedToolOps(ctx context.Context, sessionID, harness stri
 	if err := hs.PushOperations(ctx, sessionID, harness, fileOps, toolExecs); err != nil {
 		log.Printf("daemon: push operations session=%s: %v", sessionID, err)
 	}
+}
+
+// noteCodeLinks queues the files this batch's tool calls edited for the
+// code-links report. It only takes a short lock.
+func (r *Runtime) noteCodeLinks(cloudSessionID, nativeID, harness string, batch []Event) {
+	r.extraMu.Lock()
+	rep := r.codeLinks
+	r.extraMu.Unlock()
+	if rep == nil {
+		return
+	}
+	rep.NoteEvents(cloudSessionID, nativeID, harness, batch)
 }
 
 func copyMap(m map[string]any) map[string]any {

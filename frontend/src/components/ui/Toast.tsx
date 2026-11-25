@@ -1,12 +1,18 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import { X } from 'lucide-react'
 import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react'
+import { refForToast } from '@/lib/diagnostics'
 
 type Toast = {
   id: string
   title: string
   detail?: string
   tone?: 'neutral' | 'teal' | 'amber' | 'danger'
+  /**
+   * Server request ID to quote in a problem report. Error toasts pick it up
+   * from the API failure they describe when it is not given.
+   */
+  ref?: string
 }
 
 type ToastApi = {
@@ -26,10 +32,12 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const push = useCallback((toast: Omit<Toast, 'id'>) => {
     const id = crypto.randomUUID()
-    setToasts((prev) => [...prev, { ...toast, id }])
+    const ref = toast.ref ?? (toast.tone === 'danger' ? refForToast(toast.detail ?? toast.title) : undefined)
+    setToasts((prev) => [...prev, { ...toast, ref, id }])
+    // Long enough to read or copy the reference.
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
-    }, 3200)
+    }, ref ? 9000 : 3200)
   }, [])
 
   const api = useMemo(() => ({ push }), [push])
@@ -52,6 +60,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 <p className="text-sm font-medium text-fg">{t.title}</p>
                 {t.detail ? (
                   <p className="mt-0.5 truncate text-xs text-fg-dim">{t.detail}</p>
+                ) : null}
+                {t.ref ? (
+                  <p className="mt-1 select-all font-mono text-[11px] text-muted" title="Quote this reference if you report the problem">
+                    Something went wrong — ref {t.ref}
+                  </p>
                 ) : null}
               </div>
               <button

@@ -221,7 +221,7 @@ func TestSearchMemoryPageTotalMatchesList(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	page, total, err := s.SearchMemoryPage(WithViewer(ctx, "alice"), p.ID, "", nil, 2, 0)
+	page, total, err := s.SearchMemoryPage(WithViewer(ctx, "alice"), p.ID, "", nil, 2, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}

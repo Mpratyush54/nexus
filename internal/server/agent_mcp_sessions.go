@@ -47,7 +47,7 @@ func (a agentMCPStore) FetchSessionTurns(ctx context.Context, sessionID, cursor 
 	if err != nil {
 		return nil, "", err
 	}
-	ok, err := cs.CanReadAgentSession(ctx, a.UserID, sessionID)
+	ok, err := cs.CanReadAgentSessionLive(ctx, a.UserID, sessionID)
 	if err != nil {
 		return nil, "", err
 	}

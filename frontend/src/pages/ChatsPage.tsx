@@ -11,6 +11,7 @@ import {
   ArrowUp,
   GitFork,
   Monitor,
+  MoreHorizontal,
   Plus,
   RefreshCw,
   Search,
@@ -38,8 +39,10 @@ import { NexusMark } from "@/components/NexusBrand";
 import { AccessibleModal } from "@/components/ui/AccessibleModal";
 import { useAuth } from "@/providers/AuthProvider";
 import { readableChatText } from "@/lib/chat-content";
+import { memoryTitle } from "@/lib/plain-language";
 import { DESKTOP_RELAY } from "@/lib/env";
 import { agentName, chatTitle, composerHarness } from "@/lib/harness-message";
+import { chatStatus, setLiveChat, useLiveChats } from "@/lib/live-chats";
 import { ApiError } from "@/types/api";
 import { formatRelative } from "@/utils/format";
 
@@ -71,8 +74,19 @@ export function ChatsPage() {
   const cache = useQueryClient();
   const [params, setParams] = useSearchParams();
   const id = params.get("chat") || "";
-  const [search, setSearch] = useState(""),
-    [query, setQuery] = useState("");
+  // Home's search box links here with ?q=.
+  const [search, setSearch] = useState(() => params.get("q") ?? ""),
+    [query, setQuery] = useState(() => params.get("q") ?? "");
+  // Ctrl K "Search chats for …" can land here while the page is already open.
+  const urlQ = params.get("q");
+  const [seenQ, setSeenQ] = useState(urlQ);
+  if (urlQ !== seenQ) {
+    setSeenQ(urlQ);
+    if (urlQ !== null) {
+      setQuery(urlQ);
+      setSearch(urlQ);
+    }
+  }
   const feed = useInfiniteQuery({
     queryKey: ["chats", projectId, search],
     enabled: !!projectId,
@@ -81,7 +95,14 @@ export function ChatsPage() {
       chatsApi.list(projectId!, search, pageParam, signal),
     getNextPageParam: (last) => last.next_cursor || undefined,
   });
-  const cards = feed.data?.pages.flatMap((page) => page.items) ?? [];
+  const allCards = feed.data?.pages.flatMap((page) => page.items) ?? [];
+  const live = useLiveChats();
+  // Filter by agent when the list mixes several (client-side, over loaded chats).
+  const [agentFilter, setAgentFilter] = useState("");
+  const agentsInList = [...new Set(allCards.map((c) => agentName(c.harness)))];
+  const cards = agentFilter
+    ? allCards.filter((c) => agentName(c.harness) === agentFilter)
+    : allCards;
   const session = useQuery({
     queryKey: ["chat", id],
     enabled: !!id,
@@ -117,7 +138,10 @@ export function ChatsPage() {
             <RefreshCw size={15} className={feed.isFetching ? "animate-spin" : ""} />
           </button>
         </header>
-        <ProjectSwitcher compact />
+        {/* The sidebar's project picker is hidden on narrow screens; this one stands in there. */}
+        <div className="chat-project-switch">
+          <ProjectSwitcher compact />
+        </div>
         {DESKTOP_RELAY && (
           <button
             className="chat-new"
@@ -147,6 +171,23 @@ export function ChatsPage() {
             </button>
           )}
         </label>
+        {agentsInList.length > 1 && (
+          <label className="conversation-filters">
+            <span>Agent</span>
+            <select
+              value={agentFilter}
+              onChange={(e) => setAgentFilter(e.target.value)}
+              aria-label="Filter by agent"
+            >
+              <option value="">All agents</option>
+              {agentsInList.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <div className="conversation-cards">
           {feed.isPending && (
             <p className="chat-muted" role="status">Loading chats…</p>
@@ -160,7 +201,9 @@ export function ChatsPage() {
             <p className="chat-muted">
               {query
                 ? `No chats or messages match “${query.trim()}”.`
-                : "No chats yet. Install Nexus Desktop and approve this project's folder to capture your agent chats."}
+                : agentFilter
+                  ? `No ${agentFilter} chats loaded. Pick “All agents”.`
+                  : "No chats yet. Install the desktop app and chat with Claude Code, Codex or Cursor in this project — your chats show up here."}
             </p>
           )}
           {cards.map((card) => (
@@ -178,7 +221,15 @@ export function ChatsPage() {
               </span>
               {card.summary && <p>{readableChatText(card.summary)}</p>}
               <small>
-                {agentName(card.harness)}
+                <span>
+                  {agentName(card.harness)}
+                  {(() => {
+                    const st = chatStatus(card.last_active_at, live.get(card.session_id));
+                    return st ? (
+                      <em className={`chat-status is-${st.tone}`}>{st.label}</em>
+                    ) : null;
+                  })()}
+                </span>
                 <time dateTime={card.last_active_at}>
                   {formatRelative(card.last_active_at)}
                 </time>
@@ -203,7 +254,8 @@ export function ChatsPage() {
           <NexusMark size={44} />
           <h2>Pick up where the work left off.</h2>
           <p>
-            Choose a chat to read its messages, tool steps and code changes.
+            Every chat you have with an AI coding agent is saved here. Pick one
+            to read it and see which files it changed.
           </p>
           {!feed.isPending && !cards.length && !query && (
             <Link to="/app/connect">
@@ -214,14 +266,25 @@ export function ChatsPage() {
       ) : session.isPending ? (
         <p className="chat-muted conversation-state" role="status">Loading chat…</p>
       ) : session.error ? (
-        <div role="alert" className="chat-error conversation-state">
-          <p>
-            {session.error instanceof ApiError && session.error.status === 404
-              ? "This chat was deleted or you no longer have access."
-              : `Couldn't open this chat. ${message(session.error)}`}
-          </p>
-          <button onClick={() => setParams({})}>Back to chats</button>
-        </div>
+        session.error instanceof ApiError &&
+        (session.error.status === 404 || session.error.status === 403) ? (
+          <section className="conversation-welcome" role="status">
+            <NexusMark size={44} />
+            <h2>We couldn’t find this chat.</h2>
+            <p>
+              It may have been deleted, or it belongs to someone who hasn’t shared it with you.
+              Your other chats are in the list.
+            </p>
+            <button className="chat-welcome-action" onClick={() => setParams({})}>
+              Back to all chats
+            </button>
+          </section>
+        ) : (
+          <div role="alert" className="chat-error conversation-state">
+            <p>{`Couldn't open this chat. ${message(session.error)}`}</p>
+            <button onClick={() => setParams({})}>Back to chats</button>
+          </div>
+        )
       ) : !inProject ? (
         <div role="alert" className="chat-error conversation-state">
           <p>This chat is in another project.</p>
@@ -244,6 +307,34 @@ export function ChatsPage() {
           />
         )
       )}
+    </div>
+  );
+}
+
+/**
+ * A web reply runs on your computer only after you approve it there (so a
+ * stolen session can't run commands). While it waits, say so calmly and keep
+ * the clock moving so it never looks frozen.
+ */
+function ApprovalWait({ computer }: { computer: string }) {
+  const [start] = useState(() => Date.now());
+  const [now, setNow] = useState(start);
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(t);
+  }, []);
+  const secs = Math.max(0, Math.round((now - start) / 1000));
+  const waited = secs < 60 ? `${secs} s` : `${Math.floor(secs / 60)} min ${secs % 60} s`;
+  return (
+    <div className="chat-approval" role="status">
+      <span className="chat-approval-pulse" aria-hidden="true" />
+      <div>
+        <p className="chat-approval-title">Waiting for approval on {computer}</p>
+        <p className="chat-approval-help">
+          Open Nexus on that computer and select Approve. Replies sent from the web always need this
+          step, so nobody else can run your agent.{secs > 0 ? ` Waiting ${waited}.` : ""}
+        </p>
+      </div>
     </div>
   );
 }
@@ -290,6 +381,18 @@ function Conversation({
     ownJob ??
     (restoredJob.data?.session_id === session.id ? restoredJob.data : null);
   const scroll = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const root = document.documentElement;
+    const sync = () => root.style.setProperty("--nx-vvh", `${vv.height}px`);
+    sync();
+    vv.addEventListener("resize", sync);
+    return () => {
+      vv.removeEventListener("resize", sync);
+      root.style.removeProperty("--nx-vvh");
+    };
+  }, []);
   const scrolledInitially = useRef(false);
   const followReply = useRef(true);
   const [awayFromLatest, setAwayFromLatest] = useState(false);
@@ -325,6 +428,12 @@ function Conversation({
     ) ?? [];
   const device = available.find((d) => d.id === deviceId) ?? available[0];
   const busy = sending || (!!job && !isFinished(job.state));
+  // Reply from here only when it can actually run: relay on, your chat, a computer online for it.
+  const steerable = DESKTOP_RELAY && owned && !!device;
+  const knownComputer = devices.data?.items.find((d) => d.projects?.includes(session.project_id));
+  const replyNote = !owned
+    ? "Shared with you. Use “Continue as copy” to reply in your own chat."
+    : `Open Nexus on ${knownComputer?.name ?? "your computer"} to reply from here.`;
   const discoveringModels = !!modelJob && !isFinished(modelJob.state);
   const modelLock = useRef(false);
   const recipients = useQuery({
@@ -403,6 +512,7 @@ function Conversation({
     const controller = new AbortController();
     void watchDesktopJob(job.id, controller.signal, (next) => {
       setJob(next);
+      setLiveChat(next.session_id, next.state);
       setRequestParams(
         (current) => {
           const nextParams = new URLSearchParams(current);
@@ -459,6 +569,7 @@ function Conversation({
         prompt: draft.trim(),
       });
       sentPrompt.current = draft.trim();
+      setLiveChat(session.id, next.state);
       setJob(next);
       setDraft("");
     } catch (e) {
@@ -520,6 +631,10 @@ function Conversation({
         turn.role === "assistant" &&
         turn.cursor_idx === job.result?.answer_cursor,
     );
+  const jobComputer =
+    devices.data?.items.find((d) => d.id === job?.device_id)?.name ||
+    device?.name ||
+    "your computer";
   const liveTurns: ChatTurn[] =
     job && !responseAlreadySynced
       ? [
@@ -575,7 +690,7 @@ function Conversation({
           >
             <GitFork size={15} />
             <span className="conversation-action-label">
-              {fork.isPending ? "Forking…" : "Fork"}
+              {fork.isPending ? "Copying…" : "Continue as copy"}
             </span>
           </button>
           <button
@@ -594,8 +709,8 @@ function Conversation({
       <div className="conversation-tabs" role="tablist" aria-label="Chat views">
         {[
           ["chat", "Chat"],
-          ["activity", "Tool activity"],
-          ["memory", "Memory"],
+          ["activity", "Steps"],
+          ["memory", "What it learned"],
         ].map(([name, label]) => (
           <button
             role="tab"
@@ -693,7 +808,7 @@ function Conversation({
                 : summary.error
                   ? message(summary.error)
                   : readableChatText(summary.data?.summary || session.summary || "") ||
-                    "No summary yet. Nexus writes one after the chat has a few turns."}
+                    "No summary yet. Nexus writes one after the chat has a few messages."}
             </p>
             <h3>Saved memories</h3>
             {memory.isPending ? (
@@ -703,9 +818,13 @@ function Conversation({
             ) : memory.data?.items.length ? (
               memory.data.items.map((item, i) => {
                 const row = item as { content?: string; key?: string };
+                const name = memoryTitle(row.key || "");
                 return (
                   <article key={i}>
-                    <strong>{row.key}</strong>
+                    <strong title={row.key}>
+                      {name.title}
+                      {name.group && <small className="chat-memory-group"> · {name.group}</small>}
+                    </strong>
                     <p>{row.content || "No readable content was saved."}</p>
                   </article>
                 );
@@ -788,17 +907,29 @@ function Conversation({
                 {job.error}
               </p>
             )}
-            {job && (
-              <p className="chat-live-status" role="status">
+            {job && job.state === "awaiting_approval" ? (
+              <ApprovalWait key={job.id} computer={jobComputer} />
+            ) : job && (
+              <p
+                className={`chat-live-status${job.state === "cancelled" ? " is-stopped" : ""}`}
+                role="status"
+              >
                 {job.state === "completed"
                   ? job.result?.cloud_saved === false
-                    ? "Saved on Desktop; cloud sync needs attention."
+                    ? "Saved on your computer; syncing to your account needs attention."
                     : "Reply complete"
                   : job.state === "cancelled"
-                    ? "Cancelled. Changes already made to files are not undone."
+                    ? "Stopped. The steps above already ran; changes they made to files stay."
                     : job.state === "expired"
                       ? "Request expired. It was not automatically retried."
-                      : job.status || job.state}
+                      : job.status || "Working…"}
+                {!isFinished(job.state) && (
+                  <span className="chat-typing" aria-hidden="true">
+                    <i />
+                    <i />
+                    <i />
+                  </span>
+                )}
               </p>
             )}
           </div>
@@ -828,7 +959,7 @@ function Conversation({
           </button>
         )}
       </div>
-      {DESKTOP_RELAY && (
+      {steerable || busy ? (
       <form
         className="conversation-composer"
         onSubmit={(e) => {
@@ -836,86 +967,12 @@ function Conversation({
           void send();
         }}
       >
-        <div className="conversation-composer-options">
-          <select
-            aria-label="Harness"
-            value={agent}
-            disabled={busy || discoveringModels}
-            onChange={(e) => {
-              setAgent(e.target.value);
-              setModel("");
-              setModelJob(null);
-            }}
-          >
-            {!HARNESSES.includes(agent as (typeof HARNESSES)[number]) && (
-              <option value={agent} disabled>
-                {agentName(agent)}
-              </option>
-            )}
-            {HARNESSES.map((a) => (
-              <option
-                key={a}
-                value={a}
-                disabled={!!device && !device.harnesses?.includes(a)}
-              >
-                {agentName(a)}
-              </option>
-            ))}
-          </select>
-          <input
-            list={`models-${session.id}`}
-            aria-label="Model"
-            placeholder="Harness default model"
-            value={model}
-            disabled={busy || discoveringModels}
-            onChange={(e) => setModel(e.target.value)}
-          />
-          <datalist id={`models-${session.id}`}>
-            {modelJob?.agent === agent &&
-              modelJob.result?.items?.map((item) => (
-                <option key={item.id} value={item.id}>
-                  {item.name}
-                </option>
-              ))}
-          </datalist>
-          <button
-            type="button"
-            title="Load models from Desktop"
-            aria-label="Load models from Desktop"
-            disabled={
-              !device || busy || (!!modelJob && !isFinished(modelJob.state))
-            }
-            onClick={() => {
-              void models();
-            }}
-          >
-            <RefreshCw size={14} />
-          </button>
-          {available.length > 1 && (
-            <select
-              aria-label="Execution device"
-              value={device?.id || ""}
-              disabled={busy || (!!modelJob && !isFinished(modelJob.state))}
-              onChange={(e) => {
-                setDeviceId(e.target.value);
-                setModelJob(null);
-                setModel("");
-              }}
-            >
-              {available.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
         <textarea
           rows={2}
           maxLength={16000}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
-          placeholder="Message the agent…"
+          placeholder={`Reply to ${agentName(agent)}…`}
           aria-label="Message the agent"
           onKeyDown={(e) => {
             if (
@@ -929,23 +986,132 @@ function Conversation({
           }}
         />
         <div className="conversation-composer-footer">
-          <small>
-            <Monitor size={13} />
-            {!owned
-              ? "Shared with you. Fork it to continue in your own chat."
-              : device
-                ? `Runs on ${device.name}. You approve each request in Desktop.`
-                : "To send from here, open Nexus Desktop with this project and turn on browser requests in its Settings."}
-          </small>
+          <details className="composer-more">
+            <summary aria-label="Agent, model and computer">
+              <MoreHorizontal size={15} />
+              <span>
+                {agentName(agent)}
+                {model ? ` · ${model}` : ""} · {device?.name}
+              </span>
+            </summary>
+            <div className="conversation-composer-options">
+              <select
+                aria-label="Agent"
+                value={agent}
+                disabled={busy || discoveringModels}
+                onChange={(e) => {
+                  setAgent(e.target.value);
+                  setModel("");
+                  setModelJob(null);
+                }}
+              >
+                {!HARNESSES.includes(agent as (typeof HARNESSES)[number]) && (
+                  <option value={agent} disabled>
+                    {agentName(agent)}
+                  </option>
+                )}
+                {HARNESSES.map((a) => (
+                  <option
+                    key={a}
+                    value={a}
+                    disabled={!!device && !device.harnesses?.includes(a)}
+                  >
+                    {agentName(a)}
+                  </option>
+                ))}
+              </select>
+              <input
+                list={`models-${session.id}`}
+                aria-label="Model"
+                placeholder="Default model"
+                value={model}
+                disabled={busy || discoveringModels}
+                onChange={(e) => setModel(e.target.value)}
+              />
+              <datalist id={`models-${session.id}`}>
+                {modelJob?.agent === agent &&
+                  modelJob.result?.items?.map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))}
+              </datalist>
+              <button
+                type="button"
+                title="Load models from your computer"
+                aria-label="Load models from your computer"
+                disabled={!device || busy || discoveringModels}
+                onClick={() => {
+                  void models();
+                }}
+              >
+                <RefreshCw size={14} />
+              </button>
+              {available.length > 1 && (
+                <select
+                  aria-label="Computer"
+                  value={device?.id || ""}
+                  disabled={busy || discoveringModels}
+                  onChange={(e) => {
+                    setDeviceId(e.target.value);
+                    setModelJob(null);
+                    setModel("");
+                  }}
+                >
+                  {available.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+            {discoveringModels && (
+              <p className="chat-muted" role="status">
+                Loading models…{" "}
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (modelJob)
+                      void desktopApi
+                        .cancel(modelJob.id)
+                        .then(setModelJob)
+                        .catch((e) => setError(message(e)));
+                  }}
+                >
+                  Cancel
+                </button>
+              </p>
+            )}
+            {modelJob?.error && <p className="chat-error">{modelJob.error}</p>}
+            {modelJob?.result?.warning && (
+              <p className="chat-muted">{modelJob.result.warning}</p>
+            )}
+          </details>
           {busy ? (
             <button
               type="button"
+              className="chat-stop"
               disabled={sending || !job}
               onClick={() => {
                 if (job)
                   void desktopApi
                     .cancel(job.id)
-                    .then(setJob)
+                    .then((next) => {
+                      // Keep what already ran: a stopped turn still shows its finished steps.
+                      setJob((prev) =>
+                        prev && !next.activities?.length && prev.activities?.length
+                          ? {
+                              ...next,
+                              text: next.text || prev.text,
+                              activities: prev.activities.filter(
+                                (a) => a.status !== "running",
+                              ),
+                            }
+                          : next,
+                      );
+                      setLiveChat(next.session_id, next.state);
+                    })
                     .catch((e) => setError(message(e)));
               }}
             >
@@ -957,7 +1123,6 @@ function Conversation({
               className="chat-send"
               type="submit"
               disabled={
-                !owned ||
                 !device ||
                 discoveringModels ||
                 !device.harnesses.includes(agent) ||
@@ -969,35 +1134,12 @@ function Conversation({
             </button>
           )}
         </div>
-        {discoveringModels && (
-          <p className="chat-muted" role="status">
-            Loading models from Desktop…{" "}
-            <button
-              type="button"
-              onClick={() => {
-                if (modelJob)
-                  void desktopApi
-                    .cancel(modelJob.id)
-                    .then(setModelJob)
-                    .catch((e) => setError(message(e)));
-              }}
-            >
-              Cancel discovery
-            </button>
-          </p>
-        )}
-        {modelJob?.error && <p className="chat-error">{modelJob.error}</p>}
-        {modelJob?.result?.warning && (
-          <p className="chat-muted">{modelJob.result.warning}</p>
-        )}
-        {devices.error && (
-          <small className="chat-muted" role="status">
-            {devices.error instanceof ApiError && devices.error.status >= 500
-              ? "Sending from the browser isn't available on this server right now."
-              : `Couldn't check your desktops. ${message(devices.error)}`}
-          </small>
-        )}
       </form>
+      ) : (
+        <p className="conversation-composer-note" role="note">
+          <Monitor size={14} />
+          {replyNote}
+        </p>
       )}
       {shareOpen && (
         <AccessibleModal

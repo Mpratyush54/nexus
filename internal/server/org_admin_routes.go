@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -406,7 +407,9 @@ func (s *Server) handleOrgInviteCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	emailSent := false
 	if s.Mail != nil && s.Mail.Configured() && strings.TrimSpace(inv.Email) != "" {
-		body := "You have been invited to a Nexus organization.\n\nAccept with this token:\n" + inv.Token + "\n"
+		link := appPublicURL() + "/app/org?invite=" + url.QueryEscape(inv.Token)
+		body := "You have been invited to a Nexus organization.\n\nOpen this link to join:\n" + link +
+			"\n\nOr paste this code under \"Join with a code\" in Nexus:\n" + inv.Token + "\n"
 		if err := s.Mail.Send(inv.Email, "Nexus organization invite", body); err != nil {
 			s.Log.Printf("invite mail: %v", err)
 		} else {

@@ -1,7 +1,6 @@
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   BookmarkCheck,
-  Bot,
   Calendar,
   ChevronDown,
   ChevronRight,
@@ -19,11 +18,19 @@ import {
   Sparkles,
   Terminal,
 } from 'lucide-react'
-import { useDeferredValue, useMemo, useState } from 'react'
+import { useDeferredValue, useMemo, useState, type ReactNode } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { MemoryEditorSlideOver } from '@/components/MemoryEditorSlideOver'
 import { SharingControlsModal } from '@/components/SharingControlsModal'
 import { VersionHistoryDrawer } from '@/components/VersionHistoryDrawer'
-import { ProjectSwitcher } from '@/components/ProjectSwitcher'
+import { Link, useSearchParams } from 'react-router-dom'
+import { Advanced } from '@/components/Advanced'
+import { BranchesPage } from './BranchesPage'
+import { memoryTitle } from '@/lib/plain-language'
+import { looksLikeMarkdown, markdownTitle, stripMarkdown, withoutTitle } from '@/lib/memory-text'
+import { agentName } from '@/lib/harness-message'
+import { PageHeader } from '@/components/PageHeader'
 import { Button } from '@/components/ui/Button'
 import { GlassPanel } from '@/components/ui/GlassPanel'
 import { StatusPill } from '@/components/ui/StatusPill'
@@ -40,6 +47,7 @@ import { ApiError, type MemoryItem } from '@/types/api'
 import { formatRelative } from '@/utils/format'
 import { useProjectSummaries } from '@/hooks/useProjectSummaries'
 import { useProjects } from '@/hooks/useProjects'
+import { projectLabel } from '@/lib/project-label'
 
 const CATEGORY_ORDER = [
   'architecture',
@@ -74,7 +82,7 @@ const CATEGORY_CONFIG: Record<
     label: 'Infrastructure',
     icon: Server,
     badgeClass: 'text-purple-400 border-purple-500/30 bg-purple-500/10',
-    desc: 'Docker, AWS, Lightsail, CI/CD, systemd, hosting, ports',
+    desc: 'Hosting, servers, deploys, CI/CD, containers, ports',
   },
   auth: {
     label: 'Authentication',
@@ -86,7 +94,7 @@ const CATEGORY_CONFIG: Record<
     label: 'API & Schemas',
     icon: Code2,
     badgeClass: 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10',
-    desc: 'HTTP endpoints, payloads, RPC, schemas, protocols',
+    desc: 'API routes, request and response shapes, schemas',
   },
   conventions: {
     label: 'Conventions',
@@ -108,9 +116,6 @@ const CATEGORY_CONFIG: Record<
   },
 }
 
-function projectLabelOf(p: { display_name?: string; folder_name?: string; id: string }) {
-  return p.display_name || p.folder_name || `${p.id.slice(0, 8)}…`
-}
 
 function normalizeItemCategory(cat?: string): string {
   if (!cat) return 'general'
@@ -119,18 +124,41 @@ function normalizeItemCategory(cat?: string): string {
   return 'general'
 }
 
-function formatWeekLabel(bucket?: string, dateStr?: string): string {
-  if (bucket && bucket.includes('-W')) {
-    const parts = bucket.split('-W')
-    return `Week ${parts[1]}, ${parts[0]}`
-  }
-  if (dateStr) {
-    const d = new Date(dateStr)
-    if (!isNaN(d.getTime())) {
-      return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-    }
-  }
-  return 'Recent Changes'
+/** Monday 00:00 (local) of the week a date falls in. */
+function weekStart(d: Date): Date {
+  const start = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  start.setDate(start.getDate() - ((start.getDay() + 6) % 7))
+  return start
+}
+
+/** ISO "2026-W47" → the Monday that week starts on. */
+function isoWeekStart(bucket: string): Date | null {
+  const m = /^(\d{4})-W(\d{1,2})$/.exec(bucket.trim())
+  if (!m) return null
+  const jan4 = new Date(Number(m[1]), 0, 4)
+  const start = weekStart(jan4)
+  start.setDate(start.getDate() + (Number(m[2]) - 1) * 7)
+  return start
+}
+
+// Each memory's week: the server's ISO week bucket when it sends one, otherwise
+// the week it was saved. (Before, every memory without a bucket landed
+// in one group labelled with the first memory's date.)
+function memoryWeek(item: MemoryItem): Date | null {
+  const fromBucket = item.week_bucket ? isoWeekStart(item.week_bucket) : null
+  if (fromBucket) return fromBucket
+  const when = new Date(item.created_at || item.updated_at || '')
+  return isNaN(when.getTime()) ? null : weekStart(when)
+}
+
+function formatWeekLabel(start: Date | null): string {
+  if (!start) return 'Undated'
+  const thisWeek = weekStart(new Date()).getTime()
+  const days = Math.round((thisWeek - start.getTime()) / 86400000)
+  if (days === 0) return 'This week'
+  if (days === 7) return 'Last week'
+  const sameYear = start.getFullYear() === new Date().getFullYear()
+  return `Week of ${start.toLocaleDateString(undefined, { month: 'short', day: 'numeric', ...(sameYear ? {} : { year: 'numeric' }) })}`
 }
 
 export function MemoryPage() {
@@ -143,12 +171,21 @@ export function MemoryPage() {
   useFollowHarvestProject(harvestStatus, bridge.trusted)
 
   const [viewMode, setViewMode] = useState<'hierarchy' | 'timeline'>('hierarchy')
-  const [q, setQ] = useState('')
   const [level, setLevel] = useState('')
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null)
   const [tagFilter, setTagFilter] = useState<string | null>(null)
+  const [moreFilters, setMoreFilters] = useState(false)
+  const [params] = useSearchParams()
+  // Ctrl K "Search memory for …" links here with ?q=.
+  const urlQ = params.get('q')
+  const [q, setQ] = useState(() => urlQ ?? '')
+  const [seenQ, setSeenQ] = useState(urlQ)
+  if (urlQ !== seenQ) {
+    setSeenQ(urlQ)
+    if (urlQ !== null) setQ(urlQ)
+  }
   const deferredQ = useDeferredValue(q)
-  const search = useMemorySearch(deferredQ, level)
+  const search = useMemorySearch(deferredQ)
   const harvestQ = useHarvestQueue()
 
   const [expandedHarvest, setExpandedHarvest] = useState<string | null>(null)
@@ -169,7 +206,7 @@ export function MemoryPage() {
       setHarvestFull((prev) => ({ ...prev, [id]: job }))
     } catch (err) {
       push({
-        title: 'Could not load full harvest',
+        title: 'Couldn’t load the full list',
         detail: err instanceof Error ? err.message : 'Request failed',
         tone: 'danger',
       })
@@ -222,18 +259,17 @@ export function MemoryPage() {
 
   // Group confirmed items by week bucket for Timeline View
   const itemsByWeek = useMemo(() => {
-    const map: Record<string, MemoryItem[]> = {}
+    const map = new Map<number, { start: Date | null; items: MemoryItem[] }>()
     for (const item of confirmed) {
-      const bucket = item.week_bucket?.trim() || 'Current'
-      if (!map[bucket]) map[bucket] = []
-      map[bucket].push(item)
+      const start = memoryWeek(item)
+      const key = start ? start.getTime() : -1
+      const group = map.get(key) ?? { start, items: [] }
+      group.items.push(item)
+      map.set(key, group)
     }
-    const sortedKeys = Object.keys(map).sort((a, b) => b.localeCompare(a))
-    return sortedKeys.map((key) => ({
-      bucket: key,
-      label: formatWeekLabel(key, map[key][0]?.created_at),
-      items: map[key],
-    }))
+    return [...map.entries()]
+      .sort(([a], [b]) => b - a)
+      .map(([key, g]) => ({ bucket: String(key), label: formatWeekLabel(g.start), items: g.items }))
   }, [confirmed])
 
   // Only in-flight batches — done/failed leave this list; facts land in Library.
@@ -249,291 +285,185 @@ export function MemoryPage() {
   const harvestTargetId = harvestStatus?.project_id?.trim()
   const harvestMismatch = Boolean(harvestTargetId && projectId && harvestTargetId !== projectId)
   const harvestProject = (projects.data ?? []).find((p) => p.id === harvestTargetId)
-  const richer = (summaries.data ?? []).find(
-    (s) =>
-      s.project.id !== projectId &&
-      s.metrics.memories > (filtered.length + 5),
-  )
+  const filtersOn = Boolean(level || tagFilter || selectedCategory)
+  const clearFilters = () => {
+    setQ('')
+    setLevel('')
+    setTagFilter(null)
+    setSelectedCategory(null)
+  }
+  // When the open project is empty, point at the project that has the memories.
+  const elsewhere = (summaries.data ?? []).find((row) => row.project.id !== projectId && row.metrics.memories > 0)
 
   return (
     <div className="space-y-8">
-      {/* Top Header */}
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-fg">Project Memory & Knowledge</h1>
-          <p className="mt-1 max-w-xl text-sm text-fg-dim">
-            Hierarchical architecture, state of truth, and chronological evolution harvested from agent pair programming.
-            {!projectId ? ' Select a project to load memories.' : null}
-          </p>
-          <div className="mt-3 max-w-xs">
-            <ProjectSwitcher compact />
-          </div>
-        </div>
-        <div className="flex items-center gap-2">
-          {/* Tab Selector */}
-          <div className="flex rounded-lg border border-border bg-raised/70 p-0.5">
-            <button
-              type="button"
-              onClick={() => setViewMode('hierarchy')}
-              className={[
-                'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
-                viewMode === 'hierarchy'
-                  ? 'bg-amber text-ink shadow-sm font-semibold'
-                  : 'text-fg-dim hover:text-fg',
-              ].join(' ')}
+      <PageHeader
+        title="Memory"
+        description="Facts and decisions your agents saved from your chats. The next agent that works on this project can use them."
+        actions={
+          <>
+            <div className="flex rounded-lg border border-border bg-raised/70 p-0.5" role="group" aria-label="View">
+              {(
+                [
+                  ['hierarchy', 'By topic', Layers],
+                  ['timeline', 'By week', Calendar],
+                ] as const
+              ).map(([mode, label, Icon]) => (
+                <button
+                  key={mode}
+                  type="button"
+                  aria-pressed={viewMode === mode}
+                  onClick={() => setViewMode(mode)}
+                  className={[
+                    'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
+                    viewMode === mode ? 'bg-amber text-ink shadow-sm' : 'text-fg-dim hover:text-fg',
+                  ].join(' ')}
+                >
+                  <Icon size={13} aria-hidden />
+                  {label}
+                </button>
+              ))}
+            </div>
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => void search.refetch()}
+              disabled={search.isFetching || !projectId}
+              aria-label="Refresh memories"
             >
-              <Layers size={13} />
-              Active Truth
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('timeline')}
-              className={[
-                'flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition',
-                viewMode === 'timeline'
-                  ? 'bg-amber text-ink shadow-sm font-semibold'
-                  : 'text-fg-dim hover:text-fg',
-              ].join(' ')}
-            >
-              <Calendar size={13} />
-              Timeline & Changelog
-            </button>
-          </div>
-          <Button
-            variant="secondary"
-            size="sm"
-            onClick={() => void search.refetch()}
-            disabled={search.isFetching}
-          >
-            <RefreshCw size={13} className={search.isFetching ? 'animate-spin' : ''} />
-            Refresh
-          </Button>
-        </div>
-      </div>
+              <RefreshCw size={13} className={search.isFetching ? 'animate-spin' : ''} />
+            </Button>
+          </>
+        }
+      />
+
 
       {harvestMismatch && harvestTargetId ? (
         <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/40 p-4">
-          <div>
-            <p className="text-sm text-fg">
-              Desktop is writing memories to{' '}
-              <span className="font-medium">
-                {harvestProject ? projectLabelOf(harvestProject) : 'another project'}
-              </span>
-              , not this Library.
-            </p>
-            <p className="mt-1 text-xs text-fg-dim">
-              Folder <span className="font-mono">central-memory</span> maps to git remote{' '}
-              <span className="font-mono">nexus</span>.
-            </p>
-          </div>
-          <Button type="button" size="sm" onClick={() => setProjectId(harvestTargetId)}>
-            Show harvest project
-          </Button>
-        </GlassPanel>
-      ) : null}
-
-      {richer && !harvestMismatch ? (
-        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 border border-amber/30 p-4">
-          <div>
-            <p className="text-sm text-fg">
-              <span className="font-medium">{projectLabelOf(richer.project)}</span> has{' '}
-              {richer.metrics.memories} memories — more than this project.
-            </p>
-          </div>
-          <Button type="button" size="sm" onClick={() => setProjectId(richer.project.id)}>
-            Switch to {projectLabelOf(richer.project)}
-          </Button>
-        </GlassPanel>
-      ) : null}
-
-      {/* In-flight Harvest Queue */}
-      {harvestInFlight > 0 ? (
-        <GlassPanel className="space-y-3 p-5">
-          <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-medium text-fg">Incoming harvest (raw batches)</h2>
-            <StatusPill tone="amber">
-              {`${harvestQueued} queued · ${harvestProcessing} processing${
-                harvestInFlight > incomingHarvest.length
-                  ? ` · ${harvestInFlight} total in flight`
-                  : ''
-              }`}
-            </StatusPill>
-          </div>
-          <p className="text-[11px] text-muted">
-            OpenRouter is extracting architecture facts and decisions. Processed items appear automatically.
-            {harvestInFlight > incomingHarvest.length
-              ? ` Showing ${incomingHarvest.length} of ${harvestInFlight} in-flight batches.`
-              : null}
+          <p className="text-sm text-fg">
+            Desktop is saving new memories to{' '}
+            <span className="font-medium">{harvestProject ? projectLabel(harvestProject) : 'another project'}</span>,
+            not the one shown here.
           </p>
-          <ul className="max-h-[28rem] space-y-2 overflow-auto text-sm">
-            {incomingHarvest.slice(0, 20).map((job) => {
-              const open = expandedHarvest === job.id
-              const full = harvestFull[job.id]
-              const body =
-                open && full?.turns?.length
-                  ? full.turns
-                      .map((t) => `${t.speaker || '?'}: ${t.content}`)
-                      .join('\n\n')
-                  : job.raw_preview || '(empty)'
-              return (
-                <li key={job.id} className="rounded-lg border border-border bg-raised/40 px-3 py-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <StatusPill tone="amber">{job.status}</StatusPill>
-                      <span className="text-[11px] text-muted">
-                        {job.turn_count} turns
-                        {job.result_count ? ` · ${job.result_count} memories` : ''}
-                        {job.provider ? ` · ${job.provider}` : ''}
-                      </span>
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => void toggleHarvest(job.id)}
-                    >
-                      {harvestLoading === job.id
-                        ? 'Loading…'
-                        : open
-                          ? 'Collapse'
-                          : 'Show full'}
-                    </Button>
-                  </div>
-                  <pre className="mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap font-sans text-xs text-fg-dim">
-                    {body}
-                  </pre>
-                  {job.error ? <p className="mt-1 text-[11px] text-danger">{job.error}</p> : null}
-                </li>
-              )
-            })}
-          </ul>
+          <Button type="button" size="sm" onClick={() => setProjectId(harvestTargetId)}>
+            Show that project
+          </Button>
         </GlassPanel>
       ) : null}
 
-      {/* Search & Filter Bar */}
-      <div className="space-y-3">
-        <div className="flex flex-wrap items-end gap-3">
-          <label className="block min-w-[12rem] flex-1 max-w-md">
-            <span className="mb-1.5 block text-xs text-fg-dim">Search memories, files, commands</span>
+      {harvestInFlight > 0 ? (
+        <p className="text-sm text-fg-dim" role="status">
+          Reading {harvestInFlight} new {harvestInFlight === 1 ? 'chat' : 'chats'} for things worth remembering… New memories
+          appear here on their own.
+        </p>
+      ) : null}
+
+      {projectId ? (
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-[1fr_auto_auto_auto] sm:items-end">
+          <label className="col-span-2 block min-w-0 sm:col-span-1">
+            <span className="sr-only">Search memories</span>
             <input
+              type="search"
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="e.g. redis, jwt, docker, lightsail, store.go..."
+              placeholder="Search memories"
               className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
             />
           </label>
+          <FilterSelect
+            label="Topic"
+            value={selectedCategory ?? ''}
+            onChange={(v) => setSelectedCategory(v || null)}
+            options={[['', 'All topics'], ...CATEGORY_ORDER.map((c) => [c, CATEGORY_CONFIG[c].label] as [string, string])]}
+          />
+          {moreFilters ? (
+            <>
+              <FilterSelect
+                label="Level"
+                value={level}
+                onChange={setLevel}
+                options={MEMORY_LEVELS.map((o) => [o.value, o.label] as [string, string])}
+              />
+              {allTags.length > 0 ? (
+                <FilterSelect
+                  label="Tag"
+                  value={tagFilter ?? ''}
+                  onChange={(v) => setTagFilter(v || null)}
+                  options={[['', 'All tags'], ...allTags.map((t) => [t, `#${t}`] as [string, string])]}
+                />
+              ) : null}
+            </>
+          ) : (
+            <Button type="button" variant="ghost" size="md" onClick={() => setMoreFilters(true)}>
+              More filters
+            </Button>
+          )}
         </div>
+      ) : null}
 
-        {/* Level Pills */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-muted mr-1">Level:</span>
-          {MEMORY_LEVELS.map((option) => (
-            <button
-              key={option.value || 'all'}
-              type="button"
-              onClick={() => setLevel(option.value)}
-              className={[
-                'rounded-md px-2.5 py-1 text-xs font-medium transition',
-                level === option.value
-                  ? 'bg-amber-soft text-amber'
-                  : 'text-muted hover:bg-raised hover:text-fg',
-              ].join(' ')}
-            >
-              {option.label}
-            </button>
-          ))}
-        </div>
+      {filtersOn && (search.hasNext || search.hasPrev) ? (
+        <p className="text-[11px] text-muted">Topic, level and tag filters apply to the memories on this page.</p>
+      ) : null}
 
-        {/* Category Pills */}
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-xs text-muted mr-1">Category:</span>
-          <button
-            type="button"
-            onClick={() => setSelectedCategory(null)}
-            className={[
-              'rounded-md px-2.5 py-1 text-xs font-medium transition',
-              selectedCategory === null
-                ? 'bg-amber-soft text-amber'
-                : 'text-muted hover:bg-raised hover:text-fg',
-            ].join(' ')}
-          >
-            All
-          </button>
-          {CATEGORY_ORDER.map((catKey) => {
-            const cfg = CATEGORY_CONFIG[catKey]
-            const active = selectedCategory === catKey
-            const Icon = cfg.icon
-            return (
-              <button
-                key={catKey}
-                type="button"
-                onClick={() => setSelectedCategory((cur) => (cur === catKey ? null : catKey))}
-                className={[
-                  'flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium transition border',
-                  active
-                    ? 'bg-raised border-amber text-amber font-semibold'
-                    : 'border-border/50 text-muted hover:bg-raised hover:text-fg',
-                ].join(' ')}
-              >
-                <Icon size={12} />
-                {cfg.label}
-              </button>
-            )
-          })}
-        </div>
-
-        {/* Tag Pills */}
-        {allTags.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-1.5 pt-1">
-            <span className="text-xs text-muted mr-1">Tags:</span>
-            <button
-              type="button"
-              onClick={() => setTagFilter(null)}
-              className={[
-                'rounded-md px-2 py-0.5 font-mono text-[11px] transition',
-                tagFilter === null
-                  ? 'bg-amber-soft text-amber'
-                  : 'text-muted hover:bg-raised hover:text-fg',
-              ].join(' ')}
-            >
-              all
-            </button>
-            {allTags.slice(0, 15).map((tag) => (
-              <button
-                key={tag}
-                type="button"
-                onClick={() => setTagFilter((cur) => (cur === tag ? null : tag))}
-                className={[
-                  'rounded-md px-2 py-0.5 font-mono text-[11px] transition',
-                  tagFilter === tag
-                    ? 'bg-amber-soft text-amber'
-                    : 'text-muted hover:bg-raised hover:text-fg',
-                ].join(' ')}
-              >
-                #{tag}
-              </button>
-            ))}
-          </div>
-        ) : null}
-      </div>
-
-      {search.isLoading ? <p className="text-sm text-muted">Loading memories…</p> : null}
+      {search.isLoading ? (
+        <p className="text-sm text-muted" role="status">
+          Loading memories…
+        </p>
+      ) : null}
 
       {search.isError ? (
-        <GlassPanel className="p-4">
+        <GlassPanel className="flex flex-wrap items-center justify-between gap-3 p-4">
           <p className="text-sm text-danger">
-            {search.error instanceof ApiError
-              ? search.error.message
-              : 'Failed to load memories'}
+            {search.error instanceof ApiError && search.error.status === 403
+              ? 'You’re not a member of this project any more. Pick another project above.'
+              : search.error instanceof ApiError
+                ? `Couldn’t load memories: ${search.error.message}`
+                : 'Couldn’t load memories.'}
           </p>
+          <Button type="button" size="sm" variant="secondary" onClick={() => void search.refetch()}>
+            Try again
+          </Button>
         </GlassPanel>
       ) : null}
 
-      {!search.isLoading && !search.isError && filtered.length === 0 ? (
-        <GlassPanel className="p-6">
+      {!projectId && !projects.isLoading ? (
+        <GlassPanel className="space-y-2 p-6">
+          <p className="text-sm text-fg">No project yet.</p>
           <p className="text-sm text-fg-dim">
-            No memories found. Run an agent conversation or harvest from desktop to record decisions.
+            Memories are saved per project. Install the Desktop app and open a code folder, and memories start
+            appearing here.
           </p>
+          <Link to="/app/connect" className="text-sm text-amber hover:underline">
+            Set up the Desktop app →
+          </Link>
+        </GlassPanel>
+      ) : null}
+
+      {projectId && !search.isLoading && !search.isError && confirmed.length === 0 ? (
+        <GlassPanel className="space-y-3 p-6">
+          {filtersOn || deferredQ ? (
+            <>
+              <p className="text-sm text-fg-dim">No memories match {deferredQ ? `“${deferredQ}”` : 'these filters'}.</p>
+              <Button type="button" size="sm" variant="secondary" onClick={clearFilters}>
+                Clear search and filters
+              </Button>
+            </>
+          ) : elsewhere ? (
+            <>
+              <p className="text-sm text-fg">This project has no memories yet.</p>
+              <p className="text-sm text-fg-dim">
+                You have {elsewhere.metrics.memories} in <span className="text-fg">{projectLabel(elsewhere.project)}</span>.
+              </p>
+              <Button type="button" size="sm" onClick={() => setProjectId(elsewhere.project.id)}>
+                Show {projectLabel(elsewhere.project)}
+              </Button>
+            </>
+          ) : (
+            <p className="text-sm text-fg-dim">
+              No memories yet. They appear after you work with an agent in this project while the Desktop app is
+              running.
+            </p>
+          )}
         </GlassPanel>
       ) : null}
 
@@ -542,7 +472,8 @@ export function MemoryPage() {
         <div className="space-y-6">
           <div className="flex items-center justify-between">
             <h2 className="text-xs font-medium uppercase tracking-wide text-muted">
-              Active Project Architecture & Truth · {confirmed.length} active records
+              {confirmed.length} {confirmed.length === 1 ? 'memory' : 'memories'}
+              {search.total > confirmed.length && !filtersOn ? ` of ${search.total}` : ''}
             </h2>
             <div className="flex items-center gap-2">
               <Button
@@ -626,7 +557,7 @@ export function MemoryPage() {
         <div className="space-y-8">
           <div className="flex items-center justify-between">
             <h2 className="text-xs font-medium uppercase tracking-wide text-muted">
-              Project Evolution & Changelog by Week · {confirmed.length} records
+              {confirmed.length} {confirmed.length === 1 ? 'memory' : 'memories'} by week
             </h2>
           </div>
 
@@ -661,6 +592,87 @@ export function MemoryPage() {
         </div>
       ) : null}
 
+      {projectId ? (
+        <Advanced
+          title="Advanced"
+          summary="Try changes on a copy of this project’s memory and merge them back, and see chats still waiting to be read."
+          defaultOpen={params.get('advanced') === 'overlays'}
+        >
+          <div className="space-y-10">
+            <div className="space-y-3">
+              <h3 className="text-sm font-medium text-fg">Memory copies</h3>
+              <p className="text-xs text-fg-dim">
+                Make a copy, let an agent change it, compare it with the original, then merge. This is not git.
+              </p>
+              <BranchesPage embedded />
+            </div>
+        {/* In-flight harvest batches (raw) */}
+        {harvestInFlight > 0 ? (
+          <GlassPanel className="space-y-3 p-5">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-medium text-fg">Chats waiting to be read</h2>
+              <StatusPill tone="amber">
+                {`${harvestQueued} queued · ${harvestProcessing} processing${
+                  harvestInFlight > incomingHarvest.length
+                    ? ` · ${harvestInFlight} total in flight`
+                    : ''
+                }`}
+              </StatusPill>
+            </div>
+            <p className="text-[11px] text-muted">
+              OpenRouter is extracting architecture facts and decisions. Processed items appear automatically.
+              {harvestInFlight > incomingHarvest.length
+                ? ` Showing ${incomingHarvest.length} of ${harvestInFlight} in-flight batches.`
+                : null}
+            </p>
+            <ul className="max-h-[28rem] space-y-2 overflow-auto text-sm">
+              {incomingHarvest.slice(0, 20).map((job) => {
+                const open = expandedHarvest === job.id
+                const full = harvestFull[job.id]
+                const body =
+                  open && full?.turns?.length
+                    ? full.turns
+                        .map((t) => `${t.speaker || '?'}: ${t.content}`)
+                        .join('\n\n')
+                    : job.raw_preview || '(empty)'
+                return (
+                  <li key={job.id} className="rounded-lg border border-border bg-raised/40 px-3 py-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <StatusPill tone="amber">{job.status}</StatusPill>
+                        <span className="text-[11px] text-muted">
+                          {job.turn_count} turns
+                          {job.result_count ? ` · ${job.result_count} memories` : ''}
+                          {job.provider ? ` · ${job.provider}` : ''}
+                        </span>
+                      </div>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => void toggleHarvest(job.id)}
+                      >
+                        {harvestLoading === job.id
+                          ? 'Loading…'
+                          : open
+                            ? 'Collapse'
+                            : 'Show full'}
+                      </Button>
+                    </div>
+                    <pre className="mt-1.5 max-h-80 overflow-auto whitespace-pre-wrap font-sans text-xs text-fg-dim">
+                      {body}
+                    </pre>
+                    {job.error ? <p className="mt-1 text-[11px] text-danger">{job.error}</p> : null}
+                  </li>
+                )
+              })}
+            </ul>
+          </GlassPanel>
+        ) : null}
+          </div>
+        </Advanced>
+      ) : null}
+
       <MemoryEditorSlideOver
         item={editing}
         open={Boolean(editing)}
@@ -686,6 +698,16 @@ export function MemoryPage() {
   )
 }
 
+const MEMORY_MD = {
+  a: ({ href, children }: { href?: string; children?: ReactNode }) => (
+    <a href={href} target="_blank" rel="noreferrer">
+      {children}
+    </a>
+  ),
+  // Memories are text; never fetch images from them.
+  img: ({ alt }: { alt?: string }) => <span>{alt}</span>,
+}
+
 function MemoryCard({
   item,
   onEdit,
@@ -697,15 +719,23 @@ function MemoryCard({
   onHistory?: () => void
   onShare?: () => void
 }) {
-  const [expanded, setExpanded] = useState(item.scope === 'episode_summary')
+  const [expanded, setExpanded] = useState(false)
+  const [details, setDetails] = useState(false)
+  const name = memoryTitle(item.key)
   const proposed = item.status === 'PROPOSED'
   const { nameFor } = usePeople()
-  const agent = item.proposed_by ? nameFor(item.proposed_by) : item.source
+  const by = item.proposed_by ? nameFor(item.proposed_by) : item.source
+  // Agent ids ("claude") read as product names; a bare "agent" source reads as "an agent".
+  const agent = !by ? '' : by === 'agent' ? 'an agent' : /^[a-z-]+$/.test(by) ? agentName(by) : by
   const previewLimit = item.scope === 'episode_summary' ? 420 : 180
-  const preview =
-    item.content.length > previewLimit && !expanded
-      ? `${item.content.slice(0, previewLimit).trimEnd()}…`
-      : item.content
+  // Markdown memories (the project brief) take their "# Heading" as the title,
+  // preview as plain text and render as markdown when expanded.
+  const markdown = looksLikeMarkdown(item.content)
+  const heading = markdown ? markdownTitle(item.content) : ''
+  const body = heading ? withoutTitle(item.content) : item.content
+  const plain = markdown ? stripMarkdown(body) : body
+  const long = plain.length > previewLimit
+  const preview = long && !expanded ? `${plain.slice(0, previewLimit).trimEnd()}…` : plain
 
   const catKey = normalizeItemCategory(item.category)
   const catConfig = CATEGORY_CONFIG[catKey]
@@ -721,65 +751,23 @@ function MemoryCard({
       className="group overflow-hidden"
     >
       <GlassPanel glow={proposed ? 'amber' : 'none'} className="p-4 hover:border-border-strong">
-        <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1.5">
-          {/* Category Badge */}
-          <span
-            className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] font-medium border ${catConfig.badgeClass}`}
-          >
-            <CatIcon size={11} />
-            {catConfig.label}
-          </span>
-
-          <code className="font-mono text-[13px] font-semibold text-fg">{item.key}</code>
-
-          <StatusPill tone={visibleMemoryStatus(item.status) === 'active' ? 'teal' : 'neutral'}>
-            {visibleMemoryStatus(item.status)}
-          </StatusPill>
-
-          {item.outcome && item.outcome !== 'active' ? (
-            <span
-              className={`rounded px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wider ${
-                item.outcome === 'superseded'
-                  ? 'bg-zinc-800 text-zinc-400 border border-zinc-700'
-                  : item.outcome === 'deprecated'
-                    ? 'bg-rose-950/40 text-rose-400 border border-rose-800/40'
-                    : 'bg-emerald-950/40 text-emerald-400 border border-emerald-800/40'
-              }`}
-            >
-              {item.outcome}
-            </span>
-          ) : null}
-
-          {item.supersedes_key ? (
-            <span className="inline-flex items-center gap-1 text-[11px] font-mono text-amber/80 bg-amber/10 border border-amber/20 px-1.5 py-0.5 rounded">
-              <GitBranch size={10} />
-              supersedes: {item.supersedes_key}
-            </span>
-          ) : null}
-
-          <span className="font-mono text-[11px] text-muted">{item.level}</span>
-
-          {item.scope ? (
-            <span
-              className={[
-                'font-mono text-[11px]',
-                item.scope === 'episode_summary' ? 'text-amber font-medium' : 'text-muted',
-              ].join(' ')}
-            >
-              {item.scope}
-            </span>
-          ) : null}
-
-          {agent ? (
-            <span className="inline-flex items-center gap-1 text-[11px] text-muted" title={item.proposed_by || item.source}>
-              <Bot size={11} aria-hidden />
-              {agent}
-            </span>
-          ) : null}
-
-          <span className="text-[11px] text-muted">{formatRelative(item.updated_at)}</span>
-
-          <div className="ml-auto flex gap-1">
+        <div className="flex flex-wrap items-start gap-x-3 gap-y-1">
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold text-fg">
+              {heading || name.title}
+              {visibleMemoryStatus(item.status) !== 'active' ? (
+                <span className="ml-2 align-middle">
+                  <StatusPill tone="neutral">{visibleMemoryStatus(item.status)}</StatusPill>
+                </span>
+              ) : null}
+            </h3>
+            <p className="mt-0.5 text-xs text-muted">
+              {name.group ? `${name.group} · ` : ''}
+              {agent ? `Saved by ${agent} · ` : ''}
+              {formatRelative(item.updated_at)}
+            </p>
+          </div>
+          <div className="flex gap-1">
             {onEdit ? (
               <Button variant="ghost" size="sm" onClick={onEdit} type="button" aria-label="Edit">
                 <Pencil size={12} />
@@ -787,15 +775,8 @@ function MemoryCard({
               </Button>
             ) : null}
             {onHistory ? (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={onHistory}
-                type="button"
-                aria-label="Version history"
-              >
+              <Button variant="ghost" size="sm" onClick={onHistory} type="button" aria-label="Version history">
                 <History size={12} />
-                History
               </Button>
             ) : null}
             {onShare ? (
@@ -806,59 +787,115 @@ function MemoryCard({
           </div>
         </div>
 
-        <motion.div
-          initial={false}
-          animate={{ height: 'auto' }}
-          transition={{ duration: 0.22, ease: 'easeOut' }}
-        >
-          <p className="mt-2.5 whitespace-pre-wrap text-sm leading-relaxed text-fg-dim">
-            {preview}
-          </p>
-        </motion.div>
-
-        {item.content.length > previewLimit ? (
-          <button
-            type="button"
-            className="mt-1 text-[11px] font-medium text-amber hover:underline"
-            onClick={() => setExpanded((v) => !v)}
-          >
-            {expanded ? 'Collapse' : 'Read full text'}
-          </button>
-        ) : null}
-
-        {/* Concrete Provenance Chips: Files & Tools */}
-        {((item.files_affected && item.files_affected.length > 0) ||
-          (item.tools_used && item.tools_used.length > 0)) && (
-          <div className="mt-3 pt-2.5 border-t border-border/40 flex flex-wrap items-center gap-2">
-            {item.files_affected?.map((f) => (
-              <span
-                key={f}
-                className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-dim bg-raised/80 border border-border px-2 py-0.5 rounded-md"
-              >
-                <FileCode2 size={11} className="text-sky-400" />
-                {f}
-              </span>
-            ))}
-            {item.tools_used?.map((t) => (
-              <span
-                key={t}
-                className="inline-flex items-center gap-1 font-mono text-[11px] text-fg-dim bg-raised/80 border border-border px-2 py-0.5 rounded-md"
-              >
-                <Terminal size={11} className="text-amber" />
-                {t}
-              </span>
-            ))}
+        {markdown && expanded ? (
+          <div className="memory-prose mt-2">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={MEMORY_MD}>
+              {body}
+            </ReactMarkdown>
           </div>
+        ) : (
+          <p className="mt-2 text-sm leading-relaxed text-fg-dim [overflow-wrap:anywhere] whitespace-pre-wrap">{preview}</p>
         )}
 
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          {(item.tags ?? []).map((tag) => (
-            <span key={tag} className="font-mono text-[11px] text-muted">
-              #{tag}
-            </span>
-          ))}
+        <div className="mt-1 flex flex-wrap gap-3">
+          {long ? (
+            <button
+              type="button"
+              className="text-[11px] font-medium text-amber hover:underline"
+              onClick={() => setExpanded((v) => !v)}
+            >
+              {expanded ? 'Show less' : 'Read more'}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="text-[11px] font-medium text-muted hover:text-fg"
+            aria-expanded={details}
+            onClick={() => setDetails((v) => !v)}
+          >
+            {details ? 'Hide details' : 'Details'}
+          </button>
         </div>
+
+        {details ? (
+          <dl className="mt-3 grid gap-1.5 border-t border-border/40 pt-3 text-[11px] text-fg-dim sm:grid-cols-[8rem_1fr]">
+            <dt className="text-muted">Key</dt>
+            <dd className="font-mono">{item.key}</dd>
+            <dt className="text-muted">Topic</dt>
+            <dd className="inline-flex items-center gap-1"><CatIcon size={11} aria-hidden />{catConfig.label}</dd>
+            <dt className="text-muted">Visible to</dt>
+            <dd>{item.level}{item.scope && item.scope !== item.level ? ` · ${item.scope}` : ''}</dd>
+            {item.outcome && item.outcome !== 'active' ? (
+              <>
+                <dt className="text-muted">Outcome</dt>
+                <dd>{item.outcome}</dd>
+              </>
+            ) : null}
+            {item.supersedes_key ? (
+              <>
+                <dt className="text-muted">Replaces</dt>
+                <dd className="inline-flex items-center gap-1 font-mono"><GitBranch size={10} aria-hidden />{item.supersedes_key}</dd>
+              </>
+            ) : null}
+            {item.files_affected?.length ? (
+              <>
+                <dt className="text-muted">Files</dt>
+                <dd className="flex flex-wrap gap-1.5">
+                  {item.files_affected.map((f) => (
+                    <span key={f} className="inline-flex items-center gap-1 font-mono"><FileCode2 size={11} aria-hidden />{f}</span>
+                  ))}
+                </dd>
+              </>
+            ) : null}
+            {item.tools_used?.length ? (
+              <>
+                <dt className="text-muted">Agent tools</dt>
+                <dd className="flex flex-wrap gap-1.5">
+                  {item.tools_used.map((t) => (
+                    <span key={t} className="inline-flex items-center gap-1 font-mono"><Terminal size={11} aria-hidden />{t}</span>
+                  ))}
+                </dd>
+              </>
+            ) : null}
+            {item.tags?.length ? (
+              <>
+                <dt className="text-muted">Tags</dt>
+                <dd className="font-mono">{item.tags.map((t) => `#${t}`).join(' ')}</dd>
+              </>
+            ) : null}
+          </dl>
+        ) : null}
       </GlassPanel>
     </motion.div>
+  )
+}
+
+function FilterSelect({
+  label,
+  value,
+  onChange,
+  options,
+}: {
+  label: string
+  value: string
+  onChange: (v: string) => void
+  options: [string, string][]
+}) {
+  return (
+    <label className="block">
+      <span className="sr-only">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        aria-label={label}
+        className="h-10 w-full rounded-lg border border-border bg-raised px-2 text-sm text-fg outline-none focus:border-amber sm:w-auto"
+      >
+        {options.map(([v, l]) => (
+          <option key={v || 'all'} value={v}>
+            {l}
+          </option>
+        ))}
+      </select>
+    </label>
   )
 }

@@ -16,7 +16,7 @@ export const storageApi = {
 
 export function formatBytes(n: number) {
   if (!Number.isFinite(n) || n < 0) return '0 B'
-  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
   let v = n
   let i = 0
   while (v >= 1024 && i < units.length - 1) {

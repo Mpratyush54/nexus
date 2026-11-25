@@ -1,110 +1,133 @@
-import { ExternalLink, HardDrive, Monitor } from 'lucide-react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Button } from '@/components/ui/Button'
-import { GlassPanel } from '@/components/ui/GlassPanel'
+import { ArrowLeft, ArrowRight, Check, CircleCheck, FolderGit2, LogIn, TriangleAlert } from 'lucide-react'
 import { DesktopInstallPicker } from '@/components/DesktopInstallPicker'
 import { useTrustedLocalBridge } from '@/hooks/useTrustedLocalBridge'
+import { StepSwap } from '@/auth/StepSwap'
+import '@/auth/auth.css'
 import { useAuth } from '@/providers/AuthProvider'
 import { storage } from '@/utils/storage'
 
-const STEPS = [
-  {
-    id: 'account',
-    title: 'Your Nexus account',
-    body: 'You are signed into the web portal. Desktop must use this same account — never a different login on the same machine.',
-  },
-  {
-    id: 'install',
-    title: 'Install Nexus Desktop',
-    body: 'One command installs the tray app, daemon, CLI, and registers login/startup for Windows, macOS, or Linux.',
-  },
-  {
-    id: 'signin',
-    title: 'Sign in on Desktop',
-    body: 'Open Nexus from the Start Menu / Applications / app launcher (or the tray icon). Choose Sign in and complete the browser flow with the same user as this portal.',
-  },
-  {
-    id: 'harvest',
-    title: 'Open a project folder',
-    body: 'Point Desktop at your repo. It harvests Cursor / OpenCode chats into Memory for that project. Check status anytime on Desktop setup.',
-  },
-] as const
-
+/**
+ * Optional first-run guide. Never forced (AppShell only offers it), every
+ * step can be skipped, and finishing or skipping lands on Home.
+ */
 export function OnboardingPage() {
   const { user } = useAuth()
   const bridge = useTrustedLocalBridge()
   const navigate = useNavigate()
+  const [step, setStep] = useState(0)
+  const name = user?.username ?? 'you'
 
   const finish = () => {
     storage.setOnboardingDone(true)
     navigate('/app/dashboard', { replace: true })
   }
 
-  return (
-    <div className="mx-auto w-full max-w-2xl space-y-8 px-1 py-2 sm:py-6">
-      <div>
-        <p className="text-xs font-medium uppercase tracking-[0.16em] text-amber">Welcome</p>
-        <h1 className="mt-2 text-2xl font-semibold tracking-tight text-fg sm:text-3xl">
-          Get Nexus ready in a few minutes
-        </h1>
-        <p className="mt-2 max-w-xl text-sm leading-relaxed text-fg-dim">
-          Signed in as <span className="font-mono text-fg">{user?.username ?? 'you'}</span>. Desktop
-          and the portal must stay on this account so harvest never leaks across users.
-        </p>
-      </div>
-
-      <ol className="space-y-4">
-        {STEPS.map((s, i) => (
-          <li key={s.id}>
-            <GlassPanel className="flex gap-4 p-5">
-              <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-raised text-sm font-semibold text-amber">
-                {i + 1}
+  const steps = [
+    {
+      title: 'Get the desktop app',
+      lede: 'Nexus Desktop runs quietly in your tray and saves what your coding agents learn. Copy the command for your system and run it once.',
+      body: <DesktopInstallPicker title="" description="" />,
+    },
+    {
+      title: 'Sign in on the desktop',
+      lede: `Open Nexus and choose Sign in. Use this same account (${name}) so your memory stays in one place.`,
+      body: (
+        <>
+          <ul className="au-ob-list">
+            <li>
+              <LogIn size={16} aria-hidden />
+              <span>
+                <strong>Windows:</strong> Start menu → Nexus, or the tray icon.
               </span>
-              <div className="min-w-0 flex-1">
-                <h2 className="text-sm font-medium text-fg">{s.title}</h2>
-                <p className="mt-1 text-sm leading-relaxed text-fg-dim">{s.body}</p>
-                {s.id === 'install' ? (
-                  <div className="mt-3 space-y-2">
-                    <DesktopInstallPicker description="" title="" />
-                    <a
-                      className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border px-3 text-xs text-fg-dim hover:text-fg"
-                      href="https://github.com/Mpratyush54/nexus#readme"
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      Docs <ExternalLink size={12} />
-                    </a>
-                  </div>
-                ) : null}
-                {s.id === 'signin' && bridge.identity === 'match' ? (
-                  <p className="mt-2 text-xs text-teal">Desktop is already linked as you.</p>
-                ) : null}
-                {s.id === 'signin' && bridge.identity === 'mismatch' ? (
-                  <p className="mt-2 text-xs text-danger">
-                    Desktop is a different account — finish onboarding, then re-link on Desktop setup.
-                  </p>
-                ) : null}
-              </div>
-            </GlassPanel>
+            </li>
+            <li>
+              <LogIn size={16} aria-hidden />
+              <span>
+                <strong>macOS / Linux:</strong> Applications or your app launcher.
+              </span>
+            </li>
+          </ul>
+          {bridge.identity === 'match' ? (
+            <p className="au-ob-status">
+              <CircleCheck size={16} aria-hidden /> Nexus Desktop on this computer is signed in as you.
+            </p>
+          ) : bridge.identity === 'mismatch' ? (
+            <p className="au-ob-status is-warn">
+              <TriangleAlert size={16} aria-hidden /> Nexus Desktop is signed in to a different account.
+              Fix it later on Desktop setup.
+            </p>
+          ) : null}
+        </>
+      ),
+    },
+    {
+      title: 'Open a project',
+      lede: 'In Nexus Desktop, pick a project folder. From then on, chats with Claude Code, Codex, Cursor and the rest are saved to that project’s memory.',
+      body: (
+        <ul className="au-ob-list">
+          <li>
+            <FolderGit2 size={16} aria-hidden />
+            <span>Your agents can then look up earlier decisions instead of starting from zero.</span>
           </li>
-        ))}
-      </ol>
+          <li>
+            <Check size={16} aria-hidden />
+            <span>You can browse it all here on the web, from any device.</span>
+          </li>
+        </ul>
+      ),
+    },
+  ]
+  const current = steps[step]
+  const last = step === steps.length - 1
 
-      <GlassPanel className="flex flex-col gap-3 p-4 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2 text-sm text-fg-dim">
-          <Monitor size={16} className="shrink-0 text-amber" />
-          <HardDrive size={16} className="shrink-0 text-muted" />
-          <span>You can revisit Desktop setup anytime from the sidebar.</span>
+  return (
+    <div className="au au-embedded">
+      <div className="au-ob">
+        <div className="au-ob-top">
+          <div className="au-ob-progress" role="progressbar" aria-label="Setup progress" aria-valuemin={1} aria-valuemax={steps.length} aria-valuenow={step + 1}>
+            {steps.map((s, i) => (
+              <i key={s.title} className={i <= step ? 'is-on' : ''} />
+            ))}
+          </div>
+          <button type="button" className="au-link is-quiet" onClick={finish}>
+            Skip setup
+          </button>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" size="sm" variant="secondary" onClick={finish}>
-            Skip for now
-          </Button>
-          <Button type="button" size="sm" onClick={finish}>
-            Continue to Home
-          </Button>
+
+        <div className="au-head">
+          <p className="au-kicker">welcome, {name}</p>
+          <h1 className="au-title">Set up Nexus in three short steps</h1>
+          <p className="au-sub">Optional. You can use the web app right away and come back to this from Desktop setup.</p>
         </div>
-      </GlassPanel>
+
+        <div className="au-ob-card">
+          <StepSwap step={String(step)}>
+            <p className="au-ob-step">
+              step {step + 1} of {steps.length}
+            </p>
+            <h2 className="au-title" style={{ fontSize: 24, marginTop: 8 }}>
+              {current.title}
+            </h2>
+            <p className="au-sub">{current.lede}</p>
+            <div style={{ marginTop: 18 }}>{current.body}</div>
+          </StepSwap>
+          <div className="au-ob-nav">
+            {step > 0 ? (
+              <button type="button" className="au-link is-quiet" onClick={() => setStep(step - 1)}>
+                <ArrowLeft size={14} aria-hidden style={{ verticalAlign: '-2px', marginRight: 4 }} />
+                Back
+              </button>
+            ) : (
+              <span />
+            )}
+            <button type="button" className="au-btn" onClick={() => (last ? finish() : setStep(step + 1))}>
+              {last ? 'Go to Home' : 'Next'} <ArrowRight size={16} aria-hidden />
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
   )
 }

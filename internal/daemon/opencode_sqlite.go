@@ -91,6 +91,9 @@ func readOpenCodeTurns(dbPath, workspace, wantedSession string, since time.Time,
 	var firstReadError error
 	skipped := 0
 	for _, session := range sessions {
+		if IsNexusOwnedSession(session.id) {
+			continue // saved by Nexus itself; this would be a duplicate
+		}
 		// The part_session_idx index isolates bad pages in a damaged global DB.
 		// One broken session must not suppress all the other workspaces/chats.
 		parts, err := db.QueryContext(ctx, `SELECT p.id, p.message_id, m.data, p.data, p.time_created

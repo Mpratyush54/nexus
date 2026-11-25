@@ -5,44 +5,54 @@ package main
 /*
 #include <stdlib.h>
 typedef void (*nx_event_fn)(const char *json);
+static void nx_emit(nx_event_fn fn, const char *json) { if (fn) fn(json); }
 */
 import "C"
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 	"unsafe"
 
 	"central-memory/internal/config"
+	"central-memory/internal/continuex"
 	"central-memory/internal/core"
 	"central-memory/internal/daemon"
+	"central-memory/internal/diagnostics"
+	"central-memory/internal/platform"
 )
 
 type coreState struct {
-	mu                sync.Mutex
-	deps              core.Deps
-	captureCancel     context.CancelFunc
-	captureDone       chan struct{}
-	captureRuntime    *daemon.Runtime
-	captureOthers     map[string]*daemon.Runtime
-	captureWorkErrors map[string]string
-	captureConfig     *embeddedCaptureConfig
-	capturePaused     bool
-	captureStarting   bool
-	captureGeneration uint64
-	captureError      string
-	captureProjectID  string
+	mu                  sync.Mutex
+	deps                core.Deps
+	captureCancel       context.CancelFunc
+	captureDone         chan struct{}
+	captureRuntime      *daemon.Runtime
+	captureOthers       map[string]*daemon.Runtime
+	captureWorkErrors   map[string]string
+	captureWorkProjects map[string]string
+	captureConfig       *embeddedCaptureConfig
+	capturePaused       bool
+	captureStarting     bool
+	captureGeneration   uint64
+	captureError        string
+	captureProjectID    string
 }
 
 var nxState = coreState{}
 var nxEventFn C.nx_event_fn
+var nxEventMu sync.RWMutex
+var captureConfigureMu sync.Mutex
+var continuationCancels sync.Map // request id -> context.CancelFunc
 
 type embeddedCaptureConfig struct {
 	generation  uint64
@@ -51,6 +61,7 @@ type embeddedCaptureConfig struct {
 	serverToken string
 	userID      string
 	projectID   string
+	roots       []string
 }
 
 type embeddedCaptureController struct{}
@@ -71,8 +82,11 @@ func embeddedServerToken(explicit string) string {
 
 //export nx_init
 func nx_init(configJSON *C.char) (rc C.int) {
+	captureConfigureMu.Lock()
+	defer captureConfigureMu.Unlock()
 	defer func() {
-		if recover() != nil {
+		if v := recover(); v != nil {
+			diagnostics.RecordPanic("nx_init", v, debug.Stack())
 			rc = 1
 		}
 	}()
@@ -83,11 +97,23 @@ func nx_init(configJSON *C.char) (rc C.int) {
 		ServerToken   string `json:"server_token"`
 		UserID        string `json:"user_id"`
 		ProjectID     string `json:"project_id"`
+		// Where logs/ and reports/ live (the desktop's profile-aware
+		// LOCALAPPDATA Nexus folder) and the desktop's version for log headers.
+		DiagnosticsDir string `json:"diagnostics_dir"`
+		AppVersion     string `json:"app_version"`
 	}
 	if configJSON != nil {
 		_ = json.Unmarshal([]byte(C.GoString(configJSON)), &cfg)
 	}
+	setupDiagnostics(cfg.DiagnosticsDir, cfg.AppVersion)
+	// A Finder-launched macOS app has launchd's bare PATH; without this
+	// every agent CLI looks uninstalled. No-op on other systems.
+	platform.AugmentGUIPath()
+	// Go raises the open-file limit only for executables; inside the
+	// desktop app the library inherits launchd's soft limit of 256.
+	platform.RaiseFileLimit()
 	stopEmbeddedCapture()
+	stopDesktopExecution()
 
 	serverURL := strings.TrimSpace(cfg.ServerURL)
 	if serverURL == "" {
@@ -100,7 +126,10 @@ func nx_init(configJSON *C.char) (rc C.int) {
 			log.Printf("nexuscore: save capture workspace: %v", err)
 		}
 	}
-	deps := core.Deps{Root: root, Online: cfg.Online && serverToken != "", Capture: embeddedCaptureController{}}
+	// Only an explicit in-app Send invokes this bounded, console-free executor.
+	// continue.start remains command-preview only and never launches a process.
+	deps := core.Deps{Root: root, Online: cfg.Online && serverToken != "", Capture: embeddedCaptureController{}, ContinueExecutor: continuex.HeadlessExecutor{}}
+	roots := captureRoots(root)
 	if deps.Online {
 		deps.Cloud = &core.HTTPCloud{BaseURL: serverURL, Token: serverToken}
 	}
@@ -111,19 +140,27 @@ func nx_init(configJSON *C.char) (rc C.int) {
 	nxState.captureProjectID = ""
 	nxState.captureOthers = make(map[string]*daemon.Runtime)
 	nxState.captureWorkErrors = make(map[string]string)
+	nxState.captureWorkProjects = make(map[string]string)
 	nxState.captureGeneration++
-	if root == "" {
+	if len(roots) == 0 {
 		nxState.captureConfig = nil
 	} else {
 		nxState.captureConfig = &embeddedCaptureConfig{
 			generation: nxState.captureGeneration,
-			root:       root, serverURL: serverURL, serverToken: serverToken,
+			root:       roots[0], roots: roots, serverURL: serverURL, serverToken: serverToken,
 			userID: cfg.UserID, projectID: cfg.ProjectID,
 		}
 	}
 	nxState.mu.Unlock()
-	if root != "" {
+	if len(roots) > 0 {
 		startConfiguredEmbeddedCapture()
+	}
+	// A subscribed UI must be available before asking for local approval.
+	nxEventMu.RLock()
+	subscribed := nxEventFn != nil
+	nxEventMu.RUnlock()
+	if subscribed {
+		startDesktopExecution()
 	}
 	return 0
 }
@@ -212,6 +249,8 @@ func startEmbeddedCapture(cfg embeddedCaptureConfig) {
 		clearCaptureStarting()
 		return
 	}
+	// All workspaces share one machine-wide transcript reader.
+	runtime.Shared = daemon.DefaultSharedScanner()
 	d.SetPipeline(runtime)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
@@ -230,11 +269,16 @@ func startEmbeddedCapture(cfg embeddedCaptureConfig) {
 	nxState.mu.Unlock()
 	go func() {
 		defer close(done)
+		defer diagnostics.Guard("capture")()
 		var others sync.WaitGroup
-		for _, extra := range captureRoots(root)[1:] {
+		for index, extra := range cfg.roots {
+			if index == 0 {
+				continue
+			}
 			others.Add(1)
 			go func(extraRoot string) {
 				defer others.Done()
+				defer diagnostics.Guard("capture " + filepath.Base(extraRoot))()
 				runAdditionalCapture(ctx, cfg, extraRoot)
 			}(extra)
 		}
@@ -259,6 +303,7 @@ func runAdditionalCapture(ctx context.Context, cfg embeddedCaptureConfig, root s
 	if runtime == nil {
 		return
 	}
+	runtime.Shared = daemon.DefaultSharedScanner()
 	d.SetPipeline(runtime)
 	nxState.mu.Lock()
 	if nxState.captureConfig == nil || nxState.captureConfig.generation != cfg.generation || ctx.Err() != nil {
@@ -281,7 +326,7 @@ func runCaptureRuntime(ctx context.Context, cfg embeddedCaptureConfig, root stri
 			} else {
 				runtime.SetServerProjectID(id)
 				setCaptureConnection(cfg.generation, root, "", id)
-				go d.StartHeartbeat(ctx, d.ServerURL, daemon.HeartbeatInterval)
+				diagnostics.Go("heartbeat", func() { d.StartHeartbeat(ctx, d.ServerURL, daemon.HeartbeatInterval) })
 				break
 			}
 			select {
@@ -302,6 +347,7 @@ func setCaptureConnection(generation uint64, root, problem, projectID string) {
 	if nxState.captureConfig != nil && nxState.captureConfig.generation == generation {
 		if problem == "" {
 			delete(nxState.captureWorkErrors, root)
+			nxState.captureWorkProjects[root] = projectID
 		} else {
 			nxState.captureWorkErrors[root] = problem
 		}
@@ -392,7 +438,84 @@ func (embeddedCaptureController) Status() any {
 		}(),
 		"workspace_errors": errorsByWorkspace,
 	}
+	runtimes := make(map[string]*daemon.Runtime, len(nxState.captureOthers)+1)
+	if nxState.captureConfig != nil {
+		runtimes[nxState.captureConfig.root] = runtime
+	}
+	for root, r := range nxState.captureOthers {
+		runtimes[root] = r
+	}
+	projects := make(map[string]string, len(nxState.captureWorkProjects))
+	for root, id := range nxState.captureWorkProjects {
+		projects[root] = id
+	}
 	nxState.mu.Unlock()
+	saved, _ := config.LoadFile()
+	status["consent_required"] = saved.CaptureConsentVersion < 1
+	status["approved_workspaces"] = saved.CaptureWorkspaces
+	suggestions := []string{}
+	for _, path := range append([]string{saved.WorkspaceRoot}, saved.RecentWorkspaces...) {
+		if path != "" {
+			suggestions = append(suggestions, path)
+		}
+	}
+	// Folders where agents have actually run, found from transcript headers
+	// (cached; refreshed in the background at most every 10 minutes).
+	discovered := daemon.CachedDiscoveredProjects()
+	approvedSet := map[string]bool{}
+	for _, path := range saved.CaptureWorkspaces {
+		approvedSet[strings.ToLower(filepath.Clean(path))] = true
+	}
+	discoveredRows := make([]map[string]any, 0, len(discovered))
+	for _, project := range discovered {
+		key := strings.ToLower(filepath.Clean(project.Path))
+		discoveredRows = append(discoveredRows, map[string]any{
+			"path": project.Path, "name": project.Name, "sessions": project.Sessions,
+			"agents": project.Agents, "last_active": project.LastActive, "approved": approvedSet[key],
+		})
+		if len(suggestions) < 40 {
+			suggestions = append(suggestions, project.Path)
+		}
+	}
+	status["discovered_workspaces"] = discoveredRows
+	status["suggested_workspaces"] = suggestions
+	details := make([]map[string]any, 0, len(saved.CaptureWorkspaces))
+	for _, root := range saved.CaptureWorkspaces {
+		row := map[string]any{"path": root, "project_id": projects[root], "state": "connecting"}
+		if _, err := os.Stat(root); err != nil {
+			row["state"] = "unavailable"
+		}
+		if problem := errorsByWorkspace[root]; problem != "" {
+			row["state"], row["error"] = "needs attention", problem
+		}
+		if rt := runtimes[root]; rt != nil && rt.Harvester != nil {
+			stats := rt.Harvester.Stats()
+			row["state"] = "monitoring"
+			if problem := errorsByWorkspace[root]; problem != "" {
+				row["state"] = "needs attention"
+			}
+			row["last_scan_at"], row["matched_files"], row["agent_files"] = stats.LastScanAt, stats.LastScanFiles, stats.AgentFiles
+		}
+		if status["paused"] == true {
+			row["state"] = "paused"
+		}
+		details = append(details, row)
+	}
+	status["workspace_details"] = details
+	// Owned transcripts that capture does not read (size caps), never silent.
+	status["skipped_files"] = daemon.SkippedTranscripts()
+	sources := []map[string]string{}
+	seenSources := map[string]bool{}
+	for _, source := range daemon.ResolveSources() {
+		for _, path := range source.Dirs {
+			key := source.Agent + "|" + strings.ToLower(path)
+			if info, err := os.Stat(path); err == nil && info.IsDir() && !seenSources[key] {
+				sources = append(sources, map[string]string{"agent": source.Agent, "path": path})
+				seenSources[key] = true
+			}
+		}
+	}
+	status["sources"] = sources
 	if runtime != nil && runtime.Harvester != nil {
 		stats := runtime.Harvester.Stats()
 		status["last_scan_at"] = stats.LastScanAt
@@ -409,6 +532,57 @@ func (embeddedCaptureController) Status() any {
 		}
 	}
 	return status
+}
+
+func (embeddedCaptureController) ConfigureWorkspaces(request []string) (any, error) {
+	captureConfigureMu.Lock()
+	defer captureConfigureMu.Unlock()
+	roots, err := validateCaptureRoots(request, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := config.SetCaptureWorkspaces(roots); err != nil {
+		return nil, err
+	}
+	// Invalidate startup work before cancelling existing runtimes, so a late
+	// registration cannot restart a workspace after its consent was removed.
+	nxState.mu.Lock()
+	var previous embeddedCaptureConfig
+	if nxState.captureConfig != nil {
+		previous = *nxState.captureConfig
+	}
+	if cloud, ok := nxState.deps.Cloud.(*core.HTTPCloud); ok {
+		previous.serverURL, previous.serverToken = cloud.BaseURL, cloud.Token
+	}
+	nxState.captureConfig = nil
+	nxState.captureGeneration++
+	nxState.mu.Unlock()
+	stopEmbeddedCapture()
+	if previous.serverURL == "" {
+		previous.serverURL = config.ResolveServerURL("https://api-nexus.pratyushes.dev")
+	}
+	if previous.serverToken == "" {
+		previous.serverToken = embeddedServerToken("")
+	}
+	if previous.userID == "" {
+		previous.userID = config.ResolveUserID()
+	}
+	nxState.mu.Lock()
+	nxState.captureOthers = make(map[string]*daemon.Runtime)
+	nxState.captureWorkErrors = make(map[string]string)
+	nxState.captureWorkProjects = make(map[string]string)
+	nxState.captureStarting, nxState.capturePaused = false, false
+	nxState.captureError, nxState.captureProjectID = "", ""
+	if len(roots) > 0 {
+		previous.generation, previous.root, previous.roots, previous.projectID = nxState.captureGeneration, roots[0], roots, ""
+		nxState.captureConfig = &previous
+		nxState.deps.Root = roots[0]
+	}
+	nxState.mu.Unlock()
+	if len(roots) > 0 {
+		startConfiguredEmbeddedCapture()
+	}
+	return (embeddedCaptureController{}).Status(), nil
 }
 
 func stopEmbeddedCapture() {
@@ -431,12 +605,19 @@ func stopEmbeddedCapture() {
 
 //export nx_call
 func nx_call(method, request *C.char) (out *C.char) {
+	name := ""
 	defer func() {
-		if recover() != nil {
-			out = C.CString(`{"ok":false,"error":"core panic"}`)
+		if v := recover(); v != nil {
+			// The app stays up; the panic is logged with its stack and held
+			// as a crash report the desktop offers to send.
+			id := diagnostics.RecordPanic("nx_call "+name, v, debug.Stack())
+			msg := "Nexus hit an internal error"
+			if id != "" {
+				msg += " (report " + id + ")"
+			}
+			out = C.CString(string(core.MarshalResult(nil, errors.New(msg))))
 		}
 	}()
-	name := ""
 	if method != nil {
 		name = C.GoString(method)
 	}
@@ -444,10 +625,63 @@ func nx_call(method, request *C.char) (out *C.char) {
 	if request != nil {
 		args = json.RawMessage(C.GoString(request))
 	}
+	if strings.HasPrefix(name, "diagnostics.reports.") {
+		result, err := diagnosticsReportsCall(name, args)
+		return C.CString(string(core.MarshalResult(result, err)))
+	}
+	if strings.HasPrefix(name, "desktop.execution.") {
+		result, err := desktopExecutionCall(name, args)
+		return C.CString(string(core.MarshalResult(result, err)))
+	}
+	if strings.HasPrefix(name, "live.") {
+		result, err := liveCall(name, args)
+		return C.CString(string(core.MarshalResult(result, err)))
+	}
+	if strings.HasPrefix(name, "agents.memory_files.") {
+		result, err := agentMemoryFilesCall(context.Background(), name, args)
+		return C.CString(string(core.MarshalResult(result, err)))
+	}
+	if name == "agents.install_all" || name == "agents.uninstall_all" {
+		result, err := agentsInstallCall(context.Background(), name, args)
+		return C.CString(string(core.MarshalResult(result, err)))
+	}
+	if name == "agents.setup.browse" || name == "agents.setup.read" || name == "agents.setup.mcp_remove" {
+		result, err := agentsBrowseCall(name, args)
+		return C.CString(string(core.MarshalResult(result, err)))
+	}
 	nxState.mu.Lock()
 	deps := nxState.deps
 	nxState.mu.Unlock()
-	result, err := core.Call(context.Background(), name, args, deps)
+	deps.ContinueCancel = func(requestID string) bool {
+		value, found := continuationCancels.Load(requestID)
+		if found {
+			value.(context.CancelFunc)()
+		}
+		return found
+	}
+	callCtx := context.Background()
+	if name == "continue.here" {
+		var envelope struct {
+			RequestID string `json:"request_id"`
+		}
+		_ = json.Unmarshal(args, &envelope)
+		if envelope.RequestID != "" {
+			var cancel context.CancelFunc
+			callCtx, cancel = context.WithCancel(callCtx)
+			if _, loaded := continuationCancels.LoadOrStore(envelope.RequestID, cancel); loaded {
+				cancel()
+				return C.CString(string(core.MarshalResult(nil, fmt.Errorf("request is already in progress"))))
+			}
+			defer func() { continuationCancels.Delete(envelope.RequestID); cancel() }()
+		}
+		deps.ContinueProgress = func(requestID string, update continuex.StreamProgress) {
+			if requestID == "" {
+				return
+			}
+			emitCoreEvent(map[string]string{"type": "continue.progress", "request_id": requestID, "kind": update.Kind, "text": update.Text})
+		}
+	}
+	result, err := core.Call(callCtx, name, args, deps)
 	return C.CString(string(core.MarshalResult(result, err)))
 }
 
@@ -455,7 +689,10 @@ func nx_call(method, request *C.char) (out *C.char) {
 func nx_subscribe(fn C.nx_event_fn) C.int {
 	// Stored for a Go thread to invoke later. The desktop copies the
 	// payload and posts it to its UI queue. It must not call nx_call here.
+	nxEventMu.Lock()
 	nxEventFn = fn
+	nxEventMu.Unlock()
+	startDesktopExecution()
 	return 0
 }
 
@@ -468,6 +705,9 @@ func nx_free(ptr *C.char) {
 
 //export nx_shutdown
 func nx_shutdown() C.int {
+	stopDesktopExecution()
+	closeAllLive()
+	continuationCancels.Range(func(_, value any) bool { value.(context.CancelFunc)(); return true })
 	stopEmbeddedCapture()
 	nxState.mu.Lock()
 	nxState.deps = core.Deps{}
@@ -476,4 +716,20 @@ func nx_shutdown() C.int {
 	nxState.captureStarting = false
 	nxState.mu.Unlock()
 	return 0
+}
+
+func emitCoreEvent(value any) {
+	nxEventMu.RLock()
+	fn := nxEventFn
+	nxEventMu.RUnlock()
+	if fn == nil {
+		return
+	}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		return
+	}
+	message := C.CString(string(payload))
+	C.nx_emit(fn, message)
+	C.free(unsafe.Pointer(message))
 }

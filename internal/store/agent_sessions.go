@@ -51,6 +51,10 @@ type AgentSession struct {
 	// CodeMergedInto / CodeMergedAt mark a code-only merge (D17); conversations stay separate.
 	CodeMergedInto string     `json:"code_merged_into,omitempty"`
 	CodeMergedAt   *time.Time `json:"code_merged_at,omitempty"`
+	// ParentNativeID is the native id of the session that started this
+	// sub-agent run (same project, harness and machine). Upserts set it when
+	// given and never clear it. Separate from ParentSessionID (forks).
+	ParentNativeID string `json:"parent_native_id,omitempty"`
 }
 
 // SessionVersion is one upload of a session. uploading versions are not restorable.
@@ -94,6 +98,13 @@ type TimelineItem struct {
 	MatchPreview string    `json:"match_preview,omitempty"`
 	MatchTurnIdx *int      `json:"match_turn_idx,omitempty"`
 	MatchRole    string    `json:"match_role,omitempty"`
+	// LineageKind is "subagent" for a sub-agent run (listed only with
+	// IncludeSubagents). ParentSessionID is the session that started it,
+	// when that is known and captured.
+	LineageKind     string `json:"lineage_kind,omitempty"`
+	ParentSessionID string `json:"parent_session_id,omitempty"`
+	// SubagentCount is how many sub-agent runs this chat started.
+	SubagentCount int `json:"subagent_count,omitempty"`
 }
 
 // TimelineQuery filters GET /v1/timeline.
@@ -106,6 +117,10 @@ type TimelineQuery struct {
 	Limit     int
 	// HideEmpty drops sessions with no turns (turn_count 0).
 	HideEmpty bool
+	// IncludeSubagents lists sub-agent runs too (IsSubagentRun). By default
+	// they are left out before paging, so a page and its cursor count only
+	// the chats people had.
+	IncludeSubagents bool
 }
 
 // SessionGrantOpts is a live or point-in-time share (D15).
@@ -121,6 +136,7 @@ type AgentCloudStore interface {
 	UpsertAgentSession(ctx context.Context, in *AgentSession) (*AgentSession, error)
 	GetAgentSession(ctx context.Context, id string) (*AgentSession, error)
 	CanReadAgentSession(ctx context.Context, userID, sessionID string) (bool, error)
+	CanReadAgentSessionLive(ctx context.Context, userID, sessionID string) (bool, error)
 	GrantAgentSession(ctx context.Context, sessionID, granteeUserID, grantedBy string) error
 	GrantAgentSessionOpts(ctx context.Context, sessionID, granteeUserID, grantedBy string, opts SessionGrantOpts) error
 	ListVisibleSessionVersions(ctx context.Context, sessionID, userID string) ([]SessionVersion, error)
@@ -236,6 +252,9 @@ func (m *MemStore) UpsertAgentSession(ctx context.Context, in *AgentSession) (*A
 		if in.WorkspaceRootHint != "" {
 			cur.WorkspaceRootHint = in.WorkspaceRootHint
 		}
+		if p := strings.TrimSpace(in.ParentNativeID); p != "" {
+			cur.ParentNativeID = p
+		}
 		cp := *cur
 		return &cp, nil
 	}
@@ -247,7 +266,7 @@ func (m *MemStore) UpsertAgentSession(ctx context.Context, in *AgentSession) (*A
 		WorkspaceRootHint: in.WorkspaceRootHint, Title: strings.TrimSpace(in.Title),
 		StartedAt: now, LastActiveAt: now, Visibility: in.Visibility,
 		ParentSessionID: in.ParentSessionID, LineageKind: in.LineageKind,
-		Summary: strings.TrimSpace(in.Summary),
+		Summary: strings.TrimSpace(in.Summary), ParentNativeID: strings.TrimSpace(in.ParentNativeID),
 	}
 	m.agentSessions[id] = row
 	m.agentByNative[key] = id
@@ -279,6 +298,18 @@ func (m *MemStore) CanReadAgentSession(ctx context.Context, userID, sessionID st
 	return m.agentVisibleLocked(userID, row), nil
 }
 
+func (m *MemStore) CanReadAgentSessionLive(ctx context.Context, userID, sessionID string) (bool, error) {
+	_ = ctx
+	userID = strings.TrimSpace(userID)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	row := m.agentSessions[strings.TrimSpace(sessionID)]
+	if row == nil {
+		return false, ErrNotFound
+	}
+	return m.agentLiveVisibleLocked(userID, row), nil
+}
+
 func (m *MemStore) agentVisibleLocked(userID string, row *AgentSession) bool {
 	if row.OwnerUserID == userID {
 		return true
@@ -288,6 +319,25 @@ func (m *MemStore) agentVisibleLocked(userID string, row *AgentSession) bool {
 			continue
 		}
 		if g.Grantee != "" && g.Grantee == userID {
+			return true
+		}
+	}
+	if row.Visibility == "team" && m.projectMemberLocked(userID, row.ProjectID) {
+		return true
+	}
+	return false
+}
+
+func (m *MemStore) agentLiveVisibleLocked(userID string, row *AgentSession) bool {
+	if row.OwnerUserID == userID {
+		return true
+	}
+	for _, g := range m.agentGrants[row.ID] {
+		if g.Revoked || g.Grantee == "" || g.Grantee != userID {
+			continue
+		}
+		// A grant without a pin predates point-in-time sharing and remains live.
+		if g.Live || g.VersionID == "" {
 			return true
 		}
 	}
@@ -828,11 +878,22 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 		if q.Harness != "" && row.Harness != q.Harness {
 			continue
 		}
+		subagent := IsSubagentRun(row.NativeID, row.Title, row.ParentNativeID)
+		if subagent && !q.IncludeSubagents {
+			continue
+		}
 		var matchTurn *SessionTurn
+		live := m.agentLiveVisibleLocked(q.UserID, row)
 		if q.Query != "" {
 			needle := strings.ToLower(q.Query)
-			matched := strings.Contains(strings.ToLower(row.Title+" "+row.Summary+" "+row.NativeID), needle)
+			matched := strings.Contains(strings.ToLower(row.Title+" "+row.NativeID), needle)
+			if live && strings.Contains(strings.ToLower(row.Summary), needle) {
+				matched = true
+			}
 			for _, turn := range m.sessionTurns[row.ID] {
+				if !live {
+					break
+				}
 				if (turn.Role == "user" || turn.Role == "assistant") && strings.Contains(strings.ToLower(turn.TextPreview), needle) {
 					matched = true
 					copy := turn
@@ -857,12 +918,32 @@ func (m *MemStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Timelin
 			NativeID: row.NativeID, Title: row.Title, Summary: row.Summary,
 			Visibility: row.Visibility, OwnerUserID: row.OwnerUserID, LastActiveAt: row.LastActiveAt,
 		}
+		if subagent {
+			item.LineageKind = "subagent"
+		}
+		for _, other := range m.agentSessions {
+			if other == nil || other.ProjectID != row.ProjectID || other.Harness != row.Harness ||
+				other.OriginMachineID != row.OriginMachineID || other.OwnerUserID != row.OwnerUserID {
+				continue
+			}
+			if row.ParentNativeID != "" && other.NativeID == row.ParentNativeID {
+				item.ParentSessionID = other.ID
+			}
+			if other.ParentNativeID == row.NativeID {
+				item.SubagentCount++
+			}
+		}
+		if !live {
+			item.Summary = ""
+		}
 		if matchTurn != nil {
 			idx := matchTurn.Idx
 			item.MatchTurnIdx, item.MatchRole = &idx, matchTurn.Role
 			item.MatchPreview = TimelineMatchPreview(matchTurn.TextPreview, q.Query)
 		}
-		if strings.TrimSpace(item.Summary) == "" || IsPlaceholderTitle(item.Title) {
+		// A version-limited grantee sees neither summary nor turn previews:
+		// both describe the chat as it is now, not the shared version.
+		if live && (strings.TrimSpace(item.Summary) == "" || IsPlaceholderTitle(item.Title)) {
 			var users []SessionTurn
 			for _, turn := range m.sessionTurns[row.ID] {
 				if turn.Role == "user" && strings.TrimSpace(turn.TextPreview) != "" {
@@ -989,9 +1070,9 @@ func (s *PostgresStore) UpsertAgentSession(ctx context.Context, in *AgentSession
 	row := s.pool.QueryRow(ctx, `
 		INSERT INTO agent_sessions (
 			project_id, owner_user_id, harness, native_id, origin_machine_id,
-			workspace_root_hint, title, visibility, summary
+			workspace_root_hint, title, visibility, summary, parent_native_id
 		) VALUES (
-			$1::uuid, $2::uuid, $3, $4, $5, NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,'')
+			$1::uuid, $2::uuid, $3, $4, $5, NULLIF($6,''), NULLIF($7,''), $8, NULLIF($9,''), NULLIF($12,'')
 		)
 		ON CONFLICT (project_id, harness, native_id, origin_machine_id) DO UPDATE
 		-- A placeholder ($10) never replaces a real or derived title:
@@ -999,7 +1080,9 @@ func (s *PostgresStore) UpsertAgentSession(ctx context.Context, in *AgentSession
 		SET title = CASE WHEN $10::bool AND NULLIF(agent_sessions.title, '') IS NOT NULL
 		                      AND agent_sessions.title !~* $11 THEN agent_sessions.title
 		                 ELSE COALESCE(NULLIF(EXCLUDED.title, ''), agent_sessions.title) END,
-		    summary = COALESCE(NULLIF(EXCLUDED.summary, ''), agent_sessions.summary)
+		    summary = COALESCE(NULLIF(EXCLUDED.summary, ''), agent_sessions.summary),
+		    -- Set when the daemon knows it (lazy backfill); never cleared.
+		    parent_native_id = COALESCE(EXCLUDED.parent_native_id, agent_sessions.parent_native_id)
 		WHERE agent_sessions.owner_user_id = EXCLUDED.owner_user_id
 		RETURNING id::text, project_id::text, COALESCE(owner_user_id::text,''), harness, native_id,
 		          origin_machine_id, COALESCE(workspace_root_hint,''), COALESCE(title,''),
@@ -1007,7 +1090,7 @@ func (s *PostgresStore) UpsertAgentSession(ctx context.Context, in *AgentSession
 		          COALESCE(parent_session_id::text,''), COALESCE(lineage_kind,''), COALESCE(summary,'')`,
 		in.ProjectID, in.OwnerUserID, in.Harness, in.NativeID, in.OriginMachineID,
 		in.WorkspaceRootHint, in.Title, in.Visibility, in.Summary,
-		IsPlaceholderTitle(in.Title), placeholderTitlePattern)
+		IsPlaceholderTitle(in.Title), placeholderTitlePattern, strings.TrimSpace(in.ParentNativeID))
 	out, err := scanAgentSession(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("store: session owned by someone else: %w", ErrConflict)
@@ -1015,6 +1098,7 @@ func (s *PostgresStore) UpsertAgentSession(ctx context.Context, in *AgentSession
 	if err != nil {
 		return nil, err
 	}
+	out.ParentNativeID = strings.TrimSpace(in.ParentNativeID)
 	return out, nil
 }
 
@@ -1060,6 +1144,37 @@ func (s *PostgresStore) CanReadAgentSession(ctx context.Context, userID, session
 		    OR EXISTS (
 		      SELECT 1 FROM session_grants g
 		      WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid
+		    )
+		    OR (
+		      s.visibility = 'team' AND (
+		        EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
+		        OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		        OR EXISTS (
+		          SELECT 1 FROM projects p
+		          JOIN organization_members om ON om.org_id = p.org_id
+		          WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER')
+		        )
+		      )
+		    )
+		  )
+		)`, userID, sessionID).Scan(&ok)
+	return ok, err
+}
+
+func (s *PostgresStore) CanReadAgentSessionLive(ctx context.Context, userID, sessionID string) (bool, error) {
+	if !looksLikeUUID(sessionID) || !looksLikeUUID(userID) {
+		return false, nil
+	}
+	var ok bool
+	err := s.pool.QueryRow(ctx, `
+		SELECT EXISTS (
+		  SELECT 1 FROM agent_sessions s
+		  WHERE s.id = $2::uuid AND (
+		    s.owner_user_id = $1::uuid
+		    OR EXISTS (
+		      SELECT 1 FROM session_grants g
+		      WHERE g.session_id = s.id AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid
+		        AND g.live
 		    )
 		    OR (
 		      s.visibility = 'team' AND (
@@ -1419,29 +1534,108 @@ func (s *PostgresStore) PutBlob(ctx context.Context, projectID, sum, kind, purpo
 	if purpose == "" {
 		purpose = "file"
 	}
-	if purpose == "file" {
-		var used, cap int64
-		var state string
-		err := s.pool.QueryRow(ctx, `
-			SELECT bytes_used, bytes_cap, state FROM storage_usage WHERE plan_scope = $1`, "project:"+projectID).Scan(&used, &cap, &state)
-		if err != nil || cap <= 0 {
-			planCap, _ := s.planCapForScope(ctx, "project:"+projectID)
-			if cap <= 0 {
-				cap = planCap
-			}
-		}
-		if state == "full" || (cap > 0 && used >= cap) {
-			return fmt.Errorf("store: %w", ErrStorageFull)
-		}
+	if purpose != "file" {
+		_, err := s.pool.Exec(ctx, `
+			INSERT INTO blobs (project_id, sha256, size, kind, purpose, verified_at, body)
+			VALUES ($1::uuid, $2, $3, $4, $5, now(), $6)
+			ON CONFLICT (project_id, sha256) DO UPDATE
+			SET size = EXCLUDED.size, kind = EXCLUDED.kind, purpose = EXCLUDED.purpose,
+			    verified_at = now(), body = EXCLUDED.body`,
+			projectID, sum, len(body), kind, purpose, body)
+		return err
 	}
-	_, err := s.pool.Exec(ctx, `
+
+	scope, _, cap, err := s.fileStorageScope(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO storage_usage (plan_scope, bytes_used, bytes_cap, state)
+		VALUES ($1, 0, $2, $3)
+		ON CONFLICT (plan_scope) DO NOTHING`, scope, cap, capture.UsageState(0, cap)); err != nil {
+		return err
+	}
+	var used, storedCap int64
+	if err := tx.QueryRow(ctx, `
+		SELECT bytes_used, bytes_cap FROM storage_usage WHERE plan_scope = $1 FOR UPDATE`, scope).Scan(&used, &storedCap); err != nil {
+		return err
+	}
+	if storedCap <= 0 {
+		storedCap = cap
+	}
+	var oldSize int64
+	oldPurpose := ""
+	err = tx.QueryRow(ctx, `
+		SELECT size, purpose FROM blobs WHERE project_id = $1::uuid AND sha256 = $2`,
+		projectID, sum).Scan(&oldSize, &oldPurpose)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	delta := int64(len(body))
+	if oldPurpose == "file" {
+		delta -= oldSize
+	}
+	if storedCap > 0 && delta > 0 && used+delta > storedCap {
+		return fmt.Errorf("store: %w", ErrStorageFull)
+	}
+	if _, err := tx.Exec(ctx, `
 		INSERT INTO blobs (project_id, sha256, size, kind, purpose, verified_at, body)
 		VALUES ($1::uuid, $2, $3, $4, $5, now(), $6)
 		ON CONFLICT (project_id, sha256) DO UPDATE
 		SET size = EXCLUDED.size, kind = EXCLUDED.kind, purpose = EXCLUDED.purpose,
 		    verified_at = now(), body = EXCLUDED.body`,
-		projectID, sum, len(body), kind, purpose, body)
-	return err
+		projectID, sum, len(body), kind, purpose, body); err != nil {
+		return err
+	}
+	if delta != 0 {
+		used += delta
+		if used < 0 {
+			used = 0
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE storage_usage SET bytes_used = $2, bytes_cap = $3, state = $4 WHERE plan_scope = $1`,
+		scope, used, storedCap, capture.UsageState(used, storedCap)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) fileStorageScope(ctx context.Context, projectID string) (string, int64, int64, error) {
+	owner := ""
+	_ = s.pool.QueryRow(ctx, `SELECT COALESCE(created_by::text, '') FROM projects WHERE id = $1::uuid`, projectID).Scan(&owner)
+	candidates := []string{"project:" + projectID, projectID}
+	if owner != "" {
+		candidates = append(candidates, "user:"+owner)
+	}
+	for _, scope := range candidates {
+		var used, cap int64
+		err := s.pool.QueryRow(ctx, `
+			SELECT bytes_used, bytes_cap FROM storage_usage WHERE plan_scope = $1`, scope).Scan(&used, &cap)
+		if err == nil {
+			return scope, used, cap, nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return "", 0, 0, err
+		}
+	}
+	scope := "project:" + projectID
+	if owner != "" {
+		scope = "user:" + owner
+	}
+	cap, err := s.planCapForScope(ctx, scope)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	if cap <= 0 {
+		cap = PlanStorageBytes(PlanFree)
+	}
+	return scope, 0, cap, nil
 }
 
 func (s *PostgresStore) MissingBlobs(ctx context.Context, projectID string, hashes []string) ([]string, error) {
@@ -1577,12 +1771,14 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	}
 	rows, err := s.pool.Query(ctx, with+`
 		SELECT s.id::text, s.project_id::text, s.harness, s.native_id, COALESCE(s.title,''),
-		       COALESCE(s.summary,''),
+		       -- A version-limited grantee (can_read_live false) sees neither the
+		       -- summary nor turn previews: both describe the chat as it is now.
+		       CASE WHEN s.can_read_live THEN COALESCE(s.summary,'') ELSE '' END,
 		       -- Fallback preview and title source, only when there is no
 		       -- summary or the title is a placeholder: the raw first user
 		       -- turns. Go removes harness wrapper and skips envelope-only
 		       -- turns (timelineFirstRequestPreview, PresentTitle).
-		       CASE WHEN NULLIF(s.summary,'') IS NULL OR NULLIF(BTRIM(s.title),'') IS NULL OR s.title ~* $9 THEN ARRAY(
+		       CASE WHEN s.can_read_live AND (NULLIF(s.summary,'') IS NULL OR NULLIF(BTRIM(s.title),'') IS NULL OR s.title ~* $9) THEN ARRAY(
 		         SELECT LEFT(t.text_preview, 4000)
 		         FROM session_turns t WHERE t.session_id = s.id AND t.role = 'user'
 		           AND NULLIF(BTRIM(t.text_preview), '') IS NOT NULL
@@ -1601,11 +1797,44 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		         SELECT v.state FROM session_versions v
 		         WHERE v.session_id = s.id AND v.state IN ('complete','transcript_only')
 		         ORDER BY v.version DESC LIMIT 1
-		       ), ''), COALESCE(hit.preview, ''), hit.idx, COALESCE(hit.role, '')
+		       ), ''), COALESCE(hit.preview, ''), hit.idx, COALESCE(hit.role, ''),
+		       s.is_subagent,
+		       -- Sub-agent links (migration 051): the parent by its key, and
+		       -- how many sub-agent runs this chat started. Same owner only.
+		       COALESCE((
+		         SELECT p.id::text FROM agent_sessions p
+		         WHERE s.parent_native_id IS NOT NULL AND p.project_id = s.project_id
+		           AND p.harness = s.harness AND p.native_id = s.parent_native_id
+		           AND p.origin_machine_id = s.origin_machine_id
+		           AND p.owner_user_id IS NOT DISTINCT FROM s.owner_user_id
+		         LIMIT 1
+		       ), ''),
+		       (
+		         SELECT COUNT(*) FROM agent_sessions c
+		         WHERE c.parent_native_id = s.native_id AND c.project_id = s.project_id
+		           AND c.harness = s.harness AND c.origin_machine_id = s.origin_machine_id
+		           AND c.owner_user_id IS NOT DISTINCT FROM s.owner_user_id
+		       )::int
 		FROM (
 		  SELECT s.id, s.project_id, s.harness, s.native_id, s.title, s.summary,
-		         s.visibility, s.owner_user_id, s.last_active_at
+		         s.visibility, s.owner_user_id, s.last_active_at,
+		         s.origin_machine_id, s.parent_native_id,
+		         `+subagentSQL(11, 12, 13)+` AS is_subagent,
+		         acl.can_read_live
 		  FROM agent_sessions s
+		  -- Live read: owner, a live grant, or team access. A grant pinned to a
+		  -- version lists the chat but not its live summary or turns.
+		  CROSS JOIN LATERAL (SELECT (
+		    s.owner_user_id = $1::uuid
+		    OR EXISTS (SELECT 1 FROM session_grants g WHERE g.session_id = s.id
+		      AND g.revoked_at IS NULL AND g.grantee_user_id = $1::uuid AND g.live)
+		    OR (s.visibility = 'team' AND (
+		      EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
+		      OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		      OR EXISTS (SELECT 1 FROM projects p JOIN organization_members om ON om.org_id = p.org_id
+		        WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER'))
+		    ))
+		  ) AS can_read_live) acl
 		  WHERE (
 		    s.owner_user_id = $1::uuid
 		    OR EXISTS (
@@ -1616,14 +1845,20 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		      s.visibility = 'team' AND (
 		        EXISTS (SELECT 1 FROM projects p WHERE p.id = s.project_id AND p.created_by = $1::uuid)
 		        OR EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = s.project_id AND pm.user_id = $1::uuid)
+		        OR EXISTS (SELECT 1 FROM projects p JOIN organization_members om ON om.org_id = p.org_id
+		          WHERE p.id = s.project_id AND om.user_id = $1::uuid AND om.role IN ('ADMIN','OWNER'))
 		      )
 		    )
 		  )
 		  AND ($2 = '' OR s.project_id = NULLIF($2, '')::uuid)
 		  AND ($3 = '' OR s.harness = $3)
-		  AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0 OR STRPOS(LOWER(s.summary), LOWER($7)) > 0
+		  -- Sub-agent runs are left out before LIMIT, so the page and its
+		  -- cursor count only listed rows.
+		  AND ($14::bool OR NOT `+subagentSQL(11, 12, 13)+`)
+		  AND ($7 = '' OR STRPOS(LOWER(s.title), LOWER($7)) > 0
+		       OR (acl.can_read_live AND STRPOS(LOWER(s.summary), LOWER($7)) > 0)
 		       OR STRPOS(LOWER(s.native_id), LOWER($7)) > 0
-		       OR `+turnMatch+`)
+		       OR (acl.can_read_live AND `+turnMatch+`))
 		  AND ($4::timestamptz IS NULL OR (s.last_active_at, s.id::text) < ($4::timestamptz, $5))
 		  AND (NOT $8::bool
 		    OR EXISTS (SELECT 1 FROM session_turns t WHERE t.session_id = s.id)
@@ -1637,13 +1872,14 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 		  SELECT t.idx, t.role,
 		    t.text_preview AS preview
 		  FROM session_turns t
-		  WHERE t.session_id = s.id AND $7 <> '' AND t.role IN ('user', 'assistant')
+		  WHERE t.session_id = s.id AND s.can_read_live AND $7 <> '' AND t.role IN ('user', 'assistant')
 		    AND STRPOS(LOWER(t.text_preview), LOWER($7)) > 0
 		  ORDER BY t.idx LIMIT 1
 		) hit ON TRUE
 		ORDER BY s.last_active_at DESC, s.id DESC`,
 		q.UserID, q.ProjectID, q.Harness, cursorAt, cursorID, q.Limit+1, q.Query, q.HideEmpty,
-		placeholderTitlePattern, pattern)
+		placeholderTitlePattern, pattern,
+		subagentNativeIDPattern, subagentNativeMarkerPattern, subagentTitlePattern, q.IncludeSubagents)
 	if err != nil {
 		return nil, "", err
 	}
@@ -1652,9 +1888,14 @@ func (s *PostgresStore) ListTimeline(ctx context.Context, q TimelineQuery) ([]Ti
 	for rows.Next() {
 		var it TimelineItem
 		var firstTurns []string
+		var subagent bool
 		if err := rows.Scan(&it.SessionID, &it.ProjectID, &it.Harness, &it.NativeID, &it.Title, &it.Summary, &firstTurns,
-			&it.Visibility, &it.OwnerUserID, &it.LastActiveAt, &it.TurnCount, &it.VersionState, &it.MatchPreview, &it.MatchTurnIdx, &it.MatchRole); err != nil {
+			&it.Visibility, &it.OwnerUserID, &it.LastActiveAt, &it.TurnCount, &it.VersionState, &it.MatchPreview, &it.MatchTurnIdx, &it.MatchRole,
+			&subagent, &it.ParentSessionID, &it.SubagentCount); err != nil {
 			return nil, "", err
+		}
+		if subagent {
+			it.LineageKind = "subagent"
 		}
 		if it.Summary == "" {
 			it.Summary = timelineFirstRequestPreview(firstTurns)

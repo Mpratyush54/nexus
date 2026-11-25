@@ -1,7 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { Button } from '@/components/ui/Button'
-import { GlassPanel } from '@/components/ui/GlassPanel'
 import { useToast } from '@/components/ui/Toast'
 import {
   useCancelSignup,
@@ -10,14 +8,17 @@ import {
   useSignup,
   useSignupStatus,
 } from '@/hooks/useAuthMutations'
-import { ApiError } from '@/types/api'
+import { friendlyAuthError, type FriendlyError } from '@/auth/errors'
+import { Field, FormAlert, PasswordField, SubmitButton } from '@/auth/fields'
+import { looksLikeEmail } from '@/auth/validation'
+import { afterAuthPath, handoff, prefetchApp, useReleaseHoldOnLeave } from '@/auth/handoff'
+import { StepSwap } from '@/auth/StepSwap'
 import { storage } from '@/utils/storage'
 
-function looksLikeEmail(value: string) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value)
-}
-
 type Step = 'details' | 'resume' | 'verify'
+type Notice = { tone: 'info' | 'ok'; text: string } | null
+
+const minutes = (secs?: number) => Math.max(1, Math.round((secs ?? 60) / 60))
 
 export function SignupPage() {
   const navigate = useNavigate()
@@ -28,415 +29,358 @@ export function SignupPage() {
   const signup = useSignup()
   const cancelSignup = useCancelSignup()
   const statusCheck = useSignupStatus()
-  const draft = storage.getSignupDraft()
+  const [draft] = useState(() => storage.getSignupDraft())
   const [step, setStep] = useState<Step>(draft?.step === 'verify' ? 'verify' : 'details')
   const [email, setEmail] = useState(draft?.email ?? '')
   const [username, setUsername] = useState(draft?.username ?? '')
   const [password, setPassword] = useState('')
   const [code, setCode] = useState('')
-  const [resumeNote, setResumeNote] = useState(
-    draft?.step === 'verify' ? `You left verification unfinished for ${draft.email}.` : '',
+  const [submitted, setSubmitted] = useState(false)
+  const [error, setError] = useState<FriendlyError | null>(null)
+  const [notice, setNotice] = useState<Notice>(
+    draft?.step === 'verify' ? { tone: 'info', text: `You left verification unfinished for ${draft.email}.` } : null,
   )
+  const [done, setDone] = useState(false)
   const next = params.get('next')
+  const keep = next ? `?next=${encodeURIComponent(next)}` : ''
+  useReleaseHoldOnLeave()
 
   useEffect(() => {
     if (!draft?.email || draft.step !== 'verify') return
     statusCheck.mutate(draft.email, {
       onSuccess: (res) => {
         if (!res.pending) {
-          setResumeNote('')
+          setNotice(null)
           setStep('details')
           storage.clearSignupDraft()
           return
         }
         if (res.username) setUsername(res.username)
-        if (res.expired) {
-          setResumeNote('Your previous code expired. Tap Resend code — same password, any device.')
-        } else {
-          setResumeNote(
-            `Continue where you left off — code still valid for about ${Math.max(1, Math.round((res.expires_in ?? 60) / 60))} min.`,
-          )
-        }
+        setNotice(
+          res.expired
+            ? { tone: 'info', text: 'Your previous code expired. Send a new one below; your password stays the same.' }
+            : { tone: 'info', text: `Continue where you left off. Your code is valid for about ${minutes(res.expires_in)} more min.` },
+        )
         setStep('verify')
       },
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once on mount for draft resume
   }, [])
 
+  const go = (s: Step) => {
+    setError(null)
+    setSubmitted(false)
+    setStep(s)
+  }
+
   const persist = (nextStep: 'details' | 'verify', mail = email, user = username) => {
     if (looksLikeEmail(mail.trim()) && user.trim().length >= 2) {
       storage.setSignupDraft({ email: mail.trim(), username: user.trim(), step: nextStep })
     } else if (looksLikeEmail(mail.trim())) {
-      storage.setSignupDraft({
-        email: mail.trim(),
-        username: user.trim() || 'pending',
-        step: nextStep,
-      })
+      storage.setSignupDraft({ email: mail.trim(), username: user.trim() || 'pending', step: nextStep })
     }
-  }
-
-  const afterSuccess = (user: string) => {
-    storage.clearSignupDraft()
-    push({ title: 'Account created', detail: `Welcome, ${user}` })
-    if (next && (next.startsWith('/cli/') || next.startsWith('/app/'))) {
-      navigate(next, { replace: true })
-      return
-    }
-    navigate('/app/dashboard')
   }
 
   const startOver = () => {
     const mail = email.trim()
     const clearLocal = () => {
       storage.clearSignupDraft()
-      setStep('details')
+      go('details')
       setCode('')
       setPassword('')
-      setResumeNote('')
-      push({ title: 'Started over', detail: 'Pending verification cleared. You can sign up again.' })
+      setNotice({ tone: 'ok', text: 'Started over. Nothing was created; fill in your details again.' })
     }
-    if (looksLikeEmail(mail)) {
-      cancelSignup.mutate(mail, { onSettled: clearLocal })
-    } else {
-      clearLocal()
+    if (looksLikeEmail(mail)) cancelSignup.mutate(mail, { onSettled: clearLocal })
+    else clearLocal()
+  }
+
+  const enterVerify = (mail: string, user: string, note: Notice, maybeDev?: string) => {
+    setEmail(mail)
+    if (user) setUsername(user)
+    go('verify')
+    persist('verify', mail, user || username)
+    setNotice(note)
+    if (maybeDev) {
+      setCode(maybeDev)
+      push({ title: 'Dev code filled in', detail: maybeDev })
     }
   }
 
-  const enterVerify = (mail: string, user: string, note: string, maybeDev?: string) => {
-    setEmail(mail)
-    if (user) setUsername(user)
-    setStep('verify')
-    persist('verify', mail, user || username)
-    setResumeNote(note)
-    if (maybeDev) {
-      setCode(maybeDev)
-      push({ title: 'Dev code ready', detail: maybeDev })
-    }
-  }
+  const emailProblem = (v: string) => (!v.trim() ? 'Enter your email.' : looksLikeEmail(v) ? null : 'That email looks incomplete, e.g. you@company.com.')
+  const userProblem = (v: string) =>
+    !v.trim() ? 'Choose a username. Teammates see it next to your chats.' : v.trim().length >= 2 ? null : 'Use at least 2 characters.'
+  const passProblem = (v: string) => (v.length >= 8 ? null : `Use at least 8 characters${v ? ` (${8 - v.length} more)` : ''}.`)
 
   const onSendCode = (e: FormEvent) => {
     e.preventDefault()
+    setSubmitted(true)
     const mail = email.trim()
     const user = username.trim()
-    if (!looksLikeEmail(mail)) {
-      push({ title: 'Email required', detail: 'Enter a valid work email.', tone: 'danger' })
-      return
-    }
-    if (user.length < 2) {
-      push({ title: 'Username required', detail: 'Pick a username (2+ characters).', tone: 'danger' })
-      return
-    }
-    if (password.length < 8) {
-      push({ title: 'Password too short', detail: 'Use at least 8 characters.', tone: 'danger' })
-      return
-    }
+    if (emailProblem(mail) || userProblem(user) || passProblem(password) || sendCode.isPending) return
+    setError(null)
     sendCode.mutate(
       { username: user, password, email: mail },
       {
-        onSuccess: (res) => {
-          enterVerify(
-            mail,
-            user,
-            '',
-            res.dev_code,
-          )
-          if (!res.dev_code) {
-            push({ title: 'Check your email', detail: `We sent a 6-digit code to ${res.email}` })
-          }
-        },
-        onError: (err) => {
-          const message = err instanceof ApiError ? err.message : 'Could not send code'
-          push({ title: 'Could not send code', detail: message, tone: 'danger' })
-        },
+        onSuccess: (res) => enterVerify(mail, user, null, res.dev_code),
+        onError: (err) => setError(friendlyAuthError(err, 'signup')),
       },
     )
   }
 
   const onResumeLookup = (e: FormEvent) => {
     e.preventDefault()
+    setSubmitted(true)
     const mail = email.trim()
-    if (!looksLikeEmail(mail)) {
-      push({ title: 'Email required', detail: 'Enter the email you started with.', tone: 'danger' })
-      return
-    }
+    if (emailProblem(mail) || statusCheck.isPending) return
+    setError(null)
     statusCheck.mutate(mail, {
       onSuccess: (res) => {
         if (!res.pending) {
-          push({
-            title: 'No pending signup',
-            detail: 'No open verification for this email. Start a new signup on this device.',
-            tone: 'danger',
-          })
+          setError({ title: 'No sign-up in progress for this email', detail: 'Start a new sign-up here instead.', action: 'restart' })
           return
         }
         const user = res.username || ''
         if (res.expired) {
-          enterVerify(
-            mail,
-            user,
-            `Your earlier code expired. Tap Resend code below — password stays the same.`,
-          )
-          onResendAfterEnter(mail)
+          enterVerify(mail, user, { tone: 'info', text: 'Your earlier code expired, so we sent a new one. Your password stays the same.' })
+          resend(mail)
           return
         }
-        enterVerify(
-          mail,
-          user,
-          `Continuing on this device as ${user || 'you'}. Enter the code from your email (or resend below).`,
-        )
-        push({
-          title: 'Pending signup found',
-          detail: `Code valid ~${Math.max(1, Math.round((res.expires_in ?? 60) / 60))} more min.`,
+        enterVerify(mail, user, {
+          tone: 'info',
+          text: `Continuing as ${user || 'you'}. Your code is valid for about ${minutes(res.expires_in)} more min.`,
         })
       },
-      onError: (err) => {
-        const message = err instanceof ApiError ? err.message : 'Could not look up signup'
-        push({ title: 'Lookup failed', detail: message, tone: 'danger' })
-      },
+      onError: (err) => setError(friendlyAuthError(err, 'resume')),
     })
   }
 
-  const onResendAfterEnter = (mail: string) => {
-    resendCode.mutate(mail, {
-      onSuccess: (res) => {
-        if (res.username) setUsername(res.username)
-        if (res.dev_code) {
-          setCode(res.dev_code)
-          push({ title: 'New code sent', detail: res.dev_code })
-        } else {
-          push({ title: 'New code sent', detail: `Check ${res.email}` })
-        }
-      },
-      onError: (err) => {
-        const message = err instanceof ApiError ? err.message : 'Could not resend'
-        push({ title: 'Resend failed', detail: message, tone: 'danger' })
-      },
-    })
-  }
-
-  const onVerify = (e: FormEvent) => {
-    e.preventDefault()
-    const otp = code.trim()
-    if (otp.length < 4) {
-      push({ title: 'Code required', detail: 'Enter the verification code from your email.', tone: 'danger' })
-      return
-    }
-    signup.mutate(
-      {
-        email: email.trim(),
-        code: otp,
-        username: username.trim() || undefined,
-      },
-      {
-        onSuccess: (res) => afterSuccess(res.username),
-        onError: (err) => {
-          const message = err instanceof ApiError ? err.message : 'Signup failed'
-          push({ title: 'Could not verify', detail: message, tone: 'danger' })
-        },
-      },
-    )
-  }
-
-  const onResend = () => {
-    const mail = email.trim()
+  const resend = (mail = email.trim()) => {
     if (!looksLikeEmail(mail)) return
+    setError(null)
     resendCode.mutate(mail, {
       onSuccess: (res) => {
         if (res.username) setUsername(res.username)
         persist('verify', mail, res.username || username)
         if (res.dev_code) {
           setCode(res.dev_code)
-          push({ title: 'New dev code', detail: res.dev_code })
-        } else {
-          push({ title: 'Code resent', detail: `Check ${res.email}` })
+          push({ title: 'New dev code filled in', detail: res.dev_code })
         }
+        setNotice({ tone: 'ok', text: `New code sent to ${res.email}.` })
       },
-      onError: (err) => {
-        const message = err instanceof ApiError ? err.message : 'Could not resend'
-        push({ title: 'Resend failed', detail: message, tone: 'danger' })
-      },
+      onError: (err) => setError(friendlyAuthError(err, 'resend')),
     })
   }
 
-  const stepCopy =
-    step === 'details'
-      ? 'Free plan · we verify your email before creating the account.'
-      : step === 'resume'
-        ? 'Started signup on another phone or laptop? Enter that email to finish here.'
-        : `Enter the code we sent to ${email.trim() || 'your email'}. Works on any device — password was saved when you first requested the code.`
+  const onVerify = (e: FormEvent) => {
+    e.preventDefault()
+    setSubmitted(true)
+    const otp = code.trim()
+    if (otp.length < 4 || signup.isPending || done) return
+    setError(null)
+    handoff.hold()
+    prefetchApp()
+    signup.mutate(
+      { email: email.trim(), code: otp, username: username.trim() || undefined },
+      {
+        onSuccess: () => {
+          storage.clearSignupDraft()
+          setDone(true)
+          handoff.cover()
+          window.setTimeout(() => navigate(afterAuthPath(next), { replace: true }), 240)
+        },
+        onError: (err) => {
+          handoff.release()
+          setError(friendlyAuthError(err, 'verify'))
+        },
+      },
+    )
+  }
+
+  const errorAction =
+    error?.action === 'login' ? (
+      <p style={{ marginTop: 6 }}>
+        <Link to={`/login${keep}`}>Log in instead</Link>
+      </p>
+    ) : error?.action === 'resend' && step === 'verify' ? (
+      <p style={{ marginTop: 6 }}>
+        <button type="button" onClick={() => resend()}>
+          Send a new code
+        </button>
+      </p>
+    ) : error?.action === 'restart' ? (
+      <p style={{ marginTop: 6 }}>
+        <button type="button" onClick={startOver}>
+          Start over
+        </button>
+      </p>
+    ) : null
 
   return (
-    <div className="mesh-bg flex min-h-svh items-center justify-center px-4 py-12">
-      <div className="w-full max-w-md">
-        <Link to="/" className="mb-8 block text-center font-[family-name:var(--font-display)] text-2xl font-semibold tracking-tight text-fg">
-          Nexus
-        </Link>
-        <GlassPanel className="p-6 sm:p-7">
-          <h1 className="text-xl font-semibold text-fg">
-            {step === 'resume' ? 'Continue on this device' : 'Create your account'}
+    <div>
+      <StepSwap step={step}>
+        <div className="au-head">
+          <p className="au-kicker">
+            {step === 'verify' ? 'step 2 of 2 · verify email' : step === 'resume' ? 'continue sign-up' : 'free plan · step 1 of 2'}
+          </p>
+          <h1 className="au-title">
+            {step === 'verify' ? 'Check your email' : step === 'resume' ? 'Finish signing up here' : 'Create your Nexus account'}
           </h1>
-          <p className="mt-1 text-sm text-fg-dim">{stepCopy}</p>
+          <p className="au-sub">
+            {step === 'verify' ? (
+              <>
+                We sent a 6-digit code to <strong>{email.trim() || 'your email'}</strong>. It works on any
+                device.
+              </>
+            ) : step === 'resume' ? (
+              'Started on another phone or laptop? Enter the same email to pick it up here.'
+            ) : (
+              'Your agents’ memory, synced across your machines and your team.'
+            )}
+          </p>
+        </div>
+      </StepSwap>
 
-          {resumeNote && step === 'verify' ? (
-            <div className="mt-4 rounded-lg border border-amber/30 bg-amber/10 px-3 py-2 text-xs text-fg">
-              <p>{resumeNote}</p>
-              <div className="mt-2 flex flex-wrap gap-3">
-                <button
-                  type="button"
-                  className="text-fg-dim hover:text-fg hover:underline"
-                  disabled={cancelSignup.isPending}
-                  onClick={startOver}
-                >
-                  Start over
-                </button>
-              </div>
+      <FormAlert error={error}>{errorAction}</FormAlert>
+      {!error && notice ? <FormAlert tone={notice.tone}>{notice.text}</FormAlert> : null}
+
+      <StepSwap step={step}>
+        {step === 'details' ? (
+          <form className="au-form" onSubmit={onSendCode} noValidate>
+            <Field
+              label="Email"
+              name="email"
+              type="email"
+              autoComplete="email"
+              inputMode="email"
+              autoCapitalize="none"
+              spellCheck={false}
+              enterKeyHint="next"
+              placeholder="you@company.com"
+              value={email}
+              onValue={setEmail}
+              validate={emailProblem}
+              showErrors={submitted}
+              autoFocus
+            />
+            <Field
+              label="Username"
+              name="username"
+              autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              enterKeyHint="next"
+              value={username}
+              onValue={setUsername}
+              validate={userProblem}
+              showErrors={submitted}
+              hint="Shown to teammates. You can log in with it or your email."
+            />
+            <PasswordField
+              label="Password"
+              name="new-password"
+              autoComplete="new-password"
+              enterKeyHint="go"
+              value={password}
+              onValue={setPassword}
+              validate={passProblem}
+              showErrors={submitted}
+              strength={{ others: [username.trim(), email.split('@')[0] ?? ''] }}
+              hint="At least 8 characters. A few random words work well."
+            />
+            <SubmitButton busy={sendCode.isPending} busyLabel="Sending code…">
+              Continue
+            </SubmitButton>
+            <p className="au-note au-legal">
+              By continuing you agree to the <a href="/terms">Terms</a> and <a href="/privacy">Privacy Policy</a>.
+            </p>
+            <div className="au-row">
+              <button type="button" className="au-link is-quiet" onClick={() => go('resume')}>
+                Already got a code by email? Finish signing up
+              </button>
             </div>
-          ) : null}
-
-          {step === 'details' ? (
-            <form onSubmit={onSendCode} className="mt-6 space-y-4">
-              <label className="block">
-                <span className="mb-1.5 block text-xs text-fg-dim">Work email</span>
-                <input
-                  required
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
-                  placeholder="you@company.com"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1.5 block text-xs text-fg-dim">Username</span>
-                <input
-                  required
-                  minLength={2}
-                  autoComplete="username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
-                  placeholder="pratyush"
-                />
-              </label>
-              <label className="block">
-                <span className="mb-1.5 block text-xs text-fg-dim">Password</span>
-                <input
-                  required
-                  type="password"
-                  minLength={8}
-                  autoComplete="new-password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
-                  placeholder="At least 8 characters"
-                />
-              </label>
-              <Button type="submit" className="w-full" size="lg" disabled={sendCode.isPending}>
-                {sendCode.isPending ? 'Sending code…' : 'Send verification code'}
-              </Button>
+          </form>
+        ) : step === 'resume' ? (
+          <form className="au-form" onSubmit={onResumeLookup} noValidate>
+            <Field
+              label="Email you signed up with"
+              name="email"
+              type="email"
+              autoComplete="email"
+              inputMode="email"
+              autoCapitalize="none"
+              spellCheck={false}
+              value={email}
+              onValue={setEmail}
+              validate={emailProblem}
+              showErrors={submitted}
+              autoFocus
+            />
+            <SubmitButton busy={statusCheck.isPending} busyLabel="Looking it up…">
+              Find my sign-up
+            </SubmitButton>
+            <div className="au-row">
+              <button type="button" className="au-link is-quiet" onClick={() => go('details')}>
+                Back to a new sign-up
+              </button>
+            </div>
+          </form>
+        ) : (
+          <form className="au-form" onSubmit={onVerify} noValidate>
+            {/* Lets password managers pair the saved password with this account. */}
+            <input type="text" name="username" autoComplete="username" value={email} readOnly hidden />
+            <Field
+              label="Verification code"
+              name="one-time-code"
+              autoComplete="one-time-code"
+              inputMode="numeric"
+              enterKeyHint="go"
+              code
+              maxLength={8}
+              placeholder="000000"
+              value={code}
+              onValue={(v) => setCode(v.replace(/\D/g, '').slice(0, 8))}
+              validate={(v) => (v.trim().length >= 4 ? null : 'Enter the code from the email.')}
+              showErrors={submitted}
+              hint="Can’t find it? Check spam, or send a new code."
+              autoFocus
+            />
+            <SubmitButton busy={signup.isPending} done={done} busyLabel="Creating your account…" doneLabel="Account created">
+              Verify and create account
+            </SubmitButton>
+            <div className="au-row">
               <button
                 type="button"
-                className="w-full text-center text-sm text-ember hover:underline"
+                className="au-link is-quiet"
                 onClick={() => {
-                  setStep('resume')
-                  setResumeNote('')
+                  go('details')
                   setCode('')
+                  persist('details')
+                  setNotice({ tone: 'info', text: 'Change your details, then we’ll send a new code.' })
                 }}
               >
-                Already started on another device?
+                Edit details
               </button>
-            </form>
-          ) : null}
-
-          {step === 'resume' ? (
-            <form onSubmit={onResumeLookup} className="mt-6 space-y-4">
-              <label className="block">
-                <span className="mb-1.5 block text-xs text-fg-dim">Email you used to sign up</span>
-                <input
-                  required
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-sm text-fg outline-none transition focus:border-amber"
-                  placeholder="you@company.com"
-                />
-              </label>
-              <Button type="submit" className="w-full" size="lg" disabled={statusCheck.isPending}>
-                {statusCheck.isPending ? 'Looking up…' : 'Find my pending signup'}
-              </Button>
-              <button
-                type="button"
-                className="w-full text-center text-sm text-fg-dim hover:text-fg hover:underline"
-                onClick={() => setStep('details')}
-              >
-                Back to new signup
+              <button type="button" className="au-link" disabled={resendCode.isPending} onClick={() => resend()}>
+                {resendCode.isPending ? 'Sending…' : 'Send a new code'}
               </button>
-            </form>
-          ) : null}
-
-          {step === 'verify' ? (
-            <form onSubmit={onVerify} className="mt-6 space-y-4">
-              <label className="block">
-                <span className="mb-1.5 block text-xs text-fg-dim">Verification code</span>
-                <input
-                  required
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  value={code}
-                  onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 8))}
-                  className="h-10 w-full rounded-lg border border-border bg-raised px-3 text-center font-mono text-lg tracking-[0.3em] text-fg outline-none transition focus:border-amber"
-                  placeholder="000000"
-                />
-              </label>
-              <Button type="submit" className="w-full" size="lg" disabled={signup.isPending}>
-                {signup.isPending ? 'Creating…' : 'Verify & create account'}
-              </Button>
-              <div className="flex flex-wrap justify-between gap-2 text-sm">
-                <button
-                  type="button"
-                  className="text-fg-dim hover:text-fg hover:underline"
-                  onClick={() => {
-                    setStep('details')
-                    setCode('')
-                    persist('details')
-                    setResumeNote('Change details below, then send a new code.')
-                  }}
-                >
-                  Edit details
-                </button>
-                <button
-                  type="button"
-                  className="text-ember hover:underline disabled:opacity-50"
-                  disabled={resendCode.isPending}
-                  onClick={onResend}
-                >
-                  {resendCode.isPending ? 'Resending…' : 'Resend code'}
-                </button>
-              </div>
-              <button
-                type="button"
-                className="w-full text-center text-xs text-muted hover:text-fg hover:underline"
-                disabled={cancelSignup.isPending}
-                onClick={startOver}
-              >
-                Abort signup / start over
+            </div>
+            <p className="au-note">
+              Changed your mind?{' '}
+              <button type="button" className="au-link is-quiet" style={{ fontSize: 13 }} disabled={cancelSignup.isPending} onClick={startOver}>
+                Cancel this sign-up
               </button>
-            </form>
-          ) : null}
+            </p>
+          </form>
+        )}
+      </StepSwap>
 
-          <p className="mt-5 text-center text-sm text-fg-dim">
-            Already have an account?{' '}
-            <Link
-              to={next ? `/login?next=${encodeURIComponent(next)}` : '/login'}
-              className="text-ember hover:underline"
-            >
-              Log in
-            </Link>
-          </p>
-        </GlassPanel>
-      </div>
+      <p className="au-alt">
+        Already have an account? <Link to={`/login${keep}`}>Log in</Link>
+      </p>
+      {step === 'details' ? (
+        <p className="au-note">Free plan. No card needed. We verify your email before creating the account.</p>
+      ) : null}
     </div>
   )
 }

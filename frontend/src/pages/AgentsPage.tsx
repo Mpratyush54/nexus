@@ -47,7 +47,8 @@ async function copyText(text: string) {
   await navigator.clipboard.writeText(text)
 }
 
-export function AgentsPage() {
+/** `embedded` drops the page title when this renders inside another page's Advanced section. */
+export function AgentsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const { projectId } = useAuth()
   const { push } = useToast()
   const agents = useAgents()
@@ -175,6 +176,7 @@ export function AgentsPage() {
 
   return (
     <div className="space-y-8">
+      {embedded ? null : (
       <div>
         <h1 className="text-2xl font-semibold tracking-tight text-fg">Agents</h1>
         <p className="mt-1 text-sm text-fg-dim">
@@ -182,6 +184,7 @@ export function AgentsPage() {
           (Cursor vs OpenCode) so limits stay independent. Desktop install / harvest lives on Connect.
         </p>
       </div>
+      )}
 
       <GlassPanel className="space-y-3 p-5">
         <div className="flex flex-wrap items-center justify-between gap-2">

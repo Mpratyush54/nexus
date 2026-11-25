@@ -195,7 +195,7 @@ html.nx-app #root > .nx { display: none; }
 .nx-nav.is-scrolled { border-bottom-color: var(--nx-rule); }
 .nx-nav-in { display: flex; align-items: center; gap: 32px; height: 68px; }
 .nx-brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; font: 650 19px/1 var(--f-display); letter-spacing: -0.03em; }
-.nx-brand img { background: #171918; border-radius: 7px; padding: 3px; }
+.nx-brand img { flex: none; }
 .nx-nav-links { display: flex; gap: 26px; font-size: 15px; }
 .nx-nav-links a, .nx-nav-signin { text-decoration: none; color: var(--nx-ink-2); }
 .nx-nav-links a:hover, .nx-nav-signin:hover { color: var(--nx-ink); }
@@ -242,7 +242,8 @@ html.nx-app #root > .nx { display: none; }
 .nx .nx-hero-copy h1 { font-size: clamp(44px, 5.2vw, 74px); line-height: 0.97; max-width: 13.5ch; margin-top: 18px; }
 .nx-hero-lede { margin-top: 24px; font-size: 18px; line-height: 1.6; color: var(--nx-ink-2); max-width: 48ch; text-wrap: pretty; }
 .nx-hero-cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 28px; }
-.nx-hero-note { flex-basis: 100%; font-size: 14px; color: var(--nx-ink-2); }
+.nx-hero-note { flex-basis: 100%; font-size: 14px; color: var(--nx-ink-2); max-width: 58ch; }
+.nx-hero-note a { color: var(--nx-ink); white-space: nowrap; }
 .nx-hero-agents { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 28px; padding-top: 18px; border-top: 1px solid var(--nx-rule); justify-self: stretch; }
 .nx-hero-agents .nx-agent { font: 500 13.5px/1 var(--f-mono); color: var(--nx-ink); }
 .nx-hero-demo { min-width: 0; }
@@ -325,21 +326,32 @@ html.nx-app #root > .nx { display: none; }
   .nx-hero-cta .nx-btn { flex: 1 1 100%; }
   .nx-why-hint { display: none; }
   .nx-why-bar .nx-label-chip { margin-left: auto; }
-  .nx-why-line { grid-template-columns: 84px 24px max-content; font-size: 12.5px; }
+  /* Phones wrap long code lines instead of cutting them off at the card edge. */
+  .nx-why-line { grid-template-columns: 30px 22px minmax(0, 1fr); font-size: 12px; }
+  /* Only the agent colour in the gutter; the note below names the agent. */
+  .nx-why-who { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .nx-why-line code { white-space: pre-wrap; overflow-wrap: anywhere; padding-right: 10px; }
   .nx-why-gutter { padding-left: 10px; font-size: 11px; }
-  .nx-why-num { padding-right: 10px; }
+  .nx-why-num { padding-right: 8px; }
+  /* A phone can't install the Windows app: the demo leads, the download follows. */
+  .nx-hero-cta .nx-cta-demo { order: -1; background: var(--nx-cta); color: var(--nx-cta-ink); border-color: transparent; }
+  .nx-hero-cta .nx-cta-download { background: transparent; color: var(--nx-ink); border-color: var(--nx-rule); }
 }
 
 /* ---------- sections ---------- */
 
 .nx-section { padding: 112px 0; border-top: 1px solid var(--nx-rule); }
-/* Below-the-fold sections skip style and layout until they approach the viewport. */
-.nx-section, .nx-native, .nx-final, .nx-foot { content-visibility: auto; contain-intrinsic-size: auto 1000px; }
+/* No content-visibility here: the sections are anchor targets, and estimated
+   heights made nav links land far past their section while the page
+   re-measured. Images below the fold are lazy, so layout stays cheap. The
+   sticky nav offset comes from scroll-padding-top on html.nx-home. */
 .nx-section-head { display: grid; gap: 18px; margin-bottom: 56px; }
 .nx-section-head-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: end; gap: 18px 48px; }
 .nx-section-head-row > div { display: grid; gap: 18px; }
 
 .nx-split-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 56px; align-items: start; }
+/* Flipped rows mirror the columns too, so every screenshot renders at the same size. */
+.nx-split-flip .nx-split-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1.55fr); }
 .nx-split-flip .nx-split-grid > :first-child { order: 2; }
 .nx-points { display: grid; gap: 0; border-top: 1px solid var(--nx-rule); }
 .nx-points li { padding: 20px 0; border-bottom: 1px solid var(--nx-rule); display: grid; gap: 6px; }
@@ -349,7 +361,7 @@ html.nx-app #root > .nx { display: none; }
   .nx-section { padding: 80px 0; }
   .nx-section-head { margin-bottom: 40px; }
   .nx-section-head-row { grid-template-columns: 1fr; }
-  .nx-split-grid { grid-template-columns: 1fr; gap: 36px; }
+  .nx-split-grid, .nx-split-flip .nx-split-grid { grid-template-columns: 1fr; gap: 36px; }
   .nx-split-flip .nx-split-grid > :first-child { order: 0; }
 }
 
@@ -360,38 +372,116 @@ html.nx-app #root > .nx { display: none; }
   position: relative; aspect-ratio: 16 / 9; border-radius: var(--r-3); overflow: hidden;
   background: #171918; box-shadow: var(--shadow-win);
 }
-.nx-film-fallback {
-  position: absolute; inset: 0; display: grid; place-items: center;
-  background: repeating-linear-gradient(90deg, rgb(255 255 255 / 0.035) 0 1px, transparent 1px 48px), #171918;
+.nx-film-poster, .nx-film-loop { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.nx-film-loop { opacity: 0; transition: opacity 0.5s; }
+.nx-film-loop.is-playing { opacity: 1; }
+/* The whole frame is the play button; the disc is the visible target. */
+.nx-film-open {
+  position: absolute; inset: 0; z-index: 2; cursor: pointer; border: 0; padding: 0;
+  display: grid; place-content: center; justify-items: center; gap: 16px;
+  background: linear-gradient(180deg, rgb(10 12 11 / 0) 35%, rgb(10 12 11 / 0.55));
+  color: #f4f5f2;
 }
-.nx-film-fallback { align-content: center; justify-items: center; gap: 18px; padding: 24px; text-align: center; }
-.nx-film-fallback img { opacity: 0.9; }
-.nx-film-soon { display: none; color: #b7bab5; max-width: 40ch; font-size: 15px; }
-.nx-film.is-unavailable .nx-film-soon { display: block; }
-.nx-film-poster, .nx-film-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity 0.4s; }
-.nx-film-poster.is-ready, .nx-film-video.is-ready { opacity: 1; }
-.nx-film-play {
-  position: absolute; left: 20px; bottom: 20px; z-index: 2;
-  display: inline-flex; align-items: center; gap: 10px; height: 46px; padding: 0 18px;
-  border: 0; border-radius: 999px; cursor: pointer;
-  background: #f4f5f2; color: #141617; font-weight: 600; font-size: 15px;
-  box-shadow: 0 10px 30px -10px rgb(0 0 0 / 0.5);
+.nx-film-disc {
+  width: 96px; height: 96px; border-radius: 50%; display: grid; place-items: center;
+  background: #f4f5f2; color: #141617; padding-left: 5px;
+  box-shadow: 0 0 0 10px rgb(244 245 242 / 0.16), 0 18px 40px -12px rgb(0 0 0 / 0.6);
+  transition: transform 0.2s, box-shadow 0.2s;
 }
-.nx-film-play:hover { background: #fff; }
-.nx-film-play[hidden] { display: none; }
-.nx-film.is-unavailable .nx-film-play { display: none; }
+.nx-film-open:hover .nx-film-disc { transform: scale(1.05); box-shadow: 0 0 0 14px rgb(232 187 103 / 0.32), 0 18px 40px -12px rgb(0 0 0 / 0.6); }
+.nx-film-cta { display: grid; justify-items: center; gap: 2px; font: 600 17px/1.3 var(--f-body); text-shadow: 0 1px 12px rgb(0 0 0 / 0.6); }
+.nx-film-meta { font: 400 13px/1.3 var(--f-mono); color: #d6d4ce; }
+.nx .nx-film-open:focus-visible { outline: 3px solid var(--nx-amber); outline-offset: -6px; border-radius: var(--r-3); }
+.nx-film-after { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-top: 20px; color: var(--nx-ink-2); }
+@media (max-width: 600px) {
+  .nx-film-disc { width: 68px; height: 68px; }
+  .nx-film-disc svg { width: 24px; height: 24px; }
+  .nx-film-open { gap: 10px; }
+  .nx-film-cta { font-size: 15px; }
+}
+
+/* player: a modal <dialog>, so the page behind is inert and Esc closes it */
+.nx-player {
+  width: min(1280px, calc(100vw - 32px)); max-width: none; max-height: none; padding: 0; border: 0;
+  background: transparent; color: #ecebe6; overflow: visible;
+}
+.nx-player::backdrop { background: rgb(6 7 7 / 0.88); }
+.nx-player-stage {
+  position: relative; aspect-ratio: 16 / 9; max-height: calc(100vh - 96px); margin: 0 auto;
+  background: #000; border-radius: var(--r-2); overflow: hidden; box-shadow: 0 40px 80px -30px #000;
+}
+.nx-player-stage:fullscreen { max-height: none; border-radius: 0; aspect-ratio: auto; }
+.nx-player-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.nx-player-big {
+  position: absolute; left: 50%; top: 50%; translate: -50% -50%; width: 88px; height: 88px; border-radius: 50%;
+  border: 0; cursor: pointer; display: grid; place-items: center; padding-left: 5px;
+  background: rgb(244 245 242 / 0.94); color: #141617; transition: opacity 0.2s;
+}
+.nx-player-stage[data-state='playing'] .nx-player-big { opacity: 0; pointer-events: none; }
+.nx-player-bar {
+  position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 10px;
+  padding: 28px 14px 12px; background: linear-gradient(180deg, transparent, rgb(0 0 0 / 0.75));
+  transition: opacity 0.25s;
+}
+.nx-player-stage.is-idle[data-state='playing'] .nx-player-bar,
+.nx-player-stage.is-idle[data-state='playing'] .nx-player-close { opacity: 0; }
+.nx-player-stage.is-idle[data-state='playing'] { cursor: none; }
+.nx-player-btn, .nx-player-close {
+  width: 40px; height: 40px; flex: none; display: grid; place-items: center; cursor: pointer;
+  border: 0; border-radius: var(--r-1); background: transparent; color: #f4f5f2;
+}
+.nx-player-btn:hover, .nx-player-close:hover { background: rgb(255 255 255 / 0.14); }
+.nx-player-close { position: absolute; top: 10px; right: 10px; background: rgb(0 0 0 / 0.5); transition: opacity 0.25s; }
+.nx-player .i-pause, .nx-player .i-muted, .nx-player .i-unfs { display: none; }
+.nx-player-stage[data-state='playing'] .i-play { display: none; }
+.nx-player-stage[data-state='playing'] .i-pause { display: block; }
+.nx-player-stage.is-muted .i-vol { display: none; }
+.nx-player-stage.is-muted .i-muted { display: block; }
+.nx-player-stage:fullscreen .i-fs { display: none; }
+.nx-player-stage:fullscreen .i-unfs { display: block; }
+.nx-player-time { font: 400 13px/1 var(--f-mono); font-variant-numeric: tabular-nums; min-width: 4ch; text-align: center; }
+.nx-player-seek {
+  flex: 1; min-width: 60px; height: 20px; margin: 0; cursor: pointer; background: transparent;
+  -webkit-appearance: none; appearance: none; --p: 0%;
+}
+.nx-player-seek::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: linear-gradient(90deg, #e8bb67 var(--p), rgb(255 255 255 / 0.3) var(--p)); }
+.nx-player-seek::-moz-range-track { height: 4px; border-radius: 2px; background: linear-gradient(90deg, #e8bb67 var(--p), rgb(255 255 255 / 0.3) var(--p)); }
+.nx-player-seek::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; margin-top: -5px; border-radius: 50%; background: #f4f5f2; border: 0; }
+.nx-player-seek::-moz-range-thumb { width: 14px; height: 14px; border-radius: 50%; background: #f4f5f2; border: 0; }
+.nx-player :focus-visible { outline: 2px solid #e8bb67; outline-offset: 2px; }
+.nx-player-keys { margin: 12px 0 0; text-align: center; font: 400 12.5px/1.4 var(--f-mono); color: #9ea29d; }
+@media (max-width: 600px) {
+  /* Phones: the controls sit under the picture instead of covering a third of it. */
+  .nx-player-stage { aspect-ratio: auto; display: flex; flex-direction: column; max-height: none; }
+  .nx-player-stage:not(:fullscreen) .nx-player-video { position: relative; inset: auto; aspect-ratio: 16 / 9; height: auto; }
+  .nx-player-stage:not(:fullscreen) .nx-player-big { top: calc((100vw - 32px) * 9 / 32); width: 64px; height: 64px; }
+  .nx-player-bar { position: static; gap: 4px; padding: 6px; background: #0b0c0c; }
+  .nx-player-stage.is-idle[data-state='playing'] .nx-player-bar { opacity: 1; }
+  .nx-player-close { width: 34px; height: 34px; top: 6px; right: 6px; }
+  .nx-player-time[data-p='dur'], .nx-player-keys { display: none; }
+}
 
 /* ---------- product screenshots ---------- */
 
-.nx-shot { margin: 0; }
-.nx-shot img {
-  display: block; width: 100%; height: auto;
-  border-radius: var(--r-3); box-shadow: var(--shadow-win);
-  background: #000; outline: 1px solid rgb(255 255 255 / 0.06); outline-offset: -1px;
+/* Every shot sits in the same window frame at the same 5:3 ratio (the crops
+   are made to it, so nothing is cut on desktop). On phones the frame narrows
+   to 4:3 and each shot keeps its own focus point in view. */
+.nx-shot { margin: 0; min-width: 0; display: grid; gap: 12px; }
+.nx-shot-win {
+  aspect-ratio: 5 / 3; overflow: hidden; border-radius: var(--r-2);
+  background: #000; box-shadow: var(--shadow-win);
+  outline: 1px solid rgb(255 255 255 / 0.08); outline-offset: -1px; position: relative;
 }
-.nx-shot-narrow { max-width: 520px; }
-.nx-shot-rail { max-width: 340px; justify-self: center; }
+.nx-shot-win img { display: block; width: 100%; height: 100%; max-width: none; object-fit: cover; object-position: var(--focus, 0 0); }
+.nx-shot-cap { display: flex; align-items: center; gap: 8px; font: 400 12.5px/1.3 var(--f-mono); color: var(--nx-ink-2); }
+.nx-shot-cap img { border-radius: 3px; }
+a.nx-shot-win { display: block; color: inherit; cursor: zoom-in; }
+.nx-shot-zoom { display: none; margin-left: auto; color: var(--nx-ink-2); }
 .nx-shot-wide { margin-top: 48px; }
+@media (max-width: 600px) {
+  .nx-shot-win { aspect-ratio: 4 / 3; }
+  .nx-shot-zoom { display: inline; }
+}
 
 /* memory tools */
 .nx-memory { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 56px; align-items: start; }
@@ -412,13 +502,13 @@ html.nx-app #root > .nx { display: none; }
 }
 
 /* why / graph */
-.nx-why-grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 56px; align-items: start; }
+.nx-why-grid { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 56px; align-items: start; }
 @media (max-width: 980px) {
   .nx-why-grid { grid-template-columns: 1fr; gap: 36px; }
 }
 
 /* privacy */
-.nx-privacy { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 56px; align-items: start; }
+.nx-privacy { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 56px; align-items: start; }
 @media (max-width: 980px) {
   .nx-privacy { grid-template-columns: 1fr; gap: 36px; }
 }
@@ -445,21 +535,54 @@ html.nx-app #root > .nx { display: none; }
 
 /* final cta */
 .nx-final { padding: 128px 0; border-top: 1px solid var(--nx-rule); }
+.nx-final-link { display: inline-flex; align-items: center; gap: 8px; font-weight: 600; padding: 0 8px; }
 .nx-final h2 { font-size: clamp(40px, 6.4vw, 88px); line-height: 0.98; max-width: 14ch; }
 .nx-final p { margin: 24px 0 32px; font-size: 18px; color: var(--nx-ink-2); max-width: 56ch; }
 @media (max-width: 600px) {
   .nx-final { padding: 88px 0; }
 }
 
-/* footer */
-.nx-foot { border-top: 1px solid var(--nx-rule); padding: 36px 0 48px; color: var(--nx-ink-2); font-size: 14.5px; }
-.nx-foot-in { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 32px; }
+/* footer (src/landing/SiteFooter.tsx, shared with /privacy and /terms) */
+.nx-foot { border-top: 1px solid var(--nx-rule); padding: 56px 0 40px; color: var(--nx-ink-2); font-size: 14.5px; }
+.nx-foot-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 40px 56px; }
+.nx-foot-about { display: grid; gap: 14px; align-content: start; max-width: 34ch; }
 .nx-foot .nx-brand { color: var(--nx-ink); font-size: 17px; }
-.nx-foot nav { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px 22px; }
-.nx-foot nav a { text-decoration: none; }
-.nx-foot nav a:hover { color: var(--nx-ink); text-decoration: underline; }
-@media (max-width: 700px) {
-  .nx-foot nav { margin-left: 0; flex-basis: 100%; }
+.nx-foot-cols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; }
+.nx-foot-h { font: 500 12.5px/1.4 var(--f-mono); letter-spacing: 0.04em; text-transform: uppercase; color: var(--nx-ink); margin-bottom: 14px; }
+.nx-foot-cols ul { display: grid; gap: 10px; }
+.nx-foot a { text-decoration: none; }
+.nx-foot a:hover { color: var(--nx-ink); text-decoration: underline; }
+.nx-foot-base { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--nx-rule); font-size: 13.5px; }
+@media (max-width: 860px) {
+  .nx-foot-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .nx-foot-cols { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px 20px; }
+  .nx-foot-cols > :last-child { grid-column: 1 / -1; }
+}
+
+/* legal pages (src/landing/legal.tsx) */
+.nx-legal { padding: 40px 0 112px; }
+.nx-legal-in { max-width: calc(760px + var(--gut) * 2); }
+.nx-legal-back { display: inline-flex; align-items: center; gap: 6px; font-size: 14.5px; color: var(--nx-ink-2); text-decoration: none; }
+.nx-legal-back:hover { color: var(--nx-ink); }
+.nx-legal-head { display: grid; gap: 14px; margin: 32px 0 40px; }
+.nx-legal-head h1 { font-size: clamp(40px, 6vw, 64px); margin-top: 4px; }
+.nx-legal-date { font: 500 14px/1.4 var(--f-mono); color: var(--nx-ink); }
+.nx-legal-other { color: var(--nx-ink-2); }
+.nx-legal-signin { font-size: 15px; color: var(--nx-ink-2); text-decoration: none; }
+.nx-legal-signin:hover { color: var(--nx-ink); }
+.nx-legal-summary { padding: 24px 28px; border: 1px solid var(--nx-rule); border-radius: var(--r-3); background: var(--nx-panel); margin-bottom: 48px; }
+.nx-legal-summary h2, .nx-legal-body h2 { font-size: clamp(24px, 3vw, 30px); line-height: 1.15; max-width: none; }
+.nx-legal-body section { display: grid; gap: 14px; padding: 32px 0; border-top: 1px solid var(--nx-rule); scroll-margin-top: 84px; }
+.nx-legal-body p, .nx-legal-body li { max-width: 68ch; text-wrap: pretty; }
+.nx-legal-body ul { display: grid; gap: 10px; padding-left: 1.2em; list-style: disc; }
+.nx-legal-summary ul { margin-top: 16px; }
+.nx-legal-body li::marker { color: var(--nx-amber-ink); }
+.nx-legal-body a { color: var(--nx-ink); }
+.nx-legal-body code { font-size: 0.9em; padding: 1px 5px; border-radius: 4px; background: var(--nx-amber-wash); }
+@media (max-width: 900px) {
+  .nx-legal-signin { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
