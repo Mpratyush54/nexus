@@ -157,7 +157,12 @@ public sealed partial class MainWindow : Window
         Activated += (_, _) => DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, OfferCrashReports);
         // Agents installed or signed in while Nexus was in the background show
         // up in the pickers when the window comes back (checked off the UI thread).
+#if HAS_UNO
+        // Uno types the activation state as CoreWindowActivationState.
+        Activated += (_, e) => { if (e.WindowActivationState != Windows.UI.Core.CoreWindowActivationState.Deactivated) AgentAvailabilityService.Refresh(); };
+#else
         Activated += (_, e) => { if (e.WindowActivationState != WindowActivationState.Deactivated) AgentAvailabilityService.Refresh(); };
+#endif
     }
 
     private bool _crashOfferDone;
