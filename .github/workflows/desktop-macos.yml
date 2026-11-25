@@ -250,3 +250,67 @@ jobs:
             dist/pkg-a/SHA256SUMS-macos.txt
           if-no-files-found: warn
           retention-days: 7
+
+  # Production-readiness walk on real macOS: the DMG from mac-install
+  # installed into /Applications, signed in to a loopback demo server
+  # (Go server + Homebrew Postgres, fictional data), every screen
+  # screenshotted in Light and Dark (scripts/macos/mac-audit.sh).
+  mac-audit:
+    name: Audit every screen (DMG install, demo server, Light + Dark)
+    needs: mac-install
+    if: ${{ !cancelled() }}
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      APP: /Applications/Nexus.app
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: nexus-macos-dmg
+          path: dist/dmg
+
+      - name: Install from the DMG
+        run: |
+          set -euo pipefail
+          swiftc -O -o dist/winlist scripts/macos/winlist.swift
+          swiftc -O -o dist/pointer scripts/macos/pointer.swift
+          DMG=$(ls dist/dmg/Nexus-*.dmg | head -1)
+          shasum -a 256 "$DMG"
+          hdiutil attach "$DMG" -noverify -nobrowse -mountpoint /Volumes/NexusAudit
+          ls -la /Volumes/NexusAudit
+          rm -rf "$APP"
+          ditto /Volumes/NexusAudit/Nexus.app "$APP"
+          hdiutil detach /Volumes/NexusAudit -force
+          codesign --verify --strict "$APP"
+          du -sh "$APP"
+
+      - name: Demo server (Postgres + Go server, fictional data)
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          mkdir -p logs-audit
+          bash scripts/macos/demo-server.sh
+          bash scripts/macos/demo-seed.sh | tee logs-audit/seed.log
+
+      - name: Walk every screen
+        timeout-minutes: 40
+        run: bash scripts/macos/mac-audit.sh
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: nexus-macos-audit
+          path: |
+            shots-audit/
+            logs-audit/
+            logs/server.log
+          if-no-files-found: warn
+          retention-days: 14
