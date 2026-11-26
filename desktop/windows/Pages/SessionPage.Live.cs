@@ -375,7 +375,7 @@ public sealed partial class SessionPage
                 QueueLiveRender();
                 break;
             case "thinking_delta":
-                if (!_streamHasText && _streamText is not null) _streamText.Text = "Thinking…";
+                if (!_streamHasText && _streamText is not null) StreamThinking(_streamText).Append(text);
                 SetComposerStatus(LiveAgentName + " is thinking…");
                 break;
             case "tool_start":
@@ -443,6 +443,7 @@ public sealed partial class SessionPage
         if (text.Length == 0) return;
         _streamHasText = true;
         var nearBottom = _chatScroll.ScrollableHeight - _chatScroll.VerticalOffset < 120;
+        FinishStreamThinking(_streamText);
         // Rendered as Markdown while it arrives; the saved reply keeps this view.
         StreamView(_streamText).Update(_liveText.ToString(), streaming: true);
         SetComposerStatus("Replying with " + (_liveAgent.Length > 0 ? LiveAgentName : ChatTitles.AgentName(_streamAgent)) + "…");
