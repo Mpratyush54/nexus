@@ -65,21 +65,21 @@ public sealed partial class SessionPage
             var node = stack.Pop();
             switch (node)
             {
-                case TextBlock text: scaled++; Scale(text, text.FontSize, text.LineHeight, v => text.FontSize = v, v => text.LineHeight = v); break;
+                case TextBlock text: scaled++; ScaleText(text, text.FontSize, text.LineHeight, v => text.FontSize = v, v => text.LineHeight = v); break;
                 case RichTextBlock rich:
                     scaled++;
-                    Scale(rich, rich.FontSize, rich.LineHeight, v => rich.FontSize = v, v => rich.LineHeight = v);
+                    ScaleText(rich, rich.FontSize, rich.LineHeight, v => rich.FontSize = v, v => rich.LineHeight = v);
                     // Paragraphs carry their own size (headings, code).
                     foreach (var block in rich.Blocks)
                     {
-                        Scale(block, block.FontSize, block.LineHeight, v => block.FontSize = v, v => block.LineHeight = v);
+                        ScaleText(block, block.FontSize, block.LineHeight, v => block.FontSize = v, v => block.LineHeight = v);
                         if (block is Microsoft.UI.Xaml.Documents.Paragraph paragraph)
                             foreach (var inline in paragraph.Inlines)
                                 if (inline.ReadLocalValue(Microsoft.UI.Xaml.Documents.TextElement.FontSizeProperty) != DependencyProperty.UnsetValue)
-                                    Scale(inline, inline.FontSize, 0, v => inline.FontSize = v, _ => { });
+                                    ScaleText(inline, inline.FontSize, 0, v => inline.FontSize = v, _ => { });
                     }
                     break;
-                case Control control when node is not ScrollViewer: Scale(control, control.FontSize, 0, v => control.FontSize = v, _ => { }); break;
+                case Control control when node is not ScrollViewer: ScaleText(control, control.FontSize, 0, v => control.FontSize = v, _ => { }); break;
             }
             var count = VisualTreeHelper.GetChildrenCount(node);
             for (var i = 0; i < count; i++) stack.Push(VisualTreeHelper.GetChild(node, i));
@@ -87,7 +87,7 @@ public sealed partial class SessionPage
         return scaled;
     }
 
-    private void Scale(DependencyObject element, double current, double line, Action<double> set, Action<double> setLine)
+    private void ScaleText(DependencyObject element, double current, double line, Action<double> set, Action<double> setLine)
     {
         if (current <= 0 || double.IsNaN(current)) return;
         var box = s_baseFontSize.GetValue(element, _ => new StrongBox<(double, double)>((current, line)));
