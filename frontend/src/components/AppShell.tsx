@@ -2,6 +2,8 @@ import { Suspense, useEffect, useState } from 'react'
 import { Navigate, Outlet, useLocation } from 'react-router-dom'
 import { AccountMismatchBanner } from './AccountMismatchBanner'
 import { CommandPalette } from './CommandPalette'
+import { ShortcutSheet } from './ShortcutSheet'
+import { isMod, onAppCommand } from '@/lib/shortcuts'
 import { LocalWorkspacePanel } from './LocalWorkspace'
 import { MobileNav, SideNav } from './SideNav'
 import { useEnsureActiveProject } from '@/hooks/useProjectSummaries'
@@ -10,6 +12,7 @@ import { storage } from '@/utils/storage'
 
 export function AppShell() {
   const [cmdOpen, setCmdOpen] = useState(false)
+  const [keysOpen, setKeysOpen] = useState(false)
   const location = useLocation()
   const path = location.pathname
   const onHome = path.includes('/app/dashboard') || path === '/app' || path.endsWith('/app/')
@@ -28,9 +31,20 @@ export function AppShell() {
         e.preventDefault()
         setCmdOpen((v) => !v)
       }
+      if (isMod(e) && (e.key === '/' || e.code === 'Slash')) {
+        e.preventDefault()
+        setCmdOpen(false)
+        setKeysOpen((v) => !v)
+      }
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    const off = onAppCommand((c) => {
+      if (c === 'shortcuts') setKeysOpen(true)
+    })
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      off()
+    }
   }, [])
 
   // Onboarding is about installing Desktop. It is offered from Home, never
@@ -76,8 +90,9 @@ export function AppShell() {
           </div>
         </main>
         {!identityLocked ? (
-          <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} />
+          <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} onShortcuts={() => setKeysOpen(true)} />
         ) : null}
+        {keysOpen ? <ShortcutSheet onClose={() => setKeysOpen(false)} /> : null}
       </div>
     </div>
   )

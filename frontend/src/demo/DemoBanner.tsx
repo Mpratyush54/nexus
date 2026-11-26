@@ -44,7 +44,7 @@ export function DemoBanner() {
         <strong>Demo</strong>
         <span className="demo-banner-dim">— sample data</span>
       </span>
-      {open ? <span className="demo-banner-text">A fictional team. Changes stay in this tab.</span> : null}
+      {open ? <span className="demo-banner-text">A fictional team. Changes stay in this tab. Say “offline” in a chat reply to see a failed send.</span> : null}
       <span className="demo-banner-actions">
         <a className="demo-banner-cta" href={SIGN_UP_PATH}>
           Sign up free <ArrowRight size={14} aria-hidden="true" />
