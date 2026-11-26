@@ -5,7 +5,7 @@ package main
 // The desktop Agents browser: everything each coding agent is set up with,
 // the read-only content of one item, and removing one MCP server entry.
 //
-//	agents.setup.browse {workspace?} -> Inventory (all harnesses, nexus_mcp,
+//	agents.setup.browse {workspace?, state_dir?} -> Inventory (all harnesses, nexus_mcp,
 //	    header_keys, shared_with; no secret values)
 //	agents.setup.read {agent, kind, name, path, workspace?} -> ItemContent
 //	    (only items browse returned; MCP entries masked, never the whole config)
@@ -28,6 +28,7 @@ func agentsBrowseCall(name string, args json.RawMessage) (any, error) {
 		Name      string `json:"name"`
 		Path      string `json:"path"`
 		Workspace string `json:"workspace"`
+		StateDir  string `json:"state_dir"`
 		DryRun    bool   `json:"dry_run"`
 	}
 	if len(args) > 0 {
@@ -35,7 +36,7 @@ func agentsBrowseCall(name string, args json.RawMessage) (any, error) {
 			return nil, fmt.Errorf("invalid request: %w", err)
 		}
 	}
-	opts := agentsetup.BrowseOptions{Workspace: strings.TrimSpace(req.Workspace)}
+	opts := agentsetup.BrowseOptions{Workspace: strings.TrimSpace(req.Workspace), StateDir: strings.TrimSpace(req.StateDir)}
 	switch name {
 	case "agents.setup.browse":
 		return agentsetup.Browse(opts), nil

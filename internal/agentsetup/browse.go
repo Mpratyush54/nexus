@@ -18,6 +18,9 @@ import (
 // BrowseOptions control Browse, ReadItem and RemoveMCP.
 type BrowseOptions struct {
 	Home, Workspace string
+	// StateDir, when set, adds the servers Nexus turned off (see
+	// SetMCPEnabled) to each agent's list, marked Disabled and Parked.
+	StateDir string
 	// LookPath finds agent CLIs for install detection. Nil uses exec.LookPath.
 	LookPath func(string) (string, error)
 }
@@ -80,6 +83,12 @@ func Browse(o BrowseOptions) Inventory {
 			}
 		}
 		inv.Agents = append(inv.Agents, a)
+	}
+	if o.StateDir != "" {
+		parked := ParkedItems(EditOptions{Home: o.Home, Workspace: o.Workspace, StateDir: o.StateDir})
+		for i := range inv.Agents {
+			inv.Agents[i].MCPServers = append(inv.Agents[i].MCPServers, parked[inv.Agents[i].Agent]...)
+		}
 	}
 	markShared(inv.Agents)
 	rememberInventory(o, inv)
@@ -165,7 +174,7 @@ type cachedInventory struct {
 }
 
 func inventoryKey(o BrowseOptions) string {
-	return strings.ToLower(o.Home + "|" + o.Workspace)
+	return strings.ToLower(o.Home + "|" + o.Workspace + "|" + o.StateDir)
 }
 
 func rememberInventory(o BrowseOptions, inv Inventory) {
@@ -348,7 +357,11 @@ func ReadItem(o BrowseOptions, agent, kind, name, path string) (ItemContent, err
 			return out, fmt.Errorf("cannot read %s", filepath.Base(it.Path))
 		}
 		var raw map[string]any
-		if kind == "mcp" {
+		if kind == "mcp" && it.Parked {
+			if ps, ok := (EditOptions{Home: o.Home, Workspace: o.Workspace, StateDir: o.StateDir}).findParked(agent, it.Path, name, ""); ok {
+				raw = ps.Entry
+			}
+		} else if kind == "mcp" {
 			ws := ""
 			if agent == "claude" && it.Scope == "project" && filepath.Base(it.Path) == ".claude.json" {
 				ws = r.workspace
