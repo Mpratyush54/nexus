@@ -71,6 +71,25 @@ jobs:
           plutil -p "$APP/Contents/Info.plist"
           codesign -dv "$APP" 2>&1 | grep -E 'Identifier|Signature|Format|Info.plist'
 
+      # Voice input: macOS kills an app that touches the microphone or Speech
+      # without these usage strings, and the hardened runtime needs the
+      # audio-input entitlement; the helper must export the dictation calls.
+      - name: Voice input is declared (Info.plist, entitlements, helper)
+        run: |
+          set -euo pipefail
+          PL="$APP/Contents/Info.plist"
+          for key in NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
+            value=$(/usr/libexec/PlistBuddy -c "Print :$key" "$PL")
+            test -n "$value" || { echo "::error::$key is empty"; exit 1; }
+            echo "$key: $value"
+          done
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.security.device.audio-input' desktop/uno/macos/Nexus.entitlements | grep -x true
+          lib=$(find "$APP" -name libnexusmac.dylib | head -1)
+          for sym in nx_mac_dictation_start nx_mac_dictation_stop nx_mac_dictation_cancel nx_mac_dictation_locales; do
+            nm -gU "$lib" | grep " _$sym$" > /dev/null || { echo "::error::libnexusmac lacks $sym"; exit 1; }
+          done
+          otool -L "$lib" | grep -E 'Speech|AVFoundation'
+
       - name: Build the window probe
         run: swiftc -O -o dist/winlist scripts/macos/winlist.swift
 

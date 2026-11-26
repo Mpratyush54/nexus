@@ -124,6 +124,10 @@ public static class AppPrefs
         public bool AutoSendCrashReports { get; set; }
         // Appearance: "system" (follow Windows), "light" or "dark".
         public string Theme { get; set; } = "system";
+        // Voice input (dictation) in chat boxes, and its language: a BCP-47
+        // tag, or "" for the system language (Pages/VoiceInput.cs).
+        public bool VoiceInput { get; set; } = true;
+        public string VoiceLanguage { get; set; } = "";
         public Dictionary<string, string> ChatModels { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         // "chat id|agent" -> model last used in that chat (bounded).
         public Dictionary<string, string> ChatModelsByChat { get; set; } = new(StringComparer.OrdinalIgnoreCase);

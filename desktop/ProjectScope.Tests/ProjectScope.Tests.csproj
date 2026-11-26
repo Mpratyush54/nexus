@@ -43,5 +43,6 @@
     <Compile Include="../windows/Core/AgentAvailability.cs" Link="AgentAvailability.cs" />
     <Compile Include="../windows/Core/ChatListRetry.cs" Link="ChatListRetry.cs" />
     <Compile Include="../windows/Core/LiveSessions.cs" Link="LiveSessions.cs" />
+    <Compile Include="../windows/Core/DictationText.cs" Link="DictationText.cs" />
   </ItemGroup>
 </Project>
