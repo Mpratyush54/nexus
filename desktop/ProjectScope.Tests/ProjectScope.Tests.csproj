@@ -47,5 +47,9 @@
     <Compile Include="../windows/Core/MarkdownBlocks.cs" Link="MarkdownBlocks.cs" />
     <Compile Include="../windows/Core/MarkdownInline.cs" Link="MarkdownInline.cs" />
     <Compile Include="../windows/Core/CodeSyntax.cs" Link="CodeSyntax.cs" />
+    <Compile Include="../windows/Core/ComposerDrafts.cs" Link="ComposerDrafts.cs" />
+    <Compile Include="../windows/Core/ComposerKeys.cs" Link="ComposerKeys.cs" />
+    <Compile Include="../windows/Core/OutgoingMessage.cs" Link="OutgoingMessage.cs" />
+    <Compile Include="../windows/Core/TurnStatus.cs" Link="TurnStatus.cs" />
   </ItemGroup>
 </Project>

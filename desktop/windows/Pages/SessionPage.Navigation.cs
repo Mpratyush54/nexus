@@ -106,6 +106,7 @@ public sealed partial class SessionPage
         Grid.SetColumn(_promptNavigator, 1);
         viewport.Children.Add(_promptNavigator);
         _promptNavigator.JumpRequested += entry => _ = JumpToEntryAsync(entry);
+        viewport.Children.Add(BuildJumpToLatest());
         _chatScroll.ViewChanged += (_, _) => UpdateActivePrompt();
         // Selectable message text takes focus and swallows Home/End, so the
         // chat handles them even when a child already did.
