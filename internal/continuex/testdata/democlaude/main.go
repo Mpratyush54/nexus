@@ -1,8 +1,9 @@
 // democlaude is a scripted stand-in for Claude Code's stream-json mode, for
 // trying the desktop's live chats without a real agent (UI checks, demos,
 // screenshots). Put the built binary first on PATH as "claude" for an
-// isolated NEXUS_PROFILE instance. It never runs a command or edits a file:
-// tool calls are only described.
+// isolated NEXUS_PROFILE instance. It never runs a command, and it edits
+// files only when asked to "write" (for checkpoint and review checks):
+// other tool calls are only described.
 //
 // A reply streams word by word (DEMO_WORD_MS, default 90 ms), after a moment
 // of "thinking". Messages that mention "test" ask to run `npm test`, ones that
@@ -10,6 +11,11 @@
 // its permission host. --permission-mode acceptEdits skips the edit request
 // and bypassPermissions skips both, like the real CLI. An interrupt control
 // request ends the turn early.
+//
+// Messages that mention "write" really change the folder it runs in (use a
+// throwaway one): src/retry.ts gets two edits far apart (two hunks) and
+// docs/retries.md is created, each reported as an Edit/Write tool call.
+// Outside acceptEdits/bypassPermissions it asks before writing.
 package main
 
 import (
@@ -175,6 +181,12 @@ func turn(session, text string, seq int, delay time.Duration, interrupts <-chan 
 			return
 		}
 	}
+	if strings.Contains(lower, "write") {
+		block()
+		if !writeFiles(session, seq, answers, interrupts) {
+			return
+		}
+	}
 	body := "Here is what I found. The retry path reuses the same order key, so a second charge can't happen; " +
 		"the duplicate came from a client that generated a fresh key on every attempt. I kept the change small and covered it with a test. " +
 		"Nothing else in the checkout flow needs to change, and the logs now carry the request ID on every line."
@@ -207,4 +219,62 @@ func ask(session string, seq int, tool string, input map[string]any, answers <-c
 		emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "result": "interrupted", "session_id": session})
 		return false
 	}
+}
+
+// writeFiles makes real, small edits in the current folder.
+func writeFiles(session string, seq int, answers <-chan string, interrupts <-chan struct{}) bool {
+	cwd, _ := os.Getwd()
+	retry := filepath.Join(cwd, "src", "retry.ts")
+	old, err := os.ReadFile(retry)
+	text := string(old)
+	if err != nil {
+		text = "// Retries for the checkout client.\n"
+		for i := 1; i <= 12; i++ {
+			text += fmt.Sprintf("// line %d\n", i)
+		}
+		text += "const MAX_RETRIES = 5;\n"
+	}
+	next := strings.Replace(text, "const MAX_RETRIES = 5;", "const MAX_RETRIES = 3; // retries reuse order_key", 1)
+	if !strings.Contains(next, "BACKOFF_MS") {
+		next = "import { orderKey } from './orders';\n" + next + "export const BACKOFF_MS = 250;\n"
+	}
+	docs := filepath.Join(cwd, "docs", "retries.md")
+	steps := []struct {
+		tool, path, content string
+		input               map[string]any
+	}{
+		{"Edit", retry, next, map[string]any{"file_path": retry, "old_string": "const MAX_RETRIES = 5;", "new_string": "const MAX_RETRIES = 3;"}},
+		{"Write", docs, "# Retries\n\nClient retries reuse the same order key, so a retry can't charge twice.\n", nil},
+	}
+	for i, st := range steps {
+		input := st.input
+		if input == nil {
+			input = map[string]any{"file_path": st.path, "content": st.content}
+		}
+		id := fmt.Sprintf("tool-%d-write-%d", seq, i)
+		emit(map[string]any{"type": "assistant", "session_id": session, "message": map[string]any{"id": id + "-use", "content": []any{map[string]any{"type": "tool_use", "id": id, "name": st.tool, "input": input}}}})
+		allowed := true
+		if mode != "acceptEdits" && mode != "bypassPermissions" {
+			emit(map[string]any{"type": "control_request", "request_id": "perm-" + id, "request": map[string]any{"subtype": "can_use_tool", "tool_use_id": id, "tool_name": st.tool, "input": input}})
+			select {
+			case behavior := <-answers:
+				allowed = behavior == "allow"
+			case <-interrupts:
+				emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true, "result": "interrupted", "session_id": session})
+				return false
+			}
+		}
+		result := "The user declined this action."
+		if allowed {
+			_ = os.MkdirAll(filepath.Dir(st.path), 0o755)
+			if err := os.WriteFile(st.path, []byte(st.content), 0o644); err != nil {
+				result = err.Error()
+				allowed = false
+			} else {
+				result = "The file " + st.path + " has been updated."
+			}
+		}
+		emit(map[string]any{"type": "user", "session_id": session, "message": map[string]any{"content": []any{map[string]any{"type": "tool_result", "tool_use_id": id, "content": []any{map[string]any{"type": "text", "text": result}}, "is_error": !allowed}}}})
+	}
+	return true
 }

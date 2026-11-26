@@ -162,7 +162,9 @@ public sealed partial class SessionPage
                 _chat.Children.Insert(++streamIndex, activityView.View);
             }
             var changes = StringArray(result, "file_changes");
-            if (changes.Count > 0) _chat.Children.Insert(streamIndex + 1, FileChangesExpander(changes, result));
+            // A checkpointed turn gets the Review changes card (SessionPage.Review.cs) instead of the read-only list.
+            if (ReviewCardForTurn(result) is { } review) _chat.Children.Insert(streamIndex + 1, review);
+            else if (changes.Count > 0) _chat.Children.Insert(streamIndex + 1, FileChangesExpander(changes, result));
         }
         var returnedNativeID = NxJson.Text(result, "native_id");
         if (returnedNativeID.Length > 0)

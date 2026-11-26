@@ -29,6 +29,19 @@ package main
 //	live.rules.remove {project, tool, prefix?}
 //	live.rules.default {mode}
 //
+// Checkpoints (internal/checkpoint): each turn snapshots the project folder
+// first, so a chat can go back to before any message and a turn's changes
+// can be reviewed hunk by hunk. message_id is the saved user message index
+// (user_idx), a checkpoint id or an exchange id; "" means the latest.
+//
+//	live.checkpoints  {session_id}                   -> {checkpoints, rewinds}
+//	live.review       {checkpoint_id}                -> {files, pending, added, removed, ...}
+//	live.review.keep  {checkpoint_id, path?, hunk?, version?}  path "" = all
+//	live.review.undo  {checkpoint_id, path?, hunk?, version?}  path "" = all
+//	live.rewind.preview {session_id, message_id?}    -> {checkpoint_id, files, later}
+//	live.rewind       {session_id, message_id?}      -> {rewind, restored, failed}
+//	live.rewind.undo  {session_id, undo_id}          -> {restored}
+//
 // Events: {"type":"live.event", session_id, seq, kind, ...} while a turn
 // streams, live.turn_started, live.recorded when the turn is saved,
 // live.status when a chat's status changes, live.followups.
@@ -45,6 +58,7 @@ import (
 
 	"central-memory/internal/agentrun"
 	"central-memory/internal/chatstatus"
+	"central-memory/internal/checkpoint"
 	"central-memory/internal/continuex"
 	"central-memory/internal/core"
 	"central-memory/internal/daemon"
@@ -90,6 +104,9 @@ func liveManager() *agentrun.Manager {
 			Start:    startLiveAgent,
 			Record:   recordLiveTurn,
 			Emit:     func(e map[string]any) { emitCoreEvent(e); publisher.Note(e) },
+			// Under the profile's data folder (LOCALAPPDATA/Nexus follows
+			// NEXUS_PROFILE), beside logs/.
+			Checkpoints: checkpoint.Open(filepath.Join(liveDataDir(), "checkpoints"), checkpoint.Options{}),
 		})
 		publisher.List = func() []chatstatus.Report { return liveStatusReports(m.List()) }
 		publisher.Read = m.Seen
@@ -125,14 +142,19 @@ func liveStatusReports(list map[string]any) []chatstatus.Report {
 }
 
 func liveStateDir() string {
-	base := strings.TrimSpace(diagBase)
-	if base == "" {
-		base = diagnostics.DefaultDir()
-	}
+	base := liveDataDir()
 	if base == "" {
 		return ""
 	}
 	return filepath.Join(base, "agent-sessions")
+}
+
+func liveDataDir() string {
+	base := strings.TrimSpace(diagBase)
+	if base == "" {
+		base = diagnostics.DefaultDir()
+	}
+	return base
 }
 
 func normalizeLiveAgent(agent string) string {
@@ -158,6 +180,12 @@ func liveCall(name string, args json.RawMessage) (any, error) {
 		Project        string `json:"project"`
 		Tool           string `json:"tool"`
 		Prefix         string `json:"prefix"`
+		CheckpointID   string `json:"checkpoint_id"`
+		MessageID      string `json:"message_id"`
+		Path           string `json:"path"`
+		Hunk           *int   `json:"hunk"`
+		Version        string `json:"version"`
+		UndoID         string `json:"undo_id"`
 	}
 	if len(args) > 0 {
 		if err := json.Unmarshal(args, &body); err != nil {
@@ -219,10 +247,55 @@ func liveCall(name string, args json.RawMessage) (any, error) {
 		return map[string]any{"default_mode": m.Rules.DefaultMode(), "projects": m.Rules.All()}, nil
 	case "live.rules.remove":
 		return map[string]any{"removed": true}, m.Rules.Remove(body.Project, agentrun.Rule{Tool: body.Tool, Prefix: body.Prefix})
+	case "live.checkpoints":
+		return liveCheckpoints(m, id)
+	case "live.review", "live.review.keep", "live.review.undo":
+		store := m.Checkpoints()
+		if store == nil {
+			return nil, errors.New("Checkpoints are off in this copy of Nexus")
+		}
+		hunk := -1
+		if body.Hunk != nil {
+			hunk = *body.Hunk
+		}
+		switch name {
+		case "live.review.keep":
+			return store.Keep(body.CheckpointID, body.Path, hunk, body.Version)
+		case "live.review.undo":
+			return store.Undo(body.CheckpointID, body.Path, hunk, body.Version)
+		}
+		return store.Review(body.CheckpointID)
+	case "live.rewind.preview":
+		return m.PreviewRewind(id, body.MessageID)
+	case "live.rewind":
+		return m.RewindTo(id, body.MessageID)
+	case "live.rewind.undo":
+		put, err := m.UndoRewind(id, body.UndoID)
+		return map[string]any{"restored": put}, err
 	case "live.rules.default":
 		return map[string]any{"default_mode": agentrun.NormalizeMode(body.Mode)}, m.Rules.SetDefaultMode(body.Mode)
 	}
 	return nil, errors.New("unknown live method " + name)
+}
+
+// liveCheckpoints lists a chat's restorable messages and its rewinds.
+func liveCheckpoints(m *agentrun.Manager, sessionID string) (any, error) {
+	store := m.Checkpoints()
+	if store == nil || sessionID == "" {
+		return map[string]any{"checkpoints": []any{}, "rewinds": []any{}}, nil
+	}
+	list := []map[string]any{}
+	for _, cp := range store.List(sessionID) {
+		list = append(list, map[string]any{
+			"id": cp.ID, "user_idx": cp.UserIdx, "exchange_id": cp.ExchangeID, "created_at": cp.CreatedAt,
+			"done": cp.Done, "changed": len(cp.Changed), "rewound": cp.Rewound,
+		})
+	}
+	rewinds := store.Rewinds(sessionID)
+	if rewinds == nil {
+		rewinds = []checkpoint.Rewind{}
+	}
+	return map[string]any{"checkpoints": list, "rewinds": rewinds}, nil
 }
 
 // validateLiveSend checks a message before the manager takes it.

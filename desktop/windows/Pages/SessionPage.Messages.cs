@@ -81,6 +81,7 @@ public sealed partial class SessionPage
             selectMenu.Items.Add(copySelection);
             selectMenu.Items.Add(select);
             selectMenu.Items.Add(copyItem);
+            if (fromUser) AddRestoreMenuItem(selectMenu, root);
             view.ContextFlyout = selectMenu;
             // Like T3 Code: no "You"/agent label on every turn; alignment and the
             // user block's fill say who wrote it. The name stays for screen readers.
@@ -95,7 +96,9 @@ public sealed partial class SessionPage
             var actions = new MessageActionRow(fromUser, () => content,
                 edit: fromUser ? () => EditMessage(content) : null,
                 retry: fromUser ? null : () => RetryReplyAsync(root),
-                fork: () => ForkFromMessageAsync(root));
+                fork: () => ForkFromMessageAsync(root),
+                restore: fromUser ? () => RestoreFromMessageAsync(root) : null,
+                canRestore: fromUser ? () => CanRestoreMessage(root) : null);
             // Transparent, not null: the whole message (gaps too) takes hover.
             var stack = new StackPanel { HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Stretch, Background = TransparentBrush };
             stack.Children.Add(bubble);

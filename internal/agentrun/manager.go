@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"central-memory/internal/checkpoint"
 	"central-memory/internal/continuex"
 	"central-memory/internal/usage"
 )
@@ -43,6 +44,8 @@ type TurnRecord struct {
 	Files                                 []string
 	Activities                            []continuex.ToolActivity
 	Usage                                 []usage.Entry
+	// Checkpoint is the snapshot taken before the turn ("" when none).
+	Checkpoint string
 }
 
 // Config wires a Manager to the agents, the transcript store and the UI.
@@ -61,6 +64,10 @@ type Config struct {
 	// DeltaFlush batches text deltas (default 50 ms).
 	DeltaFlush time.Duration
 	Now        func() time.Time
+	// Checkpoints, when set, snapshots the project folder before each
+	// turn, so the chat can be restored to before any message and a
+	// turn's changes reviewed hunk by hunk.
+	Checkpoints *checkpoint.Store
 }
 
 // SendRequest is one message from the composer.
@@ -132,6 +139,7 @@ type turn struct {
 	streamed   strings.Builder
 	activities []continuex.ToolActivity
 	files      []string
+	checkpoint string // snapshot taken before the agent got the message
 }
 
 // runningRecord is what survives a restart for a turn that was running.
@@ -344,6 +352,7 @@ func (m *Manager) nextFollowupLocked(s *session) {
 // then sends the message. A changed agent, model, folder or native mode
 // restarts the process on the same agent session, so context carries over.
 func (m *Manager) launch(s *session, req SendRequest) error {
+	m.takeCheckpoint(s, req)
 	nativeMode := NativeMode(req.Agent, req.Mode)
 	m.mu.Lock()
 	old := s.live
@@ -539,12 +548,16 @@ func (m *Manager) handle(s *session, live continuex.LiveSession, gen int, ev con
 		s.clearPending()
 		rec, problem := t.finish(s, live, ev)
 		m.mu.Unlock()
+		changed := m.finishCheckpoint(t)
 		var result any
 		var err error
 		if problem == "" && t != nil {
+			rec.Checkpoint = t.checkpoint
 			result, err = m.cfg.Record(rec)
 			if err != nil {
 				problem = err.Error()
+			} else {
+				result = m.linkCheckpoint(t, result, changed)
 			}
 		}
 		m.mu.Lock()
