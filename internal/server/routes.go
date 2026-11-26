@@ -59,6 +59,7 @@ func (s *Server) registerRoutes() {
 	s.registerMemoryGraphRoutes()
 	s.registerCloudContractRoutes()
 	s.registerSessionDeleteRoutes()
+	s.registerSessionStateRoutes()
 	s.registerOpsRoutes()
 	s.registerDesktopExecutionRoutes()
 	s.registerDiagnosticsRoutes()

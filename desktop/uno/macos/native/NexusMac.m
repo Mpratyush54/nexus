@@ -16,14 +16,17 @@
 //   - Dock reopen, nexus:// URL events, and a Quit that goes through the app's
 //     own shutdown;
 //   - showing and hiding the Uno window (closing hides it while the item exists);
-//   - App Translocation lookup and Move to Trash, for "Move to Applications".
+//   - App Translocation lookup and Move to Trash, for "Move to Applications";
+//   - the quick-ask global hotkey (Carbon RegisterEventHotKey: no Accessibility
+//     permission needed, released when the process exits).
 //
 // Build (universal):
 //   clang -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -fobjc-arc -dynamiclib \
-//     -framework AppKit -framework CoreServices -install_name @rpath/libnexusmac.dylib \
+//     -framework AppKit -framework Carbon -framework CoreServices -install_name @rpath/libnexusmac.dylib \
 //     -framework Speech -framework AVFoundation -o libnexusmac.dylib NexusMac.m NexusDictation.m
 
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
 #import <CoreServices/CoreServices.h>
 #import <objc/runtime.h>
 #import <UserNotifications/UserNotifications.h>
@@ -51,11 +54,17 @@ enum {
     NXCopy = 15,
     NXPaste = 16,
     NXSelectAll = 17,
+    NXQuickAsk = 18,
 };
 
 // Virtual key codes (Carbon HIToolbox kVK_ANSI_*), for menu-chosen shortcuts.
 enum {
     NXKeyF = 3,
+    NXKeyB = 11,
+    NXKeyEqual = 24,
+    NXKeyMinus = 27,
+    NXKey0 = 29,
+    NXKeySlash = 44,
 };
 
 static nx_command_fn s_command;
@@ -452,6 +461,14 @@ static void nx_build_main_menu(void)
     [edit addItem:[NSMenuItem separatorItem]];
     nx_shortcut_item(edit, @"Find", @"f", cmd, NXKeyF, @"performTextFinderAction:");
 
+    // View: forwarded as key presses, so the app's own shortcuts handle them.
+    NSMenu *view = nx_submenu(bar, @"View");
+    nx_shortcut_item(view, @"Show or Hide Sidebar", @"b", cmd, NXKeyB, nil);
+    [view addItem:[NSMenuItem separatorItem]];
+    nx_shortcut_item(view, @"Bigger Text", @"=", cmd, NXKeyEqual, nil);
+    nx_shortcut_item(view, @"Smaller Text", @"-", cmd, NXKeyMinus, nil);
+    nx_shortcut_item(view, @"Default Text Size", @"0", cmd, NXKey0, nil);
+
     NSMenu *window = nx_submenu(bar, @"Window");
     nx_item(window, @"Minimize", @selector(performMiniaturize:), nil, @"m", cmd);
     nx_item(window, @"Zoom", @selector(performZoom:), nil, nil, 0);
@@ -460,6 +477,7 @@ static void nx_build_main_menu(void)
     NSApp.windowsMenu = window;
 
     NSMenu *help = nx_submenu(bar, @"Help");
+    nx_shortcut_item(help, @"Keyboard Shortcuts", @"/", cmd, NXKeySlash, nil);
     nx_command_item(help, @"Report a Problem…", NXReport, nil, 0);
     NSApp.helpMenu = help;
 
@@ -492,6 +510,7 @@ static void nx_build_status_item(void)
     s_agentsSeparator.hidden = YES;
     [menu addItem:s_agentsSeparator];
     nx_command_item(menu, @"Open Nexus", NXOpen, nil, 0);
+    nx_command_item(menu, @"Quick Ask…", NXQuickAsk, nil, 0);
     [menu addItem:[NSMenuItem separatorItem]];
     s_stateItem = nx_item(menu, @"Capturing", nil, nil, nil, 0);
     s_stateItem.enabled = NO;
@@ -752,5 +771,55 @@ void nx_mac_set_agents(const char *summary)
         s_agentsItem.hidden = s_agentsText.length == 0;
         s_agentsSeparator.hidden = s_agentsItem.hidden;
         nx_apply_capture_state();
+    });
+}
+
+// ---- Quick-ask hotkey -------------------------------------------------------------
+
+typedef void (*nx_hotkey_fn)(void);
+static nx_hotkey_fn s_hotkeyCallback;
+static EventHotKeyRef s_hotkey;
+static EventHandlerRef s_hotkeyHandler;
+
+static OSStatus nx_hotkey_pressed(EventHandlerCallRef next, EventRef event, void *data)
+{
+    if (s_hotkeyCallback != NULL) s_hotkeyCallback();
+    return noErr;
+}
+
+// keyCode: a kVK_* virtual key; modifiers: Carbon cmdKey/shiftKey/optionKey/controlKey.
+// Returns 0, or the Carbon error (eventHotKeyExistsErr -9878 when another app has it).
+__attribute__((visibility("default")))
+int32_t nx_mac_register_hotkey(uint32_t keyCode, uint32_t modifiers, nx_hotkey_fn callback)
+{
+    __block OSStatus status = noErr;
+    dispatch_block_t work = ^{
+        if (s_hotkey != NULL) {
+            UnregisterEventHotKey(s_hotkey);
+            s_hotkey = NULL;
+        }
+        s_hotkeyCallback = callback;
+        if (s_hotkeyHandler == NULL) {
+            EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
+            status = InstallApplicationEventHandler(&nx_hotkey_pressed, 1, &spec, NULL, &s_hotkeyHandler);
+            if (status != noErr) return;
+        }
+        EventHotKeyID hotKeyID = { 'NXQA', 1 };
+        status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &s_hotkey);
+        if (status != noErr) s_hotkey = NULL;
+        NSLog(@"[nexus-mac] quick-ask hotkey key=%u mods=0x%x status=%d", keyCode, modifiers, (int)status);
+    };
+    if ([NSThread isMainThread]) work(); else dispatch_sync(dispatch_get_main_queue(), work);
+    return (int32_t)status;
+}
+
+__attribute__((visibility("default")))
+void nx_mac_unregister_hotkey(void)
+{
+    nx_on_main(^{
+        if (s_hotkey != NULL) {
+            UnregisterEventHotKey(s_hotkey);
+            s_hotkey = NULL;
+        }
     });
 }

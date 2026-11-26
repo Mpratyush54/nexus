@@ -105,6 +105,11 @@ type TimelineItem struct {
 	ParentSessionID string `json:"parent_session_id,omitempty"`
 	// SubagentCount is how many sub-agent runs this chat started.
 	SubagentCount int `json:"subagent_count,omitempty"`
+	// The viewer's own state (SessionUserStateStore): Pinned and Archived,
+	// and Renamed when Title is the viewer's custom title.
+	Pinned   bool `json:"pinned,omitempty"`
+	Archived bool `json:"archived,omitempty"`
+	Renamed  bool `json:"renamed,omitempty"`
 }
 
 // TimelineQuery filters GET /v1/timeline.
