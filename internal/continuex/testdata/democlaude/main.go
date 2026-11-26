@@ -122,9 +122,14 @@ func turn(session, text string, seq int, delay time.Duration, interrupts <-chan 
 			return false
 		}
 	}
+	// DEMO_THINK_MS sets each thinking step's pause (default 300 ms).
+	think := 300 * time.Millisecond
+	if ms, err := strconv.Atoi(os.Getenv("DEMO_THINK_MS")); err == nil && ms > 0 {
+		think = time.Duration(ms) * time.Millisecond
+	}
 	for _, t := range []string{"Looking at ", "the request ", "and the project…"} {
 		emit(map[string]any{"type": "stream_event", "event": map[string]any{"type": "content_block_delta", "delta": map[string]any{"type": "thinking_delta", "thinking": t}}})
-		time.Sleep(300 * time.Millisecond)
+		time.Sleep(think)
 	}
 	// Like Claude Code, each text block (before a tool, and the last one)
 	// ends with its own assistant message.
@@ -174,6 +179,10 @@ func turn(session, text string, seq int, delay time.Duration, interrupts <-chan 
 		"the duplicate came from a client that generated a fresh key on every attempt. I kept the change small and covered it with a test. " +
 		"Nothing else in the checkout flow needs to change, and the logs now carry the request ID on every line."
 	if !say(body) {
+		return
+	}
+	// Messages that mention "code" end with a fenced code block.
+	if strings.Contains(lower, "code") && !say("\n\n```go\nfunc chargeOnce(key string) error {\n\treturn orders.CreateIdempotent(key)\n}\n```\n") {
 		return
 	}
 	block()

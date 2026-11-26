@@ -267,7 +267,8 @@ public sealed partial class SessionPage : NexusPage
         composerFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetColumn(_harness, 3);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_access, "Permission");
-        var modelPicker = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3, Children = { _model, _refreshModels, _accessWarning, _access } };
+        var modelPicker = _modelPickerRow;
+        foreach (var item in new FrameworkElement[] { _model, _refreshModels, _accessWarning, _access }) modelPicker.Children.Add(item);
         _harness.SelectionChanged += (_, _) => _access.Visibility = SupportsLive(SelectedHarness()) ? Visibility.Visible : Visibility.Collapsed;
         Grid.SetColumn(modelPicker, 4);
         Grid.SetColumn(_workspaceMenu, 1);
@@ -3049,6 +3050,7 @@ public sealed partial class SessionPage : NexusPage
     // the pickers tighten, then the refresh button and the access picker
     // go. Send is never pushed off the edge.
     private readonly Grid _composerFooter = new();
+    private readonly StackPanel _modelPickerRow = new() { Orientation = Orientation.Horizontal, Spacing = 3 };
     private const double FooterSpacing = 6;
     private const double FolderLabelMinWidth = 96;
     private const double FolderIconWidth = 36;
@@ -3085,7 +3087,7 @@ public sealed partial class SessionPage : NexusPage
         // between its seven columns.
         double Fixed()
         {
-            var width = FooterSpacing * (_composerFooter.ColumnDefinitions.Count - 1);
+            var width = _composerFooter.ColumnSpacing * (_composerFooter.ColumnDefinitions.Count - 1);
             foreach (var child in _composerFooter.Children.OfType<FrameworkElement>())
                 if (!ReferenceEquals(child, _workspaceMenu)) width += Desired(child);
             return width;
@@ -3093,7 +3095,9 @@ public sealed partial class SessionPage : NexusPage
         void Apply(int level)
         {
             // 0 roomy, 1 tight pickers, 2 no refresh button, 3 narrow model,
-            // 4 no access picker.
+            // 4 narrow access picker, 5 no access picker, 6 no model picker,
+            // 7 no agent picker (a very narrow window keeps attach, dictation
+            // and Send usable).
             _harness.MinWidth = harnessFit;
             _harness.MaxWidth = Math.Max(level == 0 ? 160 : harnessFit, harnessFit);
             _model.MinWidth = level >= 3 ? 104 : level >= 1 ? 140 : 150;
@@ -3101,13 +3105,18 @@ public sealed partial class SessionPage : NexusPage
             _sendHere.MinWidth = 32;
             _sendHere.Padding = level == 0 ? new Thickness(10, 5, 12, 5) : new Thickness(7);
             _refreshModels.Visibility = level >= 2 ? Visibility.Collapsed : Visibility.Visible;
-            _access.Visibility = accessWanted && level < 4 ? Visibility.Visible : Visibility.Collapsed;
+            _access.MaxWidth = level >= 4 ? 136 : double.PositiveInfinity;
+            _access.Visibility = accessWanted && level < 5 ? Visibility.Visible : Visibility.Collapsed;
+            _modelPickerRow.Visibility = level >= 6 ? Visibility.Collapsed : Visibility.Visible;
+            _harness.Visibility = level >= 7 ? Visibility.Collapsed : Visibility.Visible;
+            // Empty columns still take the gap; the buttons' own padding spaces them.
+            _composerFooter.ColumnSpacing = level >= 6 ? 0 : FooterSpacing;
         }
         _footerLayoutRunning = true;
         try
         {
             var icon = true;
-            for (var level = 0; level <= 4; level++)
+            for (var level = 0; level <= 7; level++)
             {
                 Apply(level);
                 var left = available - Fixed();
