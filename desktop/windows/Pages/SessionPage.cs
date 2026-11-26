@@ -267,9 +267,9 @@ public sealed partial class SessionPage : NexusPage
         composerFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetColumn(_harness, 3);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_access, "Permission");
-        var modelPicker = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3, Children = { _model, _refreshModels, _access } };
-        ToolTipService.SetToolTip(_access, "Ask before changes: approve each file edit and command.\nAuto-accept edits: file edits run without asking; commands still ask.");
-        _harness.SelectionChanged += (_, _) => _access.Visibility = SelectedHarness() == "claude" ? Visibility.Visible : Visibility.Collapsed;
+        var modelPicker = _modelPickerRow;
+        foreach (var item in new FrameworkElement[] { _model, _refreshModels, _accessWarning, _access }) modelPicker.Children.Add(item);
+        _harness.SelectionChanged += (_, _) => _access.Visibility = SupportsLive(SelectedHarness()) ? Visibility.Visible : Visibility.Collapsed;
         Grid.SetColumn(modelPicker, 4);
         Grid.SetColumn(_workspaceMenu, 1);
         Grid.SetColumn(_attachImage, 0);
@@ -322,6 +322,9 @@ public sealed partial class SessionPage : NexusPage
         _attachmentsLabel.FontSize = 11;
         _attachmentsLabel.Visibility = Visibility.Collapsed;
         _composer.Children.Add(_composerStatus);
+        InitLiveComposer();
+        VoiceInput.Attach(_prompt, _sendHere);
+        InitComposer();
         UpdateWorkspaceFlyoutVisibility();
         _chatTabBtn = SessionTabButton("Chat");
         _activityTabBtn = SessionTabButton("Activity");
@@ -542,8 +545,8 @@ public sealed partial class SessionPage : NexusPage
         root.Children.Add(head);
         root.Children.Add(body);
         Content = root;
-        Loaded += (_, _) => { ShellState.Changed += HandleShellChanged; App.Core.EventReceived += HandleCoreEvent; UpdateActions(); AgentAvailabilityService.Changed += OnAgentsChanged; AgentAvailabilityService.Refresh(); };
-        Unloaded += (_, _) => { ShellState.Changed -= HandleShellChanged; App.Core.EventReceived -= HandleCoreEvent; AgentAvailabilityService.Changed -= OnAgentsChanged; _ = CloseLiveAsync(); };
+        Loaded += (_, _) => { ShellState.Changed += HandleShellChanged; App.Core.EventReceived += HandleCoreEvent; UpdateActions(); AgentAvailabilityService.Changed += OnAgentsChanged; AgentAvailabilityService.Refresh(); _ = ReattachLiveAsync(); };
+        Unloaded += (_, _) => { ShellState.Changed -= HandleShellChanged; App.Core.EventReceived -= HandleCoreEvent; AgentAvailabilityService.Changed -= OnAgentsChanged; DetachLiveView(); };
         UpdateActions();
     }
 
@@ -557,7 +560,14 @@ public sealed partial class SessionPage : NexusPage
             return;
         }
         var generation = ++_loadGeneration;
-        if (nextId != _id) _ = CloseLiveAsync();
+        StashDraft();
+        if (nextId != _id)
+        {
+            // The agent keeps working in the core; this page just stops showing it.
+            DetachLiveView();
+            RenderFollowups(default);
+            ShowResumeBanner(default);
+        }
         RememberScrollPosition();
         _id = nextId;
         // A newly opened chat starts pinned to its newest message.
@@ -583,6 +593,7 @@ public sealed partial class SessionPage : NexusPage
         _prompt.Text = "";
         _continuationContext = "";
         ClearImageAttachments();
+        RestoreDraft();
         _harness.Items.Clear();
         _workspace.Text = "";
         _agent = "";
@@ -631,6 +642,7 @@ public sealed partial class SessionPage : NexusPage
             System.Diagnostics.Trace.WriteLine($"[perf] session {_id}: open-to-first-message {watch.ElapsedMilliseconds} ms (from memory)");
         }
         _ = LoadThenStartAsync(generation, quiet: painted);
+        FocusComposerSoon(force: true);
     }
 
     // Set by Home's "start a chat" composer: once the new chat has loaded,
@@ -649,6 +661,11 @@ public sealed partial class SessionPage : NexusPage
             if (generation != _loadGeneration) return;
             if (folder.Length > 0 && _workspace.Text.Trim().Length == 0) { _workspace.Text = folder; UpdateActions(); }
         }
+        LoadPermissionMode();
+        // A turn still running (or stopped by a restart) shows up again.
+        await AttachLiveAsync();
+        if (generation != _loadGeneration) return;
+        FocusComposerSoon(force: false);
         if (PendingStart is not { } start || start.SessionId != _id) return;
         PendingStart = null;
         if (!_sessionLoaded) return;
@@ -2090,30 +2107,7 @@ public sealed partial class SessionPage : NexusPage
         }
     }
 
-    private static UIElement ThinkingBlock(string content)
-    {
-        var stack = new StackPanel { Spacing = 4 };
-        stack.Children.Add(SessionChatRender.RoleLabel("Thinking"));
-        stack.Children.Add(new Border
-        {
-            Margin = SessionChatRender.AuxIndent,
-            Padding = new Thickness(10, 8, 12, 8),
-            BorderThickness = new Thickness(2, 0, 0, 0),
-            BorderBrush = SessionChatRender.AuxAccent,
-            Background = SessionChatRender.SubtleFill,
-            CornerRadius = new CornerRadius(4),
-            Child = new TextBlock
-            {
-                Text = NxJson.Scrub(content),
-                TextWrapping = TextWrapping.Wrap,
-                IsTextSelectionEnabled = true,
-                FontSize = 12.5,
-                Opacity = 0.72,
-                LineHeight = 18
-            }
-        });
-        return stack;
-    }
+    private static UIElement ThinkingBlock(string content) => new ThinkingView(content).View;
 
     private static string CommandKey(string command) =>
         Regex.Replace(command.Trim(), "\\s+", " ");
@@ -2442,33 +2436,6 @@ public sealed partial class SessionPage : NexusPage
         _ = DispatcherQueue.TryEnqueue(() => _ = DispatcherQueue.TryEnqueue(Scroll));
     }
 
-    private UIElement ChatMessage(string role, string content, string? assistantAgent = null, HarnessMessage? extras = null)
-    {
-        var strip = extras is null ? null : MessageExtras(extras);
-        if (strip is not null && content.Trim().Length == 0)
-        {
-            // Only attachments (an image sent without text): no empty bubble.
-            strip.HorizontalAlignment = role.Equals("user", StringComparison.OrdinalIgnoreCase) ? HorizontalAlignment.Right : HorizontalAlignment.Left;
-            return new Border { Child = strip, HorizontalAlignment = strip.HorizontalAlignment, BorderThickness = new Thickness(0) };
-        }
-        var bubble = ChatBubble(role, content, assistantAgent);
-        if (strip is null || bubble is not Border border) return bubble;
-        // Attachment chips and the context pill sit under the bubble; the
-        // outer Border stays the anchor that find / prompt jumps highlight.
-        var stack = new StackPanel { Spacing = 6, HorizontalAlignment = border.HorizontalAlignment };
-        stack.Children.Add(bubble);
-        strip.HorizontalAlignment = border.HorizontalAlignment;
-        stack.Children.Add(strip);
-        return new Border
-        {
-            Child = stack,
-            CornerRadius = new CornerRadius(14),
-            HorizontalAlignment = border.HorizontalAlignment,
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-            BorderThickness = new Thickness(0)
-        };
-    }
-
     // Thumbnails for images still on disk, a chip for anything else (Codex
     // pastes land in %TEMP% and are often gone), and a collapsed "Context"
     // pill for ambient state the harness sent with the request.
@@ -2534,157 +2501,11 @@ public sealed partial class SessionPage : NexusPage
         catch (Exception) { return false; }
     }
 
-    private UIElement ChatBubble(string role, string content, string? assistantAgent)
-    {
-        var fromUser = role.Equals("user", StringComparison.OrdinalIgnoreCase);
-        var label = fromUser ? "You" : Nonempty(ChatTitles.AgentName(assistantAgent ?? _agent), "Assistant");
-        var message = new StackPanel { Spacing = 6 };
-        var document = FormattedMessage(content);
-        var actions = new Grid();
-        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        // Like T3 Code: no "You"/agent label on every turn; alignment and the
-        // user block's fill say who wrote it. The label stays for screen readers.
-        var roleLabel = SessionChatRender.RoleLabel(label);
-        roleLabel.Visibility = Visibility.Collapsed;
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(message, label);
-        actions.Children.Add(roleLabel);
-        var copy = new Button { Content = new FontIcon { Glyph = "\uE8C8", FontSize = 12 }, Padding = new Thickness(5), MinWidth = 26, MinHeight = 24, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
-        ToolTipService.SetToolTip(copy, "Copy whole message");
-        copy.Click += (_, _) => { var data = new DataPackage(); data.SetText(content); Clipboard.SetContent(data); };
-        Grid.SetColumn(copy, 1); actions.Children.Add(copy);
-        copy.Opacity = 0;
-        actions.Height = 0;
-        message.PointerEntered += (_, _) => copy.Opacity = 0.7;
-        message.PointerExited += (_, _) => copy.Opacity = 0;
-        var selectMenu = new MenuFlyout();
-        var copySelection = new MenuFlyoutItem { Text = "Copy selection" };
-        copySelection.Click += (_, _) => { if (document.SelectedText.Length == 0) return; var data = new DataPackage(); data.SetText(document.SelectedText); Clipboard.SetContent(data); };
-        selectMenu.Opening += (_, _) => copySelection.IsEnabled = document.SelectedText.Length > 0;
-        var select = new MenuFlyoutItem { Text = "Select whole message" };
-        select.Click += (_, _) => document.SelectAll();
-        var copyItem = new MenuFlyoutItem { Text = "Copy whole message" };
-        copyItem.Click += (_, _) => { var data = new DataPackage(); data.SetText(content); Clipboard.SetContent(data); };
-        selectMenu.Items.Add(copySelection); selectMenu.Items.Add(select); selectMenu.Items.Add(copyItem);
-        document.ContextFlyout = selectMenu;
-        message.Children.Add(actions);
-        message.Children.Add(document);
-        if (fromUser)
-        {
-            return new Border
-            {
-                Child = message,
-                Padding = SessionChatRender.UserBubblePad,
-                CornerRadius = new CornerRadius(14),
-                MaxWidth = 600,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                Background = NexusPalette.UserFill,
-                BorderThickness = new Thickness(0)
-            };
-        }
-        return new Border
-        {
-            Child = message,
-            Padding = SessionChatRender.AssistantPad,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-            BorderThickness = new Thickness(0)
-        };
-    }
-
     /// <summary>Elements in the chat column (memory log).</summary>
     internal int ChatElementCount => _chat.Children.Count;
 
-    internal static RichTextBlock FormattedMessage(string content)
-    {
-        Interlocked.Increment(ref Nexus.Core.Diagnostics.UiStats.RenderedMessages);
-        // One document per message: selection can cross every paragraph,
-        // heading, list item and code block without stopping at a control edge.
-        var document = new RichTextBlock { IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap, FontSize = 14, LineHeight = 22 };
-        var lines = content.Replace("\r\n", "\n").Split('\n');
-        var inCode = false;
-        for (var at = 0; at < lines.Length; at++)
-        {
-            var line = lines[at].TrimEnd();
-            // A markdown table: a header row, a |---|---| rule, then rows.
-            if (!inCode && SessionChatRender.IsTableRow(line) && at + 1 < lines.Length && SessionChatRender.IsTableRule(lines[at + 1]))
-            {
-                var rows = new List<string> { line };
-                var end = at + 2;
-                while (end < lines.Length && SessionChatRender.IsTableRow(lines[end].TrimEnd())) rows.Add(lines[end++].TrimEnd());
-#if HAS_UNO
-                // Uno has no InlineUIContainer; the shim takes the table as a block.
-                document.AddElement(SessionChatRender.Table(rows, AddInlineFormatting));
-#else
-                var table = new Paragraph { Margin = new Thickness(0, 4, 0, 10) };
-                table.Inlines.Add(new InlineUIContainer { Child = SessionChatRender.Table(rows, AddInlineFormatting) });
-                document.Blocks.Add(table);
-#endif
-                at = end - 1;
-                continue;
-            }
-            if (line.TrimStart().StartsWith("```", StringComparison.Ordinal))
-            {
-                inCode = !inCode;
-                continue;
-            }
-            var paragraph = new Paragraph { Margin = new Thickness(0, 0, 0, line.Length == 0 ? 4 : 5) };
-            if (inCode)
-            {
-                paragraph.FontFamily = new FontFamily("Cascadia Mono, Consolas");
-                paragraph.FontSize = 12.5;
-                paragraph.Foreground = Surface("TextFillColorSecondaryBrush", Windows.UI.Color.FromArgb(255, 212, 212, 212));
-                paragraph.Inlines.Add(new Run { Text = line.Length > 0 ? line : " " });
-                document.Blocks.Add(paragraph);
-                continue;
-            }
-            var trimmed = line.TrimStart();
-            var heading = Regex.Match(trimmed, "^#{1,6}\\s+(.+)$");
-            var bullet = Regex.Match(trimmed, "^(?:[-*+]\\s+|\\d+[.)]\\s+)(.+)$");
-            var quote = trimmed.StartsWith("> ", StringComparison.Ordinal);
-            var display = heading.Success ? heading.Groups[1].Value : bullet.Success ? "•  " + bullet.Groups[1].Value : quote ? trimmed[2..] : line;
-            paragraph.FontSize = heading.Success ? 15 : 14;
-            paragraph.FontWeight = heading.Success ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
-            if (heading.Success) paragraph.Margin = new Thickness(0, 8, 0, 4);
-            if (quote) paragraph.Foreground = NexusPalette.Teal;
-            AddInlineFormatting(paragraph.Inlines, display.Length > 0 ? display : " ");
-            document.Blocks.Add(paragraph);
-        }
-        // File references become links that open the chat's file preview.
-        FileLinks.Attach(document);
-        return document;
-    }
-
-    private static void AddInlineFormatting(InlineCollection inlines, string value)
-    {
-        var pattern = new Regex(@"(\*\*(.+?)\*\*|`(.+?)`|\[([^\]]+)\]\(([^)]+)\))");
-        var start = 0;
-        foreach (Match match in pattern.Matches(value))
-        {
-            if (match.Index > start) FileLinks.AddText(inlines, value[start..match.Index], mono: false);
-            if (match.Groups[2].Success)
-            {
-                // Bold may contain inline code or links; format its contents too.
-                var bold = new Span { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
-                AddInlineFormatting(bold.Inlines, match.Groups[2].Value);
-                inlines.Add(bold);
-            }
-            else if (match.Groups[3].Success)
-            {
-                FileLinks.AddText(inlines, match.Groups[3].Value, mono: true);
-            }
-            else if (FileRefs.ParseLinkTarget(match.Groups[5].Value) is { } target)
-            {
-                inlines.Add(FileLinks.Link(match.Groups[4].Value, target));
-            }
-            else
-            {
-                inlines.Add(new Run { Text = match.Groups[4].Value, Foreground = NexusPalette.Accent });
-            }
-            start = match.Index + match.Length;
-        }
-        if (start < value.Length) FileLinks.AddText(inlines, value[start..], mono: false);
-    }
+    // Markdown → one selectable document (see MarkdownView.cs).
+    internal static RichTextBlock FormattedMessage(string content) => MarkdownRender.Document(content);
 
     private void FillActivity(NxResponse files, NxResponse ops, NxResponse continuations)
     {
@@ -2887,7 +2708,7 @@ public sealed partial class SessionPage : NexusPage
         _teleport.IsEnabled = _sessionLoaded && !_legacy && _hasTransferableVersion && _workspaceHint.Length > 0 && !ShellState.Current.Offline;
         _resume.IsEnabled = _sessionLoaded && !_legacy && _nativeID.Length > 0 && _agent.Length > 0 && _agent.Trim().ToLowerInvariant() is not "cursor";
         var selected = SelectedHarness();
-        _sendHere.IsEnabled = _sessionLoaded && !_legacy && SupportsInAppReply(selected) && !_sendInFlight && System.IO.Directory.Exists(_workspace.Text.Trim());
+        _sendHere.IsEnabled = _sessionLoaded && !_legacy && SupportsInAppReply(selected) && (!_sendInFlight || LiveTurnActive) && System.IO.Directory.Exists(_workspace.Text.Trim());
         _attachImage.IsEnabled = _sendHere.IsEnabled;
         _prompt.IsEnabled = _sessionLoaded && !_legacy;
         _prompt.IsReadOnly = false;
@@ -2913,6 +2734,7 @@ public sealed partial class SessionPage : NexusPage
         ToolTipService.SetToolTip(_resume, _legacy ? "Older saved chats can only be read" : _nativeID.Length == 0 ? "This chat can't be picked up in the agent itself, but you can continue it here" : "Copies a command that picks this chat up in the agent itself");
         ToolTipService.SetToolTip(_teleport, _legacy ? "Archived snapshots cannot be teleported" : !_hasTransferableVersion ? "A complete or transcript-only version is required" : _workspaceHint.Length == 0 ? "This chat has no mapped workspace to package code from" : null);
         ToolTipService.SetToolTip(_fork, _legacy ? "Archived snapshots cannot be forked" : "Clone the captured conversation into a separate chat. The next message starts a new local agent session.");
+        UpdateComposerButton();
     }
 
     private async Task ForkChatAsync()
@@ -2955,18 +2777,29 @@ public sealed partial class SessionPage : NexusPage
         try
         {
             _model.Items.Clear();
-            _model.Items.Add(new ComboBoxItem { Content = "Default model", Tag = "" });
+            var catalog = _modelCatalogs.GetValueOrDefault(SelectedHarness());
+            _model.Items.Add(new ComboBoxItem { Content = DefaultModelLabel(), Tag = "" });
             _refreshModels.Visibility = Visibility.Visible;
             _refreshModels.IsEnabled = !_loadingModelAgents.Contains(SelectedHarness()) && !_sendInFlight;
-            _model.PlaceholderText = _loadingModelAgents.Contains(SelectedHarness()) && !_modelCatalogs.ContainsKey(SelectedHarness()) ? "Loading models…" : "Default model";
-            foreach (var choice in _modelCatalogs.GetValueOrDefault(SelectedHarness())?.Choices ?? Array.Empty<ModelPickerChoice>())
+            _model.PlaceholderText = _loadingModelAgents.Contains(SelectedHarness()) && catalog is null ? "Loading models…" : DefaultModelLabel();
+            foreach (var (header, choice) in catalog?.Rows() ?? Enumerable.Empty<(string, ModelPickerChoice?)>())
             {
+                if (choice is null)
+                {
+                    // Provider group header: not a model, not selectable.
+                    _model.Items.Add(new ComboBoxItem { Content = header, IsEnabled = false, FontSize = 11, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold, Padding = new Thickness(10, 8, 10, 2) });
+                    continue;
+                }
                 var item = new ComboBoxItem { Content = choice.Label, Tag = choice.ID };
                 ToolTipService.SetToolTip(item, choice.Description.Length > 0 ? choice.Description + "\n" + choice.ID : choice.ID);
                 _model.Items.Add(item);
             }
-            _model.SelectedIndex = -1;
-            _model.Text = _modelByHarness.GetValueOrDefault(SelectedHarness(), "");
+            // Select the remembered model (Default included) so the list opens
+            // at it; a typed ID the list doesn't have stays as text.
+            var remembered = RememberedModel(SelectedHarness());
+            var match = _model.Items.OfType<ComboBoxItem>().FirstOrDefault(i => i.IsEnabled && (i.Tag as string) == remembered);
+            _model.SelectedIndex = match is null ? -1 : _model.Items.IndexOf(match);
+            if (match is null) _model.Text = remembered;
         }
         finally { _configuringModel = false; }
         UpdateModelCatalogNotice();
@@ -3053,210 +2886,8 @@ public sealed partial class SessionPage : NexusPage
         return joined.Length > 6000 ? joined[^6000..] : joined;
     }
 
-    private async Task SendHereAsync()
-    {
-        if (_sendInFlight || _preparingHarness)
-        {
-            return;
-        }
-        var typed = _prompt.Text.Trim();
-        if (typed.Length == 0) { SetComposerStatus(_images.Count + _files.Count > 0 ? "Add a message to send with your attachments." : "Write a follow-up first."); return; }
-        if (_viewingHistoricalPage)
-        {
-            await ReturnToLatestAsync();
-            if (_viewingHistoricalPage)
-            {
-                SetComposerStatus("Could not return to the latest messages. Use “↓ Back to latest”, then send again.");
-                return;
-            }
-        }
-        var agent = SelectedHarness();
-        var model = SelectedModel();
-        _modelByHarness[agent] = model;
-        AppPrefs.Data.ChatModels ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        AppPrefs.Data.ChatModels[agent] = model;
-        AppPrefs.Save();
-        if (!SupportsInAppReply(agent)) { SetComposerStatus("Choose an agent that can chat in Nexus: Claude Code, Codex, Cursor, OpenCode, Gemini or Kimi."); return; }
-        if (_images.Count > 0 && ComposerAttachments.ImageProblem(agent, _images[0], 1) is { } imageProblem) { SetComposerStatus(imageProblem); return; }
-        // Images go to the agent as images; other files are named by path.
-        var images = _images.ToArray();
-        var prompt = ComposerAttachments.WithFiles(typed, _files);
-        var useLive = SupportsLive(agent) && (images.Length == 0 || ComposerAttachments.SendsImagesLive(agent));
-        if (!System.IO.Directory.Exists(_workspace.Text.Trim())) { SetComposerStatus("Select an existing local project folder before sending."); return; }
-        ProjectFolders.Remember(_projectID, _workspace.Text.Trim());
-        var preparingSession = _id;
-        var preparingWorkspace = _workspace.Text.Trim();
-        var trustWorkspace = false;
-        _preparingHarness = true;
-        try
-        {
-            if (await HarnessStatusAsync(agent) is null) return;
-            // One-shot Cursor runs need --trust up front; live chats ask per action instead.
-            var needsTrust = agent == "cursor" && !useLive;
-            trustWorkspace = needsTrust && await ConfirmCursorWorkspaceAsync(preparingWorkspace);
-            if (needsTrust && !trustWorkspace) return;
-        }
-        finally { _preparingHarness = false; }
-        if (preparingSession != _id || agent != SelectedHarness() || model != SelectedModel() || preparingWorkspace != _workspace.Text.Trim() || typed != _prompt.Text.Trim()) { SetComposerStatus("The chat, model, or message changed. Review your selection and send again."); return; }
-        _sendInFlight = true;
-        SetSending(true);
-        SetComposerStatus("Connecting to " + agent + "…");
-        // Captured IDs may originate on another device or in an IDE store that
-        // the CLI cannot resume. Seed from readable chat, never from shell ops.
-        var resumeNative = (images.Length == 0 || useLive) && _localNativeID.Length > 0 && string.Equals(_localNativeAgent, agent, StringComparison.OrdinalIgnoreCase);
-        var resume = resumeNative ? "native" : "seeded";
-        var context = resumeNative ? "" : _continuationContext;
-        var nativeID = resumeNative ? _localNativeID : "";
-        var sessionID = _id;
-        var requestID = Guid.NewGuid().ToString("N");
-        _streamRequestID = requestID;
-        _streamAgent = agent;
-        _streamHasText = false;
-        var liveUserKey = "live:" + requestID;
-        var liveTime = DateTimeOffset.Now.ToString("O");
-        _conversation.Add(new ConversationEntry(liveUserKey, "user", prompt, liveTime, -1, _conversation.NextOrder));
-        // The bubble shows the images right away, from the same markers the
-        // saved message carries.
-        var shownPrompt = HarnessMessage.Parse(ComposerAttachments.WithImageTags(prompt, images));
-        var userBubble = IndexedChatMessage("user", shownPrompt.Text, liveUserKey, null, shownPrompt.Attachments.Count > 0 ? shownPrompt : null);
-        var streamText = new TextBlock
-        {
-            Text = "Thinking…", TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true,
-            FontSize = 14, MaxWidth = 820, Opacity = 0.9
-        };
-        var streamStack = new StackPanel { Spacing = 7 };
-        streamStack.Children.Add(SessionChatRender.RoleLabel(ChatTitles.AgentName(agent)));
-        streamStack.Children.Add(streamText);
-        var activityView = new LiveActivityView();
-        _streamActivity = activityView;
-        streamStack.Children.Add(activityView.View);
-        var fileChangesHost = new Border { Visibility = Visibility.Collapsed };
-        _streamFileChanges = fileChangesHost;
-        streamStack.Children.Add(fileChangesHost);
-        var streamBubble = new Border
-        {
-            Child = streamStack, Padding = SessionChatRender.AssistantPad,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent)
-        };
-        _streamText = streamText;
-        AddChatElement(userBubble);
-        AddChatElement(streamBubble);
-        RefreshConversationNavigation();
-        _prompt.Text = "";
-        ScrollChatToEnd();
-        NxResponse response;
-        var hadStreamText = false;
-        try
-        {
-            response = useLive
-                ? await SendLiveAsync(sessionID, agent, model, prompt, _continuationContext, nativeID, _workspace.Text.Trim(), images)
-                : await Call(NxMethods.ContinueHere, new { session_id = sessionID, project_id = _projectID, native_id = nativeID, agent, model, resume, prompt, context, images, workspace_root = _workspace.Text.Trim(), trust_workspace = trustWorkspace, request_id = requestID });
-        }
-        finally
-        {
-            hadStreamText = _streamHasText;
-            _streamRequestID = "";
-            _streamAgent = "";
-            _streamText = null;
-            _streamActivity = null;
-            _streamFileChanges = null;
-            _streamHasText = false;
-            _sendInFlight = false;
-            SetSending(false);
-            UpdateActions();
-        }
-        if (_id != sessionID) return;
-        if (!response.Ok || response.Result is not { } result)
-        {
-            _chat.Children.Remove(userBubble);
-            _conversation.Remove(liveUserKey); _messageAnchors.Remove(liveUserKey);
-            RefreshConversationNavigation();
-            var failureMessage = "Request stopped · " + NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent));
-            if (hadStreamText)
-                streamStack.Children.Add(new TextBlock { Text = failureMessage, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, Foreground = NexusPalette.Amber, Margin = new Thickness(0, 8, 0, 0) });
-            else
-            {
-                if (streamStack.Children[0] is TextBlock roleLabel) roleLabel.Text = "Nexus · request stopped";
-                streamText.Text = failureMessage + (activityView.Count > 0 ? "\nWorkspace changes may already have been applied; review the activity before retrying." : "");
-            }
-            streamBubble.Background = SessionChatRender.SubtleFill;
-            streamBubble.BorderBrush = NexusPalette.Amber;
-            streamBubble.BorderThickness = new Thickness(1);
-            streamBubble.CornerRadius = new CornerRadius(8);
-            streamBubble.Padding = new Thickness(12);
-            activityView.View.IsExpanded = activityView.Count > 0;
-            if (_prompt.Text.Length == 0) _prompt.Text = typed;
-            SetComposerStatus(NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent)));
-            if ((response.RawError ?? "").Contains("model", StringComparison.OrdinalIgnoreCase)) _model.Focus(FocusState.Programmatic);
-            return;
-        }
-        var answer = NxJson.Text(result, "text");
-        if (answer.Length == 0)
-        {
-            _chat.Children.Remove(userBubble);
-            _conversation.Remove(liveUserKey); _messageAnchors.Remove(liveUserKey);
-            RefreshConversationNavigation();
-            _chat.Children.Remove(streamBubble);
-            if (_prompt.Text.Length == 0) _prompt.Text = typed;
-            SetComposerStatus("The agent returned no readable reply.");
-            return;
-        }
-        var streamIndex = _chat.Children.IndexOf(streamBubble);
-        var userIndex = NxJson.Text(result, "user_idx");
-        if (long.TryParse(userIndex, out var userOrder) && userOrder > 0)
-        {
-            _conversation.Remove(liveUserKey); _messageAnchors.Remove(liveUserKey);
-            liveUserKey = TurnKey(userIndex, "user");
-            if (userBubble is FrameworkElement userAnchor) _messageAnchors[liveUserKey] = userAnchor;
-            _conversation.Add(new ConversationEntry(liveUserKey, "user", prompt, liveTime, -1, userOrder));
-        }
-        var answerIndex = NxJson.Text(result, "answer_idx");
-        var answerKey = answerIndex.Length > 0 && answerIndex != "0" ? "turn:" + answerIndex : "answer:" + requestID;
-        var answerOrder = long.TryParse(answerIndex, out var ai) && ai > 0 ? ai : _conversation.NextOrder;
-        _conversation.Add(new ConversationEntry(answerKey, "assistant", answer, liveTime, -1, answerOrder));
-        if (streamIndex >= 0)
-        {
-            _chat.Children.RemoveAt(streamIndex);
-            _chat.Children.Insert(streamIndex, IndexedChatMessage("assistant", answer, answerKey, agent));
-            if (activityView.Count > 0)
-            {
-                streamStack.Children.Remove(activityView.View);
-                activityView.View.IsExpanded = false;
-                _chat.Children.Insert(++streamIndex, activityView.View);
-            }
-            var changes = StringArray(result, "file_changes");
-            if (changes.Count > 0) _chat.Children.Insert(streamIndex + 1, FileChangesExpander(changes, result));
-        }
-        var returnedNativeID = NxJson.Text(result, "native_id");
-        if (returnedNativeID.Length > 0)
-        {
-            _localNativeID = returnedNativeID;
-            _localNativeAgent = agent;
-        }
-        _continuationContext += "\n\nuser: " + prompt + "\n\nassistant: " + answer;
-        if (_continuationContext.Length > 11000) _continuationContext = _continuationContext[^11000..];
-        ClearImageAttachments();
-        SetComposerStatus(result.TryGetProperty("saved_locally", out var saved) && saved.ValueKind == JsonValueKind.True
-            ? (result.TryGetProperty("cloud_saved", out var cloudSaved) && cloudSaved.ValueKind == JsonValueKind.True
-                ? "Reply saved in this chat and synced."
-                : "Reply saved in this chat on this device; cloud sync is unavailable right now.")
-            : "Reply received but could not be saved: " + NxJson.Text(result, "save_error"));
-        ScrollChatToEnd();
-        RefreshConversationNavigation();
-        _ = RefreshActivityAsync(sessionID);
-        if (_header.Text == "New chat" && _projectID.Length > 0 && _nativeID.StartsWith("nexus-", StringComparison.Ordinal))
-        {
-            var firstLine = prompt.Split('\n', 2)[0].Trim();
-            var title = firstLine.Length > 72 ? firstLine[..69] + "…" : firstLine;
-            if (title.Length > 0)
-            {
-                _header.Text = title;
-                _ = NameNewChatAsync(sessionID, title);
-            }
-        }
-        MainWindow.Current?.RefreshChats();
-    }
+    /// <summary>Send from the composer (SessionPage.Composer.cs): the bubble first, the checks after.</summary>
+    private Task SendHereAsync() => SendFromComposerAsync();
 
     private async Task NameNewChatAsync(string sessionID, string title)
     {
@@ -3270,9 +2901,11 @@ public sealed partial class SessionPage : NexusPage
 
     private async Task CancelHereAsync()
     {
+        // Stopped during the checks: the message is kept, not sent.
+        if (_preparingHarness) { NoteStopRequested(); return; }
         if (!_sendInFlight || _streamRequestID.Length == 0) return;
         _cancelHere.IsEnabled = false;
-        SetComposerStatus("Stopping the agent…");
+        NoteStopRequested();
         if (_liveTurn is not null)
         {
             // Live chats stop the current turn but keep the session open.
@@ -3358,17 +2991,16 @@ public sealed partial class SessionPage : NexusPage
             if (kind == "activity")
             {
                 _streamActivity?.Apply(text);
-                SetComposerStatus(_streamAgent + " is running tools…");
-                if (!_streamHasText) _streamText.Text = "Working in your workspace…";
+                TurnStatusProgress(kind, text);
                 return;
             }
             if (kind == "status")
             {
-                SetComposerStatus(text);
-                if (!_streamHasText) _streamText.Text = text;
+                TurnStatusProgress(kind, text);
                 return;
             }
             if (kind != "text") return;
+            TurnStatusProgress(kind, text);
             // Each progress event carries the full text so far; render it
             // through the same throttle as live chats.
             _liveText.Clear();
@@ -3393,11 +3025,7 @@ public sealed partial class SessionPage : NexusPage
         _refreshModels.IsEnabled = !sending && !_loadingModelAgents.Contains(SelectedHarness());
         foreach (var remove in _imagePreviews.Children.OfType<Grid>().SelectMany(preview => preview.Children.OfType<Button>()))
             remove.IsEnabled = !sending;
-        _cancelHere.Visibility = sending ? Visibility.Visible : Visibility.Collapsed;
-        _cancelHere.IsEnabled = sending;
-        _sendProgress.IsActive = sending;
-        _sendProgress.Visibility = sending ? Visibility.Visible : Visibility.Collapsed;
-        _sendGlyph.Visibility = sending ? Visibility.Collapsed : Visibility.Visible;
+        // Send and Stop morph in UpdateComposerButton (via UpdateActions).
         UpdateActions();
         if (sending)
         {
@@ -3406,6 +3034,7 @@ public sealed partial class SessionPage : NexusPage
             _model.IsEnabled = false;
             _workspaceMenu.IsEnabled = false;
             _attachImage.IsEnabled = false;
+            ApplyLiveComposerState();
             return;
         }
         _harness.IsEnabled = true;
@@ -3421,6 +3050,7 @@ public sealed partial class SessionPage : NexusPage
     // the pickers tighten, then the refresh button and the access picker
     // go. Send is never pushed off the edge.
     private readonly Grid _composerFooter = new();
+    private readonly StackPanel _modelPickerRow = new() { Orientation = Orientation.Horizontal, Spacing = 3 };
     private const double FooterSpacing = 6;
     private const double FolderLabelMinWidth = 96;
     private const double FolderIconWidth = 36;
@@ -3451,13 +3081,13 @@ public sealed partial class SessionPage : NexusPage
             element.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
             return element.DesiredSize.Width;
         }
-        var accessWanted = SelectedHarness() == "claude";
+        var accessWanted = SupportsLive(SelectedHarness());
         var harnessFit = HarnessFitWidth();
         // Everything in the footer but the folder button, plus the gaps
         // between its seven columns.
         double Fixed()
         {
-            var width = FooterSpacing * (_composerFooter.ColumnDefinitions.Count - 1);
+            var width = _composerFooter.ColumnSpacing * (_composerFooter.ColumnDefinitions.Count - 1);
             foreach (var child in _composerFooter.Children.OfType<FrameworkElement>())
                 if (!ReferenceEquals(child, _workspaceMenu)) width += Desired(child);
             return width;
@@ -3465,7 +3095,9 @@ public sealed partial class SessionPage : NexusPage
         void Apply(int level)
         {
             // 0 roomy, 1 tight pickers, 2 no refresh button, 3 narrow model,
-            // 4 no access picker.
+            // 4 narrow access picker, 5 no access picker, 6 no model picker,
+            // 7 no agent picker (a very narrow window keeps attach, dictation
+            // and Send usable).
             _harness.MinWidth = harnessFit;
             _harness.MaxWidth = Math.Max(level == 0 ? 160 : harnessFit, harnessFit);
             _model.MinWidth = level >= 3 ? 104 : level >= 1 ? 140 : 150;
@@ -3473,13 +3105,18 @@ public sealed partial class SessionPage : NexusPage
             _sendHere.MinWidth = 32;
             _sendHere.Padding = level == 0 ? new Thickness(10, 5, 12, 5) : new Thickness(7);
             _refreshModels.Visibility = level >= 2 ? Visibility.Collapsed : Visibility.Visible;
-            _access.Visibility = accessWanted && level < 4 ? Visibility.Visible : Visibility.Collapsed;
+            _access.MaxWidth = level >= 4 ? 136 : double.PositiveInfinity;
+            _access.Visibility = accessWanted && level < 5 ? Visibility.Visible : Visibility.Collapsed;
+            _modelPickerRow.Visibility = level >= 6 ? Visibility.Collapsed : Visibility.Visible;
+            _harness.Visibility = level >= 7 ? Visibility.Collapsed : Visibility.Visible;
+            // Empty columns still take the gap; the buttons' own padding spaces them.
+            _composerFooter.ColumnSpacing = level >= 6 ? 0 : FooterSpacing;
         }
         _footerLayoutRunning = true;
         try
         {
             var icon = true;
-            for (var level = 0; level <= 4; level++)
+            for (var level = 0; level <= 7; level++)
             {
                 Apply(level);
                 var left = available - Fixed();
@@ -3516,42 +3153,7 @@ public sealed partial class SessionPage : NexusPage
         return leaf.Length > 0 && leaf.Length < 40 ? "…" + System.IO.Path.DirectorySeparatorChar + leaf : "…" + path[^41..];
     }
 
-    private void AnimateInputFocus(bool focused)
-    {
-        var storyboard = new Storyboard();
-        var borderAnim = new ColorAnimation
-        {
-            Duration = new Duration(TimeSpan.FromMilliseconds(focused ? 180 : 220)),
-            EnableDependentAnimation = true
-        };
-        Storyboard.SetTarget(borderAnim, _inputFrame);
-        Storyboard.SetTargetProperty(borderAnim, "(Border.BorderBrush).(SolidColorBrush.Color)");
-        borderAnim.To = focused
-            ? Microsoft.UI.Colors.Transparent
-            : Microsoft.UI.Colors.Transparent;
-        if (_inputFrame.BorderBrush is SolidColorBrush borderBrush)
-        {
-            borderAnim.From = borderBrush.Color;
-        }
-        storyboard.Children.Add(borderAnim);
-        if (_inputFrame.Background is SolidColorBrush fillBrush)
-        {
-            var fillAnim = new ColorAnimation
-            {
-                Duration = borderAnim.Duration,
-                EnableDependentAnimation = true,
-                From = fillBrush.Color,
-                To = focused
-                    ? Microsoft.UI.Colors.Transparent
-                    : Microsoft.UI.Colors.Transparent
-            };
-            Storyboard.SetTarget(fillAnim, _inputFrame);
-            Storyboard.SetTargetProperty(fillAnim, "(Border.Background).(SolidColorBrush.Color)");
-            storyboard.Children.Add(fillAnim);
-        }
-        storyboard.Begin();
-        _inputFrame.BorderThickness = new Thickness(0);
-    }
+    private void AnimateInputFocus(bool focused) => AnimateComposerFocus(focused);
 
     private static Button SessionTabButton(string label) => new()
     {

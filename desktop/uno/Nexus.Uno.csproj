@@ -56,7 +56,8 @@
                       $(WindowsSources)InstallerHooks.cs;
                       $(WindowsSources)UninstallPrompt.cs;
                       $(WindowsSources)SingleInstance.cs;
-                      $(WindowsSources)Platform\WindowsDesktopIntegration.cs"
+                      $(WindowsSources)Platform\WindowsDesktopIntegration.cs;
+                      $(WindowsSources)Platform\WindowsDictation.cs"
              Link="Shared\%(RecursiveDir)%(Filename)%(Extension)" />
     <Compile Include="..\..\bindings\csharp\NxMethods.g.cs" Link="Shared\Core\NxMethods.g.cs" />
 

@@ -311,7 +311,7 @@ func TestCodexLive(t *testing.T) {
 		}
 	})
 	t.Run("Validation", func(t *testing.T) {
-		for _, opts := range []LiveOptions{{}, {Workspace: t.TempDir(), Model: "--invalid"}, {Workspace: t.TempDir(), PermissionMode: "bypassPermissions"}} {
+		for _, opts := range []LiveOptions{{}, {Workspace: t.TempDir(), Model: "--invalid"}, {Workspace: t.TempDir(), PermissionMode: "yolo"}} {
 			if s, err := StartCodexLive(context.Background(), opts); err == nil {
 				_ = s.Close()
 				t.Fatal("invalid options accepted")

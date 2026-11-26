@@ -1,7 +1,6 @@
 package continuex
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"os"
@@ -127,7 +126,7 @@ func TestModelCacheKeepsLastListWhenRefreshFails(t *testing.T) {
 	}
 	fake.set(HarnessModelCatalog{}, errors.New("OpenCode model discovery timed out"))
 	got, err := cache.get(context.Background(), "opencode", true)
-	if err != nil || got.Models[0] != "kept-model" || !strings.Contains(got.Warning, "Couldn't refresh models: OpenCode model discovery timed out") {
+	if err != nil || got.Models[0] != "kept-model" || got.Warning != "" || !got.RefreshFailed {
 		t.Fatalf("refresh failure: %+v %v", got, err)
 	}
 }
@@ -144,10 +143,10 @@ func TestModelCacheReportsErrorWithoutAnyList(t *testing.T) {
 }
 
 func TestModelCacheKeepsBuiltInFallbackOutOfDiskCache(t *testing.T) {
-	fake := &fakeModelDiscovery{catalog: claudeStaticModels("probe timed out")}
+	fake := &fakeModelDiscovery{catalog: HarnessModelCatalog{Fallback: true, Warning: "probe timed out", Items: []HarnessModel{{ID: "builtin"}}}}
 	cache, dir := testModelCache(t, fake)
 	got, err := cache.get(context.Background(), "claude", false)
-	if err != nil || !got.Fallback || len(got.Items) == 0 {
+	if err != nil || !got.Fallback || len(got.Items) == 0 || got.Warning != "" {
 		t.Fatalf("fallback: %+v %v", got, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "claude.json")); !os.IsNotExist(err) {
@@ -238,56 +237,6 @@ func TestOpenCodeModelParsingSkipsLogNoise(t *testing.T) {
 	}
 	if strings.Join(ids, ",") != "opencode/big-pickle,anthropic/claude-sonnet-5-5,nvidia/meta/llama-3.2-11b-vision-instruct" {
 		t.Fatalf("opencode ids: %v", ids)
-	}
-}
-
-func TestClaudeInitParsingMatchesRealResponseShape(t *testing.T) {
-	line := `{"type":"control_response","response":{"subtype":"success","request_id":"nexus_models","response":{"commands":[{"name":"x"}],"models":[{"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default (recommended)"},{"value":"opus","displayName":"Opus","description":"Opus 5.5"},{"value":"claude-fable-5-2","displayName":"Fable"},{"value":"sonnet","displayName":"Sonnet"},{"value":"haiku","displayName":"Haiku"}],"account":{}}}}`
-	items, matched, err := parseClaudeInitModels([]byte(line), "nexus_models")
-	if !matched || err != nil || len(items) != 4 || items[0].ID != "opus" || items[0].Description != "Opus 5.5" {
-		t.Fatalf("claude init: %+v %v %v", items, matched, err)
-	}
-	if _, matched, _ := parseClaudeInitModels([]byte(`{"type":"system","subtype":"init"}`), "nexus_models"); matched {
-		t.Fatal("non-response line matched")
-	}
-	if _, matched, err := parseClaudeInitModels([]byte(`{"type":"control_response","response":{"subtype":"error","request_id":"nexus_models","error":"bad"}}`), "nexus_models"); !matched || err == nil {
-		t.Fatal("error response should fail")
-	}
-}
-
-func TestClaudeStaticModelsAreMarkedAndValid(t *testing.T) {
-	catalog := claudeStaticModels("Claude Code is not installed.")
-	catalog.normalize()
-	want := "sonnet,opus,haiku,claude-sonnet-5-5,claude-opus-5-5,claude-haiku-5-5,claude-fable-5-2"
-	if strings.Join(catalog.Models, ",") != want || !catalog.Fallback || !strings.Contains(catalog.Source, "static") {
-		t.Fatalf("static claude models: %+v", catalog)
-	}
-	if !strings.HasPrefix(catalog.Warning, "Couldn't load models: Claude Code is not installed, using defaults") {
-		t.Fatalf("warning: %q", catalog.Warning)
-	}
-}
-
-func TestModelCacheSilentProbeChild(t *testing.T) {
-	if os.Getenv("NX_MODEL_CACHE_SILENT_CHILD") == "" {
-		return
-	}
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-	}
-	time.Sleep(time.Minute)
-}
-
-func TestClaudeProbeTimesOutInsteadOfHanging(t *testing.T) {
-	t.Setenv("NX_MODEL_CACHE_SILENT_CHILD", "1")
-	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
-	defer cancel()
-	status := HarnessAvailability{Agent: "claude", Name: "Claude Code", Executable: os.Args[0], Prefix: []string{"-test.run=^TestModelCacheSilentProbeChild$", "--"}}
-	start := time.Now()
-	if _, err := claudeModels(ctx, status); err == nil {
-		t.Fatal("silent probe should fail")
-	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("probe ignored its timeout: %v", elapsed)
 	}
 }
 

@@ -16,16 +16,20 @@
 //   - Dock reopen, nexus:// URL events, and a Quit that goes through the app's
 //     own shutdown;
 //   - showing and hiding the Uno window (closing hides it while the item exists);
-//   - App Translocation lookup and Move to Trash, for "Move to Applications".
+//   - App Translocation lookup and Move to Trash, for "Move to Applications";
+//   - the quick-ask global hotkey (Carbon RegisterEventHotKey: no Accessibility
+//     permission needed, released when the process exits).
 //
 // Build (universal):
 //   clang -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -fobjc-arc -dynamiclib \
-//     -framework AppKit -framework CoreServices -install_name @rpath/libnexusmac.dylib \
-//     -o libnexusmac.dylib NexusMac.m
+//     -framework AppKit -framework Carbon -framework CoreServices -install_name @rpath/libnexusmac.dylib \
+//     -framework Speech -framework AVFoundation -o libnexusmac.dylib NexusMac.m NexusDictation.m
 
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
 #import <CoreServices/CoreServices.h>
 #import <objc/runtime.h>
+#import <UserNotifications/UserNotifications.h>
 #include <dlfcn.h>
 
 typedef void (*nx_command_fn)(int32_t command);
@@ -50,11 +54,17 @@ enum {
     NXCopy = 15,
     NXPaste = 16,
     NXSelectAll = 17,
+    NXQuickAsk = 18,
 };
 
 // Virtual key codes (Carbon HIToolbox kVK_ANSI_*), for menu-chosen shortcuts.
 enum {
     NXKeyF = 3,
+    NXKeyB = 11,
+    NXKeyEqual = 24,
+    NXKeyMinus = 27,
+    NXKey0 = 29,
+    NXKeySlash = 44,
 };
 
 static nx_command_fn s_command;
@@ -62,6 +72,9 @@ static nx_url_fn s_url;
 static NSStatusItem *s_item;
 static NSMenuItem *s_stateItem;
 static NSMenuItem *s_pauseItem;
+static NSMenuItem *s_agentsItem;
+static NSMenuItem *s_agentsSeparator;
+static NSString *s_agentsText;
 static BOOL s_paused;
 static BOOL s_installed;
 static BOOL s_delivering;
@@ -448,6 +461,14 @@ static void nx_build_main_menu(void)
     [edit addItem:[NSMenuItem separatorItem]];
     nx_shortcut_item(edit, @"Find", @"f", cmd, NXKeyF, @"performTextFinderAction:");
 
+    // View: forwarded as key presses, so the app's own shortcuts handle them.
+    NSMenu *view = nx_submenu(bar, @"View");
+    nx_shortcut_item(view, @"Show or Hide Sidebar", @"b", cmd, NXKeyB, nil);
+    [view addItem:[NSMenuItem separatorItem]];
+    nx_shortcut_item(view, @"Bigger Text", @"=", cmd, NXKeyEqual, nil);
+    nx_shortcut_item(view, @"Smaller Text", @"-", cmd, NXKeyMinus, nil);
+    nx_shortcut_item(view, @"Default Text Size", @"0", cmd, NXKey0, nil);
+
     NSMenu *window = nx_submenu(bar, @"Window");
     nx_item(window, @"Minimize", @selector(performMiniaturize:), nil, @"m", cmd);
     nx_item(window, @"Zoom", @selector(performZoom:), nil, nil, 0);
@@ -456,6 +477,7 @@ static void nx_build_main_menu(void)
     NSApp.windowsMenu = window;
 
     NSMenu *help = nx_submenu(bar, @"Help");
+    nx_shortcut_item(help, @"Keyboard Shortcuts", @"/", cmd, NXKeySlash, nil);
     nx_command_item(help, @"Report a Problem…", NXReport, nil, 0);
     NSApp.helpMenu = help;
 
@@ -469,6 +491,7 @@ static void nx_apply_capture_state(void)
     s_pauseItem.title = s_paused ? @"Resume capture" : @"Pause capture";
     s_item.button.appearsDisabled = s_paused;
     s_item.button.toolTip = s_paused ? @"Nexus · capture paused" : @"Nexus · capturing";
+    if (s_agentsText.length > 0) s_item.button.toolTip = [@"Nexus · " stringByAppendingString:s_agentsText];
 }
 
 static void nx_build_status_item(void)
@@ -480,7 +503,14 @@ static void nx_build_status_item(void)
 
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Nexus"];
     menu.autoenablesItems = NO;
+    // "2 agents working · 1 needs you", shown while agents work.
+    s_agentsItem = nx_command_item(menu, @"", NXOpen, nil, 0);
+    s_agentsItem.hidden = YES;
+    s_agentsSeparator = [NSMenuItem separatorItem];
+    s_agentsSeparator.hidden = YES;
+    [menu addItem:s_agentsSeparator];
     nx_command_item(menu, @"Open Nexus", NXOpen, nil, 0);
+    nx_command_item(menu, @"Quick Ask…", NXQuickAsk, nil, 0);
     [menu addItem:[NSMenuItem separatorItem]];
     s_stateItem = nx_item(menu, @"Capturing", nil, nil, nil, 0);
     s_stateItem.enabled = NO;
@@ -627,4 +657,169 @@ int32_t nx_mac_trash(const char *path)
         if (!ok) NSLog(@"[nexus-mac] trash failed: %@", error.localizedDescription);
         return ok ? 1 : 0;
     }
+}
+
+// ---- Agents working in the background -----------------------------------------
+// The menu bar item shows how many agents work; a notification says when a
+// chat finishes or needs approval while Nexus isn't focused. Clicking it opens
+// that chat through the nexus:// link handler.
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+@interface NXNotifyDelegate : NSObject <UNUserNotificationCenterDelegate, NSUserNotificationCenterDelegate>
+@end
+
+@implementation NXNotifyDelegate
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler
+{
+    if (@available(macOS 11.0, *)) completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionSound);
+    else completionHandler(UNNotificationPresentationOptionAlert | UNNotificationPresentationOptionSound);
+}
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+didReceiveNotificationResponse:(UNNotificationResponse *)response
+         withCompletionHandler:(void (^)(void))completionHandler
+{
+    NSString *url = response.notification.request.content.userInfo[@"url"];
+    if ([url isKindOfClass:[NSString class]]) nx_deliver_url(url);
+    completionHandler();
+}
+- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification
+{
+    NSString *url = notification.userInfo[@"url"];
+    if ([url isKindOfClass:[NSString class]]) nx_deliver_url(url);
+}
+- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification
+{
+    return YES;
+}
+@end
+
+static NXNotifyDelegate *s_notify;
+static BOOL s_notifyAsked;
+static BOOL s_notifyAllowed;
+
+static void nx_legacy_notify(NSString *title, NSString *body, NSString *url)
+{
+    NSUserNotification *note = [[NSUserNotification alloc] init];
+    note.title = title;
+    note.informativeText = body;
+    note.userInfo = url.length > 0 ? @{ @"url": url } : @{};
+    NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
+    center.delegate = s_notify;
+    [center deliverNotification:note];
+}
+
+static void nx_post(NSString *title, NSString *body, NSString *url)
+{
+    if (!s_notifyAllowed) {
+        nx_legacy_notify(title, body, url);
+        return;
+    }
+    UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+    content.title = title;
+    content.body = body;
+    content.sound = [UNNotificationSound defaultSound];
+    content.userInfo = url.length > 0 ? @{ @"url": url } : @{};
+    UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:[[NSUUID UUID] UUIDString] content:content trigger:nil];
+    [[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:request withCompletionHandler:^(NSError *error) {
+        if (error != nil) {
+            NSLog(@"[nexus-mac] notification failed (%@); using the legacy center", error.localizedDescription);
+            dispatch_async(dispatch_get_main_queue(), ^{ nx_legacy_notify(title, body, url); });
+        }
+    }];
+}
+#pragma clang diagnostic pop
+
+__attribute__((visibility("default")))
+void nx_mac_notify(const char *title, const char *body, const char *url)
+{
+    NSString *t = title != NULL ? [NSString stringWithUTF8String:title] : @"Nexus";
+    NSString *b = body != NULL ? [NSString stringWithUTF8String:body] : @"";
+    NSString *u = url != NULL ? [NSString stringWithUTF8String:url] : @"";
+    nx_on_main(^{
+        if (s_notify == nil) s_notify = [[NXNotifyDelegate alloc] init];
+        if (s_notifyAsked) {
+            nx_post(t ?: @"Nexus", b ?: @"", u ?: @"");
+            return;
+        }
+        s_notifyAsked = YES;
+        // An ad hoc signed app may not get UserNotifications; then the older
+        // center still shows the banner.
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        center.delegate = s_notify;
+        [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                              completionHandler:^(BOOL granted, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                s_notifyAllowed = granted && error == nil;
+                NSLog(@"[nexus-mac] notifications %@", s_notifyAllowed ? @"allowed" : @"unavailable; using the legacy center");
+                nx_post(t ?: @"Nexus", b ?: @"", u ?: @"");
+            });
+        }];
+    });
+}
+
+__attribute__((visibility("default")))
+void nx_mac_set_agents(const char *summary)
+{
+    NSString *text = summary != NULL ? [NSString stringWithUTF8String:summary] : @"";
+    nx_on_main(^{
+        s_agentsText = text ?: @"";
+        if (s_agentsItem == nil) return;
+        s_agentsItem.title = s_agentsText;
+        s_agentsItem.hidden = s_agentsText.length == 0;
+        s_agentsSeparator.hidden = s_agentsItem.hidden;
+        nx_apply_capture_state();
+    });
+}
+
+// ---- Quick-ask hotkey -------------------------------------------------------------
+
+typedef void (*nx_hotkey_fn)(void);
+static nx_hotkey_fn s_hotkeyCallback;
+static EventHotKeyRef s_hotkey;
+static EventHandlerRef s_hotkeyHandler;
+
+static OSStatus nx_hotkey_pressed(EventHandlerCallRef next, EventRef event, void *data)
+{
+    if (s_hotkeyCallback != NULL) s_hotkeyCallback();
+    return noErr;
+}
+
+// keyCode: a kVK_* virtual key; modifiers: Carbon cmdKey/shiftKey/optionKey/controlKey.
+// Returns 0, or the Carbon error (eventHotKeyExistsErr -9878 when another app has it).
+__attribute__((visibility("default")))
+int32_t nx_mac_register_hotkey(uint32_t keyCode, uint32_t modifiers, nx_hotkey_fn callback)
+{
+    __block OSStatus status = noErr;
+    dispatch_block_t work = ^{
+        if (s_hotkey != NULL) {
+            UnregisterEventHotKey(s_hotkey);
+            s_hotkey = NULL;
+        }
+        s_hotkeyCallback = callback;
+        if (s_hotkeyHandler == NULL) {
+            EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
+            status = InstallApplicationEventHandler(&nx_hotkey_pressed, 1, &spec, NULL, &s_hotkeyHandler);
+            if (status != noErr) return;
+        }
+        EventHotKeyID hotKeyID = { 'NXQA', 1 };
+        status = RegisterEventHotKey(keyCode, modifiers, hotKeyID, GetApplicationEventTarget(), 0, &s_hotkey);
+        if (status != noErr) s_hotkey = NULL;
+        NSLog(@"[nexus-mac] quick-ask hotkey key=%u mods=0x%x status=%d", keyCode, modifiers, (int)status);
+    };
+    if ([NSThread isMainThread]) work(); else dispatch_sync(dispatch_get_main_queue(), work);
+    return (int32_t)status;
+}
+
+__attribute__((visibility("default")))
+void nx_mac_unregister_hotkey(void)
+{
+    nx_on_main(^{
+        if (s_hotkey != NULL) {
+            UnregisterEventHotKey(s_hotkey);
+            s_hotkey = NULL;
+        }
+    });
 }

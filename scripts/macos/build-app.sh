@@ -47,11 +47,13 @@ lipo -create -output "$OUT/libnexuscore.dylib" "$OUT/arm64/libnexuscore.dylib" "
 lipo -info "$OUT/libnexuscore.dylib"
 
 # The macOS integration helper: menu bar status item, app menu, Dock reopen,
-# nexus:// URL events, App Translocation lookup (desktop/uno/macos/native/NexusMac.m).
+# nexus:// URL events, App Translocation lookup (desktop/uno/macos/native/NexusMac.m),
+# and voice input with Speech + AVAudioEngine (NexusDictation.m).
 echo "--- libnexusmac.dylib (arm64 + x86_64, universal)"
 clang -arch arm64 -arch x86_64 -mmacosx-version-min=12.0 -fobjc-arc -Wall -Wextra -Wno-unused-parameter \
-  -dynamiclib -framework AppKit -framework CoreServices \
-  -install_name @rpath/libnexusmac.dylib -o "$OUT/libnexusmac.dylib" "$ROOT/desktop/uno/macos/native/NexusMac.m"
+  -dynamiclib -framework AppKit -framework Carbon -framework CoreServices -framework UserNotifications -framework Speech -framework AVFoundation \
+  -install_name @rpath/libnexusmac.dylib -o "$OUT/libnexusmac.dylib" \
+  "$ROOT/desktop/uno/macos/native/NexusMac.m" "$ROOT/desktop/uno/macos/native/NexusDictation.m"
 lipo -info "$OUT/libnexusmac.dylib"
 nm -gU "$OUT/libnexusmac.dylib" | grep ' _nx_mac_' | sort -u
 
@@ -80,7 +82,8 @@ sed -e "s/__SHORT_VERSION__/${SHORT}/" -e "s/__BUILD_VERSION__/${BUILD}/" \
 exe=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$PL")
 for key in CFBundleIdentifier CFBundleName CFBundleDisplayName CFBundleShortVersionString CFBundleVersion \
            LSMinimumSystemVersion LSApplicationCategoryType NSHighResolutionCapable \
-           NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription CFBundleURLTypes; do
+           NSDocumentsFolderUsageDescription NSDesktopFolderUsageDescription NSDownloadsFolderUsageDescription CFBundleURLTypes \
+           NSMicrophoneUsageDescription NSSpeechRecognitionUsageDescription; do
   /usr/libexec/PlistBuddy -c "Delete :$key" "$PL" 2>/dev/null || true
 done
 /usr/libexec/PlistBuddy -c "Merge $OUT/nexus.plist" "$PL"

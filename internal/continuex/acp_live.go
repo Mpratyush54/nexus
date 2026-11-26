@@ -130,7 +130,7 @@ func StartACPLive(ctx context.Context, agent string, opts LiveOptions) (LiveSess
 	if err != nil || !info.IsDir() {
 		return nil, errors.New("ACP live: workspace must be an existing directory")
 	}
-	if opts.PermissionMode != "" && opts.PermissionMode != "acceptEdits" && opts.PermissionMode != "plan" {
+	if !validPermissionMode(opts.PermissionMode) {
 		return nil, errors.New("ACP live: invalid permission mode")
 	}
 	if _, err := WithModel(LaunchPlan{Agent: agent, Argv: []string{argv[0]}}, opts.Model); err != nil {
@@ -451,7 +451,14 @@ func (s *acpLive) initialize(ctx context.Context, opts LiveOptions) error {
 	s.resumed = method == "session/load"
 	s.mu.Unlock()
 	var session struct {
-		ID     string `json:"sessionId"`
+		ID    string `json:"sessionId"`
+		Modes *struct {
+			Current   string `json:"currentModeId"`
+			Available []struct {
+				ID   string `json:"id"`
+				Name string `json:"name"`
+			} `json:"availableModes"`
+		} `json:"modes"`
 		Models *struct {
 			Current   string `json:"currentModelId"`
 			Available []struct {
@@ -541,6 +548,18 @@ func (s *acpLive) initialize(ctx context.Context, opts LiveOptions) error {
 			s.mu.Lock()
 			s.usageModel = model
 			s.mu.Unlock()
+		}
+	}
+	// The chat's permission mode, where the agent offers a matching session
+	// mode (Gemini: autoEdit/yolo; Claude ACP: acceptEdits/bypassPermissions).
+	// Nexus answers requests by the same mode either way.
+	if session.Modes != nil && opts.PermissionMode != "" {
+		ids := make([]string, 0, len(session.Modes.Available))
+		for _, mode := range session.Modes.Available {
+			ids = append(ids, mode.ID)
+		}
+		if id := acpModeFor(opts.PermissionMode, ids); id != "" && id != session.Modes.Current {
+			_, _ = s.rpc(ctx, "session/set_mode", map[string]any{"sessionId": session.ID, "modeId": id})
 		}
 	}
 	s.emit(LiveEvent{Kind: "status", Text: "Connected", NativeID: session.ID})
@@ -776,7 +795,7 @@ func (s *acpLive) parse(line []byte) {
 		if name == "" {
 			name = p.Tool.Kind
 		}
-		s.emit(LiveEvent{Kind: "approval", RequestID: id, ToolID: p.Tool.ID, ToolName: liveText(name, 4096), ToolInput: liveInput(p.Tool.Input)})
+		s.emit(LiveEvent{Kind: "approval", RequestID: id, ToolID: p.Tool.ID, ToolName: liveText(name, 4096), ToolInput: liveInput(p.Tool.Input), ToolKind: p.Tool.Kind})
 		return
 	}
 	if m.Method != "session/update" {
@@ -821,6 +840,14 @@ func (s *acpLive) parse(line []byte) {
 		if json.Unmarshal(u.Content, &b) == nil && b.Type == "text" {
 			s.emit(LiveEvent{Kind: "text_delta", Text: liveText(b.Text, liveLineLimit)})
 		}
+	case "agent_thought_chunk":
+		var b struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(u.Content, &b) == nil && b.Type == "text" {
+			s.emit(LiveEvent{Kind: "thinking_delta", Text: liveText(b.Text, liveLineLimit)})
+		}
 	case "tool_call":
 		input := u.Input
 		if len(input) == 0 || string(input) == "null" {
@@ -863,4 +890,26 @@ func acpToolContent(raw json.RawMessage) string {
 		text.WriteByte('\n')
 	}
 	return liveText(text.String(), 64*1024)
+}
+
+// acpModeFor picks the agent's session mode for a permission mode by its
+// advertised id, or "" when none matches.
+func acpModeFor(permission string, ids []string) string {
+	var want []string
+	switch permission {
+	case "acceptEdits":
+		want = []string{"acceptedits", "autoedit", "auto_edit", "auto-edit", "accept-edits"}
+	case "bypassPermissions":
+		want = []string{"bypasspermissions", "yolo", "full-access", "full_access", "fullaccess", "full"}
+	case "plan":
+		want = []string{"plan"}
+	}
+	for _, w := range want {
+		for _, id := range ids {
+			if strings.EqualFold(id, w) {
+				return id
+			}
+		}
+	}
+	return ""
 }

@@ -327,7 +327,7 @@ func TestACPLive(t *testing.T) {
 		if ACPSupported("claude") {
 			t.Fatal("unsupported")
 		}
-		for _, o := range []LiveOptions{{}, {Workspace: t.TempDir(), Model: "--bad"}, {Workspace: t.TempDir(), PermissionMode: "bypassPermissions"}} {
+		for _, o := range []LiveOptions{{}, {Workspace: t.TempDir(), Model: "--bad"}, {Workspace: t.TempDir(), PermissionMode: "yolo"}} {
 			if s, err := StartACPLive(context.Background(), "cursor", o); err == nil {
 				_ = s.Close()
 				t.Fatal("invalid options")

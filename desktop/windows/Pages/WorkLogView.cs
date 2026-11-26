@@ -569,7 +569,13 @@ internal static class WorkLogVisuals
     public const string ChevronRight = "";
     public const string ChevronDown = "";
     public static FontFamily IconFont => new("Segoe Fluent Icons,Segoe MDL2 Assets");
-    public static FontFamily MonoFont => new("Cascadia Mono,Consolas");
+    // Skia (the Uno head) takes one family, not a fallback list.
+    public static FontFamily MonoFont => new(
+#if HAS_UNO
+        OperatingSystem.IsMacOS() ? "Menlo" : "Consolas");
+#else
+        "Cascadia Mono,Consolas");
+#endif
 
     public static Button RowButton(UIElement content) => new()
     {

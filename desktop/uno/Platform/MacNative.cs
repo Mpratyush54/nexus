@@ -34,6 +34,7 @@ internal static partial class MacNative
         Copy = 15,
         Paste = 16,
         SelectAll = 17,
+        QuickAsk = 18,
     }
 
     private static Action<Command>? s_onCommand;
@@ -61,6 +62,45 @@ internal static partial class MacNative
     }
 
     public static void SetCapturePaused(bool paused) => Try(() => nx_mac_set_capture_state(paused ? 1 : 0));
+
+    /// <summary>A notification; clicking it delivers <paramref name="url"/> (a nexus:// link).</summary>
+    public static void Notify(string title, string body, string url)
+    {
+        if (Available) Try(() => nx_mac_notify(title, body, url));
+    }
+
+    /// <summary>The menu bar line for agents at work ("2 agents working"); empty hides it.</summary>
+    public static void SetAgentsStatus(string summary)
+    {
+        if (Available) Try(() => nx_mac_set_agents(summary));
+    }
+
+    private static Action? s_onHotkey;
+
+    /// <summary>
+    /// The quick-ask global hotkey (Carbon key code and modifiers). 0 = registered;
+    /// a Carbon error otherwise (-9878: another app has it); int.MinValue without the library.
+    /// </summary>
+    public static unsafe int RegisterHotkey(uint keyCode, uint modifiers, Action onPressed)
+    {
+        if (!Available) return int.MinValue;
+        s_onHotkey = onPressed;
+        var status = int.MinValue;
+        Try(() => status = nx_mac_register_hotkey(keyCode, modifiers, &OnHotkey));
+        return status;
+    }
+
+    public static void UnregisterHotkey()
+    {
+        if (Available) Try(nx_mac_unregister_hotkey);
+    }
+
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+    private static void OnHotkey()
+    {
+        try { s_onHotkey?.Invoke(); }
+        catch (Exception ex) { Nexus.Core.Diagnostics.DiagLog.Error("mac", "hotkey failed", ex); }
+    }
 
     public static bool ShowWindows() => Try(nx_mac_show_windows);
 
@@ -142,6 +182,18 @@ internal static partial class MacNative
 
     [LibraryImport(Lib)]
     private static partial void nx_mac_set_capture_state(int paused);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial void nx_mac_notify(string title, string body, string url);
+
+    [LibraryImport(Lib, StringMarshalling = StringMarshalling.Utf8)]
+    private static partial void nx_mac_set_agents(string summary);
+
+    [LibraryImport(Lib)]
+    private static unsafe partial int nx_mac_register_hotkey(uint keyCode, uint modifiers, delegate* unmanaged[Cdecl]<void> callback);
+
+    [LibraryImport(Lib)]
+    private static partial void nx_mac_unregister_hotkey();
 
     [LibraryImport(Lib)]
     private static partial void nx_mac_show_windows();

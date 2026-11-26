@@ -87,7 +87,7 @@ func StartCodexLive(ctx context.Context, opts LiveOptions) (LiveSession, error) 
 	if err != nil || !info.IsDir() {
 		return nil, errors.New("codex live: workspace must be an existing directory")
 	}
-	if opts.PermissionMode != "" && opts.PermissionMode != "acceptEdits" && opts.PermissionMode != "plan" {
+	if !validPermissionMode(opts.PermissionMode) {
 		return nil, errors.New("codex live: invalid permission mode")
 	}
 	if _, err := WithModel(LaunchPlan{Agent: "codex", Argv: []string{"codex"}}, opts.Model); err != nil {
@@ -273,7 +273,8 @@ func (s *codexLive) run(ctx context.Context, opts LiveOptions) {
 		fail(err)
 		return
 	}
-	params := map[string]any{"cwd": opts.Workspace, "approvalPolicy": "on-request", "approvalsReviewer": "user", "sandbox": "workspace-write"}
+	policy, sandbox := codexPolicy(opts.PermissionMode)
+	params := map[string]any{"cwd": opts.Workspace, "approvalPolicy": policy, "approvalsReviewer": "user", "sandbox": sandbox}
 	if opts.Model != "" {
 		params["model"] = strings.TrimSpace(opts.Model)
 	}
@@ -577,6 +578,8 @@ func (s *codexLive) parse(line []byte) {
 		return
 	}
 	switch m.Method {
+	case "item/reasoning/summaryTextDelta", "item/reasoning/textDelta":
+		s.emit(LiveEvent{Kind: "thinking_delta", ToolID: p.ItemID, Text: liveText(p.Delta, liveLineLimit)})
 	case "item/agentMessage/delta":
 		s.emit(LiveEvent{Kind: "text_delta", ToolID: p.ItemID, Text: liveText(p.Delta, liveLineLimit)})
 	case "item/started", "item/completed":
@@ -687,4 +690,21 @@ func (s *codexLive) item(raw json.RawMessage, completed bool) {
 	}
 	failed := i.Status == "failed" || i.Status == "declined" || (i.ExitCode != nil && *i.ExitCode != 0) || (len(i.Error) > 0 && string(i.Error) != "null")
 	s.emit(LiveEvent{Kind: "tool_end", ToolID: i.ID, ToolName: name, ToolOutput: liveText(output, 64*1024), IsError: failed})
+}
+
+// codexPolicy maps a permission mode to Codex's approval policy and sandbox
+// (app-server v2 AskForApproval / SandboxMode). Ask every time: "untrusted"
+// asks before edits and anything but known-safe reads. Auto-approve edits:
+// Codex's own default, "on-request" in the workspace-write sandbox (edits in
+// the project run; leaving the sandbox asks). Full access: nothing asks.
+func codexPolicy(mode string) (policy, sandbox string) {
+	switch mode {
+	case "acceptEdits":
+		return "on-request", "workspace-write"
+	case "bypassPermissions":
+		return "never", "danger-full-access"
+	case "plan":
+		return "on-request", "read-only"
+	}
+	return "untrusted", "workspace-write"
 }

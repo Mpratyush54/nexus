@@ -331,6 +331,7 @@ func (m *MemStore) DeleteAgentSession(ctx context.Context, sessionID string) (*S
 	m.toolExecs = keptExecs
 	delete(m.sessionOwners, sessionID)
 	delete(m.sessionGrants, sessionID)
+	m.deleteSessionUserStates(sessionID)
 	m.mu.Unlock()
 
 	book := guestBook(m)
@@ -440,6 +441,10 @@ func (s *PostgresStore) DeleteAgentSession(ctx context.Context, sessionID string
 		if _, err := tx.Exec(ctx, `DELETE FROM `+table+` WHERE session_id = $1::uuid`, id); err != nil {
 			return nil, fmt.Errorf("delete %s: %w", table, err)
 		}
+	}
+	// Everyone's pins, archive marks and custom titles (migration 055).
+	if _, err := tx.Exec(ctx, `DELETE FROM agent_session_user_state WHERE session_id = $1`, id); err != nil {
+		return nil, fmt.Errorf("delete agent_session_user_state: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM agent_sessions WHERE id = $1::uuid`, id); err != nil {
 		return nil, err

@@ -124,8 +124,20 @@ public static class AppPrefs
         public bool AutoSendCrashReports { get; set; }
         // Appearance: "system" (follow Windows), "light" or "dark".
         public string Theme { get; set; } = "system";
+        // Voice input (dictation) in chat boxes, and its language: a BCP-47
+        // tag, or "" for the system language (Pages/VoiceInput.cs).
+        public bool VoiceInput { get; set; } = true;
+        public string VoiceLanguage { get; set; } = "";
         public Dictionary<string, string> ChatModels { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        // "chat id|agent" -> model last used in that chat (bounded).
+        public Dictionary<string, string> ChatModelsByChat { get; set; } = new(StringComparer.OrdinalIgnoreCase);
         // project id -> local folder last used for chats in that project
         public Dictionary<string, string> ProjectFolders { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        // chat session id -> permission mode picked in its composer (ask,
+        // edits, full). Chats without one use the default in Settings.
+        public Dictionary<string, string> ChatPermissionModes { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+        // Desktop notifications for chats working in the background, shown
+        // when the window isn't focused: all, approvals, off.
+        public string AgentNotifications { get; set; } = "all";
     }
 }

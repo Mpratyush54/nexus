@@ -316,6 +316,34 @@ func TestAgentSessionForkRoutes(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), child.ID) {
 		t.Fatalf("forks: %d %s", rec.Code, rec.Body.String())
 	}
+
+	// "Fork from here": only the turns up to through_idx come along.
+	for idx, role := range []string{"user", "assistant", "user", "assistant"} {
+		if err := mem.AppendSessionTurn(ctx, store.SessionTurn{SessionID: parent.ID, Idx: idx, Role: role, TextPreview: role}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec = doJSON(t, s, http.MethodPost, "/v1/agent-sessions/"+parent.ID+"/fork", owner, map[string]any{"through_idx": 1})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("fork through: %d %s", rec.Code, rec.Body.String())
+	}
+	var partial store.AgentSession
+	decodeBody(t, rec, &partial)
+	turns, err := mem.ListSessionTurns(ctx, partial.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(turns) != 2 || turns[len(turns)-1].Idx != 1 {
+		t.Fatalf("fork through_idx 1 copied %d turns: %+v", len(turns), turns)
+	}
+	whole, err := mem.ListSessionTurns(ctx, child.ID)
+	if err != nil || len(whole) != 0 {
+		t.Fatalf("the earlier fork must keep its own turns: %v %+v", err, whole)
+	}
+	rec = doJSON(t, s, http.MethodPost, "/v1/agent-sessions/"+parent.ID+"/fork", owner, map[string]any{"through_idx": "x"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad through_idx: %d %s", rec.Code, rec.Body.String())
+	}
 }
 
 func TestAgentSessionMergeCodeStub(t *testing.T) {

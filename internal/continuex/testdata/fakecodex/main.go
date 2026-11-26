@@ -131,7 +131,7 @@ func main() {
 				Instructions string `json:"developerInstructions"`
 			}
 			_ = json.Unmarshal(m.Params, &p)
-			if !ready || thread || p.Cwd == "" || p.Approval != "on-request" || p.Reviewer != "user" || p.Sandbox != "workspace-write" || p.Model != "test-model" ||
+			if !ready || thread || p.Cwd == "" || !validPolicy(p.Approval, p.Sandbox) || p.Reviewer != "user" || p.Model != "test-model" ||
 				// Context seeds new threads only; a resumed thread has its history.
 				(m.Method == "thread/start" && p.Instructions != "seed context") || (m.Method == "thread/resume" && p.Instructions != "") {
 				fatal("thread options")
@@ -239,4 +239,14 @@ func main() {
 			fatal("unexpected method " + m.Method)
 		}
 	}
+}
+
+// validPolicy accepts the approval policy and sandbox pairs Nexus sends for
+// its permission modes (ask, auto-approve edits, full access, plan).
+func validPolicy(approval, sandbox string) bool {
+	switch approval + "/" + sandbox {
+	case "untrusted/workspace-write", "on-request/workspace-write", "never/danger-full-access", "on-request/read-only":
+		return true
+	}
+	return false
 }

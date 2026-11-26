@@ -59,7 +59,7 @@ function jobStream(id: string, signal?: AbortSignal) {
           if (['completed', 'failed', 'cancelled', 'expired'].includes(job.state)) controller.close()
           return
         }
-        await new Promise((r) => setTimeout(r, 250))
+        await new Promise((r) => setTimeout(r, 60))
       }
     },
   })

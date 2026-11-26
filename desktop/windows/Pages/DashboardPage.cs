@@ -167,6 +167,7 @@ public sealed class DashboardPage : NexusPage
         bar.Children.Add(_startStatus);
         Grid.SetColumn(_startSend, 3);
         bar.Children.Add(_startSend);
+        VoiceInput.Attach(_startPrompt, _startSend);
         _startAgent.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         _startAgent.BorderThickness = new Thickness(0);
         _startAgent.FontSize = 12.5;
@@ -452,6 +453,7 @@ public sealed class DashboardPage : NexusPage
         ActivitySummary? summary;
         string? error = null;
         var slow = false;
+        var noProjects = false;
         var metrics = new List<JsonElement>();
         var watch = System.Diagnostics.Stopwatch.StartNew();
         // A retry keeps what is on screen until the new answer arrives.
@@ -489,7 +491,9 @@ public sealed class DashboardPage : NexusPage
             if (!projects.Ok || ids.Count == 0)
             {
                 summary = null;
-                error = projects.Ok ? "No projects yet." : projects.Error;
+                // No projects yet is a fresh start, not an error.
+                noProjects = projects.Ok;
+                error = projects.Ok ? null : projects.Error;
                 slow = !projects.Ok && NxErrors.Classify(projects.Error, Connectivity.Offline) == CallTrouble.Slow;
             }
             else
@@ -519,6 +523,15 @@ public sealed class DashboardPage : NexusPage
         if (complete || NxErrors.IsSignedOut(error)) s_activity[key] = (summary, metrics, error, DateTime.UtcNow);
         else s_activity.Remove(key);
         void Retry() => _ = LoadActivityAsync(_version, ShellProjectId(), null, retrying: true);
+        if (noProjects)
+        {
+            // One friendly start, no numbers and no error card. The capture
+            // card above has the same button; it isn't repeated here.
+            _calendar.RenderNoProjects(_captureCard.Visibility == Visibility.Visible ? null : () => _ = ChooseFoldersAsync());
+            RenderMetrics(metrics, null);
+            _activityAttempt = 0;
+            return;
+        }
         _calendar.Render(summary, scope, error, slow ? Retry : null);
         RenderMetrics(metrics, error);
         // A slow card retries by itself a few times; archived history the
@@ -572,18 +585,20 @@ public sealed class DashboardPage : NexusPage
             TextWrapping = TextWrapping.Wrap, Opacity = 0.75, FontSize = NexusTokens.FontBody, LineHeight = 20
         });
         var configure = new Button { Content = "Choose folders", Margin = new Thickness(0, 4, 0, 0) };
-        configure.Click += async (_, _) =>
-        {
-            var result = await CaptureSetup.ShowAsync(this, _approved, _suggested);
-            if (result is null) return;
-            if (!result.Ok)
-            {
-                _notice.Text = StateView.Friendly(result.Error) is { Length: > 0 } why ? why : "Couldn't save your folder choices. Try again.";
-                _notice.Visibility = Visibility.Visible;
-                return;
-            }
-            await LoadAsync();
-        };
+        configure.Click += async (_, _) => await ChooseFoldersAsync();
         _capture.Children.Add(configure);
+    }
+
+    private async Task ChooseFoldersAsync()
+    {
+        var result = await CaptureSetup.ShowAsync(this, _approved, _suggested);
+        if (result is null) return;
+        if (!result.Ok)
+        {
+            _notice.Text = StateView.Friendly(result.Error) is { Length: > 0 } why ? why : "Couldn't save your folder choices. Try again.";
+            _notice.Visibility = Visibility.Visible;
+            return;
+        }
+        await LoadAsync();
     }
 }

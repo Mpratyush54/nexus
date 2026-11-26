@@ -26,6 +26,7 @@ namespace Nexus.Core
         public const string SessionsGrants = "sessions.grants";
         public const string SessionsRestoreIdeHistory = "sessions.restore_ide_history";
         public const string SessionsDelete = "sessions.delete";
+        public const string SessionsState = "sessions.state";
         public const string FilesRead = "files.read";
         public const string FilesDiff = "files.diff";
         public const string ContinueStart = "continue.start";

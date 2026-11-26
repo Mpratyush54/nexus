@@ -166,6 +166,7 @@ func Methods() []string {
 		"sessions.grants",
 		"sessions.restore_ide_history",
 		"sessions.delete",
+		"sessions.state",
 		"agents.list",
 		"agents.configure_mcp",
 		"runs.message",
@@ -265,7 +266,11 @@ func Call(ctx context.Context, method string, args json.RawMessage, deps Deps) (
 	case "harness.available":
 		// Every chat agent at once, for the agent pickers. Read-only: PATH
 		// lookups, file stats and launcher reads; no agent is started.
-		return map[string]any{"agents": continuex.DetectHarnesses()}, nil
+		// The app asks this at startup, so it also fills the model-picker
+		// cache in the background for the agents that are ready.
+		agents := continuex.DetectHarnesses()
+		continuex.PrewarmModelCatalogs(agents)
+		return map[string]any{"agents": agents}, nil
 	case "harness.models":
 		// Cached per harness (memory + disk, 24h, background refresh) so the
 		// picker does not spawn a CLI each time it opens.
@@ -845,6 +850,8 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 			"project_id": "project_id", "project": "project_id", "agent": "harness",
 			"harness": "harness", "q": "q", "limit": "limit", "cursor": "cursor",
 			"include_subagents": "include_subagents",
+			"archived":          "archived",
+			"pinned":            "pinned",
 		}), nil, nil
 	case "memory.search":
 		if hasJSONKey(args, "browse") {
@@ -1014,7 +1021,14 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 		if id == "" {
 			return "", "", nil, errors.New("session id is required")
 		}
-		return http.MethodPost, "/v1/agent-sessions/" + url.PathEscape(id) + "/fork", []byte("{}"), nil
+		// through_idx ("fork from here") is passed through as written: turn
+		// indexes can exceed float64 precision.
+		body := []byte("{}")
+		var values map[string]json.RawMessage
+		if json.Unmarshal(args, &values) == nil && len(values["through_idx"]) > 0 && string(values["through_idx"]) != "null" {
+			body, _ = json.Marshal(map[string]json.RawMessage{"through_idx": values["through_idx"]})
+		}
+		return http.MethodPost, "/v1/agent-sessions/" + url.PathEscape(id) + "/fork", body, nil
 	case "sessions.shared_with":
 		if id == "" {
 			return "", "", nil, errors.New("session id is required")
@@ -1027,6 +1041,19 @@ func cloudRequest(method string, args json.RawMessage) (httpMethod, path string,
 			return "", "", nil, errors.New("session id is required")
 		}
 		return http.MethodDelete, "/v1/agent-sessions/" + url.PathEscape(id), nil, nil
+	case "sessions.state":
+		// The caller's own rename, pin and archive of a chat they can read.
+		// Only the keys given are sent: {title?: string ("" clears the
+		// rename), pinned?: bool, archived?: bool}.
+		if id == "" {
+			return "", "", nil, errors.New("session id is required")
+		}
+		patch, err := sessionStatePatch(args)
+		if err != nil {
+			return "", "", nil, err
+		}
+		body, _ := json.Marshal(patch)
+		return http.MethodPatch, "/v1/agent-sessions/" + url.PathEscape(id) + "/state", body, nil
 	case "sessions.unshare":
 		// {user_id}: that person; {team:true}: the project team; neither:
 		// everyone. (It used to fall through to the create-session route.)
@@ -1153,6 +1180,41 @@ func decodeExact(raw []byte, out *any) error {
 		return errors.New("trailing data after JSON value")
 	}
 	return nil
+}
+
+// sessionStatePatch reads the sessions.state keys that are present.
+func sessionStatePatch(args json.RawMessage) (map[string]any, error) {
+	var values map[string]json.RawMessage
+	if len(args) > 0 && json.Unmarshal(args, &values) != nil {
+		return nil, errors.New("invalid arguments")
+	}
+	patch := map[string]any{}
+	if raw, ok := values["title"]; ok {
+		var title *string
+		if json.Unmarshal(raw, &title) != nil {
+			return nil, errors.New("title must be text")
+		}
+		if title == nil {
+			patch["title"] = ""
+		} else {
+			patch["title"] = *title
+		}
+	}
+	for _, key := range []string{"pinned", "archived"} {
+		raw, ok := values[key]
+		if !ok {
+			continue
+		}
+		var flag bool
+		if json.Unmarshal(raw, &flag) != nil {
+			return nil, errors.New(key + " must be true or false")
+		}
+		patch[key] = flag
+	}
+	if len(patch) == 0 {
+		return nil, errors.New("send title, pinned or archived")
+	}
+	return patch, nil
 }
 
 func hasJSONKey(args json.RawMessage, key string) bool {

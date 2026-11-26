@@ -11,6 +11,7 @@ import { projectsApi, type ExportMemory } from '@/api/projects'
 import { formatBytes, storageApi } from '@/api/storage'
 import { PlanGrid } from '@/components/PlanGrid'
 import { AppearanceSettings } from '@/components/AppearanceSettings'
+import { VoiceInputSettings } from '@/components/voice/VoiceInputSettings'
 import {
   FieldRow,
   FormMessage,
@@ -106,6 +107,9 @@ export function SettingsPage() {
           <SettingsSection id="appearance" title="Appearance" description="Applies to the web app in this browser.">
             <FieldRow label="Theme" id="theme" help="“Match system” follows your OS light or dark setting.">
               <AppearanceSettings labelledBy="theme-label" />
+            </FieldRow>
+            <FieldRow label="Voice input" id="voice" help="Dictate into the chat box with the mic (Ctrl+Shift+Space, or ⌘⇧Space on a Mac). Your browser turns speech into text; Nexus never receives audio.">
+              <VoiceInputSettings labelledBy="voice-label" />
             </FieldRow>
           </SettingsSection>
           <PlanSection />

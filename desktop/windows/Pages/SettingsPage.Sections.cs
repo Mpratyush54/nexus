@@ -52,7 +52,12 @@ public sealed partial class SettingsPage
             SettingRow(RowText("Updates", _updateStatus), _updateButton));
         _updateButton.Click += async (_, _) => await UpdateAsync();
         RenderUpdateState();
-        return new StackPanel { Children = { appearance, startup, setup } };
+        var general = new StackPanel { Children = { appearance } };
+        foreach (var group in BuildShellSettingsGroups()) general.Children.Add(group);
+        general.Children.Add(startup);
+        general.Children.Add(BuildVoiceInputGroup());
+        general.Children.Add(setup);
+        return general;
     }
 
     // ---- General: updates (installed copies only; see UpdateService)
@@ -212,11 +217,12 @@ public sealed partial class SettingsPage
             SettingRow(RowText("Allow requests from Nexus Web",
                 "Off by default. When on, you can start an agent on this computer from Nexus in your browser. Nexus asks you here before every message, and only folders you chose can be used. Turning this off stops any work started that way."),
                 _browserExecution, _browserExecutionStatus));
-        return new StackPanel { Children = { mcp, web } };
+        return new StackPanel { Children = { BuildPermissionsGroup(), mcp, web } };
     }
 
     private async Task LoadAgentsSectionAsync()
     {
+        await LoadPermissionsAsync();
         await LoadMcpStatusAsync();
         await RefreshBrowserExecutionAsync();
     }

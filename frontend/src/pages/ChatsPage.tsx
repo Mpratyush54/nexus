@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+} from "react";
 import {
   useInfiniteQuery,
   useMutation,
@@ -9,6 +17,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import {
   ArrowDown,
   ArrowUp,
+  ChevronRight,
   GitFork,
   Monitor,
   MoreHorizontal,
@@ -16,12 +25,11 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Send,
   Share2,
   Square,
   X,
 } from "lucide-react";
-import { chatsApi, type ChatSession, type ChatTurn } from "@/api/chats";
+import { chatsApi, type ChatCard, type ChatSession, type ChatTurn } from "@/api/chats";
 import {
   desktopApi,
   isFinished,
@@ -33,17 +41,47 @@ import {
   ChatWorkLog,
   isSilentTurn,
   isToolOnlyTurn,
+  type MessageActions,
 } from "@/components/ChatMessage";
 import { ChatDiff } from "@/components/ChatDiff";
+import { VoiceInputButton } from "@/components/voice";
 import { ProjectSwitcher } from "@/components/ProjectSwitcher";
 import { NexusMark } from "@/components/NexusBrand";
 import { AccessibleModal } from "@/components/ui/AccessibleModal";
+import { ToastHost } from "@/components/Toasts";
+import { showToast } from "@/lib/toasts";
 import { useAuth } from "@/providers/AuthProvider";
 import { readableChatText } from "@/lib/chat-content";
 import { memoryTitle } from "@/lib/plain-language";
 import { DESKTOP_RELAY } from "@/lib/env";
-import { agentName, chatTitle, composerHarness } from "@/lib/harness-message";
-import { chatStatus, setLiveChat, useLiveChats } from "@/lib/live-chats";
+import {
+  agentName,
+  chatTitle,
+  composerHarness,
+  parseTurnText,
+} from "@/lib/harness-message";
+import { setLiveChat, useLiveChats } from "@/lib/live-chats";
+import { formatRelative } from "@/utils/format";
+import { useDraft, useDraftsVersion } from "@/lib/drafts";
+import {
+  enterAction,
+  isPrintableKey,
+  isTouchComposer,
+  recallStep,
+} from "@/lib/composer-keys";
+import { editIntoComposer, outbox } from "@/lib/outbox";
+import {
+  MAX_PINNED,
+  forgetChat,
+  groupChats,
+  migrateLocalChatPrefs,
+  renameChat,
+  setArchived,
+  setChatListRefresher,
+  setPinned,
+  useChatPrefs,
+} from "@/lib/chat-prefs";
+import { comboLabel, isMod, onAppCommand } from "@/lib/shortcuts";
 import { ApiError } from "@/types/api";
 import {
   MAX_IMAGES,
@@ -54,11 +92,15 @@ import {
   relayErrorMessage,
   type DraftImage,
 } from "@/lib/image-attach";
-import { formatRelative } from "@/utils/format";
+import { ChatRow, type RowCommand } from "./chats/ChatList";
+import { ReplyStatus } from "./chats/ReplyStatus";
 
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "Request failed. Try again.";
 const HARNESSES = ["codex", "cursor", "opencode", "claude"] as const;
+const reducedMotion = () =>
+  typeof window !== "undefined" &&
+  window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
 type Segment =
   | { kind: "turn"; turn: ChatTurn }
@@ -79,8 +121,21 @@ function segmentTurns(rows: ChatTurn[]): Segment[] {
   }
   return out;
 }
+
+/** The words a person typed in a user turn (without harness wrappers). */
+function promptText(turn: ChatTurn | undefined): string {
+  return turn ? parseTurnText(turn.text_preview ?? "").text.trim() : "";
+}
+
+/** True when focus is in something that takes typing. */
+function isTypingTarget(target: EventTarget | null) {
+  const el = target as HTMLElement | null;
+  return !!el?.closest?.("input, textarea, select, [contenteditable=''], [contenteditable='true']");
+}
+
 export function ChatsPage() {
-  const { projectId, setProjectId } = useAuth();
+  const { projectId, setProjectId, user } = useAuth();
+  const userId = user?.userId ?? "";
   const cache = useQueryClient();
   const [params, setParams] = useSearchParams();
   const id = params.get("chat") || "";
@@ -105,7 +160,44 @@ export function ChatsPage() {
       chatsApi.list(projectId!, search, pageParam, signal),
     getNextPageParam: (last) => last.next_cursor || undefined,
   });
-  const allCards = feed.data?.pages.flatMap((page) => page.items) ?? [];
+  // Pinned chats can be older than the first page; the server lists them apart.
+  const pinnedFeed = useQuery({
+    queryKey: ["chats-pinned", projectId],
+    enabled: !!projectId && !search.trim(),
+    queryFn: ({ signal }) => chatsApi.pinned(projectId!, signal),
+    retry: false,
+  });
+  useEffect(() => {
+    setChatListRefresher(() =>
+      Promise.all([
+        cache.invalidateQueries({ queryKey: ["chats"] }),
+        cache.invalidateQueries({ queryKey: ["chats-pinned"] }),
+      ]),
+    );
+    return () => setChatListRefresher(null);
+  }, [cache]);
+  // Pins, archives and renames an older web build kept in this browser move to the server once.
+  useEffect(() => {
+    if (!userId) return;
+    void migrateLocalChatPrefs(userId).then((moved) => {
+      if (moved > 0) {
+        void cache.invalidateQueries({ queryKey: ["chats"] });
+        void cache.invalidateQueries({ queryKey: ["chats-pinned"] });
+      }
+    });
+  }, [userId, cache]);
+  useDraftsVersion();
+  // Chats deleted a moment ago: hidden while their Undo toast is up.
+  const [deleting, setDeleting] = useState<Set<string>>(() => new Set());
+  const [confirmDelete, setConfirmDelete] = useState<ChatCard | null>(null);
+  const [showArchived, setShowArchived] = useState(false);
+  const allCards = useMemo(() => {
+    const seen = new Set<string>();
+    return [...(search.trim() ? [] : (pinnedFeed.data?.items ?? [])), ...(feed.data?.pages.flatMap((page) => page.items) ?? [])].filter(
+      (c) => !deleting.has(c.session_id) && !seen.has(c.session_id) && !!seen.add(c.session_id),
+    );
+  }, [feed.data, pinnedFeed.data, search, deleting]);
+  const prefs = useChatPrefs(allCards);
   const live = useLiveChats();
   // Filter by agent when the list mixes several (client-side, over loaded chats).
   const [agentFilter, setAgentFilter] = useState("");
@@ -113,6 +205,7 @@ export function ChatsPage() {
   const cards = agentFilter
     ? allCards.filter((c) => agentName(c.harness) === agentFilter)
     : allCards;
+  const groups = groupChats(cards, prefs);
   const session = useQuery({
     queryKey: ["chat", id],
     enabled: !!id,
@@ -127,10 +220,119 @@ export function ChatsPage() {
       void cache.invalidateQueries({ queryKey: ["chats"] });
     },
   });
+  // "New chat" from the command palette lands here as ?new=1.
+  const wantsNew = params.get("new") === "1";
+  useEffect(() => {
+    if (!wantsNew) return;
+    setParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        next.delete("new");
+        return next;
+      },
+      { replace: true },
+    );
+    if (DESKTOP_RELAY && projectId && !create.isPending) create.mutate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantsNew, projectId]);
+  useEffect(
+    () =>
+      onAppCommand((command) => {
+        if (command === "new-chat" && DESKTOP_RELAY && projectId) create.mutate();
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [projectId],
+  );
   useEffect(() => {
     const timer = setTimeout(() => setSearch(query), 250);
     return () => clearTimeout(timer);
   }, [query]);
+
+  function deleteSoon(card: ChatCard) {
+    const chatId = card.session_id;
+    setDeleting((s) => new Set(s).add(chatId));
+    if (chatId === id) setParams({});
+    let undone = false;
+    const restore = () => {
+      undone = true;
+      setDeleting((s) => {
+        const next = new Set(s);
+        next.delete(chatId);
+        return next;
+      });
+    };
+    // Deleting is permanent, so it waits out the Undo window first.
+    showToast("Chat deleted", { undo: restore });
+    window.setTimeout(() => {
+      if (undone) return;
+      chatsApi
+        .remove(chatId)
+        .then(() => {
+          forgetChat(chatId);
+          void cache.invalidateQueries({ queryKey: ["chats"] });
+        })
+        .catch((e) => {
+          restore();
+          showToast(
+            e instanceof ApiError && e.status === 403
+              ? "Only the person who owns this chat can delete it."
+              : `Couldn't delete the chat. ${message(e)}`,
+            { tone: "error" },
+          );
+        });
+    }, 8000);
+  }
+
+  function runRowCommand(card: ChatCard, command: RowCommand) {
+    const chatId = card.session_id;
+    if (command === "pin") {
+      const pinned = prefs.pinned.includes(chatId);
+      if (!pinned && prefs.pinned.length >= MAX_PINNED) {
+        showToast(`You can pin up to ${MAX_PINNED} chats. Unpin one first.`, { tone: "error" });
+        return;
+      }
+      showToast(pinned ? "Unpinned" : "Pinned to the top");
+      setPinned(chatId, !pinned).catch((e) => showToast(`Couldn't ${pinned ? "unpin" : "pin"} the chat. ${message(e)}`, { tone: "error" }));
+    } else if (command === "archive") {
+      const archived = prefs.archived.includes(chatId);
+      const failed = (e: unknown) => showToast(`Couldn't update the chat. ${message(e)}`, { tone: "error" });
+      setArchived(chatId, !archived).catch(failed);
+      showToast(archived ? "Chat moved back to your list" : "Chat archived", {
+        undo: () => void setArchived(chatId, archived).catch(failed),
+      });
+    } else if (command === "link") {
+      const url = new URL(window.location.href);
+      url.search = new URLSearchParams({ chat: chatId }).toString();
+      url.hash = "";
+      void navigator.clipboard
+        .writeText(url.toString())
+        .then(() => showToast("Link copied. It opens for people who can see this chat."))
+        .catch(() => showToast("Copy was blocked by the browser.", { tone: "error" }));
+    } else if (command === "delete") {
+      setConfirmDelete(card);
+    }
+  }
+
+  const row = (card: ChatCard) => (
+    <ChatRow
+      key={card.session_id}
+      card={card}
+      title={prefs.titles[card.session_id]}
+      active={id === card.session_id}
+      pinned={prefs.pinned.includes(card.session_id)}
+      archived={prefs.archived.includes(card.session_id)}
+      live={live.get(card.session_id)}
+      onOpen={() => setParams({ chat: card.session_id })}
+      onCommand={(command) => runRowCommand(card, command)}
+      onRename={(title) => {
+        // An empty name goes back to the chat's own title.
+        const current = prefs.titles[card.session_id] || chatTitle(card.title, card.summary, card.harness);
+        if (title.trim() === current) return;
+        renameChat(card.session_id, title).catch((e) => showToast(`Couldn't rename the chat. ${message(e)}`, { tone: "error" }));
+      }}
+    />
+  );
+
   const inProject = session.data?.project_id === projectId;
   return (
     <div className={`conversation-layout ${id ? "has-chat" : ""}`}>
@@ -216,36 +418,16 @@ export function ChatsPage() {
                   : "No chats yet. Install the desktop app and chat with Claude Code, Codex or Cursor in this project — your chats show up here."}
             </p>
           )}
-          {cards.map((card) => (
-            <button
-              key={card.session_id}
-              className={`conversation-card ${id === card.session_id ? "is-active" : ""}`}
-              aria-current={id === card.session_id ? "true" : undefined}
-              onClick={() => setParams({ chat: card.session_id })}
-            >
-              <span>
-                <strong>{chatTitle(card.title, card.summary, card.harness)}</strong>
-                {card.parent_session_id && (
-                  <GitFork size={13} aria-label="Forked chat" />
-                )}
-              </span>
-              {card.summary && <p>{readableChatText(card.summary)}</p>}
-              <small>
-                <span>
-                  {agentName(card.harness)}
-                  {(() => {
-                    const st = chatStatus(card.last_active_at, live.get(card.session_id));
-                    return st ? (
-                      <em className={`chat-status is-${st.tone}`}>{st.label}</em>
-                    ) : null;
-                  })()}
-                </span>
-                <time dateTime={card.last_active_at}>
-                  {formatRelative(card.last_active_at)}
-                </time>
-              </small>
-            </button>
-          ))}
+          {groups.pinned.length > 0 && (
+            <section aria-label="Pinned chats" className="conversation-group">
+              <h2>Pinned</h2>
+              {groups.pinned.map(row)}
+            </section>
+          )}
+          {groups.recent.length > 0 && groups.pinned.length > 0 && (
+            <h2 className="conversation-group-title">Recent</h2>
+          )}
+          {groups.recent.map(row)}
           {feed.hasNextPage && (
             <button
               className="chat-load-more"
@@ -256,6 +438,20 @@ export function ChatsPage() {
             >
               {feed.isFetchingNextPage ? "Loading…" : "Load more chats"}
             </button>
+          )}
+          {groups.archived.length > 0 && (
+            <section aria-label="Archived chats" className="conversation-group is-archived">
+              <button
+                type="button"
+                className="conversation-archived-toggle"
+                aria-expanded={showArchived}
+                onClick={() => setShowArchived(!showArchived)}
+              >
+                <ChevronRight size={13} className="chat-chevron" aria-hidden />
+                Archived ({groups.archived.length})
+              </button>
+              {showArchived && groups.archived.map(row)}
+            </section>
           )}
         </div>
       </aside>
@@ -274,7 +470,11 @@ export function ChatsPage() {
           )}
         </section>
       ) : session.isPending ? (
-        <p className="chat-muted conversation-state" role="status">Loading chat…</p>
+        <div className="conversation-detail conversation-skeleton" role="status" aria-label="Loading chat">
+          <span />
+          <span />
+          <span />
+        </div>
       ) : session.error ? (
         session.error instanceof ApiError &&
         (session.error.status === 404 || session.error.status === 403) ? (
@@ -312,11 +512,40 @@ export function ChatsPage() {
           <Conversation
             key={`${projectId}:${id}`}
             session={session.data}
+            title={prefs.titles[id]}
             onBack={() => setParams({})}
             onOpen={(next) => setParams({ chat: next })}
           />
         )
       )}
+      {confirmDelete && (
+        <AccessibleModal labelledBy="delete-chat-title" onClose={() => setConfirmDelete(null)}>
+          <header>
+            <h3 id="delete-chat-title">Delete this chat?</h3>
+            <button aria-label="Cancel" onClick={() => setConfirmDelete(null)}>
+              <X size={18} />
+            </button>
+          </header>
+          <p>
+            “{prefs.titles[confirmDelete.session_id] || chatTitle(confirmDelete.title, confirmDelete.summary, confirmDelete.harness)}”
+            and its messages are removed for everyone it’s shared with. Memories your agents saved from it stay.
+          </p>
+          <div className="chat-modal-actions">
+            <button onClick={() => setConfirmDelete(null)}>Cancel</button>
+            <button
+              className="chat-danger"
+              autoFocus
+              onClick={() => {
+                deleteSoon(confirmDelete);
+                setConfirmDelete(null);
+              }}
+            >
+              Delete chat
+            </button>
+          </div>
+        </AccessibleModal>
+      )}
+      <ToastHost />
     </div>
   );
 }
@@ -351,16 +580,19 @@ function ApprovalWait({ computer }: { computer: string }) {
 
 function Conversation({
   session,
+  title,
   onBack,
   onOpen,
 }: {
   session: ChatSession;
+  title?: string;
   onBack: () => void;
   onOpen: (id: string) => void;
 }) {
   const { user } = useAuth();
   const owned = !!user?.userId && session.owner_user_id === user.userId;
   const cache = useQueryClient();
+  const [touch] = useState(isTouchComposer);
   const [tab, setTab] = useState("chat"),
     [findOpen, setFindOpen] = useState(false),
     [find, setFind] = useState(""),
@@ -370,13 +602,18 @@ function Conversation({
     [shareUser, setShareUser] = useState("");
   const [agent, setAgent] = useState(composerHarness(session.harness)),
     [model, setModel] = useState(""),
-    [deviceId, setDeviceId] = useState(""),
-    [draft, setDraft] = useState("");
+    [deviceId, setDeviceId] = useState("");
+  // What you're typing is kept per chat, across switches and reloads.
+  const [draft, setDraft, clearDraft] = useDraft(session.id);
   const [ownJob, setJob] = useState<DesktopJob | null>(null),
     [error, setError] = useState(""),
     [streamNonce, setStreamNonce] = useState(0);
   const [modelJob, setModelJob] = useState<DesktopJob | null>(null);
-  const [sending, setSending] = useState(false);
+  // Replies sent from here that finished but haven't synced into the transcript yet.
+  const [earlierJobs, setEarlierJobs] = useState<DesktopJob[]>([]);
+  // The message just sent, shown before the server answers (and kept if it fails).
+  const [outgoing, dispatchOut] = useReducer(outbox, null);
+  const [startedAt, setStartedAt] = useState(() => Date.now());
   // Images waiting in the composer, and the ones shown under the message
   // just sent (object URLs; the bytes leave this tab only in the send).
   const [images, setImages] = useState<DraftImage[]>([]);
@@ -385,6 +622,7 @@ function Conversation({
   // Image problems are said next to the 📎, not at the top of the chat.
   const [attachNote, setAttachNote] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
+  const composer = useRef<HTMLTextAreaElement>(null);
   const objectUrls = useRef(new Set<string>());
   useEffect(() => {
     const urls = objectUrls.current;
@@ -404,6 +642,7 @@ function Conversation({
     ownJob ??
     (restoredJob.data?.session_id === session.id ? restoredJob.data : null);
   const scroll = useRef<HTMLDivElement>(null);
+  const transcript = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const vv = window.visualViewport;
     if (!vv) return;
@@ -450,7 +689,9 @@ function Conversation({
         Date.now() - new Date(d.last_seen_at).getTime() < 45000,
     ) ?? [];
   const device = available.find((d) => d.id === deviceId) ?? available[0];
-  const busy = sending || (!!job && !isFinished(job.state));
+  const sending = outgoing?.state === "sending";
+  const running = !!job && !isFinished(job.state);
+  const busy = sending || running;
   const imageBlocker = device ? attachBlocker(agent, device.protocol) : "";
   // Reply from here only when it can actually run: relay on, your chat, a computer online for it.
   const steerable = DESKTOP_RELAY && owned && !!device;
@@ -488,6 +729,32 @@ function Conversation({
   const prompts = rows.filter(
     (turn) => turn.role === "user" && readableChatText(turn.text_preview || ""),
   );
+
+  // ---- Focus: opening a chat puts the caret in the composer (not on phones,
+  // where that would throw the keyboard over the conversation).
+  const focusComposer = useCallback(() => {
+    const el = composer.current;
+    if (!el) return;
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+  const focusedOnOpen = useRef(false);
+  useEffect(() => {
+    if (focusedOnOpen.current || !composer.current || touch) return;
+    focusedOnOpen.current = true;
+    focusComposer();
+  }, [steerable, busy, touch, focusComposer]);
+
+  // ---- Composer grows with its text, up to a limit, instead of a resize handle.
+  useLayoutEffect(() => {
+    const el = composer.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, touch ? 160 : 240)}px`;
+  }, [draft, touch, steerable]);
+
+  // ---- Scroll: start at the latest message, and stay pinned to it while a
+  // reply streams in, unless the reader scrolled up.
   useEffect(() => {
     if (
       !findQuery &&
@@ -500,9 +767,16 @@ function Conversation({
     }
   }, [turns.data, findQuery]);
   useEffect(() => {
-    if (followReply.current && scroll.current && job)
-      scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [job]);
+    const node = transcript.current;
+    if (!node || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const box = scroll.current;
+      if (box && followReply.current && scrolledInitially.current && !anchor.current)
+        box.scrollTop = box.scrollHeight;
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [tab]);
   // Loading earlier messages prepends rows: keep the reader's place.
   const anchor = useRef<{ height: number; top: number } | null>(null);
   useEffect(() => {
@@ -519,9 +793,10 @@ function Conversation({
   function jumpToLatest() {
     const node = scroll.current;
     if (!node) return;
+    followReply.current = true;
     node.scrollTo({
       top: node.scrollHeight,
-      behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+      behavior: reducedMotion() ? "auto" : "smooth",
     });
   }
   useEffect(() => {
@@ -567,7 +842,15 @@ function Conversation({
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [modelJob?.id]);
-  async function send() {
+
+  /**
+   * Sends a message. The bubble appears at once and the composer empties;
+   * the request goes out after. If it fails, the bubble stays with Retry and Edit.
+   */
+  async function send(opts: { text?: string; images?: DraftImage[]; retryId?: string } = {}) {
+    const fromComposer = opts.text === undefined;
+    const text = (opts.text ?? draft).trim();
+    const pics = opts.images ?? (fromComposer ? images : []);
     if (
       !owned ||
       !device ||
@@ -575,17 +858,30 @@ function Conversation({
       discoveringModels ||
       modelLock.current ||
       sendingLock.current ||
-      !draft.trim() ||
-      readingImages > 0
+      !text ||
+      (fromComposer && readingImages > 0)
     )
       return;
-    if (images.length > 0 && imageBlocker) {
+    if (pics.length > 0 && imageBlocker) {
       setAttachNote(imageBlocker);
       return;
     }
+    const outId = opts.retryId ?? crypto.randomUUID();
     sendingLock.current = true;
-    setSending(true);
+    dispatchOut(
+      opts.retryId
+        ? { type: "retry", id: outId }
+        : { type: "send", id: outId, text, images: pics },
+    );
+    if (fromComposer) {
+      clearDraft();
+      setImages([]);
+      setAttachNote("");
+    }
+    setRecall(-1);
     setError("");
+    followReply.current = true;
+    requestAnimationFrame(() => jumpToLatest());
     try {
       const next = await desktopApi.create({
         id: crypto.randomUUID(),
@@ -595,29 +891,138 @@ function Conversation({
         kind: "turn",
         agent,
         model,
-        prompt: draft.trim(),
-        ...(images.length > 0 && {
-          attachments: images.map((image) => ({
+        prompt: text,
+        ...(pics.length > 0 && {
+          attachments: pics.map((image) => ({
             name: image.name,
             media_type: image.mediaType,
             data: image.data,
           })),
         }),
       });
-      sentPrompt.current = draft.trim();
+      if (job && !isSynced(job)) setEarlierJobs((list) => [...list, job]);
+      sentPrompt.current = text;
+      setStartedAt(Date.now());
       setLiveChat(session.id, next.state);
+      setSentImages(pics);
       setJob(next);
-      setDraft("");
-      setSentImages(images);
-      setImages([]);
-      setAttachNote("");
+      dispatchOut({ type: "sent", id: outId });
     } catch (e) {
-      setError(relayErrorMessage(message(e)));
+      dispatchOut({ type: "failed", id: outId, error: relayErrorMessage(message(e)) });
     } finally {
       sendingLock.current = false;
-      setSending(false);
     }
   }
+  function editFailed() {
+    if (!outgoing) return;
+    setDraft(editIntoComposer(outgoing.text, draft));
+    if (!images.length && outgoing.images.length) setImages(outgoing.images);
+    dispatchOut({ type: "discard", id: outgoing.id });
+    requestAnimationFrame(focusComposer);
+  }
+  function stop() {
+    if (!job || isFinished(job.state)) return;
+    void desktopApi
+      .cancel(job.id)
+      .then((next) => {
+        // Keep what already ran: a stopped turn still shows its finished steps.
+        setJob((prev) =>
+          prev && !next.activities?.length && prev.activities?.length
+            ? {
+                ...next,
+                text: next.text || prev.text,
+                activities: prev.activities.filter(
+                  (a) => a.status !== "running",
+                ),
+              }
+            : next,
+        );
+        setLiveChat(next.session_id, next.state);
+      })
+      .catch((e) => setError(message(e)));
+  }
+  /** Puts an earlier message in the composer to change and send again. */
+  function editMessage(text: string) {
+    setDraft(editIntoComposer(text, draft));
+    requestAnimationFrame(focusComposer);
+  }
+
+  // ---- ↑ in an empty composer recalls your earlier prompts, newest first.
+  const history = [
+    ...new Set(
+      [...prompts.map((t) => promptText(t)), job?.prompt ?? ""]
+        .filter(Boolean)
+        .reverse(),
+    ),
+  ];
+  const [recall, setRecall] = useState(-1);
+
+  // ---- Keys that work anywhere in the open chat.
+  const keyState = useRef({ busy, stop, jumpToLatest, focusComposer, tab });
+  keyState.current = { busy, stop, jumpToLatest, focusComposer, tab };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const k = keyState.current;
+      if (e.defaultPrevented) return;
+      const modalOpen = !!document.querySelector("dialog[open], [role=menu]");
+      // Esc stops from the composer or while reading; other text boxes keep their own Esc.
+      if (
+        e.key === "Escape" &&
+        k.busy &&
+        !modalOpen &&
+        (!isTypingTarget(e.target) || e.target === composer.current)
+      ) {
+        e.preventDefault();
+        k.stop();
+        return;
+      }
+      if (isMod(e) && e.shiftKey && e.key === "Backspace" && k.busy) {
+        e.preventDefault();
+        k.stop();
+        return;
+      }
+      if (isMod(e) && e.key === "ArrowDown" && !isTypingTarget(e.target)) {
+        e.preventDefault();
+        k.jumpToLatest();
+        return;
+      }
+      if (isMod(e) && !e.shiftKey && e.key.toLowerCase() === "f" && k.tab !== "memory") {
+        e.preventDefault();
+        setFindOpen(true);
+        requestAnimationFrame(() =>
+          document.querySelector<HTMLInputElement>(".conversation-find input")?.focus(),
+        );
+        return;
+      }
+      // Typing while reading the transcript goes into the composer.
+      if (
+        isPrintableKey(e) &&
+        !modalOpen &&
+        !isTypingTarget(e.target) &&
+        !(e.target as HTMLElement | null)?.closest?.(
+          ".conversation-list, [role=tablist], button, a, summary, [role=menu]",
+        ) &&
+        composer.current
+      ) {
+        composer.current.focus({ preventScroll: true });
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(
+    () =>
+      onAppCommand((command) => {
+        if (command === "stop-reply") keyState.current.stop();
+        if (command === "focus-composer") keyState.current.focusComposer();
+        if (command === "find-in-chat") {
+          setTab("chat");
+          setFindOpen(true);
+        }
+      }),
+    [],
+  );
+
   async function addImages(files: File[]) {
     if (!files.length) return;
     if (imageBlocker) {
@@ -689,9 +1094,7 @@ function Conversation({
     document
       .getElementById(`turn-${turn.cursor_idx || turn.idx}-${turn.role}`)
       ?.scrollIntoView({
-        behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
-          ? "instant"
-          : "smooth",
+        behavior: reducedMotion() ? "instant" : "smooth",
         block: "start",
       });
   }
@@ -702,33 +1105,50 @@ function Conversation({
     jump(rows[next]);
   }
   const files = job?.result?.file_diffs ?? [];
-  const responseAlreadySynced =
-    !!job?.result?.answer_cursor &&
-    rows.some(
-      (turn) =>
-        turn.role === "assistant" &&
-        turn.cursor_idx === job.result?.answer_cursor,
+  function isSynced(j: DesktopJob) {
+    return (
+      !!j.result?.answer_cursor &&
+      rows.some((turn) => turn.role === "assistant" && turn.cursor_idx === j.result?.answer_cursor)
     );
+  }
+  const responseAlreadySynced = !!job && isSynced(job);
   const jobComputer =
     devices.data?.items.find((d) => d.id === job?.device_id)?.name ||
     device?.name ||
     "your computer";
-  const liveTurns: ChatTurn[] =
-    job && !responseAlreadySynced
-      ? [
-          {
-            idx: -2,
-            role: "user",
-            text_preview: job.prompt || sentPrompt.current,
-          },
-          {
-            idx: -1,
-            role: "assistant",
-            text_preview: job.result?.text || job.text,
-            tool_calls: job.activities,
-          },
-        ]
-      : [];
+  const showJob = !!job && !responseAlreadySynced;
+  const canReply = steerable && !busy;
+
+  // The latest reply keeps its actions visible; Retry asks its prompt again.
+  const lastSegment = segments[segments.length - 1];
+  const lastIsReply =
+    !showJob &&
+    !outgoing &&
+    lastSegment?.kind === "turn" &&
+    lastSegment.turn.role !== "user";
+  const lastPrompt = promptText(prompts[prompts.length - 1]);
+  const replyActions = (isLatest: boolean, prompt: string): MessageActions => ({
+    always: isLatest,
+    onRetry: isLatest && canReply && prompt ? () => void send({ text: prompt }) : undefined,
+    onFork: isLatest && owned && !busy ? () => fork.mutate() : undefined,
+  });
+  const userActions = (text: string): MessageActions | undefined =>
+    steerable && text ? { onEdit: () => editMessage(text) } : undefined;
+
+  const statusVerb = !job
+    ? ""
+    : job.state === "queued"
+      ? `Sending to ${jobComputer}`
+      : job.status || "Working";
+  const liveStatus =
+    job && !isFinished(job.state) ? (
+      job.state === "awaiting_approval" ? (
+        <ApprovalWait key={job.id} computer={jobComputer} />
+      ) : (
+        <ReplyStatus verb={statusVerb} startedAt={startedAt} touch={touch} />
+      )
+    ) : undefined;
+
   return (
     <section className="conversation-detail" aria-label="Conversation">
       <header className="conversation-header">
@@ -736,7 +1156,7 @@ function Conversation({
           <button className="chat-mobile-back" onClick={onBack}>
             ← Chats
           </button>
-          <h2>{chatTitle(session.title, session.summary, session.harness)}</h2>
+          <h2>{title || chatTitle(session.title, session.summary, session.harness)}</h2>
           <small>
             {agentName(session.harness)}
             {session.last_active_at &&
@@ -754,7 +1174,7 @@ function Conversation({
             </button>
           )}
           <button
-            title="Find in chat"
+            title={`Find in chat (${comboLabel(["Mod", "F"])})`}
             aria-label="Find in chat"
             onClick={() => setFindOpen(!findOpen)}
           >
@@ -763,7 +1183,6 @@ function Conversation({
           <button
             disabled={fork.isPending || busy}
             title="Copy this chat into a new one you can continue"
-            aria-label="Fork chat"
             onClick={() => fork.mutate()}
           >
             <GitFork size={15} />
@@ -822,6 +1241,17 @@ function Conversation({
             onChange={(e) => setFind(e.target.value)}
             placeholder="Find across this conversation"
             aria-label="Find across this conversation"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                nextMatch(e.shiftKey ? -1 : 1);
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                setFindOpen(false);
+                setFind("");
+                focusComposer();
+              }
+            }}
           />
           <small>
             {findQuery
@@ -845,6 +1275,7 @@ function Conversation({
           </button>
         </div>
       )}
+      <div className="conversation-stage">
       <div
         className="conversation-scroll"
         id="chat-tabpanel"
@@ -857,8 +1288,8 @@ function Conversation({
           const node = scroll.current;
           if (!node) return;
           const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
-          followReply.current = distance < 100;
-          setAwayFromLatest(distance > 600);
+          followReply.current = distance < 80;
+          setAwayFromLatest(distance > 200);
         }}
       >
         {(turns.error || error || fork.error) && (
@@ -876,7 +1307,13 @@ function Conversation({
             )}
           </p>
         )}
-        {turns.isPending && <p className="chat-muted" role="status">Loading messages…</p>}
+        {turns.isPending && (
+          <div className="conversation-skeleton is-inline" role="status" aria-label="Loading messages">
+            <span />
+            <span />
+            <span />
+          </div>
+        )}
         {tab === "memory" ? (
           <div className="conversation-memory">
             <h3>Conversation summary</h3>
@@ -912,7 +1349,7 @@ function Conversation({
             )}
           </div>
         ) : (
-          <div className="conversation-transcript">
+          <div className="conversation-transcript" ref={transcript}>
             {!findQuery && turns.hasNextPage && (
               <button
                 className="chat-load-more"
@@ -932,7 +1369,7 @@ function Conversation({
                     harness={session.harness}
                   />
                 ))
-              : segments.map((segment) =>
+              : segments.map((segment, index) =>
                   segment.kind === "worklog" ? (
                     <ChatWorkLog
                       key={`log:${segment.turns[0].cursor_idx || segment.turns[0].idx}`}
@@ -945,14 +1382,23 @@ function Conversation({
                       turn={segment.turn}
                       harness={session.harness}
                       match={findQuery}
+                      actions={
+                        findQuery
+                          ? undefined
+                          : segment.turn.role === "user"
+                            ? userActions(promptText(segment.turn))
+                            : replyActions(lastIsReply && index === segments.length - 1, lastPrompt)
+                      }
                     />
                   ),
                 )}
-            {!segments.length && !turns.isPending && !turns.error && (
+            {!segments.length && !turns.isPending && !turns.error && !showJob && !outgoing && (
               <p className="chat-muted">
                 {findQuery
                   ? `No messages match “${findQuery}”.`
-                  : "No messages yet. They appear here once Nexus Desktop syncs this chat."}
+                  : steerable
+                    ? "No messages yet. Say what you'd like the agent to do."
+                    : "No messages yet. They appear here once Nexus Desktop syncs this chat."}
               </p>
             )}
             {findQuery && turns.hasNextPage && (
@@ -970,50 +1416,85 @@ function Conversation({
                     : "Load earlier messages"}
               </button>
             )}
-            {liveTurns.map((turn) => (
-              <ChatMessage
-                key={turn.idx}
-                turn={turn}
-                harness={job?.agent || agent}
-                images={
-                  turn.role === "user" && job?.attachments?.length
-                    ? sentImages.map((image) => ({ url: image.url, name: image.name }))
-                    : []
-                }
-              />
-            ))}
-            {files.map((file) => (
-              <ChatDiff key={file.path} {...file} />
-            ))}
-            {job?.error && (
-              <p role="alert" className="chat-error">
-                {job.error}
-              </p>
-            )}
-            {job && job.state === "awaiting_approval" ? (
-              <ApprovalWait key={job.id} computer={jobComputer} />
-            ) : job && (
-              <p
-                className={`chat-live-status${job.state === "cancelled" ? " is-stopped" : ""}`}
-                role="status"
-              >
-                {job.state === "completed"
-                  ? job.result?.cloud_saved === false
-                    ? "Saved on your computer; syncing to your account needs attention."
-                    : "Reply complete"
-                  : job.state === "cancelled"
-                    ? "Stopped. The steps above already ran; changes they made to files stay."
-                    : job.state === "expired"
-                      ? "Request expired. It was not automatically retried."
-                      : job.status || "Working…"}
-                {!isFinished(job.state) && (
-                  <span className="chat-typing" aria-hidden="true">
-                    <i />
-                    <i />
-                    <i />
-                  </span>
+            {tab === "chat" &&
+              earlierJobs
+                .filter((j) => j.id !== job?.id && !isSynced(j))
+                .map((j) => (
+                  <div key={`earlier-${j.id}`} className="chat-earlier-job">
+                    <ChatMessage
+                      turn={{ idx: -4, role: "user", text_preview: j.prompt || "" }}
+                      harness={j.agent || agent}
+                      actions={userActions(j.prompt || "")}
+                    />
+                    <ChatMessage
+                      turn={{ idx: -4, role: "assistant", text_preview: j.result?.text || j.text, tool_calls: j.activities }}
+                      harness={j.agent || agent}
+                      toolsFirst
+                    />
+                  </div>
+                ))}
+            {tab === "chat" && showJob && job && (
+              <>
+                <ChatMessage
+                  key={`job-user-${job.id}`}
+                  turn={{ idx: -2, role: "user", text_preview: job.prompt || sentPrompt.current }}
+                  harness={job.agent || agent}
+                  images={
+                    job.attachments?.length
+                      ? sentImages.map((image) => ({ url: image.url, name: image.name }))
+                      : []
+                  }
+                  actions={outgoing ? undefined : userActions(job.prompt || sentPrompt.current)}
+                />
+                <ChatMessage
+                  key={`job-reply-${job.id}`}
+                  turn={{
+                    idx: -1,
+                    role: "assistant",
+                    text_preview: job.result?.text || job.text,
+                    tool_calls: job.activities,
+                  }}
+                  harness={job.agent || agent}
+                  isNew
+                  toolsFirst
+                  status={liveStatus}
+                  actions={
+                    !outgoing && isFinished(job.state)
+                      ? replyActions(true, job.prompt || sentPrompt.current)
+                      : undefined
+                  }
+                />
+                {files.map((file) => (
+                  <ChatDiff key={file.path} {...file} />
+                ))}
+                {job.error && (
+                  <div role="alert" className="chat-error chat-reply-error">
+                    <p>{job.error}</p>
+                    {canReply && (job.prompt || sentPrompt.current) && (
+                      <button type="button" onClick={() => void send({ text: job.prompt || sentPrompt.current })}>
+                        Retry
+                      </button>
+                    )}
+                  </div>
                 )}
-              </p>
+                {isFinished(job.state) && job.state !== "failed" && <JobOutcome job={job} canReply={canReply} onContinue={() => void send({ text: "continue" })} onRetry={() => void send({ text: job.prompt || sentPrompt.current })} />}
+              </>
+            )}
+            {tab === "chat" && outgoing && (
+              <ChatMessage
+                key={`out-${outgoing.id}`}
+                turn={{ idx: -3, role: "user", text_preview: outgoing.text }}
+                harness={agent}
+                isNew={outgoing.state === "sending"}
+                images={outgoing.images.map((image) => ({ url: image.url, name: image.name }))}
+                outgoing={{
+                  state: outgoing.state,
+                  error: outgoing.error,
+                  onRetry: () =>
+                    void send({ text: outgoing.text, images: outgoing.images, retryId: outgoing.id }),
+                  onEdit: editFailed,
+                }}
+              />
             )}
           </div>
         )}
@@ -1036,18 +1517,29 @@ function Conversation({
             ))}
           </nav>
         )}
-        {awayFromLatest && tab === "chat" && !findQuery && (
-          <button type="button" className="chat-jump-latest" onClick={jumpToLatest}>
-            <ArrowDown size={14} /> Latest
-          </button>
-        )}
+      </div>
+        <button
+          type="button"
+          className={`chat-jump-latest ${awayFromLatest && tab === "chat" && !findQuery ? "is-visible" : ""}`}
+          onClick={jumpToLatest}
+          aria-label="Jump to latest message"
+          title={`Jump to latest (${comboLabel(["Mod", "↓"])})`}
+          tabIndex={awayFromLatest && tab === "chat" && !findQuery ? 0 : -1}
+          aria-hidden={awayFromLatest && tab === "chat" && !findQuery ? undefined : true}
+        >
+          <ArrowDown size={16} />
+          {busy && <span className="chat-jump-dot" aria-hidden="true" />}
+        </button>
       </div>
       {steerable || busy ? (
       <form
         className="conversation-composer"
+        aria-label="Reply"
         onSubmit={(e) => {
           e.preventDefault();
-          void send();
+          if (busy) stop();
+          else void send();
+          if (!touch) requestAnimationFrame(focusComposer);
         }}
       >
         {attachNote && (
@@ -1074,10 +1566,15 @@ function Conversation({
           </ul>
         )}
         <textarea
-          rows={2}
+          ref={composer}
+          rows={1}
           maxLength={16000}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          enterKeyHint={touch ? "enter" : "send"}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setRecall(-1);
+          }}
           onPaste={(e) => {
             const files = pastedImages(e.clipboardData);
             if (!files.length) return;
@@ -1086,47 +1583,86 @@ function Conversation({
           }}
           placeholder={`Reply to ${agentName(agent)}…`}
           aria-label="Message the agent"
+          aria-describedby="composer-hint"
           onKeyDown={(e) => {
-            if (
-              e.key === "Enter" &&
-              !e.shiftKey &&
-              !e.nativeEvent.isComposing
-            ) {
+            const action = enterAction(
+              {
+                key: e.key,
+                shiftKey: e.shiftKey,
+                ctrlKey: e.ctrlKey,
+                metaKey: e.metaKey,
+                altKey: e.altKey,
+                isComposing: e.nativeEvent.isComposing,
+                keyCode: e.keyCode,
+              },
+              touch,
+            );
+            if (action === "send") {
               e.preventDefault();
-              void send();
+              if (!busy) void send();
+              return;
+            }
+            if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+              const el = e.currentTarget;
+              const atEdge =
+                e.key === "ArrowUp"
+                  ? el.selectionStart === 0 && el.selectionEnd === 0
+                  : el.selectionStart === el.value.length;
+              if (!atEdge && draft) return;
+              const next = recallStep(e.key, recall, history.length, draft, history[recall]);
+              if (next === null) return;
+              e.preventDefault();
+              setRecall(next);
+              setDraft(next >= 0 ? history[next] : "");
+              return;
+            }
+            if (e.key === "Escape" && !busy && recall >= 0) {
+              e.preventDefault();
+              setRecall(-1);
+              setDraft("");
             }
           }}
         />
+        <span id="composer-hint" className="sr-only">
+          {touch
+            ? "Use the Send button to send."
+            : "Enter sends, Shift+Enter adds a line, up arrow recalls an earlier prompt."}
+        </span>
         <div className="conversation-composer-footer">
-          <input
-            ref={fileInput}
-            type="file"
-            accept="image/png,image/jpeg,image/gif,image/webp"
-            multiple
-            hidden
-            onChange={(e) => {
-              const files = Array.from(e.target.files ?? []);
-              e.target.value = "";
-              void addImages(files);
-            }}
-          />
-          <button
-            type="button"
-            className="composer-attach"
-            aria-label="Attach images"
-            title={imageBlocker || "Attach images (or paste them)"}
-            aria-disabled={!!imageBlocker || busy || images.length >= MAX_IMAGES}
-            onClick={() => {
-              if (imageBlocker) setAttachNote(imageBlocker);
-              else if (images.length >= MAX_IMAGES) setAttachNote("Attach at most " + MAX_IMAGES + " images.");
-              else if (!busy) fileInput.current?.click();
-            }}
-          >
-            <Paperclip size={16} />
-          </button>
+          <div className="composer-tools">
+            <input
+              ref={fileInput}
+              type="file"
+              accept="image/png,image/jpeg,image/gif,image/webp"
+              multiple
+              hidden
+              onChange={(e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                void addImages(files);
+              }}
+            />
+            <button
+              type="button"
+              className="composer-attach"
+              aria-label="Attach images"
+              title={imageBlocker || "Attach images (or paste them)"}
+              aria-disabled={!!imageBlocker || busy || images.length >= MAX_IMAGES}
+              onClick={() => {
+                if (imageBlocker) setAttachNote(imageBlocker);
+                else if (images.length >= MAX_IMAGES) setAttachNote("Attach at most " + MAX_IMAGES + " images.");
+                else if (!busy) fileInput.current?.click();
+              }}
+            >
+              <Paperclip size={16} />
+            </button>
+            {/* Dictation: the mic sits next to 📎 and writes into this form's textarea. */}
+            <VoiceInputButton />
+          </div>
           <details className="composer-more">
-            <summary aria-label="Agent, model and computer">
-              <MoreHorizontal size={15} />
+            <summary>
+              <MoreHorizontal size={15} aria-hidden />
+              <span className="sr-only">Agent, model and computer: </span>
               <span>
                 {agentName(agent)}
                 {model ? ` · ${model}` : ""} · {device?.name}
@@ -1227,53 +1763,40 @@ function Conversation({
               <p className="chat-muted">{modelJob.result.warning}</p>
             )}
           </details>
-          {busy ? (
-            <button
-              type="button"
-              className="chat-stop"
-              disabled={sending || !job}
-              onClick={() => {
-                if (job)
-                  void desktopApi
-                    .cancel(job.id)
-                    .then((next) => {
-                      // Keep what already ran: a stopped turn still shows its finished steps.
-                      setJob((prev) =>
-                        prev && !next.activities?.length && prev.activities?.length
-                          ? {
-                              ...next,
-                              text: next.text || prev.text,
-                              activities: prev.activities.filter(
-                                (a) => a.status !== "running",
-                              ),
-                            }
-                          : next,
-                      );
-                      setLiveChat(next.session_id, next.state);
-                    })
-                    .catch((e) => setError(message(e)));
-              }}
-            >
-              <Square size={14} />
-              {sending ? "Sending…" : "Stop"}
-            </button>
-          ) : (
-            <button
-              className="chat-send"
-              type="submit"
-              disabled={
-                !device ||
-                discoveringModels ||
-                !device.harnesses.includes(agent) ||
-                !draft.trim() ||
-                readingImages > 0 ||
-                (images.length > 0 && !!imageBlocker)
-              }
-            >
-              <Send size={15} />
-              Send
-            </button>
-          )}
+          {/* One round button: Send, which turns into Stop while the agent works. */}
+          <button
+            className={`chat-send ${busy ? "is-stop" : ""}`}
+            type="submit"
+            aria-label={busy ? (sending ? "Sending" : "Stop reply") : "Send"}
+            title={
+              busy
+                ? sending
+                  ? "Sending…"
+                  : touch
+                    ? "Stop"
+                    : `Stop · Esc`
+                : touch
+                  ? "Send"
+                  : "Send · Enter (Shift+Enter for a new line)"
+            }
+            disabled={
+              busy
+                ? sending || !job
+                : !device ||
+                  discoveringModels ||
+                  !device.harnesses.includes(agent) ||
+                  !draft.trim() ||
+                  readingImages > 0 ||
+                  (images.length > 0 && !!imageBlocker)
+            }
+          >
+            <span className="chat-send-icon is-send" aria-hidden>
+              <ArrowUp size={16} strokeWidth={2.4} />
+            </span>
+            <span className="chat-send-icon is-stop" aria-hidden>
+              <Square size={12} fill="currentColor" />
+            </span>
+          </button>
         </div>
       </form>
       ) : (
@@ -1328,7 +1851,7 @@ function Conversation({
             </p>
           )}
           <button
-            className="chat-send"
+            className="chat-send is-wide"
             disabled={!shareUser || share.isPending}
             onClick={() => share.mutate()}
           >
@@ -1338,4 +1861,47 @@ function Conversation({
       )}
     </section>
   );
+}
+
+/** What's left to say once a reply finished. Success is silent. */
+function JobOutcome({
+  job,
+  canReply,
+  onContinue,
+  onRetry,
+}: {
+  job: DesktopJob;
+  canReply: boolean;
+  onContinue: () => void;
+  onRetry: () => void;
+}) {
+  if (job.state === "completed")
+    return job.result?.cloud_saved === false ? (
+      <p className="chat-live-status" role="status">
+        Saved on your computer; syncing to your account needs attention.
+      </p>
+    ) : null;
+  if (job.state === "cancelled")
+    return (
+      <p className="chat-live-status is-stopped" role="status">
+        Stopped. The steps above already ran; changes they made to files stay.
+        {canReply && (
+          <button type="button" className="chat-inline-action" onClick={onContinue}>
+            Continue
+          </button>
+        )}
+      </p>
+    );
+  if (job.state === "expired")
+    return (
+      <p className="chat-live-status is-stopped" role="status">
+        Request expired. It was not automatically retried.
+        {canReply && (
+          <button type="button" className="chat-inline-action" onClick={onRetry}>
+            Retry
+          </button>
+        )}
+      </p>
+    );
+  return null;
 }

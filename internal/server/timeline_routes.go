@@ -181,7 +181,7 @@ func (s *Server) handleAgentSessionGet(w http.ResponseWriter, r *http.Request) {
 			row = &copy
 		}
 	}
-	writeJSON(w, http.StatusOK, row)
+	writeJSON(w, http.StatusOK, s.agentSessionWithState(r.Context(), authSubject(r), row))
 }
 
 func (s *Server) handleAgentSessionForks(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +218,17 @@ func (s *Server) handleAgentSessionFork(w http.ResponseWriter, r *http.Request) 
 	if s.rejectIfCaptureOff(w, r, parent.ProjectID) {
 		return
 	}
-	child, err := cs.ForkAgentSession(r.Context(), parent.ID, authSubject(r))
+	// Optional {"through_idx": N}: "fork from here" keeps turns up to N.
+	var body struct {
+		ThroughIdx *int `json:"through_idx"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid fork request")
+			return
+		}
+	}
+	child, err := cs.ForkAgentSessionThrough(r.Context(), parent.ID, authSubject(r), body.ThroughIdx)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -683,6 +693,27 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 	hideEmpty := queryFlag(r.URL.Query().Get("hide_empty"))
 	// Sub-agent runs are left out unless include_subagents=1 asks for them.
 	includeSubagents := queryFlag(r.URL.Query().Get("include_subagents"))
+	// The caller's archived chats are hidden unless archived=include or
+	// archived=only; pinned=only and archived=only list just those chats
+	// (session_state_routes.go).
+	archivedMode, ok := parseTimelineArchived(r.URL.Query().Get("archived"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "archived must be include or only")
+		return
+	}
+	pinnedOnly, ok := parseTimelinePinnedOnly(r.URL.Query().Get("pinned"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "pinned must be only")
+		return
+	}
+	if pinnedOnly && archivedMode == timelineArchivedOnly {
+		writeError(w, http.StatusBadRequest, "pinned=only and archived=only cannot be combined")
+		return
+	}
+	if pinnedOnly || archivedMode == timelineArchivedOnly {
+		s.handleTimelineStateOnly(w, r, cs, projectID, harness, query, pinnedOnly)
+		return
+	}
 	items, modernNext, err := cs.ListTimeline(r.Context(), store.TimelineQuery{
 		UserID: authSubject(r), ProjectID: projectID,
 		Harness: harness, Query: query, Cursor: cursor, Limit: limit,
@@ -758,6 +789,15 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) {
 		// sorts after every row at floor's time.
 		next = floor.UpdatedAt.Add(time.Microsecond).UTC().Format(time.RFC3339Nano) + "|"
 	}
+	// The caller's titles, pins and archive marks. Archived chats leave the
+	// page after next_cursor is set, so a page may come back short; clients
+	// keep paging while next_cursor is set.
+	states, err := s.loadSessionUserStates(r.Context(), authSubject(r))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load pinned and archived chats")
+		return
+	}
+	items = filterTimelineByState(items, states, archivedMode)
 	// turn_counts tells clients turn_count is real, so a 0 means an empty
 	// chat (older servers sent 0 for every mirrored chat).
 	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": next, "turn_counts": "exact"})

@@ -20,7 +20,7 @@ public sealed partial class SettingsPage
         new("general", "General", "", "Appearance, startup, and how the Nexus window behaves."),
         new("account", "Account", "", "Your Nexus identity and the tokens your agents use."),
         new("workspaces", "Workspaces & capture", "", "Choose which folders Nexus monitors and how capture runs."),
-        new("agents", "Agents", "", "Connect your coding agents to Nexus memory."),
+        new("agents", "Agents", "", "What agents may do without asking, and connecting them to Nexus memory."),
         new("memory", "Memory", "", "Project briefs and who can see what Nexus captures."),
         new("organizations", "Organizations", "", "Teams, invitations, and member roles."),
         new("usage", "Usage", "", "How much Nexus you and your agents use."),

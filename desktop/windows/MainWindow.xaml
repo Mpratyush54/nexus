@@ -211,7 +211,10 @@
             </tb:TaskbarIcon.IconSource>
             <tb:TaskbarIcon.ContextFlyout>
                 <MenuFlyout>
+                    <MenuFlyoutItem x:Name="AgentsItem" Text="No agents working" Visibility="Collapsed" Click="AgentsItem_Click"/>
+                    <MenuFlyoutSeparator x:Name="AgentsSeparator" Visibility="Collapsed"/>
                     <MenuFlyoutItem Text="Open" Command="{x:Bind TrayOpenCommand}"/>
+                    <MenuFlyoutItem Text="Quick ask…" Click="QuickAskItem_Click"/>
                     <MenuFlyoutItem x:Name="PauseItem" Text="Pause capture" Command="{x:Bind TrayPauseCommand}"/>
                     <MenuFlyoutItem Text="Chats sent to you" Command="{x:Bind TrayTeleportCommand}"/>
                     <MenuFlyoutItem Text="Report a problem…" Command="{x:Bind TrayReportCommand}"/>

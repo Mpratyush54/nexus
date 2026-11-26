@@ -86,6 +86,9 @@ internal static class MacShell
             case MacNative.Command.SwitchProject:
                 window.OpenProjectSwitcher();
                 break;
+            case MacNative.Command.QuickAsk:
+                window.ShowQuickAsk();
+                break;
             default:
                 Edit(window, command);
                 break;
@@ -136,6 +139,8 @@ internal static class MacShell
                 done = false;
                 break;
         }
+        // Command+Z with no text box focused undoes the last archive or delete (its notice).
+        if (!done && command == MacNative.Command.Undo && Nexus.Pages.Toast.UndoLatest()) done = true;
         Log($"edit {command}: {(done ? focused?.GetType().Name : "nothing focused that can do it")}");
     }
 

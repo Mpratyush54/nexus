@@ -74,14 +74,42 @@ function setStatus(id: string, status: string) {
   return ok(m)
 }
 
+// The demo person's own chat state, as PATCH /v1/agent-sessions/{id}/state keeps it.
+// One chat starts pinned, so the list shows its Pinned group.
+type ChatState = { title?: string; pinned?: boolean; archived?: boolean }
+const chatStates = new Map<string, ChatState>(CHATS[0] ? [[CHATS[0].card.session_id, { pinned: true }]] : [])
+
 function timeline(q: URLSearchParams) {
   const project = q.get('project_id')
   const text = (q.get('q') ?? '').toLowerCase().trim()
+  const archivedMode = (q.get('archived') ?? '').toLowerCase()
+  const pinnedOnly = (q.get('pinned') ?? '').toLowerCase() === 'only'
   let rows = CHATS.filter((c) => !project || c.card.project_id === project)
-  if (text) rows = rows.filter((c) => `${c.card.title} ${c.summary} ${c.turns.map((t) => t.text ?? '').join(' ')}`.toLowerCase().includes(text))
+  if (text) rows = rows.filter((c) => `${chatStates.get(c.card.session_id)?.title ?? ''} ${c.card.title} ${c.summary} ${c.turns.map((t) => t.text ?? '').join(' ')}`.toLowerCase().includes(text))
   // The sample laptop's agent keeps working: its chat always looks active a moment ago.
-  const fresh = (c: (typeof CHATS)[number]) => (c.card.title === LIVE_TITLE ? { ...c.card, last_active_at: new Date(Date.now() - 40_000).toISOString() } : c.card)
-  return ok({ items: rows.map(fresh).sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)) })
+  const fresh = (c: (typeof CHATS)[number]) => {
+    const card = c.card.title === LIVE_TITLE ? { ...c.card, last_active_at: new Date(Date.now() - 40_000).toISOString() } : c.card
+    const st = chatStates.get(card.session_id)
+    if (!st) return card
+    return { ...card, ...(st.title ? { title: st.title, renamed: true } : {}), ...(st.pinned ? { pinned: true } : {}), ...(st.archived ? { archived: true } : {}) }
+  }
+  const items = rows
+    .map(fresh)
+    .filter((c) => (pinnedOnly ? c.pinned : archivedMode === 'only' ? c.archived : archivedMode === 'include' || !c.archived))
+    .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at))
+  return ok({ items })
+}
+
+function setChatState(id: string, body: ChatState) {
+  const c = chatById(id)
+  if (!c) return missing()
+  const sid = c.card.session_id
+  const st = { ...chatStates.get(sid) }
+  if (typeof body.title === 'string') st.title = body.title.trim() || undefined
+  if (typeof body.pinned === 'boolean') { st.pinned = body.pinned; if (body.pinned) st.archived = false }
+  if (typeof body.archived === 'boolean') { st.archived = body.archived; if (body.archived) st.pinned = false }
+  chatStates.set(sid, st)
+  return ok({ session_id: sid, title: st.title ?? '', pinned: !!st.pinned, archived: !!st.archived })
 }
 
 const LIVE_TITLE = 'Add a test for declined captures'
@@ -242,11 +270,21 @@ const WRITE: [string, RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
     const body = (r.body ?? {}) as { project_id?: string; harness?: string; title?: string }
     return ok(chatSession(newChat(body.project_id ?? CHECKOUT, body.harness ?? 'codex', body.title ?? 'New conversation')))
   }],
+  ['DELETE', /^\/v1\/agent-sessions\/([^/]+)$/, (m) => {
+    const c = chatById(m[1])
+    if (!c) return missing()
+    if (c.owner && c.owner !== ME.id) return { status: 403, body: { error: { code: 403, message: "only the chat's owner can change its history" } } }
+    CHATS.splice(CHATS.indexOf(c), 1)
+    return ok({ deleted: true, session_id: c.card.session_id })
+  }],
+  ['PATCH', /^\/v1\/agent-sessions\/([^/]+)\/state$/, (m, r) => setChatState(m[1], (r.body ?? {}) as ChatState)],
   ['POST', /^\/v1\/agent-sessions\/([^/]+)\/fork$/, (m) => { const c = chatById(m[1]); return c ? ok(chatSession(forkChat(c))) : missing() }],
   ['POST', /^\/v1\/agent-sessions\/([^/]+)\/grants$/, (_m, r) => ok({ ok: true, user_id: (r.body as { user_id?: string } | undefined)?.user_id })],
   ['POST', /^\/v1\/desktop\/jobs$/, (_m, r) => {
     const body = (r.body ?? {}) as Partial<DemoJobRequest>
     if (!body.id || !body.device_id || !body.kind) return { status: 400, body: { error: { code: 400, message: 'Missing request fields' } } }
+    // Say "offline" in a message to see how a failed send looks: it stays, with Retry and Edit.
+    if (body.kind === 'turn' && /offline/i.test(body.prompt ?? '')) return { status: 503, body: { error: { code: 503, message: "MAYA-LAPTOP didn't answer. Open Nexus on it, then select Retry." } } }
     // Like the server: images are checked, and their bytes are kept out of every later read.
     const attachments = (body.attachments ?? []).map((a) => ({ name: a.name, media_type: a.media_type, size: Math.floor(((a.data?.length ?? 0) * 3) / 4) }))
     if (attachments.length > 4) return { status: 400, body: { error: { code: 400, message: 'attach at most 4 images' } } }
@@ -285,6 +323,7 @@ const jobs = new Map<string, { req: DemoJobRequest; started: number; cancelledAt
 /** A scripted run on the sample laptop, advanced by wall-clock time since it was sent. */
 // The real app waits for you to approve each web request on the computer; the
 // demo laptop "approves" by itself after about 1.5 s so the run keeps moving.
+// The reply then streams in over two seconds, code block and all.
 const STEPS = [
   { at: 0, state: 'queued', status: 'Sent to MAYA-LAPTOP' },
   { at: 300, state: 'awaiting_approval', status: 'Waiting for approval on MAYA-LAPTOP' },
@@ -292,8 +331,26 @@ const STEPS = [
   { at: 2400, state: 'running', status: 'Reading the code' },
   { at: 3400, state: 'running', status: 'Making the change' },
   { at: 4400, state: 'running', status: 'Running the tests' },
-  { at: 5400, state: 'completed', status: 'Done' },
+  { at: 5400, state: 'running', status: 'Writing' },
+  { at: 7800, state: 'completed', status: 'Done' },
 ]
+const STREAM_FROM = 5400
+const STREAM_MS = 2400
+
+function demoReply(req: DemoJobRequest) {
+  const seen = req.attachments?.length ? `I looked at the ${req.attachments.length === 1 ? 'screenshot' : `${req.attachments.length} images`} you sent: the Pay button overlaps the footer below 400px. ` : ''
+  return (
+    seen +
+    'Done. I made the change in `src/payments/retry.ts` and ran the payment tests: all 12 pass.\n\n' +
+    'The retry loop now backs off with full jitter:\n\n' +
+    '```ts\n' +
+    'const backoff = (attempt: number) =>\n' +
+    '  // 200 ms base, capped at 2 s, with full jitter\n' +
+    '  Math.random() * Math.min(2000, 200 * 2 ** attempt)\n' +
+    '```\n\n' +
+    '_This is a sample reply from the demo laptop._'
+  )
+}
 
 export function demoJob(id: string) {
   const j = jobs.get(id)
@@ -312,22 +369,24 @@ export function demoJob(id: string) {
     { id: 'a2', tool: 'Edit', status: step > 4 ? 'completed' : 'running', files: ['src/payments/retry.ts'] },
     { id: 'a3', tool: 'Bash', status: step > 5 ? 'completed' : 'running', command: 'npm test -- payments', output: step > 5 ? 'Tests: 12 passed, 12 total' : undefined },
   ].slice(0, Math.max(0, step - 2))
+  const reply = demoReply(req)
+  const done = step >= STEPS.length - 1
+  // While streaming, every few characters is a new revision (like the real relay).
+  const shown = done ? reply.length : step === 6 ? Math.floor((reply.length * (elapsed - STREAM_FROM)) / STREAM_MS) : 0
+  const text = reply.slice(0, shown)
   if (j.cancelledAt) {
     // Like the desktop app: steps that finished stay, the one in flight is dropped.
-    const done = activities.filter((a) => a.status === 'completed')
-    return { ...base, state: 'cancelled', revision: step + 2, status: 'Stopped', text: '', activities: done }
+    const finished = activities.filter((a) => a.status === 'completed')
+    return { ...base, state: 'cancelled', revision: 1_000_000, status: 'Stopped', text, activities: finished }
   }
-  const seen = req.attachments?.length ? `I looked at the ${req.attachments.length === 1 ? 'screenshot' : `${req.attachments.length} images`} you sent: the Pay button overlaps the footer below 400px. ` : ''
-  const reply = seen + 'Done. I made the change in `src/payments/retry.ts` and ran the payment tests: all 12 pass.\n\n_This is a sample reply from the demo laptop._'
-  const text = step >= 6 ? reply : step >= 4 ? 'Working on it…' : ''
   return {
     ...base,
     state: STEPS[step].state,
     status: STEPS[step].status,
-    revision: step + 1,
+    revision: step * 10_000 + shown,
     text,
     activities,
-    result: step >= 6 ? { text: reply, agent: req.agent, cloud_saved: true } : undefined,
+    result: done ? { text: reply, agent: req.agent, cloud_saved: true } : undefined,
   }
 }
 

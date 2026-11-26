@@ -105,6 +105,11 @@ type TimelineItem struct {
 	ParentSessionID string `json:"parent_session_id,omitempty"`
 	// SubagentCount is how many sub-agent runs this chat started.
 	SubagentCount int `json:"subagent_count,omitempty"`
+	// The viewer's own state (SessionUserStateStore): Pinned and Archived,
+	// and Renamed when Title is the viewer's custom title.
+	Pinned   bool `json:"pinned,omitempty"`
+	Archived bool `json:"archived,omitempty"`
+	Renamed  bool `json:"renamed,omitempty"`
 }
 
 // TimelineQuery filters GET /v1/timeline.
@@ -142,6 +147,9 @@ type AgentCloudStore interface {
 	ListVisibleSessionVersions(ctx context.Context, sessionID, userID string) ([]SessionVersion, error)
 	ListAgentSessionForks(ctx context.Context, parentSessionID string) ([]AgentSession, error)
 	ForkAgentSession(ctx context.Context, parentSessionID, ownerUserID string) (*AgentSession, error)
+	// ForkAgentSessionThrough forks with only the turns whose idx is at most
+	// throughIdx ("fork from here"); nil copies every turn.
+	ForkAgentSessionThrough(ctx context.Context, parentSessionID, ownerUserID string, throughIdx *int) (*AgentSession, error)
 	MarkAgentSessionCodeMerged(ctx context.Context, fromSessionID, intoSessionID string) (*AgentSession, error)
 	AppendSessionTurn(ctx context.Context, turn SessionTurn) error
 	ListSessionTurns(ctx context.Context, sessionID string) ([]SessionTurn, error)
@@ -492,6 +500,10 @@ func (m *MemStore) ListAgentSessionForks(ctx context.Context, parentSessionID st
 }
 
 func (m *MemStore) ForkAgentSession(ctx context.Context, parentSessionID, ownerUserID string) (*AgentSession, error) {
+	return m.ForkAgentSessionThrough(ctx, parentSessionID, ownerUserID, nil)
+}
+
+func (m *MemStore) ForkAgentSessionThrough(ctx context.Context, parentSessionID, ownerUserID string, throughIdx *int) (*AgentSession, error) {
 	_ = ctx
 	parentSessionID = strings.TrimSpace(parentSessionID)
 	ownerUserID = strings.TrimSpace(ownerUserID)
@@ -520,6 +532,9 @@ func (m *MemStore) ForkAgentSession(ctx context.Context, parentSessionID, ownerU
 	m.agentSessions[id] = row
 	m.agentByNative[key] = id
 	for _, original := range m.sessionTurns[parent.ID] {
+		if throughIdx != nil && original.Idx > *throughIdx {
+			continue
+		}
 		copyTurn := original
 		copyTurn.SessionID = id
 		copyTurn.ToolCalls = append(json.RawMessage(nil), original.ToolCalls...)
@@ -1322,6 +1337,10 @@ func (s *PostgresStore) ListAgentSessionForks(ctx context.Context, parentSession
 }
 
 func (s *PostgresStore) ForkAgentSession(ctx context.Context, parentSessionID, ownerUserID string) (*AgentSession, error) {
+	return s.ForkAgentSessionThrough(ctx, parentSessionID, ownerUserID, nil)
+}
+
+func (s *PostgresStore) ForkAgentSessionThrough(ctx context.Context, parentSessionID, ownerUserID string, throughIdx *int) (*AgentSession, error) {
 	if !looksLikeUUID(parentSessionID) || !looksLikeUUID(ownerUserID) {
 		return nil, errors.New("store: fork ids must be uuids")
 	}
@@ -1357,7 +1376,7 @@ func (s *PostgresStore) ForkAgentSession(ctx context.Context, parentSessionID, o
 	_, err = tx.Exec(ctx, `
 		INSERT INTO session_turns (session_id, idx, role, ts, text_preview, tool_calls, blob_ref)
 		SELECT $1::uuid, idx, role, ts, text_preview, tool_calls, blob_ref
-		FROM session_turns WHERE session_id = $2::uuid`, child.ID, parent.ID)
+		FROM session_turns WHERE session_id = $2::uuid AND ($3::bigint IS NULL OR idx <= $3::bigint)`, child.ID, parent.ID, throughIdx)
 	if err != nil {
 		return nil, err
 	}

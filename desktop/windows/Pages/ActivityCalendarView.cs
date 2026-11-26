@@ -27,6 +27,17 @@ internal sealed class ActivityCalendarView : UserControl
         AutomationProperties.SetName(_content, "Loading activity for " + scope);
     }
 
+    /// <summary>No projects yet: a friendly start instead of an error.</summary>
+    /// <param name="chooseFolders">The "Choose folders" action, or null when the page already offers it.</param>
+    internal void RenderNoProjects(Action? chooseFolders)
+    {
+        _content.Children.Clear();
+        AutomationProperties.SetName(_content, "Agent activity");
+        _content.Children.Add(StateView.Empty("", "Pick a folder to start",
+            "Your agents' activity will show here once Nexus saves chats from a folder you choose.",
+            chooseFolders is null ? null : "Choose folders", chooseFolders, primary: true));
+    }
+
     /// <summary>Paints the calendar. scope names what it covers ("all your projects", a project name).</summary>
     /// <param name="retry">Shown as a quiet "Try again" when the calendar's call was slow.</param>
     internal void Render(ActivitySummary? activity, string scope, string? error = null, Action? retry = null)
