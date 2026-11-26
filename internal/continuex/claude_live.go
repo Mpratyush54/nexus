@@ -54,7 +54,7 @@ func StartClaudeLive(ctx context.Context, opts LiveOptions) (LiveSession, error)
 	if err != nil || !info.IsDir() {
 		return nil, fmt.Errorf("claude live: workspace must be an existing directory")
 	}
-	if opts.PermissionMode != "" && opts.PermissionMode != "acceptEdits" && opts.PermissionMode != "plan" {
+	if !validPermissionMode(opts.PermissionMode) {
 		return nil, errors.New("claude live: invalid permission mode")
 	}
 	// Reuse the public model validator; its argument insertion is not used here.
@@ -352,8 +352,9 @@ func (s *claudeLive) parse(line []byte) {
 		Event      struct {
 			Type  string `json:"type"`
 			Delta struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
+				Type     string `json:"type"`
+				Text     string `json:"text"`
+				Thinking string `json:"thinking"`
 			} `json:"delta"`
 		} `json:"event"`
 		Message struct {
@@ -413,6 +414,10 @@ func (s *claudeLive) parse(line []byte) {
 		// Sub-agent token deltas would interleave with the main reply.
 		if m.ParentID == "" && m.Event.Type == "content_block_delta" && m.Event.Delta.Type == "text_delta" {
 			s.emit(LiveEvent{Kind: "text_delta", Text: liveText(m.Event.Delta.Text, liveLineLimit)})
+		}
+		// Extended thinking, so the chat can show "Thinking…" while it lasts.
+		if m.ParentID == "" && m.Event.Type == "content_block_delta" && m.Event.Delta.Type == "thinking_delta" {
+			s.emit(LiveEvent{Kind: "thinking_delta", Text: liveText(m.Event.Delta.Thinking, liveLineLimit)})
 		}
 	case "assistant", "user":
 		if u := m.Message.Usage; m.Type == "assistant" && u != nil && m.Message.Model != "<synthetic>" {

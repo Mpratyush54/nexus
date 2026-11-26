@@ -274,7 +274,7 @@ func TestClaudeLive(t *testing.T) {
 		liveUntil(t, b, "turn_done")
 	})
 	t.Run("Validation", func(t *testing.T) {
-		for _, opts := range []LiveOptions{{}, {Workspace: t.TempDir(), Model: "--bad"}, {Workspace: t.TempDir(), PermissionMode: "bypassPermissions"}} {
+		for _, opts := range []LiveOptions{{}, {Workspace: t.TempDir(), Model: "--bad"}, {Workspace: t.TempDir(), PermissionMode: "yolo"}} {
 			if s, err := StartClaudeLive(context.Background(), opts); err == nil {
 				_ = s.Close()
 				t.Fatal("invalid options accepted")

@@ -212,11 +212,12 @@ public sealed partial class SettingsPage
             SettingRow(RowText("Allow requests from Nexus Web",
                 "Off by default. When on, you can start an agent on this computer from Nexus in your browser. Nexus asks you here before every message, and only folders you chose can be used. Turning this off stops any work started that way."),
                 _browserExecution, _browserExecutionStatus));
-        return new StackPanel { Children = { mcp, web } };
+        return new StackPanel { Children = { BuildPermissionsGroup(), mcp, web } };
     }
 
     private async Task LoadAgentsSectionAsync()
     {
+        await LoadPermissionsAsync();
         await LoadMcpStatusAsync();
         await RefreshBrowserExecutionAsync();
     }

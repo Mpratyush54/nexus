@@ -267,9 +267,8 @@ public sealed partial class SessionPage : NexusPage
         composerFooter.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetColumn(_harness, 3);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(_access, "Permission");
-        var modelPicker = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3, Children = { _model, _refreshModels, _access } };
-        ToolTipService.SetToolTip(_access, "Ask before changes: approve each file edit and command.\nAuto-accept edits: file edits run without asking; commands still ask.");
-        _harness.SelectionChanged += (_, _) => _access.Visibility = SelectedHarness() == "claude" ? Visibility.Visible : Visibility.Collapsed;
+        var modelPicker = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 3, Children = { _model, _refreshModels, _accessWarning, _access } };
+        _harness.SelectionChanged += (_, _) => _access.Visibility = SupportsLive(SelectedHarness()) ? Visibility.Visible : Visibility.Collapsed;
         Grid.SetColumn(modelPicker, 4);
         Grid.SetColumn(_workspaceMenu, 1);
         Grid.SetColumn(_attachImage, 0);
@@ -322,6 +321,7 @@ public sealed partial class SessionPage : NexusPage
         _attachmentsLabel.FontSize = 11;
         _attachmentsLabel.Visibility = Visibility.Collapsed;
         _composer.Children.Add(_composerStatus);
+        InitLiveComposer();
         UpdateWorkspaceFlyoutVisibility();
         _chatTabBtn = SessionTabButton("Chat");
         _activityTabBtn = SessionTabButton("Activity");
@@ -542,8 +542,8 @@ public sealed partial class SessionPage : NexusPage
         root.Children.Add(head);
         root.Children.Add(body);
         Content = root;
-        Loaded += (_, _) => { ShellState.Changed += HandleShellChanged; App.Core.EventReceived += HandleCoreEvent; UpdateActions(); AgentAvailabilityService.Changed += OnAgentsChanged; AgentAvailabilityService.Refresh(); };
-        Unloaded += (_, _) => { ShellState.Changed -= HandleShellChanged; App.Core.EventReceived -= HandleCoreEvent; AgentAvailabilityService.Changed -= OnAgentsChanged; _ = CloseLiveAsync(); };
+        Loaded += (_, _) => { ShellState.Changed += HandleShellChanged; App.Core.EventReceived += HandleCoreEvent; UpdateActions(); AgentAvailabilityService.Changed += OnAgentsChanged; AgentAvailabilityService.Refresh(); _ = ReattachLiveAsync(); };
+        Unloaded += (_, _) => { ShellState.Changed -= HandleShellChanged; App.Core.EventReceived -= HandleCoreEvent; AgentAvailabilityService.Changed -= OnAgentsChanged; DetachLiveView(); };
         UpdateActions();
     }
 
@@ -557,7 +557,13 @@ public sealed partial class SessionPage : NexusPage
             return;
         }
         var generation = ++_loadGeneration;
-        if (nextId != _id) _ = CloseLiveAsync();
+        if (nextId != _id)
+        {
+            // The agent keeps working in the core; this page just stops showing it.
+            DetachLiveView();
+            RenderFollowups(default);
+            ShowResumeBanner(default);
+        }
         RememberScrollPosition();
         _id = nextId;
         // A newly opened chat starts pinned to its newest message.
@@ -649,6 +655,10 @@ public sealed partial class SessionPage : NexusPage
             if (generation != _loadGeneration) return;
             if (folder.Length > 0 && _workspace.Text.Trim().Length == 0) { _workspace.Text = folder; UpdateActions(); }
         }
+        LoadPermissionMode();
+        // A turn still running (or stopped by a restart) shows up again.
+        await AttachLiveAsync();
+        if (generation != _loadGeneration) return;
         if (PendingStart is not { } start || start.SessionId != _id) return;
         PendingStart = null;
         if (!_sessionLoaded) return;
@@ -2887,7 +2897,7 @@ public sealed partial class SessionPage : NexusPage
         _teleport.IsEnabled = _sessionLoaded && !_legacy && _hasTransferableVersion && _workspaceHint.Length > 0 && !ShellState.Current.Offline;
         _resume.IsEnabled = _sessionLoaded && !_legacy && _nativeID.Length > 0 && _agent.Length > 0 && _agent.Trim().ToLowerInvariant() is not "cursor";
         var selected = SelectedHarness();
-        _sendHere.IsEnabled = _sessionLoaded && !_legacy && SupportsInAppReply(selected) && !_sendInFlight && System.IO.Directory.Exists(_workspace.Text.Trim());
+        _sendHere.IsEnabled = _sessionLoaded && !_legacy && SupportsInAppReply(selected) && (!_sendInFlight || LiveTurnActive) && System.IO.Directory.Exists(_workspace.Text.Trim());
         _attachImage.IsEnabled = _sendHere.IsEnabled;
         _prompt.IsEnabled = _sessionLoaded && !_legacy;
         _prompt.IsReadOnly = false;
@@ -3055,6 +3065,12 @@ public sealed partial class SessionPage : NexusPage
 
     private async Task SendHereAsync()
     {
+        // While the agent works, a message waits for its turn.
+        if (LiveTurnActive && !_preparingHarness)
+        {
+            await SendFollowupAsync(now: false);
+            return;
+        }
         if (_sendInFlight || _preparingHarness)
         {
             return;
@@ -3109,153 +3125,17 @@ public sealed partial class SessionPage : NexusPage
         var nativeID = resumeNative ? _localNativeID : "";
         var sessionID = _id;
         var requestID = Guid.NewGuid().ToString("N");
-        _streamRequestID = requestID;
-        _streamAgent = agent;
-        _streamHasText = false;
-        var liveUserKey = "live:" + requestID;
-        var liveTime = DateTimeOffset.Now.ToString("O");
-        _conversation.Add(new ConversationEntry(liveUserKey, "user", prompt, liveTime, -1, _conversation.NextOrder));
-        // The bubble shows the images right away, from the same markers the
-        // saved message carries.
-        var shownPrompt = HarnessMessage.Parse(ComposerAttachments.WithImageTags(prompt, images));
-        var userBubble = IndexedChatMessage("user", shownPrompt.Text, liveUserKey, null, shownPrompt.Attachments.Count > 0 ? shownPrompt : null);
-        var streamText = new TextBlock
-        {
-            Text = "Thinking…", TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true,
-            FontSize = 14, MaxWidth = 820, Opacity = 0.9
-        };
-        var streamStack = new StackPanel { Spacing = 7 };
-        streamStack.Children.Add(SessionChatRender.RoleLabel(ChatTitles.AgentName(agent)));
-        streamStack.Children.Add(streamText);
-        var activityView = new LiveActivityView();
-        _streamActivity = activityView;
-        streamStack.Children.Add(activityView.View);
-        var fileChangesHost = new Border { Visibility = Visibility.Collapsed };
-        _streamFileChanges = fileChangesHost;
-        streamStack.Children.Add(fileChangesHost);
-        var streamBubble = new Border
-        {
-            Child = streamStack, Padding = SessionChatRender.AssistantPad,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent)
-        };
-        _streamText = streamText;
-        AddChatElement(userBubble);
-        AddChatElement(streamBubble);
-        RefreshConversationNavigation();
+        var view = BeginTurnView(agent, prompt, images, requestID);
         _prompt.Text = "";
-        ScrollChatToEnd();
         NxResponse response;
-        var hadStreamText = false;
         try
         {
             response = useLive
-                ? await SendLiveAsync(sessionID, agent, model, prompt, _continuationContext, nativeID, _workspace.Text.Trim(), images)
+                ? await SendLiveAsync(view, sessionID, agent, model, prompt, _continuationContext, nativeID, _workspace.Text.Trim(), images)
                 : await Call(NxMethods.ContinueHere, new { session_id = sessionID, project_id = _projectID, native_id = nativeID, agent, model, resume, prompt, context, images, workspace_root = _workspace.Text.Trim(), trust_workspace = trustWorkspace, request_id = requestID });
         }
-        finally
-        {
-            hadStreamText = _streamHasText;
-            _streamRequestID = "";
-            _streamAgent = "";
-            _streamText = null;
-            _streamActivity = null;
-            _streamFileChanges = null;
-            _streamHasText = false;
-            _sendInFlight = false;
-            SetSending(false);
-            UpdateActions();
-        }
-        if (_id != sessionID) return;
-        if (!response.Ok || response.Result is not { } result)
-        {
-            _chat.Children.Remove(userBubble);
-            _conversation.Remove(liveUserKey); _messageAnchors.Remove(liveUserKey);
-            RefreshConversationNavigation();
-            var failureMessage = "Request stopped · " + NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent));
-            if (hadStreamText)
-                streamStack.Children.Add(new TextBlock { Text = failureMessage, TextWrapping = TextWrapping.Wrap, IsTextSelectionEnabled = true, Foreground = NexusPalette.Amber, Margin = new Thickness(0, 8, 0, 0) });
-            else
-            {
-                if (streamStack.Children[0] is TextBlock roleLabel) roleLabel.Text = "Nexus · request stopped";
-                streamText.Text = failureMessage + (activityView.Count > 0 ? "\nWorkspace changes may already have been applied; review the activity before retrying." : "");
-            }
-            streamBubble.Background = SessionChatRender.SubtleFill;
-            streamBubble.BorderBrush = NexusPalette.Amber;
-            streamBubble.BorderThickness = new Thickness(1);
-            streamBubble.CornerRadius = new CornerRadius(8);
-            streamBubble.Padding = new Thickness(12);
-            activityView.View.IsExpanded = activityView.Count > 0;
-            if (_prompt.Text.Length == 0) _prompt.Text = typed;
-            SetComposerStatus(NxErrors.ForAgent(response.Error, AgentAvailability.DisplayName(agent)));
-            if ((response.RawError ?? "").Contains("model", StringComparison.OrdinalIgnoreCase)) _model.Focus(FocusState.Programmatic);
-            return;
-        }
-        var answer = NxJson.Text(result, "text");
-        if (answer.Length == 0)
-        {
-            _chat.Children.Remove(userBubble);
-            _conversation.Remove(liveUserKey); _messageAnchors.Remove(liveUserKey);
-            RefreshConversationNavigation();
-            _chat.Children.Remove(streamBubble);
-            if (_prompt.Text.Length == 0) _prompt.Text = typed;
-            SetComposerStatus("The agent returned no readable reply.");
-            return;
-        }
-        var streamIndex = _chat.Children.IndexOf(streamBubble);
-        var userIndex = NxJson.Text(result, "user_idx");
-        if (long.TryParse(userIndex, out var userOrder) && userOrder > 0)
-        {
-            _conversation.Remove(liveUserKey); _messageAnchors.Remove(liveUserKey);
-            liveUserKey = TurnKey(userIndex, "user");
-            if (userBubble is FrameworkElement userAnchor) _messageAnchors[liveUserKey] = userAnchor;
-            _conversation.Add(new ConversationEntry(liveUserKey, "user", prompt, liveTime, -1, userOrder));
-        }
-        var answerIndex = NxJson.Text(result, "answer_idx");
-        var answerKey = answerIndex.Length > 0 && answerIndex != "0" ? "turn:" + answerIndex : "answer:" + requestID;
-        var answerOrder = long.TryParse(answerIndex, out var ai) && ai > 0 ? ai : _conversation.NextOrder;
-        _conversation.Add(new ConversationEntry(answerKey, "assistant", answer, liveTime, -1, answerOrder));
-        if (streamIndex >= 0)
-        {
-            _chat.Children.RemoveAt(streamIndex);
-            _chat.Children.Insert(streamIndex, IndexedChatMessage("assistant", answer, answerKey, agent));
-            if (activityView.Count > 0)
-            {
-                streamStack.Children.Remove(activityView.View);
-                activityView.View.IsExpanded = false;
-                _chat.Children.Insert(++streamIndex, activityView.View);
-            }
-            var changes = StringArray(result, "file_changes");
-            if (changes.Count > 0) _chat.Children.Insert(streamIndex + 1, FileChangesExpander(changes, result));
-        }
-        var returnedNativeID = NxJson.Text(result, "native_id");
-        if (returnedNativeID.Length > 0)
-        {
-            _localNativeID = returnedNativeID;
-            _localNativeAgent = agent;
-        }
-        _continuationContext += "\n\nuser: " + prompt + "\n\nassistant: " + answer;
-        if (_continuationContext.Length > 11000) _continuationContext = _continuationContext[^11000..];
-        ClearImageAttachments();
-        SetComposerStatus(result.TryGetProperty("saved_locally", out var saved) && saved.ValueKind == JsonValueKind.True
-            ? (result.TryGetProperty("cloud_saved", out var cloudSaved) && cloudSaved.ValueKind == JsonValueKind.True
-                ? "Reply saved in this chat and synced."
-                : "Reply saved in this chat on this device; cloud sync is unavailable right now.")
-            : "Reply received but could not be saved: " + NxJson.Text(result, "save_error"));
-        ScrollChatToEnd();
-        RefreshConversationNavigation();
-        _ = RefreshActivityAsync(sessionID);
-        if (_header.Text == "New chat" && _projectID.Length > 0 && _nativeID.StartsWith("nexus-", StringComparison.Ordinal))
-        {
-            var firstLine = prompt.Split('\n', 2)[0].Trim();
-            var title = firstLine.Length > 72 ? firstLine[..69] + "…" : firstLine;
-            if (title.Length > 0)
-            {
-                _header.Text = title;
-                _ = NameNewChatAsync(sessionID, title);
-            }
-        }
-        MainWindow.Current?.RefreshChats();
+        finally { EndTurnStreaming(view); }
+        FinishTurnView(view, response, sessionID, typed);
     }
 
     private async Task NameNewChatAsync(string sessionID, string title)
@@ -3406,6 +3286,7 @@ public sealed partial class SessionPage : NexusPage
             _model.IsEnabled = false;
             _workspaceMenu.IsEnabled = false;
             _attachImage.IsEnabled = false;
+            ApplyLiveComposerState();
             return;
         }
         _harness.IsEnabled = true;
@@ -3451,7 +3332,7 @@ public sealed partial class SessionPage : NexusPage
             element.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
             return element.DesiredSize.Width;
         }
-        var accessWanted = SelectedHarness() == "claude";
+        var accessWanted = SupportsLive(SelectedHarness());
         var harnessFit = HarnessFitWidth();
         // Everything in the footer but the folder button, plus the gaps
         // between its seven columns.

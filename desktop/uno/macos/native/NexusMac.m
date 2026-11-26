@@ -26,6 +26,7 @@
 #import <AppKit/AppKit.h>
 #import <CoreServices/CoreServices.h>
 #import <objc/runtime.h>
+#import <UserNotifications/UserNotifications.h>
 #include <dlfcn.h>
 
 typedef void (*nx_command_fn)(int32_t command);
@@ -62,6 +63,9 @@ static nx_url_fn s_url;
 static NSStatusItem *s_item;
 static NSMenuItem *s_stateItem;
 static NSMenuItem *s_pauseItem;
+static NSMenuItem *s_agentsItem;
+static NSMenuItem *s_agentsSeparator;
+static NSString *s_agentsText;
 static BOOL s_paused;
 static BOOL s_installed;
 static BOOL s_delivering;
@@ -469,6 +473,7 @@ static void nx_apply_capture_state(void)
     s_pauseItem.title = s_paused ? @"Resume capture" : @"Pause capture";
     s_item.button.appearsDisabled = s_paused;
     s_item.button.toolTip = s_paused ? @"Nexus · capture paused" : @"Nexus · capturing";
+    if (s_agentsText.length > 0) s_item.button.toolTip = [@"Nexus · " stringByAppendingString:s_agentsText];
 }
 
 static void nx_build_status_item(void)
@@ -480,6 +485,12 @@ static void nx_build_status_item(void)
 
     NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Nexus"];
     menu.autoenablesItems = NO;
+    // "2 agents working · 1 needs you", shown while agents work.
+    s_agentsItem = nx_command_item(menu, @"", NXOpen, nil, 0);
+    s_agentsItem.hidden = YES;
+    s_agentsSeparator = [NSMenuItem separatorItem];
+    s_agentsSeparator.hidden = YES;
+    [menu addItem:s_agentsSeparator];
     nx_command_item(menu, @"Open Nexus", NXOpen, nil, 0);
     [menu addItem:[NSMenuItem separatorItem]];
     s_stateItem = nx_item(menu, @"Capturing", nil, nil, nil, 0);
@@ -627,4 +638,119 @@ int32_t nx_mac_trash(const char *path)
         if (!ok) NSLog(@"[nexus-mac] trash failed: %@", error.localizedDescription);
         return ok ? 1 : 0;
     }
+}
+
+// ---- Agents working in the background -----------------------------------------
+// The menu bar item shows how many agents work; a notification says when a
+// chat finishes or needs approval while Nexus isn't focused. Clicking it opens
+// that chat through the nexus:// link handler.
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+@interface NXNotifyDelegate : NSObject <UNUserNotificationCenterDelegate, NSUserNotificationCenterDelegate>
+@end
+
+@implementation NXNotifyDelegate
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+       willPresentNotification:(UNNotification *)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions))completionHandler
+{
+    if (@available(macOS 11.0, *)) completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionSound);
+    else completionHandler(UNNotificationPresentationOptionAlert | UNNotificationPresentationOptionSound);
+}
+- (void)userNotificationCenter:(UNUserNotificationCenter *)center
+didReceiveNotificationResponse:(UNNotificationResponse *)response
+         withCompletionHandler:(void (^)(void))completionHandler
+{
+    NSString *url = response.notification.request.content.userInfo[@"url"];
+    if ([url isKindOfClass:[NSString class]]) nx_deliver_url(url);
+    completionHandler();
+}
+- (void)userNotificationCenter:(NSUserNotificationCenter *)center didActivateNotification:(NSUserNotification *)notification
+{
+    NSString *url = notification.userInfo[@"url"];
+    if ([url isKindOfClass:[NSString class]]) nx_deliver_url(url);
+}
+- (BOOL)userNotificationCenter:(NSUserNotificationCenter *)center shouldPresentNotification:(NSUserNotification *)notification
+{
+    return YES;
+}
+@end
+
+static NXNotifyDelegate *s_notify;
+static BOOL s_notifyAsked;
+static BOOL s_notifyAllowed;
+
+static void nx_legacy_notify(NSString *title, NSString *body, NSString *url)
+{
+    NSUserNotification *note = [[NSUserNotification alloc] init];
+    note.title = title;
+    note.informativeText = body;
+    note.userInfo = url.length > 0 ? @{ @"url": url } : @{};
+    NSUserNotificationCenter *center = [NSUserNotificationCenter defaultUserNotificationCenter];
+    center.delegate = s_notify;
+    [center deliverNotification:note];
+}
+
+static void nx_post(NSString *title, NSString *body, NSString *url)
+{
+    if (!s_notifyAllowed) {
+        nx_legacy_notify(title, body, url);
+        return;
+    }
+    UNMutableNotificationContent *content = [[UNMutableNotificationContent alloc] init];
+    content.title = title;
+    content.body = body;
+    content.sound = [UNNotificationSound defaultSound];
+    content.userInfo = url.length > 0 ? @{ @"url": url } : @{};
+    UNNotificationRequest *request = [UNNotificationRequest requestWithIdentifier:[[NSUUID UUID] UUIDString] content:content trigger:nil];
+    [[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:request withCompletionHandler:^(NSError *error) {
+        if (error != nil) {
+            NSLog(@"[nexus-mac] notification failed (%@); using the legacy center", error.localizedDescription);
+            dispatch_async(dispatch_get_main_queue(), ^{ nx_legacy_notify(title, body, url); });
+        }
+    }];
+}
+#pragma clang diagnostic pop
+
+__attribute__((visibility("default")))
+void nx_mac_notify(const char *title, const char *body, const char *url)
+{
+    NSString *t = title != NULL ? [NSString stringWithUTF8String:title] : @"Nexus";
+    NSString *b = body != NULL ? [NSString stringWithUTF8String:body] : @"";
+    NSString *u = url != NULL ? [NSString stringWithUTF8String:url] : @"";
+    nx_on_main(^{
+        if (s_notify == nil) s_notify = [[NXNotifyDelegate alloc] init];
+        if (s_notifyAsked) {
+            nx_post(t ?: @"Nexus", b ?: @"", u ?: @"");
+            return;
+        }
+        s_notifyAsked = YES;
+        // An ad hoc signed app may not get UserNotifications; then the older
+        // center still shows the banner.
+        UNUserNotificationCenter *center = [UNUserNotificationCenter currentNotificationCenter];
+        center.delegate = s_notify;
+        [center requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                              completionHandler:^(BOOL granted, NSError *error) {
+            dispatch_async(dispatch_get_main_queue(), ^{
+                s_notifyAllowed = granted && error == nil;
+                NSLog(@"[nexus-mac] notifications %@", s_notifyAllowed ? @"allowed" : @"unavailable; using the legacy center");
+                nx_post(t ?: @"Nexus", b ?: @"", u ?: @"");
+            });
+        }];
+    });
+}
+
+__attribute__((visibility("default")))
+void nx_mac_set_agents(const char *summary)
+{
+    NSString *text = summary != NULL ? [NSString stringWithUTF8String:summary] : @"";
+    nx_on_main(^{
+        s_agentsText = text ?: @"";
+        if (s_agentsItem == nil) return;
+        s_agentsItem.title = s_agentsText;
+        s_agentsItem.hidden = s_agentsText.length == 0;
+        s_agentsSeparator.hidden = s_agentsItem.hidden;
+        nx_apply_capture_state();
+    });
 }
