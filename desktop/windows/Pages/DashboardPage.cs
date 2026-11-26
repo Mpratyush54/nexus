@@ -12,7 +12,7 @@ namespace Nexus.Pages;
 /// action; activity sits below it, open, and setup appears only until
 /// capture is configured.
 /// </summary>
-public sealed class DashboardPage : NexusPage
+public sealed partial class DashboardPage : NexusPage
 {
     private readonly TextBlock _title = NexusTokens.PageTitle("Home");
     private readonly TextBlock _subtitle = NexusTokens.Caption("");
@@ -120,6 +120,8 @@ public sealed class DashboardPage : NexusPage
         _startSend.Click += async (_, _) => await StartChatAsync();
         _startPrompt.PreviewKeyDown += async (_, e) =>
         {
+            // "/" and "@" lists and ↑ recall first (DashboardPage.Composer.cs).
+            if (!e.Handled && _assist.HandleKey(e)) { e.Handled = true; return; }
             if (e.Key != Windows.System.VirtualKey.Enter) return;
             var shift = Microsoft.UI.Input.InputKeyboardSource.GetKeyStateForCurrentThread(Windows.System.VirtualKey.Shift)
                 .HasFlag(Windows.UI.Core.CoreVirtualKeyStates.Down);
@@ -181,6 +183,7 @@ public sealed class DashboardPage : NexusPage
         var stack = new StackPanel { Spacing = 8 };
         stack.Children.Add(_startPrompt);
         stack.Children.Add(bar);
+        InitStartAssist(stack);
         var frame = new Border
         {
             Child = stack, Padding = new Thickness(12, 12, 10, 10), CornerRadius = new CornerRadius(16), BorderThickness = new Thickness(1),
@@ -196,7 +199,7 @@ public sealed class DashboardPage : NexusPage
     // Send is the page's primary action: accent when there is something to send.
     private void StyleSend()
     {
-        var ready = _startPrompt.Text.Trim().Length > 0;
+        var ready = _startPrompt.Text.Trim().Length > 0 || _assist?.Mentions.Count > 0;
         _startSend.Background = ready
             ? NexusTokens.Brush("AccentFillColorDefaultBrush", NexusTokens.BrandGold)
             : NexusTokens.Brush("NexusUserFillBrush", Windows.UI.Color.FromArgb(255, 0x33, 0x33, 0x33));
@@ -237,6 +240,14 @@ public sealed class DashboardPage : NexusPage
         AppPrefs.Save();
     }
 
+    /// <summary>The composer's /clear: the next chat starts with the agent the last one used.</summary>
+    internal void PrepareNewChat(string agent)
+    {
+        if (agent.Length == 0) return;
+        RememberAgent(agent);
+        if (_startAgent.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (i.Tag as string) == agent) is { } item) _startAgent.SelectedItem = item;
+    }
+
     /// <summary>New chat: a draft here, created only when the first message is sent.</summary>
     internal void FocusNewChat()
     {
@@ -273,8 +284,11 @@ public sealed class DashboardPage : NexusPage
 
     private async Task StartChatAsync()
     {
+        // "/help" typed in full runs here instead of starting a chat.
+        if (await _assist.TryRunTypedAsync()) return;
         var prompt = _startPrompt.Text.Trim();
-        if (prompt.Length == 0 || !_startSend.IsEnabled) return;
+        var mentions = _assist.Mentions.ToList();
+        if ((prompt.Length == 0 && mentions.Count == 0) || !_startSend.IsEnabled) return;
         var project = ShellProjectId();
         if (project.Length == 0) { StartStatus("Choose a project first."); _startProject.Focus(FocusState.Programmatic); return; }
         var agent = (_startAgent.SelectedItem as ComboBoxItem)?.Tag as string ?? "";
@@ -302,7 +316,7 @@ public sealed class DashboardPage : NexusPage
                 ProjectFolders.Remember(project, workspace);
                 StartStatus("Starting chat…");
             }
-            var firstLine = prompt.Split('\n', 2)[0].Trim();
+            var firstLine = prompt.Length > 0 ? prompt.Split('\n', 2)[0].Trim() : MentionText.ChipLabel(mentions[0]);
             var title = firstLine.Length > 72 ? firstLine[..69] + "…" : firstLine;
             var created = await Core.CallAsync(NxMethods.SessionsCreate, new
             {
@@ -312,9 +326,12 @@ public sealed class DashboardPage : NexusPage
             await UiThread.Resume(DispatcherQueue);
             var id = created is { Ok: true, Result: { } body } ? NxJson.Text(body, "id", "session_id") : "";
             if (id.Length == 0) { StartStatus(StateView.Friendly(created.Error) is { Length: > 0 } why ? why : "Couldn't start the chat. Try again."); return; }
-            _startPrompt.Text = "";
+            _assist.RememberSent(prompt);
+            _assist.SetText("", 0);
+            _assist.ClearMentions();
+            StyleSend();
             StartStatus("");
-            SessionPage.PendingStart = (id, prompt);
+            SessionPage.PendingStart = (id, prompt, mentions);
             MainWindow.Current?.OpenSession(id);
             MainWindow.Current?.RefreshChats();
         }

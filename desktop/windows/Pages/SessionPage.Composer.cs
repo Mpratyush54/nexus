@@ -67,6 +67,7 @@ public sealed partial class SessionPage
 
         var inputAt = _composer.Children.IndexOf(_inputFrame);
         _composer.Children.Insert(Math.Max(0, inputAt), _pasteStrip);
+        InitPickers();
 
         // The prompt grows with its text up to about a third of the page, then scrolls.
         SizeChanged += (_, e) => _prompt.MaxHeight = Math.Clamp(e.NewSize.Height * 0.34, 132, 320);
@@ -101,14 +102,17 @@ public sealed partial class SessionPage
         : ComposerKeys.Run.Idle;
 
     private bool HasComposerContent() =>
-        _prompt.Text.Trim().Length > 0 || _pastes.Count > 0 || _images.Count > 0 || _files.Count > 0;
+        _prompt.Text.Trim().Length > 0 || _pastes.Count > 0 || _images.Count > 0 || _files.Count > 0 || _assist.Mentions.Count > 0;
 
     private ComposerKeys.Press PressOf(KeyRoutedEventArgs e) =>
         new(KeyOf(e.Key), IsDown(VirtualKey.Shift), Shortcuts.IsPrimaryDown(), IsDown(VirtualKey.Menu), _imeComposing);
 
     private async void OnComposerKeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Handled || KeyOf(e.Key) == ComposerKeys.Key.Other) return;
+        if (e.Handled) return;
+        // The / and @ list, ↑ recall and Esc over a recalled prompt come first.
+        if (HandlePickerKey(e)) { e.Handled = true; return; }
+        if (KeyOf(e.Key) == ComposerKeys.Key.Other) return;
         var action = ComposerKeys.Decide(PressOf(e), CurrentRun(), HasComposerContent());
         // Ctrl/Cmd+Down inside the text moves the caret, as in any editor.
         if (action is ComposerKeys.Action.None or ComposerKeys.Action.JumpToLatest) return;
@@ -292,7 +296,8 @@ public sealed partial class SessionPage
         Caret = _prompt.SelectionStart,
         Images = _images.ToList(),
         Files = _files.ToList(),
-        Pastes = _pastes.ToList()
+        Pastes = _pastes.ToList(),
+        Mentions = _assist.Mentions.ToList()
     };
 
     private void QueueDraftSave()
@@ -328,11 +333,12 @@ public sealed partial class SessionPage
     private void RestoreDraft()
     {
         ClearPastes();
+        ResetPickers();
         _draftOwner = _id;
         if (ComposerDraftStore.Default.Get(_id) is not { } draft) return;
-        _prompt.Text = draft.Text;
-        _prompt.SelectionStart = Math.Clamp(draft.Caret, 0, _prompt.Text.Length);
+        SetComposerText(draft.Text, draft.Caret);
         foreach (var paste in draft.Pastes) AddPasteChip(paste, animate: false);
+        foreach (var mention in draft.Mentions) AddMention(mention, animate: false);
         if (draft.Images.Count + draft.Files.Count > 0) _ = RestoreAttachmentsAsync(_id, draft.Images.Concat(draft.Files).ToList());
     }
 
@@ -353,16 +359,18 @@ public sealed partial class SessionPage
         _prompt.Text = "";
         ClearImageAttachments();
         ClearPastes();
+        ClearMentions();
         if (_id.Length > 0 && ComposerDraftStore.Default.Remove(_id)) ComposerDraftStore.Default.Save();
         UpdateComposerButton();
     }
 
     /// <summary>Puts a message back in the composer (Edit, a failed follow-up). A draft already there stays after it.</summary>
-    private void LoadIntoComposer(string text, IEnumerable<string>? attachments = null, IEnumerable<string>? pastes = null)
+    private void LoadIntoComposer(string text, IEnumerable<string>? attachments = null, IEnumerable<string>? pastes = null, IEnumerable<ComposerMention>? mentions = null)
     {
         var current = _prompt.Text.Trim();
-        _prompt.Text = current.Length == 0 ? text : text.TrimEnd() + "\n\n" + current;
+        SetComposerText(current.Length == 0 ? text : text.TrimEnd() + "\n\n" + current, 0);
         foreach (var paste in pastes ?? Enumerable.Empty<string>()) AddPasteChip(paste, animate: true);
+        foreach (var mention in mentions ?? Enumerable.Empty<ComposerMention>()) AddMention(mention, animate: true);
         if (attachments?.ToList() is { Count: > 0 } paths) _ = RestoreAttachmentsAsync(_id, paths);
         _prompt.Focus(FocusState.Programmatic);
         _prompt.SelectionStart = Math.Min(text.TrimEnd().Length, _prompt.Text.Length);
@@ -513,9 +521,10 @@ public sealed partial class SessionPage
             await SendFollowupAsync(now: false);
             return;
         }
+        if (await TryRunTypedCommandAsync()) return;
         if (_sendInFlight || _preparingHarness) return;
         var typed = _prompt.Text.Trim();
-        if (typed.Length == 0 && _pastes.Count == 0)
+        if (typed.Length == 0 && _pastes.Count == 0 && _assist.Mentions.Count == 0)
         {
             if (_images.Count + _files.Count > 0) SetComposerStatus("Add a message to send with your attachments.");
             return;
@@ -530,7 +539,8 @@ public sealed partial class SessionPage
         if (!SupportsInAppReply(agent)) { SetComposerStatus("Choose an agent that can chat in Nexus: Claude Code, Codex, Cursor, OpenCode, Gemini or Kimi."); return; }
         if (_images.Count > 0 && ComposerAttachments.ImageProblem(agent, _images[0], 1) is { } imageProblem) { SetComposerStatus(imageProblem); return; }
         if (!System.IO.Directory.Exists(_workspace.Text.Trim())) { SetComposerStatus("Select an existing local project folder before sending."); return; }
-        var message = new OutgoingMessage(_id, typed, _images, _files, _pastes);
+        var message = new OutgoingMessage(_id, typed, _images, _files, _pastes, _assist.Mentions);
+        RememberSent(typed);
         ClearComposer();
         SetComposerStatus("");
         await SendMessageAsync(message);
@@ -547,7 +557,7 @@ public sealed partial class SessionPage
         var model = SelectedModel();
         SaveModelChoice(agent, model);
         var images = message.Images.ToArray();
-        var prompt = ComposerAttachments.WithFiles(message.Prompt, message.Files.ToList());
+        var prompt = ComposerAttachments.WithFiles(message.PromptFor(agent), message.Files.ToList());
         var useLive = SupportsLive(agent) && (images.Length == 0 || ComposerAttachments.SendsImagesLive(agent));
         var workspace = _workspace.Text.Trim();
         ProjectFolders.Remember(_projectID, workspace);
@@ -646,7 +656,8 @@ public sealed partial class SessionPage
             Text = text, Caret = message.Text.Length,
             Images = message.Images.Concat(existing?.Images ?? new()).Distinct().ToList(),
             Files = message.Files.Concat(existing?.Files ?? new()).Distinct().ToList(),
-            Pastes = message.Pastes.Concat(existing?.Pastes ?? new()).ToList()
+            Pastes = message.Pastes.Concat(existing?.Pastes ?? new()).ToList(),
+            Mentions = message.Mentions.Concat(existing?.Mentions ?? new()).Distinct().ToList()
         });
         store.Save();
     }
@@ -798,7 +809,7 @@ public sealed partial class SessionPage
         {
             if (!message.Withdraw()) return;
             Withdraw(keepPartial: true);
-            LoadIntoComposer(message.Text, message.Images.Concat(message.Files), message.Pastes);
+            LoadIntoComposer(message.Text, message.Images.Concat(message.Files), message.Pastes, message.Mentions);
         };
         return row;
     }
@@ -826,16 +837,17 @@ public sealed partial class SessionPage
     /// <summary>Queues a message behind the running reply (Retry or Continue while the agent works).</summary>
     private async Task QueueMessageAsync(OutgoingMessage message, bool now)
     {
+        var agent = _liveAgent.Length > 0 ? _liveAgent : SelectedHarness();
         var response = await Call("live.send", new
         {
-            session_id = _id, project_id = _projectID, agent = _liveAgent.Length > 0 ? _liveAgent : SelectedHarness(),
+            session_id = _id, project_id = _projectID, agent,
             workspace_root = _workspace.Text.Trim(), model = SelectedModel(), mode = PermissionMode(),
-            context = _continuationContext, text = ComposerAttachments.WithFiles(message.Prompt, message.Files.ToList()),
+            context = _continuationContext, text = ComposerAttachments.WithFiles(message.PromptFor(agent), message.Files.ToList()),
             images = message.Images.ToArray(), when = now ? "now" : "queue"
         });
         if (!response.Ok)
         {
-            LoadIntoComposer(message.Text, message.Images.Concat(message.Files), message.Pastes);
+            LoadIntoComposer(message.Text, message.Images.Concat(message.Files), message.Pastes, message.Mentions);
             SetComposerStatus(response.Error ?? "Could not queue that message. It's back in the message box.");
         }
     }
@@ -847,9 +859,11 @@ public sealed partial class SessionPage
     /// </summary>
     private async Task SendFollowupFromComposerAsync(bool now)
     {
+        if (await TryRunTypedCommandAsync()) return;
         var typed = _prompt.Text.Trim();
-        if (typed.Length == 0 && _pastes.Count == 0) return;
-        var message = new OutgoingMessage(_id, typed, _images, _files, _pastes);
+        if (typed.Length == 0 && _pastes.Count == 0 && _assist.Mentions.Count == 0) return;
+        var message = new OutgoingMessage(_id, typed, _images, _files, _pastes, _assist.Mentions);
+        RememberSent(typed);
         ClearComposer();
         if (now) TurnStatusStopping("Stopping to send yours next");
         await QueueMessageAsync(message, now);

@@ -97,6 +97,7 @@ import {
 } from "@/lib/image-attach";
 import { ChatRow, type RowCommand } from "./chats/ChatList";
 import { ReplyStatus } from "./chats/ReplyStatus";
+import { useComposerPickers } from "./chats/useComposerPickers";
 
 const message = (error: unknown) =>
   error instanceof Error ? error.message : "Request failed. Try again.";
@@ -523,6 +524,13 @@ export function ChatsPage() {
             title={prefs.titles[id]}
             onBack={() => setParams({})}
             onOpen={(next) => setParams({ chat: next })}
+            onNew={
+              DESKTOP_RELAY && projectId
+                ? () => {
+                    if (!create.isPending) create.mutate();
+                  }
+                : undefined
+            }
           />
         )
       )}
@@ -591,11 +599,14 @@ function Conversation({
   title,
   onBack,
   onOpen,
+  onNew,
 }: {
   session: ChatSession;
   title?: string;
   onBack: () => void;
   onOpen: (id: string) => void;
+  /** Starts a new chat in this project (the composer's /new and /clear). */
+  onNew?: () => void;
 }) {
   const { user } = useAuth();
   const owned = !!user?.userId && session.owner_user_id === user.userId;
@@ -631,6 +642,37 @@ function Conversation({
   const [attachNote, setAttachNote] = useState("");
   const fileInput = useRef<HTMLInputElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const moreOptions = useRef<HTMLDetailsElement>(null);
+  const modelInput = useRef<HTMLInputElement>(null);
+  // "/" commands and "@" chats/memories (see useComposerPickers).
+  const pickers = useComposerPickers({
+    draft,
+    setDraft,
+    textarea: composer,
+    agent,
+    sessionId: session.id,
+    projectId: session.project_id,
+    onCommand: (name, argument) => {
+      switch (name) {
+        case "model":
+          if (argument) setModel(argument);
+          else {
+            if (moreOptions.current) moreOptions.current.open = true;
+            requestAnimationFrame(() => modelInput.current?.focus());
+          }
+          return true;
+        case "new":
+        case "clear":
+          if (!onNew) return false;
+          onNew();
+          return true;
+        case "compact":
+          void send({ text: "/compact" });
+          return true;
+      }
+      return false;
+    },
+  });
   const objectUrls = useRef(new Set<string>());
   useEffect(() => {
     const urls = objectUrls.current;
@@ -857,7 +899,12 @@ function Conversation({
    */
   async function send(opts: { text?: string; images?: DraftImage[]; retryId?: string } = {}) {
     const fromComposer = opts.text === undefined;
-    const text = (opts.text ?? draft).trim();
+    // "/model …", "/new" and the like run here instead of going to the agent.
+    if (fromComposer && pickers.runTyped(draft)) {
+      clearDraft();
+      return;
+    }
+    const text = (fromComposer ? pickers.withMentions(draft.trim()) : (opts.text ?? "")).trim();
     const pics = opts.images ?? (fromComposer ? images : []);
     if (
       !owned ||
@@ -883,6 +930,7 @@ function Conversation({
     );
     if (fromComposer) {
       clearDraft();
+      pickers.clearMentions();
       setImages([]);
       setAttachNote("");
     }
@@ -1583,6 +1631,9 @@ function Conversation({
             ))}
           </ul>
         )}
+        {pickers.help}
+        {pickers.popup}
+        {pickers.chips}
         <textarea
           ref={composer}
           rows={1}
@@ -1592,7 +1643,13 @@ function Conversation({
           onChange={(e) => {
             setDraft(e.target.value);
             setRecall(-1);
+            pickers.updateCaret(e.target.value, e.target.selectionStart, e.target.selectionEnd);
           }}
+          onSelect={(e) =>
+            pickers.updateCaret(e.currentTarget.value, e.currentTarget.selectionStart, e.currentTarget.selectionEnd)
+          }
+          aria-activedescendant={pickers.activeOption}
+          aria-controls={pickers.open ? pickers.listId : undefined}
           onPaste={(e) => {
             const files = pastedImages(e.clipboardData);
             if (!files.length) return;
@@ -1603,6 +1660,8 @@ function Conversation({
           aria-label="Message the agent"
           aria-describedby="composer-hint"
           onKeyDown={(e) => {
+            // The / and @ list takes ↑/↓, Enter/Tab and Esc while it is open.
+            if (pickers.onKeyDown(e)) return;
             const action = enterAction(
               {
                 key: e.key,
@@ -1644,7 +1703,7 @@ function Conversation({
         <span id="composer-hint" className="sr-only">
           {touch
             ? "Use the Send button to send."
-            : "Enter sends, Shift+Enter adds a line, up arrow recalls an earlier prompt."}
+            : "Enter sends, Shift+Enter adds a line, up arrow recalls an earlier prompt. Type / for commands, @ to mention a chat or memory."}
         </span>
         <div className="conversation-composer-footer">
           <div className="composer-tools">
@@ -1677,7 +1736,7 @@ function Conversation({
             {/* Dictation: the mic sits next to 📎 and writes into this form's textarea. */}
             <VoiceInputButton />
           </div>
-          <details className="composer-more">
+          <details className="composer-more" ref={moreOptions}>
             <summary>
               <MoreHorizontal size={15} aria-hidden />
               <span className="sr-only">Agent, model and computer: </span>
@@ -1714,6 +1773,7 @@ function Conversation({
                 ))}
               </select>
               <input
+                ref={modelInput}
                 list={`models-${session.id}`}
                 aria-label="Model"
                 placeholder="Default model"
@@ -1803,7 +1863,7 @@ function Conversation({
                 : !device ||
                   discoveringModels ||
                   !device.harnesses.includes(agent) ||
-                  !draft.trim() ||
+                  (!draft.trim() && !pickers.mentions.length) ||
                   readingImages > 0 ||
                   (images.length > 0 && !!imageBlocker)
             }

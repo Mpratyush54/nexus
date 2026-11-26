@@ -5,11 +5,13 @@ import {
   AlertCircle,
   Bell,
   Bot,
+  Brain,
   ChevronRight,
   FileText,
   GitBranch,
   History,
   Image as ImageIcon,
+  MessageSquare,
   Pencil,
   RotateCcw,
   Wrench,
@@ -25,6 +27,7 @@ import {
 import { ChatDiff } from "./ChatDiff";
 import { CodeBlock, CopyButton } from "./CodeBlock";
 import { shortReason } from "@/lib/outbox";
+import { extractMentions } from "@/lib/composer-commands";
 
 const markdownComponents = {
   a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
@@ -355,7 +358,10 @@ export function ChatMessage({
 }) {
   const parsed = parseTurnText(turn.text_preview ?? "");
   const tools = toolViews(turn.tool_calls);
-  const { text, envelopes, attachments, context, compaction } = parsed;
+  const { envelopes, attachments, context, compaction } = parsed;
+  // Chats and memories sent with a message show as chips, not as raw context text.
+  const { text, mentions: sentContext } =
+    turn.role === "user" ? extractMentions(parsed.text) : { text: parsed.text, mentions: [] };
   if (!text && !tools.length && !envelopes.length && !compaction && !attachments.length && !images.length && !status && !thinking)
     return null;
   // A user turn made only of envelopes was written by the harness, not the person.
@@ -412,6 +418,35 @@ export function ChatMessage({
               >
                 {file.isImage ? <ImageIcon size={13} aria-hidden /> : <FileText size={13} aria-hidden />}
                 {label}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {sentContext.length > 0 && (
+        <ul className="chat-attachments chat-sent-context" aria-label="Context sent with this message">
+          {sentContext.map((m, i) => {
+            const href =
+              m.kind === "chat"
+                ? m.value
+                  ? `/app/chats?chat=${encodeURIComponent(m.value)}`
+                  : ""
+                : `/app/memory?q=${encodeURIComponent(m.label)}`;
+            const label = (m.kind === "chat" ? "Chat: " : "Memory: ") + m.label;
+            const icon = m.kind === "chat" ? <MessageSquare size={13} aria-hidden /> : <Brain size={13} aria-hidden />;
+            return (
+              <li key={i} title={m.context}>
+                {href ? (
+                  <a href={href}>
+                    {icon}
+                    {label}
+                  </a>
+                ) : (
+                  <>
+                    {icon}
+                    {label}
+                  </>
+                )}
               </li>
             );
           })}

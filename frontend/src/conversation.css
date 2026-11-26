@@ -1238,3 +1238,13 @@ details[open] > summary > .chat-chevron {
   line-height: 1.6;
   color: var(--chat-error);
 }
+
+/* Chats and memories sent with a message: chips that open their source. */
+.chat-sent-context li {
+  border-color: color-mix(in srgb, var(--chat-accent) 40%, transparent);
+  background: color-mix(in srgb, var(--chat-accent) 10%, transparent);
+  color: var(--chat-fg);
+}
+.chat-sent-context li svg { color: var(--chat-accent); flex: none; }
+.chat-sent-context a { display: inline-flex; align-items: center; gap: 6px; color: inherit; text-decoration: none; }
+.chat-sent-context a:hover { text-decoration: underline; }

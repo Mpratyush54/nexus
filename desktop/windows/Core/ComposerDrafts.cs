@@ -16,10 +16,12 @@ internal sealed record ComposerDraft
     public List<string> Images { get; init; } = new();
     public List<string> Files { get; init; } = new();
     public List<string> Pastes { get; init; } = new();
+    /// <summary>Files, folders, chats and memories picked with "@".</summary>
+    public List<ComposerMention> Mentions { get; init; } = new();
     public DateTimeOffset SavedAt { get; init; }
 
     [JsonIgnore]
-    public bool IsEmpty => Text.Trim().Length == 0 && Images.Count == 0 && Files.Count == 0 && Pastes.Count == 0;
+    public bool IsEmpty => Text.Trim().Length == 0 && Images.Count == 0 && Files.Count == 0 && Pastes.Count == 0 && Mentions.Count == 0;
 }
 
 /// <summary>
@@ -75,8 +77,36 @@ internal sealed class ComposerDraftStore
         Caret = Math.Clamp(draft.Caret, 0, (draft.Text ?? "").Length),
         Images = draft.Images ?? new(),
         Files = draft.Files ?? new(),
-        Pastes = (draft.Pastes ?? new()).Where(p => !string.IsNullOrEmpty(p)).ToList()
+        Pastes = (draft.Pastes ?? new()).Where(p => !string.IsNullOrEmpty(p)).ToList(),
+        Mentions = (draft.Mentions ?? new()).Where(m => m is not null && m.Value.Length > 0).ToList()
     };
+
+    /// <summary>Raised (on the caller's thread) with the chat id after a draft appears, changes or goes.</summary>
+    public event Action<string>? Changed;
+
+    private string _active = "";
+
+    /// <summary>
+    /// The chat open in the composer. The sidebar hides that chat's "Draft"
+    /// marker: you are looking at the draft already.
+    /// </summary>
+    public string ActiveSession
+    {
+        get => _active;
+        set
+        {
+            value ??= "";
+            if (string.Equals(_active, value, StringComparison.OrdinalIgnoreCase)) return;
+            var old = _active;
+            _active = value;
+            if (old.Length > 0) Changed?.Invoke(old);
+            if (value.Length > 0) Changed?.Invoke(value);
+        }
+    }
+
+    /// <summary>True when the chat has a draft and isn't the one open (the sidebar's "Draft").</summary>
+    public bool ShowsDraftMarker(string sessionId) =>
+        !string.Equals(sessionId, _active, StringComparison.OrdinalIgnoreCase) && Has(sessionId);
 
     public ComposerDraft? Get(string sessionId)
     {
@@ -90,29 +120,40 @@ internal sealed class ComposerDraftStore
     public bool Set(string sessionId, ComposerDraft draft)
     {
         if (string.IsNullOrEmpty(sessionId)) return false;
+        bool changed, had, has;
         lock (_gate)
         {
             var drafts = Drafts();
-            if (draft.IsEmpty) return drafts.Remove(sessionId);
-            var clean = Clean(draft) with
+            had = drafts.ContainsKey(sessionId);
+            if (draft.IsEmpty) changed = drafts.Remove(sessionId);
+            else
             {
-                SavedAt = _now(),
-                Pastes = draft.Pastes.Where(p => p.Length <= MaxPasteChars).ToList()
-            };
-            if (drafts.TryGetValue(sessionId, out var old) && Same(old, clean)) return false;
-            drafts[sessionId] = clean;
-            return true;
+                var clean = Clean(draft) with
+                {
+                    SavedAt = _now(),
+                    Pastes = draft.Pastes.Where(p => p.Length <= MaxPasteChars).ToList()
+                };
+                changed = !(drafts.TryGetValue(sessionId, out var old) && Same(old, clean));
+                if (changed) drafts[sessionId] = clean;
+            }
+            has = drafts.ContainsKey(sessionId);
         }
+        // Only appearing or going matters to the sidebar.
+        if (had != has) Changed?.Invoke(sessionId);
+        return changed;
     }
 
     public bool Remove(string sessionId)
     {
         if (string.IsNullOrEmpty(sessionId)) return false;
-        lock (_gate) return Drafts().Remove(sessionId);
+        bool removed;
+        lock (_gate) removed = Drafts().Remove(sessionId);
+        if (removed) Changed?.Invoke(sessionId);
+        return removed;
     }
 
     private static bool Same(ComposerDraft a, ComposerDraft b) =>
-        a.Text == b.Text && a.Caret == b.Caret && a.Images.SequenceEqual(b.Images) && a.Files.SequenceEqual(b.Files) && a.Pastes.SequenceEqual(b.Pastes);
+        a.Text == b.Text && a.Caret == b.Caret && a.Images.SequenceEqual(b.Images) && a.Files.SequenceEqual(b.Files) && a.Pastes.SequenceEqual(b.Pastes) && a.Mentions.SequenceEqual(b.Mentions);
 
     /// <summary>Writes every draft to disk (atomically: temp file, then move).</summary>
     public void Save()
