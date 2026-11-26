@@ -9,7 +9,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { DESCRIPTION, DOWNLOAD_URL, FAQ, GITHUB_URL, SITE_URL } from '../src/landing/content'
+import { DESCRIPTION, DOWNLOAD_URL, FAQ, FEATURES, GITHUB_URL, LATEST_VERSION, SITE_URL } from '../src/landing/content'
 import { LandingPage } from '../src/landing/LandingPage'
 import { LEGAL_META, LegalPage, type LegalKind } from '../src/landing/legal'
 
@@ -45,7 +45,9 @@ const jsonLd = {
       description: DESCRIPTION,
       url: `${SITE_URL}/`,
       downloadUrl: DOWNLOAD_URL,
-      operatingSystem: 'Windows',
+      operatingSystem: 'Windows, macOS',
+      softwareVersion: LATEST_VERSION,
+      featureList: FEATURES,
       applicationCategory: 'DeveloperApplication',
       image: `${SITE_URL}/og/nexus-og.png`,
       offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD', description: 'Free plan' },
