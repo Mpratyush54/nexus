@@ -263,9 +263,27 @@ public class ComposerMentionTests
         var prompt = MentionText.Apply("Please refactor", mentions, "claude");
         Assert.Equal(
             "Please refactor\n\n@src/app/main.cs @docs/ @\"My Notes/todo.md\"\n\n" +
-            "<context source=\"Earlier Nexus chat: Fix 'login' bug\">\nWe moved the token check into middleware.\n</context>\n\n" +
-            "<context source=\"Nexus memory: Deploys\">\nDeploys go out on Tuesdays.\n</context>",
+            "<context source=\"Earlier Nexus chat: Fix 'login' bug\" ref=\"chat:c1\">\nWe moved the token check into middleware.\n</context>\n\n" +
+            "<context source=\"Nexus memory: Deploys\" ref=\"memory:m1\">\nDeploys go out on Tuesdays.\n</context>",
             prompt);
+
+        // The sent bubble takes them back out: the text, and chips that know their source.
+        var (text, sent) = MentionText.Extract(prompt);
+        Assert.Equal("Please refactor\n\n@src/app/main.cs @docs/ @\"My Notes/todo.md\"", text);
+        Assert.Equal(2, sent.Count);
+        Assert.Equal((ComposerMention.Chat, "c1", "Fix 'login' bug", "We moved the token check into middleware."), (sent[0].Kind, sent[0].Value, sent[0].Label, sent[0].Context));
+        Assert.Equal((ComposerMention.Memory, "m1", "Deploys"), (sent[1].Kind, sent[1].Value, sent[1].Label));
+    }
+
+    [Fact]
+    public void ExtractLeavesOtherTextAloneAndCutsAPreview()
+    {
+        Assert.Equal(("plain <context>not ours</context>", 0), (MentionText.Extract("plain <context>not ours</context>").Text, MentionText.Extract("plain <context>not ours</context>").Mentions.Count));
+        // An older message without ref: a chip that can't open anything.
+        var (_, old) = MentionText.Extract("q\n\n<context source=\"Nexus memory: Deploys\">\nTuesdays\n</context>");
+        Assert.Equal("", Assert.Single(old).Value);
+        // A sidebar preview cut inside a block keeps only the request.
+        Assert.Equal("Please check", MentionText.Strip("Please check\n\n<context source=\"Earlier Nexus chat: Fix bug\" ref=\"chat:c1\">\nWe moved the tok"));
     }
 
     [Fact]

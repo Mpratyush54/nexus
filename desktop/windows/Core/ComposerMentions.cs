@@ -1,6 +1,7 @@
 #nullable enable
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Nexus.Core;
 
@@ -64,13 +65,50 @@ internal static class MentionText
         {
             var context = Clip(m.Context);
             if (context.Length == 0) continue;
-            var what = m.Kind == ComposerMention.Chat ? "Earlier Nexus chat" : "Nexus memory";
+            var what = m.Kind == ComposerMention.Chat ? ChatSource : MemorySource;
             if (b.Length > 0) b.Append("\n\n");
-            b.Append("<context source=\"").Append(what).Append(": ").Append(Attr(m.Label)).Append("\">\n")
-             .Append(context).Append("\n</context>");
+            b.Append("<context source=\"").Append(what).Append(": ").Append(Attr(m.Label)).Append('"');
+            // The id lets the chip under the sent message open its source.
+            if (m.Value.Length > 0) b.Append(" ref=\"").Append(m.Kind).Append(':').Append(Attr(m.Value)).Append('"');
+            b.Append(">\n").Append(context).Append("\n</context>");
         }
         return b.ToString();
     }
+
+    private const string ChatSource = "Earlier Nexus chat";
+    private const string MemorySource = "Nexus memory";
+    private static readonly Regex ContextBlock = new(
+        @"\s*<context source=""(?<kind>" + ChatSource + "|" + MemorySource + @"): (?<label>[^""]*)""(?:\s+ref=""(?<ref>[^""]*)"")?\s*>\n?(?<body>.*?)\n?</context>",
+        RegexOptions.Singleline | RegexOptions.Compiled);
+    // A preview cut inside a block leaves only its start.
+    private static readonly Regex OpenBlock = new(
+        @"\s*<context source=""(?:" + ChatSource + "|" + MemorySource + @"):.*$",
+        RegexOptions.Singleline | RegexOptions.Compiled);
+
+    /// <summary>
+    /// Takes the chats and memories sent with a message back out of it: the
+    /// text without the context blocks, and each block as a mention (for the
+    /// chips under the sent bubble). Text without blocks comes back as it was.
+    /// </summary>
+    public static (string Text, IReadOnlyList<ComposerMention> Mentions) Extract(string? text)
+    {
+        text ??= "";
+        if (!text.Contains("<context source=\"", StringComparison.Ordinal)) return (text, Array.Empty<ComposerMention>());
+        var found = new List<ComposerMention>();
+        var clean = ContextBlock.Replace(text, m =>
+        {
+            var kind = m.Groups["kind"].Value == ChatSource ? ComposerMention.Chat : ComposerMention.Memory;
+            var reference = m.Groups["ref"].Value;
+            var id = reference.StartsWith(kind + ":", StringComparison.Ordinal) ? reference[(kind.Length + 1)..] : "";
+            found.Add(new ComposerMention { Kind = kind, Value = id, Label = m.Groups["label"].Value.Trim(), Context = m.Groups["body"].Value.Trim() });
+            return "";
+        });
+        clean = OpenBlock.Replace(clean, "");
+        return (clean.Trim(), found);
+    }
+
+    /// <summary>The text without chat and memory context blocks (titles, previews, recall).</summary>
+    public static string Strip(string? text) => Extract(text).Text;
 
     private static string Clip(string text)
     {

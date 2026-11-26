@@ -102,7 +102,7 @@ public sealed partial class SessionPage
         : ComposerKeys.Run.Idle;
 
     private bool HasComposerContent() =>
-        _prompt.Text.Trim().Length > 0 || _pastes.Count > 0 || _images.Count > 0 || _files.Count > 0 || _mentions.Count > 0;
+        _prompt.Text.Trim().Length > 0 || _pastes.Count > 0 || _images.Count > 0 || _files.Count > 0 || _assist.Mentions.Count > 0;
 
     private ComposerKeys.Press PressOf(KeyRoutedEventArgs e) =>
         new(KeyOf(e.Key), IsDown(VirtualKey.Shift), Shortcuts.IsPrimaryDown(), IsDown(VirtualKey.Menu), _imeComposing);
@@ -297,7 +297,7 @@ public sealed partial class SessionPage
         Images = _images.ToList(),
         Files = _files.ToList(),
         Pastes = _pastes.ToList(),
-        Mentions = _mentions.ToList()
+        Mentions = _assist.Mentions.ToList()
     };
 
     private void QueueDraftSave()
@@ -524,7 +524,7 @@ public sealed partial class SessionPage
         if (await TryRunTypedCommandAsync()) return;
         if (_sendInFlight || _preparingHarness) return;
         var typed = _prompt.Text.Trim();
-        if (typed.Length == 0 && _pastes.Count == 0 && _mentions.Count == 0)
+        if (typed.Length == 0 && _pastes.Count == 0 && _assist.Mentions.Count == 0)
         {
             if (_images.Count + _files.Count > 0) SetComposerStatus("Add a message to send with your attachments.");
             return;
@@ -539,7 +539,7 @@ public sealed partial class SessionPage
         if (!SupportsInAppReply(agent)) { SetComposerStatus("Choose an agent that can chat in Nexus: Claude Code, Codex, Cursor, OpenCode, Gemini or Kimi."); return; }
         if (_images.Count > 0 && ComposerAttachments.ImageProblem(agent, _images[0], 1) is { } imageProblem) { SetComposerStatus(imageProblem); return; }
         if (!System.IO.Directory.Exists(_workspace.Text.Trim())) { SetComposerStatus("Select an existing local project folder before sending."); return; }
-        var message = new OutgoingMessage(_id, typed, _images, _files, _pastes, _mentions);
+        var message = new OutgoingMessage(_id, typed, _images, _files, _pastes, _assist.Mentions);
         RememberSent(typed);
         ClearComposer();
         SetComposerStatus("");
@@ -861,8 +861,8 @@ public sealed partial class SessionPage
     {
         if (await TryRunTypedCommandAsync()) return;
         var typed = _prompt.Text.Trim();
-        if (typed.Length == 0 && _pastes.Count == 0 && _mentions.Count == 0) return;
-        var message = new OutgoingMessage(_id, typed, _images, _files, _pastes, _mentions);
+        if (typed.Length == 0 && _pastes.Count == 0 && _assist.Mentions.Count == 0) return;
+        var message = new OutgoingMessage(_id, typed, _images, _files, _pastes, _assist.Mentions);
         RememberSent(typed);
         ClearComposer();
         if (now) TurnStatusStopping("Stopping to send yours next");

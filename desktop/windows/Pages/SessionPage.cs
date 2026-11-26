@@ -647,7 +647,7 @@ public sealed partial class SessionPage : NexusPage
 
     // Set by Home's "start a chat" composer: once the new chat has loaded,
     // its first message is sent without another click.
-    internal static (string SessionId, string Prompt)? PendingStart;
+    internal static (string SessionId, string Prompt, IReadOnlyList<ComposerMention> Mentions)? PendingStart;
 
     private async Task LoadThenStartAsync(int generation, bool quiet = false)
     {
@@ -670,6 +670,7 @@ public sealed partial class SessionPage : NexusPage
         PendingStart = null;
         if (!_sessionLoaded) return;
         _prompt.Text = start.Prompt;
+        foreach (var mention in start.Mentions) AddMention(mention, animate: false);
         if (!System.IO.Directory.Exists(_workspace.Text.Trim()))
         {
             SetComposerStatus("Choose the project folder (folder button), then press Send.");

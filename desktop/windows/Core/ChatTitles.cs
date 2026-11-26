@@ -26,6 +26,8 @@ internal static class ChatTitles
         // Codex wraps the request in file mentions, ambient context and a
         // "My request:" marker; keep only the request.
         text = HarnessMessage.RequestText(text);
+        // Chats and memories a person mentioned with "@" go to the agent as context blocks; never a title.
+        text = MentionText.Strip(text);
         // Tool blocks Codex imports from another agent, and the frame around a
         // sub-agent's hand-back, are not something a person wrote.
         text = ExternalToolMarkers.Strip(text);

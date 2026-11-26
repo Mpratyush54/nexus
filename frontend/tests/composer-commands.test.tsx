@@ -4,6 +4,8 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import {
   applyMentions,
+  extractMentions,
+  stripMentions,
   findTrigger,
   fuzzyMatch,
   highlights,
@@ -14,6 +16,7 @@ import {
   webCommands,
 } from '../src/lib/composer-commands'
 import { recallStep } from '../src/lib/composer-keys'
+import { chatTitle } from '../src/lib/harness-message'
 import { ComposerPopup } from '../src/components/ComposerPopup'
 
 test('"/" opens only at the start of the message, "@" at a word start', () => {
@@ -77,9 +80,21 @@ test('mentions go along as @paths and context blocks', () => {
   assert.equal(
     out,
     'Please refactor\n\n@src/app/main.ts @"My Docs/"\n\n' +
-      '<context source="Earlier Nexus chat: Fix \'login\' bug">\nMoved the token check into middleware.\n</context>\n\n' +
-      '<context source="Nexus memory: Deploys">\nDeploys go out on Tuesdays.\n</context>',
+      '<context source="Earlier Nexus chat: Fix \'login\' bug" ref="chat:c1">\nMoved the token check into middleware.\n</context>\n\n' +
+      '<context source="Nexus memory: Deploys" ref="memory:m1">\nDeploys go out on Tuesdays.\n</context>',
   )
+  // The sent bubble takes them back out as chips that know their source.
+  const back = extractMentions(out)
+  assert.equal(back.text, 'Please refactor\n\n@src/app/main.ts @"My Docs/"')
+  assert.deepEqual(
+    back.mentions.map((m) => [m.kind, m.value, m.label]),
+    [
+      ['chat', 'c1', "Fix 'login' bug"],
+      ['memory', 'm1', 'Deploys'],
+    ],
+  )
+  assert.equal(stripMentions('Check\n\n<context source="Nexus memory: X" ref="memory:m">\nhalf a pre'), 'Check')
+  assert.ok(!chatTitle(undefined, out, 'claude').includes('context'))
   assert.equal(applyMentions('hi ', []), 'hi ')
   assert.equal(applyMentions('look at @a.ts now', [{ kind: 'file', value: 'a.ts', label: 'a.ts' }]), 'look at @a.ts now')
 })

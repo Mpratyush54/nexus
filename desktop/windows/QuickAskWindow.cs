@@ -284,7 +284,7 @@ internal sealed class QuickAskWindow
             _prompt.Text = "";
             Status("");
             HidePrompt();
-            SessionPage.PendingStart = (id, prompt);
+            SessionPage.PendingStart = (id, prompt, Array.Empty<ComposerMention>());
             _main.OpenChatFromQuickAsk(id);
         }
         catch (Exception ex)

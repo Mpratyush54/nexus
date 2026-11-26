@@ -78,6 +78,8 @@ internal sealed class ComposerPopup
 
     public bool IsOpen => _popup.IsOpen && !_closing;
     public bool HasRows => _rows.Count > 0;
+    /// <summary>Results are still on their way (Enter waits rather than sending a half-typed mention).</summary>
+    public bool IsLoading { get; private set; }
     public Row? Selected => _selected >= 0 && _selected < _rows.Count ? _rows[_selected].Row : null;
     public int Count => _rows.Count;
 
@@ -118,6 +120,7 @@ internal sealed class ComposerPopup
         _scroll.Visibility = _rows.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         _empty.Visibility = _rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         _emptyText.Text = loading && _rows.Count == 0 ? "Looking…" : emptyText;
+        IsLoading = loading;
         _busy.IsActive = loading && _rows.Count == 0;
         _busy.Visibility = _busy.IsActive ? Visibility.Visible : Visibility.Collapsed;
         _card.Width = width;
@@ -176,7 +179,7 @@ internal sealed class ComposerPopup
         board.Begin();
     }
 
-    // Above the anchor (the message box frame), left-aligned with it.
+    // Above the anchor (the composer), left-aligned with it.
     private void Place()
     {
         if (!_popup.IsOpen || _anchor.XamlRoot is null) return;
@@ -185,7 +188,9 @@ internal sealed class ComposerPopup
             var at = _anchor.TransformToVisual(null).TransformPoint(new Windows.Foundation.Point(0, 0));
             var height = _card.ActualHeight > 0 ? _card.ActualHeight : _card.DesiredSize.Height;
             _popup.HorizontalOffset = at.X;
-            _popup.VerticalOffset = Math.Max(8, at.Y - height - 8);
+            // Above the composer; below it when there is no room above (Home's composer sits near the top).
+            var above = at.Y - height - 8;
+            _popup.VerticalOffset = above >= 8 ? above : at.Y + _anchor.ActualHeight + 8;
         }
         catch (ArgumentException) { }
     }

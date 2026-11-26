@@ -42,7 +42,12 @@ public sealed partial class SessionPage
 
     private UIElement ChatMessage(string role, string content, string? assistantAgent = null, HarnessMessage? extras = null)
     {
+        // Chats and memories sent with a message show as chips, not as their raw context text.
+        IReadOnlyList<ComposerMention> sent = Array.Empty<ComposerMention>();
+        if (role.Equals("user", StringComparison.OrdinalIgnoreCase)) (content, sent) = MentionText.Extract(content);
         var strip = extras is null ? null : MessageExtras(extras);
+        if (ComposerAssist.SentContextRow(sent) is { } context)
+            strip = strip is null ? context : new StackPanel { Spacing = 6, Children = { strip, context } };
         if (strip is not null && content.Trim().Length == 0)
         {
             // Only attachments (an image sent without text): no empty bubble.

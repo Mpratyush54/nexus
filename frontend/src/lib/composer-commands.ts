@@ -161,12 +161,45 @@ export function applyMentions(prompt: string, mentions: Mention[]): string {
     let context = (m.context ?? '').trim()
     if (!context) continue
     if (context.length > MAX_CONTEXT_CHARS) context = context.slice(0, MAX_CONTEXT_CHARS).trimEnd() + '\n…'
-    const what = m.kind === 'chat' ? 'Earlier Nexus chat' : 'Nexus memory'
+    const what = m.kind === 'chat' ? CHAT_SOURCE : MEMORY_SOURCE
     const label = m.label.replace(/"/g, "'").replace(/\n/g, ' ').trim()
-    out += (out ? '\n\n' : '') + `<context source="${what}: ${label}">\n${context}\n</context>`
+    // The id lets the chip under the sent message open its source.
+    const ref = m.value ? ` ref="${m.kind}:${m.value.replace(/"/g, "'")}"` : ''
+    out += (out ? '\n\n' : '') + `<context source="${what}: ${label}"${ref}>\n${context}\n</context>`
   }
   return out
 }
+
+const CHAT_SOURCE = 'Earlier Nexus chat'
+const MEMORY_SOURCE = 'Nexus memory'
+const CONTEXT_BLOCK = new RegExp(
+  `\\s*<context source="(${CHAT_SOURCE}|${MEMORY_SOURCE}): ([^"]*)"(?:\\s+ref="([^"]*)")?\\s*>\\n?([\\s\\S]*?)\\n?</context>`,
+  'g',
+)
+const OPEN_BLOCK = new RegExp(`\\s*<context source="(?:${CHAT_SOURCE}|${MEMORY_SOURCE}):[\\s\\S]*$`)
+
+/**
+ * Takes the chats and memories sent with a message back out of it: the text
+ * without the context blocks, and each block as a mention for the chips under
+ * the sent bubble. Mirrors MentionText.Extract on the desktop.
+ */
+export function extractMentions(raw: string): { text: string; mentions: Mention[] } {
+  if (!raw.includes('<context source="')) return { text: raw, mentions: [] }
+  const mentions: Mention[] = []
+  const text = raw
+    .replace(CONTEXT_BLOCK, (_all, source: string, label: string, ref: string | undefined, body: string) => {
+      const kind = source === CHAT_SOURCE ? 'chat' : 'memory'
+      const id = ref?.startsWith(kind + ':') ? ref.slice(kind.length + 1) : ''
+      mentions.push({ kind, value: id, label: label.trim(), context: body.trim() })
+      return ''
+    })
+    .replace(OPEN_BLOCK, '')
+    .trim()
+  return { text, mentions }
+}
+
+/** The text without chat and memory context blocks (titles and previews). */
+export const stripMentions = (raw: string) => extractMentions(raw).text
 
 /** Removes the typed "@query" (or "/query") the pick replaces; returns the new text and caret. */
 export function replaceTrigger(text: string, trigger: Trigger, caret: number, insert = ''): { text: string; caret: number } {
