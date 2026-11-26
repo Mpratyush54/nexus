@@ -126,4 +126,28 @@ public class ChangeReviewTests
         Assert.Equal("Restored checkpoint · 2 files", ChatRewinds.Divider(rewind));
         Assert.Equal("Restored checkpoint", ChatRewinds.Divider(rewind with { Files = 0 }));
     }
+
+    [Fact]
+    public void BackToBackRestoresKeepOnlyTheLastDivider()
+    {
+        // message, divider, (hidden message), divider, divider, message, divider
+        var elements = new List<(bool IsDivider, bool Visible)>
+        {
+            (false, true), (true, true), (false, false), (true, true), (true, true), (false, true), (true, true),
+        };
+        Assert.Equal(new[] { 1, 3 }, ChatRewinds.StackedDividers(elements));
+        // A divider that is already hidden is neither hidden again nor counted.
+        elements[3] = (true, false);
+        Assert.Equal(new[] { 1 }, ChatRewinds.StackedDividers(elements));
+        Assert.Empty(ChatRewinds.StackedDividers(new List<(bool, bool)> { (true, true), (false, true), (true, true) }));
+    }
+
+    [Fact]
+    public void RewindCommandIsOfferedOnlyWithARestorableMessage()
+    {
+        var index = CheckpointIndex.Parse(Json("""{"checkpoints":[{"id":"a","user_idx":4,"changed":1,"done":true,"rewound":true}]}"""));
+        Assert.DoesNotContain(index.Items, i => !i.Rewound && i.UserIdx > 0);
+        index.Note("b", 8, 0);
+        Assert.Contains(index.Items, i => !i.Rewound && i.UserIdx > 0);
+    }
 }

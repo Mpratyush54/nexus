@@ -54,6 +54,9 @@ type modelCatalogCache struct {
 	// applied on every read so a config change shows without a refresh.
 	defaultModel func(agent string) string
 	prewarming   atomic.Bool
+	// background counts discoveries and refreshes still running after their
+	// caller returned (tests wait on it before removing the cache folder).
+	background sync.WaitGroup
 }
 
 func newModelCatalogCache(dir func() (string, error), discover func(context.Context, string, bool) (HarnessModelCatalog, error)) *modelCatalogCache {
@@ -180,7 +183,9 @@ func (e modelCacheEntry) view() HarnessModelCatalog {
 }
 
 func (c *modelCatalogCache) refreshInBackground(agent string) {
+	c.background.Add(1)
 	go func() {
+		defer c.background.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), modelDiscoveryTimeout+5*time.Second)
 		defer cancel()
 		_, _ = c.fetch(ctx, agent, true)
@@ -196,7 +201,9 @@ func (c *modelCatalogCache) fetch(ctx context.Context, agent string, refresh boo
 	if !running {
 		flight = &modelFlight{done: make(chan struct{})}
 		c.flights[agent] = flight
+		c.background.Add(1)
 		go func() {
+			defer c.background.Done()
 			catalog, err := c.discover(context.WithoutCancel(ctx), agent, refresh)
 			if err == nil && len(catalog.Items) > 0 {
 				catalog.FetchedAt = c.now()
@@ -224,6 +231,10 @@ func (c *modelCatalogCache) fetch(ctx context.Context, agent string, refresh boo
 		return HarnessModelCatalog{Agent: agent}, errors.New("model loading was cancelled")
 	}
 }
+
+// wait blocks until every background discovery and refresh has finished
+// (its result stored in memory and on disk).
+func (c *modelCatalogCache) wait() { c.background.Wait() }
 
 func (c *modelCatalogCache) recentFailure(agent string) error {
 	c.mu.Lock()

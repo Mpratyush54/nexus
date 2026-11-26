@@ -33,17 +33,10 @@ type fakeModelDiscovery struct {
 	catalog HarnessModelCatalog
 	err     error
 	gate    chan struct{}
-	called  chan struct{}
 }
 
 func (f *fakeModelDiscovery) discover(_ context.Context, agent string, _ bool) (HarnessModelCatalog, error) {
 	f.calls.Add(1)
-	if f.called != nil {
-		select {
-		case f.called <- struct{}{}:
-		default:
-		}
-	}
 	if f.gate != nil {
 		<-f.gate
 	}
@@ -63,7 +56,10 @@ func (f *fakeModelDiscovery) set(catalog HarnessModelCatalog, err error) {
 
 func testModelCache(t *testing.T, fake *fakeModelDiscovery) (*modelCatalogCache, string) {
 	dir := t.TempDir()
-	return newModelCatalogCache(func() (string, error) { return dir, nil }, fake.discover), dir
+	cache := newModelCatalogCache(func() (string, error) { return dir, nil }, fake.discover)
+	// Runs before the TempDir cleanup: no refresh may still be writing there.
+	t.Cleanup(cache.wait)
+	return cache, dir
 }
 
 func TestModelCacheServesMemoryThenDiskWithoutRespawning(t *testing.T) {
@@ -97,25 +93,23 @@ func TestModelCacheReturnsStaleListAndRefreshesInBackground(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.set(HarnessModelCatalog{Items: []HarnessModel{{ID: "new-model"}}}, nil)
-	fake.called = make(chan struct{}, 1)
 	cache.now = func() time.Time { return base.Add(modelCacheTTL + time.Minute) }
 	stale, err := cache.get(context.Background(), "codex", false)
 	if err != nil || stale.Models[0] != "old-model" || !stale.Cached {
 		t.Fatalf("stale entry should be served instantly: %+v %v", stale, err)
 	}
-	select {
-	case <-fake.called:
-	case <-time.After(5 * time.Second):
-		t.Fatal("stale entry did not trigger a background refresh")
+	cache.wait()
+	if fake.calls.Load() != 2 {
+		t.Fatalf("stale entry should trigger exactly one background refresh, got %d discoveries", fake.calls.Load())
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if got, _ := cache.get(context.Background(), "codex", false); len(got.Models) > 0 && got.Models[0] == "new-model" {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	got, err := cache.get(context.Background(), "codex", false)
+	if err != nil || len(got.Models) == 0 || got.Models[0] != "new-model" || !got.Cached {
+		t.Fatalf("background refresh did not replace the cached list: %+v %v", got, err)
 	}
-	t.Fatal("background refresh did not replace the cached list")
+	cache.wait()
+	if fake.calls.Load() != 2 {
+		t.Fatalf("a fresh entry must not refresh again, got %d discoveries", fake.calls.Load())
+	}
 }
 
 func TestModelCacheKeepsLastListWhenRefreshFails(t *testing.T) {
@@ -154,14 +148,12 @@ func TestModelCacheKeepsBuiltInFallbackOutOfDiskCache(t *testing.T) {
 	}
 	base := time.Now()
 	cache.now = func() time.Time { return base.Add(modelFallbackCacheTTL + time.Minute) }
-	fake.called = make(chan struct{}, 1)
 	if _, err := cache.get(context.Background(), "claude", false); err != nil {
 		t.Fatal(err)
 	}
-	select {
-	case <-fake.called:
-	case <-time.After(5 * time.Second):
-		t.Fatal("fallback should be retried after its short TTL")
+	cache.wait()
+	if fake.calls.Load() != 2 {
+		t.Fatalf("fallback should be retried after its short TTL, got %d discoveries", fake.calls.Load())
 	}
 }
 
@@ -196,14 +188,11 @@ func TestModelCacheCallerCancellationDoesNotBlock(t *testing.T) {
 		t.Fatalf("cancelled caller should return promptly: %v", err)
 	}
 	close(fake.gate)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if got, err := cache.get(context.Background(), "opencode", false); err == nil && got.Cached {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	// The discovery outlived its cancelled caller; once it ends the list is cached.
+	cache.wait()
+	if got, err := cache.get(context.Background(), "opencode", false); err != nil || !got.Cached || got.Models[0] != "late-model" || fake.calls.Load() != 1 {
+		t.Fatalf("detached discovery did not fill the cache: %+v %v calls=%d", got, err, fake.calls.Load())
 	}
-	t.Fatal("detached discovery did not fill the cache")
 }
 
 func TestModelCacheRecordsLiveSessionModels(t *testing.T) {

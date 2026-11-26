@@ -703,10 +703,18 @@
   border-radius: 50%;
   vertical-align: 1px;
 }
+/* Running: a 10px accent ring with a three-quarter arc, the desktop sidebar's spinner. */
 .chat-dot.is-running {
-  border: 1.5px solid color-mix(in srgb, var(--chat-accent) 25%, transparent);
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  margin-right: 7px;
+  vertical-align: 0;
+  border: 2px solid color-mix(in srgb, var(--chat-accent) 22%, transparent);
   border-top-color: var(--chat-accent);
-  animation: chat-dot-spin 1s linear infinite;
+  border-right-color: var(--chat-accent);
+  border-bottom-color: var(--chat-accent);
+  animation: chat-dot-spin 0.9s linear infinite;
 }
 .chat-dot.is-approval { background: var(--color-amber, #d99a1e); animation: chat-dot-pulse 1.2s ease-in-out infinite; }
 .chat-dot.is-unread { background: var(--chat-accent); }

@@ -362,10 +362,21 @@ export function ChatMessage({
   // Chats and memories sent with a message show as chips, not as raw context text.
   const { text, mentions: sentContext } =
     turn.role === "user" ? extractMentions(parsed.text) : { text: parsed.text, mentions: [] };
-  if (!text && !tools.length && !envelopes.length && !compaction && !attachments.length && !images.length && !status && !thinking)
+  if (
+    !text &&
+    !tools.length &&
+    !envelopes.length &&
+    !compaction &&
+    !attachments.length &&
+    !images.length &&
+    !sentContext.length &&
+    !status &&
+    !thinking
+  )
     return null;
   // A user turn made only of envelopes was written by the harness, not the person.
-  const isUser = turn.role === "user" && (!!text || attachments.length > 0 || images.length > 0);
+  const isUser =
+    turn.role === "user" && (!!text || attachments.length > 0 || images.length > 0 || sentContext.length > 0);
   const matched =
     !!match && text.toLocaleLowerCase().includes(match.toLocaleLowerCase());
   const at = turnTime(turn);

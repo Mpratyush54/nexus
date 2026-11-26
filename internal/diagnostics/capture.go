@@ -178,10 +178,13 @@ func Guard(where string) func() {
 
 // Go runs fn on a new goroutine under Guard.
 func Go(where string, fn func()) {
-	go func() {
-		defer Guard(where)()
-		fn()
-	}()
+	go guarded(where, fn)
+}
+
+// guarded runs fn under Guard on the calling goroutine (Go's body).
+func guarded(where string, fn func()) {
+	defer Guard(where)()
+	fn()
 }
 
 // RecordPanic is for callers that recover themselves (nx_call turns a

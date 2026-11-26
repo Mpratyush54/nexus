@@ -59,6 +59,17 @@ public sealed partial class SessionPage
             PlaceReviewCard(item.Id, item.Changed, item.UserIdx);
     }
 
+    // /rewind (SessionPage.Pickers): offered once this chat has a message
+    // that can still be restored; it restores to before the latest one.
+    partial void ComposerCanRewind(ref bool available) =>
+        available = _checkpointsFor == _id && _id.Length > 0 && _checkpoints.Items.Any(i => !i.Rewound && i.UserIdx > 0);
+
+    partial void ComposerRewind(ref bool handled)
+    {
+        _ = RewindToMessageAsync();
+        handled = true;
+    }
+
     private bool CanRestoreMessage(UIElement message) =>
         _checkpointsFor == _id && TurnIdxFromKey(MessageKey(message)) is { } idx && _checkpoints.CanRestore(idx);
 
@@ -217,6 +228,11 @@ public sealed partial class SessionPage
             Motion.FadeIn(divider, rise: 4);
             changed = true;
         }
+        // Restores done back to back: one divider, not a stack of them.
+        var stacked = ChatRewinds.StackedDividers(_chat.Children
+            .Select(e => (e is FrameworkElement { Tag: string t } && t.StartsWith(RewindDividerTag, StringComparison.Ordinal), e.Visibility == Visibility.Visible))
+            .ToList());
+        foreach (var i in stacked) { _chat.Children[i].Visibility = Visibility.Collapsed; changed = true; }
         if (changed) RefreshConversationNavigation();
     }
 

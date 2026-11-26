@@ -164,7 +164,7 @@ public sealed partial class SessionPage
             var changes = StringArray(result, "file_changes");
             // A checkpointed turn gets the Review changes card (SessionPage.Review.cs) instead of the read-only list.
             if (ReviewCardForTurn(result) is { } review) _chat.Children.Insert(streamIndex + 1, review);
-            else if (changes.Count > 0) _chat.Children.Insert(streamIndex + 1, FileChangesExpander(changes, result));
+            else if (changes.Count > 0 && FileChangesExpander(changes, result) is { } filesList) _chat.Children.Insert(streamIndex + 1, filesList);
         }
         var returnedNativeID = NxJson.Text(result, "native_id");
         if (returnedNativeID.Length > 0)

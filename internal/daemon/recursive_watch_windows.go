@@ -51,6 +51,9 @@ type recursiveRoot struct {
 	stop windows.Handle // event: set to end the watch
 	ov   *windows.Overlapped
 	io   windows.Handle // event signalled when a read completes
+	// armed is closed once the first read is pending (or failed): changes
+	// made after that are reported.
+	armed chan struct{}
 }
 
 func newRecursiveWatcher() (*recursiveWatcher, error) {
@@ -126,7 +129,7 @@ func (w *recursiveWatcher) AddRoot(dir string) error {
 		windows.CloseHandle(h)
 		return err
 	}
-	r := &recursiveRoot{dir: dir, h: h, stop: stop, io: ioEv, ov: &windows.Overlapped{HEvent: ioEv}}
+	r := &recursiveRoot{dir: dir, h: h, stop: stop, io: ioEv, ov: &windows.Overlapped{HEvent: ioEv}, armed: make(chan struct{})}
 
 	w.mu.Lock()
 	if w.closed || w.coversLocked(key) {
@@ -145,6 +148,9 @@ func (w *recursiveWatcher) AddRoot(dir string) error {
 	w.wg.Add(1)
 	w.mu.Unlock()
 	go w.loop(r)
+	// The kernel only queues changes once a read is pending, so a file
+	// written right after AddRoot returns is never missed.
+	<-r.armed
 	return nil
 }
 
@@ -177,12 +183,21 @@ func (w *recursiveWatcher) loop(r *recursiveRoot) {
 	// The kernel writes into buf and r.ov while a read is pending: both are
 	// heap objects referenced until the read has completed or was cancelled.
 	buf := make([]byte, recursiveWatchBuffer)
+	armed := false
+	arm := func() {
+		if !armed {
+			armed = true
+			close(r.armed)
+		}
+	}
+	defer arm()
 	for {
 		windows.ResetEvent(r.io)
 		if err := windows.ReadDirectoryChanges(r.h, &buf[0], uint32(len(buf)), true, recursiveWatchMask, nil, r.ov, 0); err != nil {
 			w.sendErr(err)
 			return
 		}
+		arm()
 		which, err := windows.WaitForMultipleObjects([]windows.Handle{r.io, r.stop}, false, windows.INFINITE)
 		if err != nil || which != windows.WAIT_OBJECT_0 {
 			_ = windows.CancelIoEx(r.h, r.ov)

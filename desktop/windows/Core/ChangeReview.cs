@@ -248,6 +248,25 @@ internal static class ChatRewinds
         return (start, end);
     }
 
+    /// Back-to-back restores leave dividers with nothing visible between
+    /// them; only the last of each run stays. `elements` are the chat's
+    /// elements in order (is it a divider, is it visible). Returns the
+    /// indices of the dividers to hide.
+    public static IReadOnlyList<int> StackedDividers(IReadOnlyList<(bool IsDivider, bool Visible)> elements)
+    {
+        var hide = new List<int>();
+        var previous = -1; // the last visible divider with nothing visible after it yet
+        for (var i = 0; i < elements.Count; i++)
+        {
+            var (isDivider, visible) = elements[i];
+            if (!visible) continue;
+            if (!isDivider) { previous = -1; continue; }
+            if (previous >= 0) hide.Add(previous);
+            previous = i;
+        }
+        return hide;
+    }
+
     /// The divider's words: "Restored checkpoint · 3 files".
     public static string Divider(ChatRewind rewind) =>
         "Restored checkpoint" + (rewind.Files switch { 0 => "", 1 => " · 1 file", var n => " · " + n + " files" });

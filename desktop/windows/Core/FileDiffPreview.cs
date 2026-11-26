@@ -10,6 +10,8 @@ internal sealed record FileDiffPreview(string Path, string Diff, string Notice =
     public IReadOnlyList<DiffLine> Lines => ParseLines(Diff);
     public int Added => Lines.Count(line => line.Kind == "added");
     public int Removed => Lines.Count(line => line.Kind == "removed");
+    /// False for a +0 −0 entry: no line was added or removed.
+    public bool HasChanges => Lines.Any(line => line.Kind is "added" or "removed");
 
     public static FileDiffPreview Captured(string path, string input, string output)
     {

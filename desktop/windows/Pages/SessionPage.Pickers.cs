@@ -14,7 +14,7 @@ public sealed partial class SessionPage
     private Border? _helpCard;
     private bool _openedByCommand;
 
-    // The checkpoint view fills these in (feat/turn-checkpoints); without it /rewind stays hidden.
+    // SessionPage.Review fills these in from the chat's checkpoints; with none, /rewind stays hidden.
     partial void ComposerCanRewind(ref bool available);
     partial void ComposerRewind(ref bool handled);
 
