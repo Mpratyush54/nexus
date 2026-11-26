@@ -317,9 +317,27 @@ func streamAgentStatus(line string) string {
 		if row["subtype"] == "started" {
 			return "Agent is using workspace tools…"
 		}
+	case "stream_event":
+		// Claude Code's extended thinking; the web relay shows it as the
+		// reply's status ("Thinking · 12s") while the words stay private.
+		event, _ := row["event"].(map[string]any)
+		block, _ := event["content_block"].(map[string]any)
+		delta, _ := event["delta"].(map[string]any)
+		if (event["type"] == "content_block_start" && block["type"] == "thinking") ||
+			(event["type"] == "content_block_delta" && delta["type"] == "thinking_delta") {
+			return thinkingStatus
+		}
+	case "item.started", "item.updated":
+		// Codex reasoning items.
+		if item, _ := row["item"].(map[string]any); item["type"] == "reasoning" {
+			return thinkingStatus
+		}
 	}
 	return ""
 }
+
+// thinkingStatus is the status while an agent thinks before replying.
+const thinkingStatus = "Thinking…"
 
 func streamAssistantText(line string) (string, bool) {
 	var row map[string]any

@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useReducer,
   useRef,
   useState,
@@ -70,11 +71,14 @@ import {
 } from "@/lib/composer-keys";
 import { editIntoComposer, outbox } from "@/lib/outbox";
 import {
+  MAX_PINNED,
   forgetChat,
   groupChats,
+  migrateLocalChatPrefs,
   renameChat,
   setArchived,
-  togglePin,
+  setChatListRefresher,
+  setPinned,
   useChatPrefs,
 } from "@/lib/chat-prefs";
 import { comboLabel, isMod, onAppCommand } from "@/lib/shortcuts";
@@ -156,15 +160,44 @@ export function ChatsPage() {
       chatsApi.list(projectId!, search, pageParam, signal),
     getNextPageParam: (last) => last.next_cursor || undefined,
   });
-  const prefs = useChatPrefs(userId);
+  // Pinned chats can be older than the first page; the server lists them apart.
+  const pinnedFeed = useQuery({
+    queryKey: ["chats-pinned", projectId],
+    enabled: !!projectId && !search.trim(),
+    queryFn: ({ signal }) => chatsApi.pinned(projectId!, signal),
+    retry: false,
+  });
+  useEffect(() => {
+    setChatListRefresher(() =>
+      Promise.all([
+        cache.invalidateQueries({ queryKey: ["chats"] }),
+        cache.invalidateQueries({ queryKey: ["chats-pinned"] }),
+      ]),
+    );
+    return () => setChatListRefresher(null);
+  }, [cache]);
+  // Pins, archives and renames an older web build kept in this browser move to the server once.
+  useEffect(() => {
+    if (!userId) return;
+    void migrateLocalChatPrefs(userId).then((moved) => {
+      if (moved > 0) {
+        void cache.invalidateQueries({ queryKey: ["chats"] });
+        void cache.invalidateQueries({ queryKey: ["chats-pinned"] });
+      }
+    });
+  }, [userId, cache]);
   useDraftsVersion();
   // Chats deleted a moment ago: hidden while their Undo toast is up.
   const [deleting, setDeleting] = useState<Set<string>>(() => new Set());
   const [confirmDelete, setConfirmDelete] = useState<ChatCard | null>(null);
   const [showArchived, setShowArchived] = useState(false);
-  const allCards = (feed.data?.pages.flatMap((page) => page.items) ?? []).filter(
-    (c) => !deleting.has(c.session_id),
-  );
+  const allCards = useMemo(() => {
+    const seen = new Set<string>();
+    return [...(search.trim() ? [] : (pinnedFeed.data?.items ?? [])), ...(feed.data?.pages.flatMap((page) => page.items) ?? [])].filter(
+      (c) => !deleting.has(c.session_id) && !seen.has(c.session_id) && !!seen.add(c.session_id),
+    );
+  }, [feed.data, pinnedFeed.data, search, deleting]);
+  const prefs = useChatPrefs(allCards);
   const live = useLiveChats();
   // Filter by agent when the list mixes several (client-side, over loaded chats).
   const [agentFilter, setAgentFilter] = useState("");
@@ -235,7 +268,7 @@ export function ChatsPage() {
       chatsApi
         .remove(chatId)
         .then(() => {
-          forgetChat(userId, chatId);
+          forgetChat(chatId);
           void cache.invalidateQueries({ queryKey: ["chats"] });
         })
         .catch((e) => {
@@ -253,13 +286,19 @@ export function ChatsPage() {
   function runRowCommand(card: ChatCard, command: RowCommand) {
     const chatId = card.session_id;
     if (command === "pin") {
-      const nowPinned = togglePin(userId, chatId);
-      showToast(nowPinned ? "Pinned to the top" : "Unpinned");
+      const pinned = prefs.pinned.includes(chatId);
+      if (!pinned && prefs.pinned.length >= MAX_PINNED) {
+        showToast(`You can pin up to ${MAX_PINNED} chats. Unpin one first.`, { tone: "error" });
+        return;
+      }
+      showToast(pinned ? "Unpinned" : "Pinned to the top");
+      setPinned(chatId, !pinned).catch((e) => showToast(`Couldn't ${pinned ? "unpin" : "pin"} the chat. ${message(e)}`, { tone: "error" }));
     } else if (command === "archive") {
       const archived = prefs.archived.includes(chatId);
-      setArchived(userId, chatId, !archived);
+      const failed = (e: unknown) => showToast(`Couldn't update the chat. ${message(e)}`, { tone: "error" });
+      setArchived(chatId, !archived).catch(failed);
       showToast(archived ? "Chat moved back to your list" : "Chat archived", {
-        undo: () => setArchived(userId, chatId, archived),
+        undo: () => void setArchived(chatId, archived).catch(failed),
       });
     } else if (command === "link") {
       const url = new URL(window.location.href);
@@ -286,8 +325,10 @@ export function ChatsPage() {
       onOpen={() => setParams({ chat: card.session_id })}
       onCommand={(command) => runRowCommand(card, command)}
       onRename={(title) => {
-        const original = chatTitle(card.title, card.summary, card.harness);
-        renameChat(userId, card.session_id, title.trim() === original ? "" : title);
+        // An empty name goes back to the chat's own title.
+        const current = prefs.titles[card.session_id] || chatTitle(card.title, card.summary, card.harness);
+        if (title.trim() === current) return;
+        renameChat(card.session_id, title).catch((e) => showToast(`Couldn't rename the chat. ${message(e)}`, { tone: "error" }));
       }}
     />
   );

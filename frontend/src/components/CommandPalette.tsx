@@ -67,8 +67,7 @@ export function CommandPalette({ open, onClose, onShortcuts }: Props) {
   const navigate = useNavigate()
   const location = useLocation()
   const cache = useQueryClient()
-  const { projectId, user } = useAuth()
-  const prefs = useChatPrefs(user?.userId ?? '')
+  const { projectId } = useAuth()
   const reduced = useReducedMotion()
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
@@ -84,6 +83,7 @@ export function CommandPalette({ open, onClose, onShortcuts }: Props) {
     const data = cache.getQueryData<InfiniteData<ChatPage<ChatCard>>>(['chats', projectId, ''])
     return data?.pages.flatMap((p) => p.items) ?? []
   }, [open, projectId, cache])
+  const prefs = useChatPrefs(cachedChats)
   const serverChats = useQuery({
     queryKey: ['palette-chats', projectId, searchQ],
     enabled: open && !!projectId && searchQ.length >= 2,

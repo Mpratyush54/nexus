@@ -8,7 +8,7 @@
  */
 import { API_BASE } from '@/lib/env'
 import { demoJob, handle } from './api'
-import { CHATS, CHECKOUT, ME } from './data'
+import { CHECKOUT, ME } from './data'
 
 export const DEMO_TOKEN = 'demo-session'
 
@@ -31,8 +31,6 @@ function installStorage() {
   mem.setItem('nexus.auth.user', JSON.stringify({ userId: ME.id, username: ME.username }))
   mem.setItem('nexus.project.id', CHECKOUT)
   mem.setItem('nexus.onboarding.done', '1')
-  // One pinned chat, so the list shows its Pinned group (right-click any chat to pin more).
-  mem.setItem(`nexus.chat-prefs.${ME.id}`, JSON.stringify({ pinned: [CHATS[0].card.session_id], archived: [], titles: {} }))
   Object.defineProperty(window, 'localStorage', { value: mem, configurable: true })
   Object.defineProperty(window, 'sessionStorage', { value: new MemoryStorage(), configurable: true })
 }

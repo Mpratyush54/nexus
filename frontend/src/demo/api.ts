@@ -74,14 +74,42 @@ function setStatus(id: string, status: string) {
   return ok(m)
 }
 
+// The demo person's own chat state, as PATCH /v1/agent-sessions/{id}/state keeps it.
+// One chat starts pinned, so the list shows its Pinned group.
+type ChatState = { title?: string; pinned?: boolean; archived?: boolean }
+const chatStates = new Map<string, ChatState>(CHATS[0] ? [[CHATS[0].card.session_id, { pinned: true }]] : [])
+
 function timeline(q: URLSearchParams) {
   const project = q.get('project_id')
   const text = (q.get('q') ?? '').toLowerCase().trim()
+  const archivedMode = (q.get('archived') ?? '').toLowerCase()
+  const pinnedOnly = (q.get('pinned') ?? '').toLowerCase() === 'only'
   let rows = CHATS.filter((c) => !project || c.card.project_id === project)
-  if (text) rows = rows.filter((c) => `${c.card.title} ${c.summary} ${c.turns.map((t) => t.text ?? '').join(' ')}`.toLowerCase().includes(text))
+  if (text) rows = rows.filter((c) => `${chatStates.get(c.card.session_id)?.title ?? ''} ${c.card.title} ${c.summary} ${c.turns.map((t) => t.text ?? '').join(' ')}`.toLowerCase().includes(text))
   // The sample laptop's agent keeps working: its chat always looks active a moment ago.
-  const fresh = (c: (typeof CHATS)[number]) => (c.card.title === LIVE_TITLE ? { ...c.card, last_active_at: new Date(Date.now() - 40_000).toISOString() } : c.card)
-  return ok({ items: rows.map(fresh).sort((a, b) => b.last_active_at.localeCompare(a.last_active_at)) })
+  const fresh = (c: (typeof CHATS)[number]) => {
+    const card = c.card.title === LIVE_TITLE ? { ...c.card, last_active_at: new Date(Date.now() - 40_000).toISOString() } : c.card
+    const st = chatStates.get(card.session_id)
+    if (!st) return card
+    return { ...card, ...(st.title ? { title: st.title, renamed: true } : {}), ...(st.pinned ? { pinned: true } : {}), ...(st.archived ? { archived: true } : {}) }
+  }
+  const items = rows
+    .map(fresh)
+    .filter((c) => (pinnedOnly ? c.pinned : archivedMode === 'only' ? c.archived : archivedMode === 'include' || !c.archived))
+    .sort((a, b) => b.last_active_at.localeCompare(a.last_active_at))
+  return ok({ items })
+}
+
+function setChatState(id: string, body: ChatState) {
+  const c = chatById(id)
+  if (!c) return missing()
+  const sid = c.card.session_id
+  const st = { ...chatStates.get(sid) }
+  if (typeof body.title === 'string') st.title = body.title.trim() || undefined
+  if (typeof body.pinned === 'boolean') { st.pinned = body.pinned; if (body.pinned) st.archived = false }
+  if (typeof body.archived === 'boolean') { st.archived = body.archived; if (body.archived) st.pinned = false }
+  chatStates.set(sid, st)
+  return ok({ session_id: sid, title: st.title ?? '', pinned: !!st.pinned, archived: !!st.archived })
 }
 
 const LIVE_TITLE = 'Add a test for declined captures'
@@ -249,6 +277,7 @@ const WRITE: [string, RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
     CHATS.splice(CHATS.indexOf(c), 1)
     return ok({ deleted: true, session_id: c.card.session_id })
   }],
+  ['PATCH', /^\/v1\/agent-sessions\/([^/]+)\/state$/, (m, r) => setChatState(m[1], (r.body ?? {}) as ChatState)],
   ['POST', /^\/v1\/agent-sessions\/([^/]+)\/fork$/, (m) => { const c = chatById(m[1]); return c ? ok(chatSession(forkChat(c))) : missing() }],
   ['POST', /^\/v1\/agent-sessions\/([^/]+)\/grants$/, (_m, r) => ok({ ok: true, user_id: (r.body as { user_id?: string } | undefined)?.user_id })],
   ['POST', /^\/v1\/desktop\/jobs$/, (_m, r) => {
