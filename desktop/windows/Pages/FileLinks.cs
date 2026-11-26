@@ -19,8 +19,9 @@ internal static class FileLinks
 {
     private static readonly ConditionalWeakTable<Run, Hyperlink> RunLinks = new();
     private static readonly ConditionalWeakTable<Hyperlink, FrameworkElement> Owners = new();
-    private static readonly ConditionalWeakTable<RichTextBlock, object> Attached = new();
-    private static FontFamily Mono => new("Cascadia Mono, Consolas");
+    private sealed class AttachState { public bool Hooked; }
+    private static readonly ConditionalWeakTable<RichTextBlock, AttachState> Attached = new();
+    private static FontFamily Mono => WorkLogVisuals.MonoFont;
 
     // Plain or inline-code text, with any file references linked.
     public static void AddText(InlineCollection inlines, string text, bool mono)
@@ -49,16 +50,17 @@ internal static class FileLinks
         return link;
     }
 
-    // Call once a document is built: links learn their owner (to find the
-    // chat page on click) and get the hover underline. Table cells too.
+    // Call once a document is built (and again after it grows, as a
+    // streaming reply does): links learn their owner (to find the chat page
+    // on click) and get the hover underline. Table cells too.
     public static void Attach(RichTextBlock document)
     {
-        if (Attached.TryGetValue(document, out _)) return;
-        Attached.Add(document, new object());
+        var state = Attached.GetValue(document, _ => new AttachState());
         var any = false;
         foreach (var block in document.Blocks)
             if (block is Paragraph paragraph) any |= Walk(paragraph.Inlines, document);
-        if (!any) return;
+        if (!any || state.Hooked) return;
+        state.Hooked = true;
         Hyperlink? hovered = null;
         void Hover(Hyperlink? next)
         {

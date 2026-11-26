@@ -218,7 +218,17 @@ func (s *Server) handleAgentSessionFork(w http.ResponseWriter, r *http.Request) 
 	if s.rejectIfCaptureOff(w, r, parent.ProjectID) {
 		return
 	}
-	child, err := cs.ForkAgentSession(r.Context(), parent.ID, authSubject(r))
+	// Optional {"through_idx": N}: "fork from here" keeps turns up to N.
+	var body struct {
+		ThroughIdx *int `json:"through_idx"`
+	}
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "invalid fork request")
+			return
+		}
+	}
+	child, err := cs.ForkAgentSessionThrough(r.Context(), parent.ID, authSubject(r), body.ThroughIdx)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return

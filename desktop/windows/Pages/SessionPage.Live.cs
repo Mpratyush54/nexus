@@ -443,7 +443,8 @@ public sealed partial class SessionPage
         if (text.Length == 0) return;
         _streamHasText = true;
         var nearBottom = _chatScroll.ScrollableHeight - _chatScroll.VerticalOffset < 120;
-        _streamText.Text = text.Length <= 24000 ? text : text[^24000..];
+        // Rendered as Markdown while it arrives; the saved reply keeps this view.
+        StreamView(_streamText).Update(_liveText.ToString(), streaming: true);
         SetComposerStatus("Replying with " + (_liveAgent.Length > 0 ? LiveAgentName : ChatTitles.AgentName(_streamAgent)) + "…");
         // Stuck to the bottom, the SizeChanged re-pin follows the stream.
         if (nearBottom && !_stickToBottom) ScrollChatToEnd();

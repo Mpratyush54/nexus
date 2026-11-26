@@ -2101,30 +2101,7 @@ public sealed partial class SessionPage : NexusPage
         }
     }
 
-    private static UIElement ThinkingBlock(string content)
-    {
-        var stack = new StackPanel { Spacing = 4 };
-        stack.Children.Add(SessionChatRender.RoleLabel("Thinking"));
-        stack.Children.Add(new Border
-        {
-            Margin = SessionChatRender.AuxIndent,
-            Padding = new Thickness(10, 8, 12, 8),
-            BorderThickness = new Thickness(2, 0, 0, 0),
-            BorderBrush = SessionChatRender.AuxAccent,
-            Background = SessionChatRender.SubtleFill,
-            CornerRadius = new CornerRadius(4),
-            Child = new TextBlock
-            {
-                Text = NxJson.Scrub(content),
-                TextWrapping = TextWrapping.Wrap,
-                IsTextSelectionEnabled = true,
-                FontSize = 12.5,
-                Opacity = 0.72,
-                LineHeight = 18
-            }
-        });
-        return stack;
-    }
+    private static UIElement ThinkingBlock(string content) => new ThinkingView(content).View;
 
     private static string CommandKey(string command) =>
         Regex.Replace(command.Trim(), "\\s+", " ");
@@ -2453,33 +2430,6 @@ public sealed partial class SessionPage : NexusPage
         _ = DispatcherQueue.TryEnqueue(() => _ = DispatcherQueue.TryEnqueue(Scroll));
     }
 
-    private UIElement ChatMessage(string role, string content, string? assistantAgent = null, HarnessMessage? extras = null)
-    {
-        var strip = extras is null ? null : MessageExtras(extras);
-        if (strip is not null && content.Trim().Length == 0)
-        {
-            // Only attachments (an image sent without text): no empty bubble.
-            strip.HorizontalAlignment = role.Equals("user", StringComparison.OrdinalIgnoreCase) ? HorizontalAlignment.Right : HorizontalAlignment.Left;
-            return new Border { Child = strip, HorizontalAlignment = strip.HorizontalAlignment, BorderThickness = new Thickness(0) };
-        }
-        var bubble = ChatBubble(role, content, assistantAgent);
-        if (strip is null || bubble is not Border border) return bubble;
-        // Attachment chips and the context pill sit under the bubble; the
-        // outer Border stays the anchor that find / prompt jumps highlight.
-        var stack = new StackPanel { Spacing = 6, HorizontalAlignment = border.HorizontalAlignment };
-        stack.Children.Add(bubble);
-        strip.HorizontalAlignment = border.HorizontalAlignment;
-        stack.Children.Add(strip);
-        return new Border
-        {
-            Child = stack,
-            CornerRadius = new CornerRadius(14),
-            HorizontalAlignment = border.HorizontalAlignment,
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-            BorderThickness = new Thickness(0)
-        };
-    }
-
     // Thumbnails for images still on disk, a chip for anything else (Codex
     // pastes land in %TEMP% and are often gone), and a collapsed "Context"
     // pill for ambient state the harness sent with the request.
@@ -2545,157 +2495,11 @@ public sealed partial class SessionPage : NexusPage
         catch (Exception) { return false; }
     }
 
-    private UIElement ChatBubble(string role, string content, string? assistantAgent)
-    {
-        var fromUser = role.Equals("user", StringComparison.OrdinalIgnoreCase);
-        var label = fromUser ? "You" : Nonempty(ChatTitles.AgentName(assistantAgent ?? _agent), "Assistant");
-        var message = new StackPanel { Spacing = 6 };
-        var document = FormattedMessage(content);
-        var actions = new Grid();
-        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        actions.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-        // Like T3 Code: no "You"/agent label on every turn; alignment and the
-        // user block's fill say who wrote it. The label stays for screen readers.
-        var roleLabel = SessionChatRender.RoleLabel(label);
-        roleLabel.Visibility = Visibility.Collapsed;
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(message, label);
-        actions.Children.Add(roleLabel);
-        var copy = new Button { Content = new FontIcon { Glyph = "\uE8C8", FontSize = 12 }, Padding = new Thickness(5), MinWidth = 26, MinHeight = 24, Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent), BorderThickness = new Thickness(0) };
-        ToolTipService.SetToolTip(copy, "Copy whole message");
-        copy.Click += (_, _) => { var data = new DataPackage(); data.SetText(content); Clipboard.SetContent(data); };
-        Grid.SetColumn(copy, 1); actions.Children.Add(copy);
-        copy.Opacity = 0;
-        actions.Height = 0;
-        message.PointerEntered += (_, _) => copy.Opacity = 0.7;
-        message.PointerExited += (_, _) => copy.Opacity = 0;
-        var selectMenu = new MenuFlyout();
-        var copySelection = new MenuFlyoutItem { Text = "Copy selection" };
-        copySelection.Click += (_, _) => { if (document.SelectedText.Length == 0) return; var data = new DataPackage(); data.SetText(document.SelectedText); Clipboard.SetContent(data); };
-        selectMenu.Opening += (_, _) => copySelection.IsEnabled = document.SelectedText.Length > 0;
-        var select = new MenuFlyoutItem { Text = "Select whole message" };
-        select.Click += (_, _) => document.SelectAll();
-        var copyItem = new MenuFlyoutItem { Text = "Copy whole message" };
-        copyItem.Click += (_, _) => { var data = new DataPackage(); data.SetText(content); Clipboard.SetContent(data); };
-        selectMenu.Items.Add(copySelection); selectMenu.Items.Add(select); selectMenu.Items.Add(copyItem);
-        document.ContextFlyout = selectMenu;
-        message.Children.Add(actions);
-        message.Children.Add(document);
-        if (fromUser)
-        {
-            return new Border
-            {
-                Child = message,
-                Padding = SessionChatRender.UserBubblePad,
-                CornerRadius = new CornerRadius(14),
-                MaxWidth = 600,
-                HorizontalAlignment = HorizontalAlignment.Right,
-                Background = NexusPalette.UserFill,
-                BorderThickness = new Thickness(0)
-            };
-        }
-        return new Border
-        {
-            Child = message,
-            Padding = SessionChatRender.AssistantPad,
-            HorizontalAlignment = HorizontalAlignment.Stretch,
-            Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent),
-            BorderThickness = new Thickness(0)
-        };
-    }
-
     /// <summary>Elements in the chat column (memory log).</summary>
     internal int ChatElementCount => _chat.Children.Count;
 
-    internal static RichTextBlock FormattedMessage(string content)
-    {
-        Interlocked.Increment(ref Nexus.Core.Diagnostics.UiStats.RenderedMessages);
-        // One document per message: selection can cross every paragraph,
-        // heading, list item and code block without stopping at a control edge.
-        var document = new RichTextBlock { IsTextSelectionEnabled = true, TextWrapping = TextWrapping.Wrap, FontSize = 14, LineHeight = 22 };
-        var lines = content.Replace("\r\n", "\n").Split('\n');
-        var inCode = false;
-        for (var at = 0; at < lines.Length; at++)
-        {
-            var line = lines[at].TrimEnd();
-            // A markdown table: a header row, a |---|---| rule, then rows.
-            if (!inCode && SessionChatRender.IsTableRow(line) && at + 1 < lines.Length && SessionChatRender.IsTableRule(lines[at + 1]))
-            {
-                var rows = new List<string> { line };
-                var end = at + 2;
-                while (end < lines.Length && SessionChatRender.IsTableRow(lines[end].TrimEnd())) rows.Add(lines[end++].TrimEnd());
-#if HAS_UNO
-                // Uno has no InlineUIContainer; the shim takes the table as a block.
-                document.AddElement(SessionChatRender.Table(rows, AddInlineFormatting));
-#else
-                var table = new Paragraph { Margin = new Thickness(0, 4, 0, 10) };
-                table.Inlines.Add(new InlineUIContainer { Child = SessionChatRender.Table(rows, AddInlineFormatting) });
-                document.Blocks.Add(table);
-#endif
-                at = end - 1;
-                continue;
-            }
-            if (line.TrimStart().StartsWith("```", StringComparison.Ordinal))
-            {
-                inCode = !inCode;
-                continue;
-            }
-            var paragraph = new Paragraph { Margin = new Thickness(0, 0, 0, line.Length == 0 ? 4 : 5) };
-            if (inCode)
-            {
-                paragraph.FontFamily = new FontFamily("Cascadia Mono, Consolas");
-                paragraph.FontSize = 12.5;
-                paragraph.Foreground = Surface("TextFillColorSecondaryBrush", Windows.UI.Color.FromArgb(255, 212, 212, 212));
-                paragraph.Inlines.Add(new Run { Text = line.Length > 0 ? line : " " });
-                document.Blocks.Add(paragraph);
-                continue;
-            }
-            var trimmed = line.TrimStart();
-            var heading = Regex.Match(trimmed, "^#{1,6}\\s+(.+)$");
-            var bullet = Regex.Match(trimmed, "^(?:[-*+]\\s+|\\d+[.)]\\s+)(.+)$");
-            var quote = trimmed.StartsWith("> ", StringComparison.Ordinal);
-            var display = heading.Success ? heading.Groups[1].Value : bullet.Success ? "•  " + bullet.Groups[1].Value : quote ? trimmed[2..] : line;
-            paragraph.FontSize = heading.Success ? 15 : 14;
-            paragraph.FontWeight = heading.Success ? Microsoft.UI.Text.FontWeights.SemiBold : Microsoft.UI.Text.FontWeights.Normal;
-            if (heading.Success) paragraph.Margin = new Thickness(0, 8, 0, 4);
-            if (quote) paragraph.Foreground = NexusPalette.Teal;
-            AddInlineFormatting(paragraph.Inlines, display.Length > 0 ? display : " ");
-            document.Blocks.Add(paragraph);
-        }
-        // File references become links that open the chat's file preview.
-        FileLinks.Attach(document);
-        return document;
-    }
-
-    private static void AddInlineFormatting(InlineCollection inlines, string value)
-    {
-        var pattern = new Regex(@"(\*\*(.+?)\*\*|`(.+?)`|\[([^\]]+)\]\(([^)]+)\))");
-        var start = 0;
-        foreach (Match match in pattern.Matches(value))
-        {
-            if (match.Index > start) FileLinks.AddText(inlines, value[start..match.Index], mono: false);
-            if (match.Groups[2].Success)
-            {
-                // Bold may contain inline code or links; format its contents too.
-                var bold = new Span { FontWeight = Microsoft.UI.Text.FontWeights.SemiBold };
-                AddInlineFormatting(bold.Inlines, match.Groups[2].Value);
-                inlines.Add(bold);
-            }
-            else if (match.Groups[3].Success)
-            {
-                FileLinks.AddText(inlines, match.Groups[3].Value, mono: true);
-            }
-            else if (FileRefs.ParseLinkTarget(match.Groups[5].Value) is { } target)
-            {
-                inlines.Add(FileLinks.Link(match.Groups[4].Value, target));
-            }
-            else
-            {
-                inlines.Add(new Run { Text = match.Groups[4].Value, Foreground = NexusPalette.Accent });
-            }
-            start = match.Index + match.Length;
-        }
-        if (start < value.Length) FileLinks.AddText(inlines, value[start..], mono: false);
-    }
+    // Markdown → one selectable document (see MarkdownView.cs).
+    internal static RichTextBlock FormattedMessage(string content) => MarkdownRender.Document(content);
 
     private void FillActivity(NxResponse files, NxResponse ops, NxResponse continuations)
     {

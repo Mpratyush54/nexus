@@ -78,27 +78,49 @@ internal sealed partial class RichTextBlock : StackPanel
     {
         if (_built) return;
         _built = true;
-        foreach (var block in Blocks)
-        {
-            if (_elements.TryGetValue(block, out var element))
-            {
-                if (element is FrameworkElement fe) fe.Margin = new Thickness(0, 4, 0, 10);
-                Children.Add(element);
-                continue;
-            }
-            if (block is not Paragraph paragraph) continue;
-            var line = new TextBlock { Margin = new Thickness(0, 0, 0, 5) };
-            var inlines = paragraph.Inlines.ToList();
-            paragraph.Inlines.Clear();
-            foreach (var inline in inlines) line.Inlines.Add(inline);
-            if (IsSet(paragraph, TextElement.FontSizeProperty)) line.FontSize = paragraph.FontSize;
-            if (IsSet(paragraph, TextElement.FontWeightProperty)) line.FontWeight = paragraph.FontWeight;
-            if (IsSet(paragraph, TextElement.FontFamilyProperty)) line.FontFamily = paragraph.FontFamily;
-            if (IsSet(paragraph, TextElement.ForegroundProperty)) line.Foreground = paragraph.Foreground;
-            line.Tag = paragraph;
-            Children.Add(line);
-        }
+        foreach (var block in Blocks) Children.Add(Realize(block));
         Apply();
+    }
+
+    /// <summary>Adds a paragraph to a document that may already be on screen (a streaming reply).</summary>
+    public void AppendBlock(Block block)
+    {
+        Blocks.Add(block);
+        if (!_built) return;
+        Children.Add(Realize(block));
+        Apply();
+    }
+
+    /// <summary>Removes the last paragraph (a streaming reply re-rendering its tail).</summary>
+    public void RemoveLastBlock()
+    {
+        if (Blocks.Count == 0) return;
+        var block = Blocks[^1];
+        Blocks.RemoveAt(Blocks.Count - 1);
+        _elements.Remove(block);
+        if (_built && Children.Count > 0) Children.RemoveAt(Children.Count - 1);
+    }
+
+    // One child per block, so blocks and children stay index-aligned.
+    private UIElement Realize(Block block)
+    {
+        if (_elements.TryGetValue(block, out var element))
+        {
+            if (element is FrameworkElement fe && fe.Margin == default) fe.Margin = new Thickness(0, 4, 0, 10);
+            return element;
+        }
+        var line = new TextBlock { Margin = new Thickness(0, 0, 0, 5) };
+        if (block is not Paragraph paragraph) return line;
+        var inlines = paragraph.Inlines.ToList();
+        paragraph.Inlines.Clear();
+        foreach (var inline in inlines) line.Inlines.Add(inline);
+        if (IsSet(paragraph, TextElement.FontSizeProperty)) line.FontSize = paragraph.FontSize;
+        if (IsSet(paragraph, TextElement.FontWeightProperty)) line.FontWeight = paragraph.FontWeight;
+        if (IsSet(paragraph, TextElement.FontFamilyProperty)) line.FontFamily = paragraph.FontFamily;
+        if (IsSet(paragraph, TextElement.ForegroundProperty)) line.Foreground = paragraph.Foreground;
+        if (IsSet(paragraph, Block.MarginProperty)) line.Margin = paragraph.Margin;
+        line.Tag = paragraph;
+        return line;
     }
 
     private void Apply()
