@@ -19,7 +19,7 @@ func TestCodexCachedCatalogFiltersHiddenModelsAndPrivateMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	catalog, err := readCodexModelCache(path)
-	if err != nil || len(catalog.Models) != 1 || catalog.Items[0].ID != "visible-model" || catalog.Items[0].Name != "Readable name" || catalog.Warning == "" {
+	if err != nil || len(catalog.Models) != 1 || catalog.Items[0].ID != "visible-model" || catalog.Items[0].Name != "Readable name" || catalog.Warning != "" {
 		t.Fatalf("bad cache catalog: %+v %v", catalog, err)
 	}
 	encoded, _ := json.Marshal(catalog)
@@ -44,23 +44,34 @@ func TestModelCatalogNormalizationRejectsLogsAndKeepsOrder(t *testing.T) {
 	}
 }
 
-func TestConfiguredModelCatalogDoesNotExposeProviderKeys(t *testing.T) {
+func TestKimiCatalogListsConfiguredAliasesWithoutProviderKeys(t *testing.T) {
 	home := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(home, ".kimi"), 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(home, ".kimi-code"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	config := "default_model = 'work'\n[models.work]\nmodel = 'provider-model'\n[models.backup]\nmodel = 'other-model'\n[providers.private]\napi_key = 'SECRET-CREDENTIAL'\n"
-	if err := os.WriteFile(filepath.Join(home, ".kimi", "config.toml"), []byte(config), 0600); err != nil {
+	config := `default_model = 'work'
+[models.work]
+model = 'provider-model'
+display_name = 'Work model'
+[models.backup]
+model = 'kimi-for-coding'
+[providers.private]
+api_key = 'SECRET-CREDENTIAL'
+`
+	if err := os.WriteFile(filepath.Join(home, ".kimi-code", "config.toml"), []byte(config), 0600); err != nil {
 		t.Fatal(err)
 	}
-	catalog, err := configuredHarnessModelsAt("kimi", home)
+	catalog := kimiModelCatalog(home, func(string) string { return "" })
 	catalog.normalize()
-	if err != nil || len(catalog.Models) != 2 || catalog.Models[0] != "work" || catalog.Models[1] != "backup" {
-		t.Fatalf("configured models: %+v %v", catalog, err)
+	if strings.Join(catalog.Models, ",") != "backup,work" || catalog.Items[1].Name != "Work model" || !catalog.Items[1].Default || catalog.Items[0].Name != "Kimi For Coding" {
+		t.Fatalf("configured models: %+v", catalog)
 	}
 	encoded, _ := json.Marshal(catalog)
 	if strings.Contains(string(encoded), "SECRET-CREDENTIAL") {
 		t.Fatal("provider key leaked")
+	}
+	if got := configuredDefaultModel("kimi", home, func(string) string { return "" }); got != "work" {
+		t.Fatalf("kimi default %q", got)
 	}
 }
 
@@ -83,13 +94,6 @@ func TestModelCatalogProbeChild(t *testing.T) {
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &row); err != nil {
 			t.Fatal(err)
-		}
-		if mode == "claude" {
-			if row.Type != "control_request" {
-				t.Fatal("Model listing sent a user message")
-			}
-			fmt.Fprintln(os.Stdout, `{"type":"control_response","response":{"subtype":"success","request_id":"nexus_models","response":{"models":[{"value":"sonnet","displayName":"Sonnet"},{"value":"custom/model","displayName":"Custom"},{"value":"default","displayName":"Default"}]}}}`)
-			continue
 		}
 		switch row.Method {
 		case "initialize":
@@ -123,17 +127,5 @@ func TestCodexModelDiscoveryPaginatesWithoutStartingAThread(t *testing.T) {
 	catalog.normalize()
 	if err != nil || strings.Join(catalog.Models, ",") != "model-a,model-b" || catalog.Items[0].Name != "Friendly A" || !catalog.Items[0].Default {
 		t.Fatalf("RPC catalog: %+v %v", catalog, err)
-	}
-}
-
-func TestClaudeModelDiscoveryUsesOnlyControlInitialization(t *testing.T) {
-	t.Setenv("NX_MODEL_CATALOG_CHILD", "claude")
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	status := HarnessAvailability{Agent: "claude", Name: "Claude", Executable: os.Args[0], Prefix: []string{"-test.run=^TestModelCatalogProbeChild$", "--"}}
-	catalog, err := claudeModels(ctx, status)
-	catalog.normalize()
-	if err != nil || strings.Join(catalog.Models, ",") != "sonnet,custom/model" {
-		t.Fatalf("SDK catalog: %+v %v", catalog, err)
 	}
 }

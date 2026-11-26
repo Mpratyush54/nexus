@@ -20,7 +20,7 @@ public class ModelPickerCatalogTests
         using var json = JsonDocument.Parse("""{"models":["a","b"],"items":[{"id":"a","name":"Friendly A","description":"Description"}],"source":"Installed CLI","warning":"Catalog only"}""");
         var catalog = ModelPickerCatalog.Parse(json.RootElement);
         Assert.Equal(2, catalog.Choices.Count);
-        Assert.Equal("Friendly A · a", catalog.Choices[0].Label);
+        Assert.Equal("Friendly A", catalog.Choices[0].Label);
         Assert.Equal("a", catalog.Choices[0].ID);
         Assert.Equal("Installed CLI", catalog.Source);
         Assert.Equal("Catalog only", catalog.Warning);
@@ -32,7 +32,7 @@ public class ModelPickerCatalogTests
         using var json = JsonDocument.Parse("null");
         var catalog = ModelPickerCatalog.Parse(json.RootElement);
         Assert.Empty(catalog.Choices);
-        Assert.NotEmpty(catalog.Warning);
+        Assert.True(catalog.RefreshFailed);
         Assert.Equal("saved-model", ModelPickerCatalog.ResolveValue("saved-model", null, null));
     }
 
@@ -47,22 +47,34 @@ public class ModelPickerCatalogTests
         Assert.False(cached.SameAs(changed));
     }
 
-    [Theory]
-    [InlineData("", "")]
-    [InlineData("This harness has no supported account-wide model-list adapter here. Configured choices are shown when present; use its default or enter a model ID. Access and quota are not verified.", "")]
-    [InlineData("Cached model catalog; refresh to check the CLI catalog. Entries do not guarantee account access or available quota.", "")]
-    [InlineData("Live Codex discovery failed; showing its local cached catalog. Availability and quota are not verified. exit status 1", "Couldn't refresh Kimi's models, so the last list is shown.")]
-    [InlineData("Couldn't refresh models: OpenCode model discovery timed out. Showing the last loaded list.", "Couldn't refresh Kimi's models, so the last list is shown.")]
-    [InlineData("Couldn't load models: Claude Code is not installed, using defaults. This is a built-in list of Claude Code aliases, not your account's catalog.", "Couldn't get Kimi's models, so its usual ones are shown.")]
-    [InlineData("Pick a smaller model for long chats.", "Pick a smaller model for long chats.")]
-    public void WarningsBecomePlainNotices(string warning, string expected)
-        => Assert.Equal(expected, ModelPickerCatalog.Notice(warning, "Kimi"));
+    [Fact]
+    public void DefaultEntryNamesTheAgentsConfiguredModel()
+    {
+        using var json = JsonDocument.Parse("""{"items":[{"id":"claude-fable-5-2","name":"Claude Fable 5.2","is_default":true}],"default_model":"claude-fable-5-2","default_name":"Claude Fable 5.2"}""");
+        var catalog = ModelPickerCatalog.Parse(json.RootElement);
+        Assert.Equal("Default (Claude Fable 5.2)", catalog.DefaultLabel);
+        Assert.Equal("", ModelPickerCatalog.ResolveValue("Default (Claude Fable 5.2)", "", "Default (Claude Fable 5.2)"));
+        Assert.Equal("", ModelPickerCatalog.ResolveValue("Default (Claude Fable 5.2)", null, null));
+        using var bare = JsonDocument.Parse("""{"items":[{"id":"a"}]}""");
+        Assert.Equal("Default model", ModelPickerCatalog.Parse(bare.RootElement).DefaultLabel);
+    }
 
     [Fact]
-    public void JargonWarningsNeverReachTheComposer()
+    public void RowsGroupByProviderOnlyWhenThereIsMoreThanOne()
     {
-        var notice = ModelPickerCatalog.Notice("Invalid model catalog; use the default or enter a model ID.", "Kimi");
-        Assert.DoesNotContain("catalog", notice);
-        Assert.Contains("Kimi", notice);
+        using var many = JsonDocument.Parse("""{"items":[{"id":"openai/gpt-6","name":"GPT-6","provider":"OpenAI"},{"id":"anthropic/claude-opus-5-5","name":"Claude Opus 5.5","provider":"Anthropic"},{"id":"openai/gpt-5","name":"GPT-5","provider":"OpenAI"}]}""");
+        var rows = ModelPickerCatalog.Parse(many.RootElement).Rows().Select(r => r.Choice is null ? "#" + r.Header : r.Choice.Label).ToList();
+        Assert.Equal(new[] { "#OpenAI", "GPT-6", "GPT-5", "#Anthropic", "Claude Opus 5.5" }, rows);
+        using var one = JsonDocument.Parse("""{"items":[{"id":"opus","name":"Opus","provider":"Anthropic"},{"id":"sonnet","name":"Sonnet","provider":"Anthropic"}]}""");
+        Assert.All(ModelPickerCatalog.Parse(one.RootElement).Rows(), r => Assert.NotNull(r.Choice));
+    }
+
+    [Fact]
+    public void FailedRefreshIsAFlagNotASentence()
+    {
+        using var json = JsonDocument.Parse("""{"items":[{"id":"a"}],"refresh_failed":true}""");
+        var catalog = ModelPickerCatalog.Parse(json.RootElement);
+        Assert.True(catalog.RefreshFailed);
+        Assert.Equal("", catalog.Warning);
     }
 }

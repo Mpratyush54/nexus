@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"central-memory/internal/platform"
@@ -20,7 +21,15 @@ import (
 const (
 	modelCacheTTL         = 24 * time.Hour
 	modelFallbackCacheTTL = 5 * time.Minute
+	// A failed listing (CLI signed out, offline) is not retried on every
+	// picker open or availability check; Refresh still retries at once.
+	modelFailureBackoff = 3 * time.Minute
 )
+
+type modelFailure struct {
+	at  time.Time
+	err error
+}
 
 type modelCacheEntry struct {
 	Catalog   HarnessModelCatalog `json:"catalog"`
@@ -40,10 +49,15 @@ type modelCatalogCache struct {
 	now      func() time.Time
 	mem      map[string]modelCacheEntry
 	flights  map[string]*modelFlight
+	failures map[string]modelFailure
+	// defaultModel reads the agent's configured default (cheap file reads),
+	// applied on every read so a config change shows without a refresh.
+	defaultModel func(agent string) string
+	prewarming   atomic.Bool
 }
 
 func newModelCatalogCache(dir func() (string, error), discover func(context.Context, string, bool) (HarnessModelCatalog, error)) *modelCatalogCache {
-	return &modelCatalogCache{dir: dir, discover: discover, now: time.Now, mem: map[string]modelCacheEntry{}, flights: map[string]*modelFlight{}}
+	return &modelCatalogCache{dir: dir, discover: discover, now: time.Now, mem: map[string]modelCacheEntry{}, flights: map[string]*modelFlight{}, failures: map[string]modelFailure{}, defaultModel: func(string) string { return "" }}
 }
 
 var defaultModelCache = newModelCatalogCache(func() (string, error) {
@@ -54,11 +68,52 @@ var defaultModelCache = newModelCatalogCache(func() (string, error) {
 	return filepath.Join(root, "model-catalogs"), nil
 }, DiscoverHarnessModels)
 
+func init() {
+	defaultModelCache.defaultModel = func(agent string) string {
+		home, _ := os.UserHomeDir()
+		return configuredDefaultModel(agent, home, os.Getenv)
+	}
+}
+
 // HarnessModelsCached returns the cached catalog when one exists (refreshing
 // it in the background once stale) and otherwise discovers it. refresh forces
-// a live discovery; on failure the previous list is kept with a warning.
+// a live discovery; on failure the previous list is kept, quietly.
 func HarnessModelsCached(ctx context.Context, agent string, refresh bool) (HarnessModelCatalog, error) {
 	return defaultModelCache.get(ctx, agent, refresh)
+}
+
+// modelPrewarmAgents have an in-app model picker.
+var modelPrewarmAgents = map[string]bool{"claude": true, "codex": true, "opencode": true, "cursor": true, "gemini": true, "kimi": true}
+
+// PrewarmModelCatalogs fills the model cache for every usable agent in the
+// background, one at a time, so the first picker open is instant. Fresh
+// entries are skipped; a prewarm already running is not restarted.
+func PrewarmModelCatalogs(agents []HarnessAvailability) {
+	defaultModelCache.prewarm(agents)
+}
+
+func (c *modelCatalogCache) prewarm(agents []HarnessAvailability) {
+	if !c.prewarming.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer c.prewarming.Store(false)
+		for _, status := range agents {
+			agent := normalizeAgent(status.Agent)
+			if !status.Usable || !modelPrewarmAgents[agent] {
+				continue
+			}
+			if entry, ok := c.load(agent); ok && c.now().Sub(entry.FetchedAt) <= c.ttl(entry) {
+				continue
+			}
+			if c.recentFailure(agent) != nil {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), modelDiscoveryTimeout+5*time.Second)
+			_, _ = c.fetch(ctx, agent, false)
+			cancel()
+		}
+	}()
 }
 
 // RecordAdvertisedModels stores the models a live agent session advertised
@@ -82,12 +137,25 @@ func (c *modelCatalogCache) ttl(entry modelCacheEntry) time.Duration {
 
 func (c *modelCatalogCache) get(ctx context.Context, agent string, refresh bool) (HarnessModelCatalog, error) {
 	agent = normalizeAgent(agent)
+	catalog, err := c.lookup(ctx, agent, refresh)
+	if err == nil {
+		// A fallback is a normal state, never an excuse line in the picker.
+		catalog.Warning = ""
+		catalog.applyDefault(c.defaultModel(agent))
+	}
+	return catalog, err
+}
+
+func (c *modelCatalogCache) lookup(ctx context.Context, agent string, refresh bool) (HarnessModelCatalog, error) {
 	if !refresh {
 		if entry, ok := c.load(agent); ok {
 			if c.now().Sub(entry.FetchedAt) > c.ttl(entry) {
 				c.refreshInBackground(agent)
 			}
 			return entry.view(), nil
+		}
+		if err := c.recentFailure(agent); err != nil {
+			return HarnessModelCatalog{Agent: agent}, err
 		}
 	}
 	catalog, err := c.fetch(ctx, agent, refresh)
@@ -96,7 +164,7 @@ func (c *modelCatalogCache) get(ctx context.Context, agent string, refresh bool)
 	}
 	if entry, ok := c.load(agent); ok {
 		view := entry.view()
-		view.Warning = strings.TrimSpace("Couldn't refresh models: " + strings.TrimSuffix(err.Error(), ".") + ". Showing the last loaded list. " + view.Warning)
+		view.RefreshFailed = true
 		return view, nil
 	}
 	return catalog, err
@@ -134,6 +202,13 @@ func (c *modelCatalogCache) fetch(ctx context.Context, agent string, refresh boo
 				catalog.FetchedAt = c.now()
 				c.store(agent, modelCacheEntry{Catalog: catalog, FetchedAt: catalog.FetchedAt})
 			}
+			c.mu.Lock()
+			if err != nil {
+				c.failures[agent] = modelFailure{at: c.now(), err: err}
+			} else {
+				delete(c.failures, agent)
+			}
+			c.mu.Unlock()
 			flight.catalog, flight.err = catalog, err
 			c.mu.Lock()
 			delete(c.flights, agent)
@@ -148,6 +223,15 @@ func (c *modelCatalogCache) fetch(ctx context.Context, agent string, refresh boo
 	case <-ctx.Done():
 		return HarnessModelCatalog{Agent: agent}, errors.New("model loading was cancelled")
 	}
+}
+
+func (c *modelCatalogCache) recentFailure(agent string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if f, ok := c.failures[agent]; ok && c.now().Sub(f.at) < modelFailureBackoff {
+		return f.err
+	}
+	return nil
 }
 
 func (c *modelCatalogCache) record(agent string, items []HarnessModel) {
@@ -192,6 +276,13 @@ func (c *modelCatalogCache) load(agent string) (modelCacheEntry, bool) {
 
 func (c *modelCatalogCache) store(agent string, entry modelCacheEntry) {
 	entry.Catalog.Cached = false
+	entry.Catalog.RefreshFailed = false
+	// A built-in fallback never replaces a list the agent really reported.
+	if entry.Catalog.Fallback {
+		if current, ok := c.load(agent); ok && !current.Catalog.Fallback {
+			return
+		}
+	}
 	c.mu.Lock()
 	c.mem[agent] = entry
 	c.mu.Unlock()

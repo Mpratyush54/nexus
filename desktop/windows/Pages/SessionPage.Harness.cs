@@ -13,7 +13,6 @@ public sealed partial class SessionPage
     // last list instantly. The core also caches per harness on disk (24h).
     private static readonly Dictionary<string, ModelPickerCatalog> _modelCatalogs = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, DateTime> _modelCatalogLoadedAt = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, string> _modelLoadErrors = new(StringComparer.OrdinalIgnoreCase);
     private static readonly TimeSpan ModelCatalogRecheck = TimeSpan.FromMinutes(10);
     private readonly HashSet<string> _loadingModelAgents = new(StringComparer.OrdinalIgnoreCase);
     private bool _configuringModel;
@@ -72,16 +71,12 @@ public sealed partial class SessionPage
             var response = await Call(NxMethods.HarnessModels, new { agent, refresh });
             if (!response.Ok || response.Result is not { } result)
             {
-                var name = AgentAvailability.DisplayName(agent);
-                _modelLoadErrors[agent] = hadCatalog
-                    ? $"Couldn't refresh {name}'s models, so the last list is shown."
-                    : $"Couldn't get {name}'s models, so its default model is used.";
+                // Discovery failing is not the user's problem: the picker keeps
+                // its default and the last list; the refresh button stays.
                 if (response.RawError is { Length: > 0 } raw) Nexus.Core.Diagnostics.DiagLog.Warn("models", $"{agent}: {raw}");
-                if (SelectedHarness() == agent && session == _id) UpdateModelCatalogNotice();
                 if (openPicker) SetComposerStatus("");
                 return;
             }
-            _modelLoadErrors.Remove(agent);
             var catalog = ModelPickerCatalog.Parse(result);
             var unchanged = _modelCatalogs.TryGetValue(agent, out var previous) && previous.SameAs(catalog);
             _modelCatalogs[agent] = catalog;
@@ -97,51 +92,65 @@ public sealed partial class SessionPage
         }
         catch (Exception ex)
         {
-            var name = AgentAvailability.DisplayName(agent);
-            _modelLoadErrors[agent] = NxErrors.ForException(hadCatalog ? $"Couldn't refresh {name}'s models, so the last list is shown." : $"Couldn't get {name}'s models, so its default model is used.", ex, "models");
-            if (SelectedHarness() == agent && session == _id) UpdateModelCatalogNotice();
+            Nexus.Core.Diagnostics.DiagLog.Warn("models", $"{agent}: {ex.Message}");
+            if (openPicker) SetComposerStatus("");
         }
         finally
         {
             _loadingModelAgents.Remove(agent);
-            if (SelectedHarness() == agent) { _refreshModels.IsEnabled = !_sendInFlight; _model.PlaceholderText = "Default model"; }
+            if (SelectedHarness() == agent) { _refreshModels.IsEnabled = !_sendInFlight; _model.PlaceholderText = DefaultModelLabel(); }
         }
     }
 
-    // Keep the user's last pick per harness (persisted) as soon as it changes,
-    // not only when a message is sent.
+    // Keep the user's last pick per harness and per chat (persisted) as soon
+    // as it changes, not only when a message is sent.
     private void RememberModelChoice()
     {
         if (_configuringModel || _sendInFlight) return;
         var agent = SelectedHarness();
         if (agent.Length == 0) return;
         var model = SelectedModel();
-        if (_modelByHarness.TryGetValue(agent, out var current) && current == model) return;
+        if (_modelByHarness.TryGetValue(agent, out var current) && current == model && RememberedModel(agent) == model) return;
+        SaveModelChoice(agent, model);
+    }
+
+    private const int ChatModelMemory = 300;
+
+    private void SaveModelChoice(string agent, string model)
+    {
         _modelByHarness[agent] = model;
         AppPrefs.Data.ChatModels ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         AppPrefs.Data.ChatModels[agent] = model;
+        if (_id.Length > 0)
+        {
+            var chats = AppPrefs.Data.ChatModelsByChat ??= new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            var key = _id + "|" + agent;
+            chats.Remove(key);
+            chats[key] = model;
+            // Drop the oldest entries (roughly) so the prefs file stays small.
+            while (chats.Count > ChatModelMemory) chats.Remove(chats.Keys.First());
+        }
         AppPrefs.Save();
     }
+
+    // This chat's last model for the agent, else the agent's last model.
+    private string RememberedModel(string agent)
+    {
+        if (_id.Length > 0 && AppPrefs.Data.ChatModelsByChat is { } chats && chats.TryGetValue(_id + "|" + agent, out var chatModel)) return chatModel;
+        return _modelByHarness.GetValueOrDefault(agent, "");
+    }
+
+    private string DefaultModelLabel() => _modelCatalogs.GetValueOrDefault(SelectedHarness())?.DefaultLabel ?? "Default model";
 
     private void UpdateModelCatalogNotice()
     {
         var agent = SelectedHarness();
-        var error = _modelLoadErrors.GetValueOrDefault(agent, "");
-        if (!_modelCatalogs.TryGetValue(agent, out var catalog))
-        {
-            _modelCatalogNotice.Text = error;
-            _modelCatalogNotice.Visibility = error.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-            return;
-        }
         var selected = SelectedModel();
-        var missing = selected.Length > 0 && !catalog.Choices.Any(choice => choice.ID == selected);
-        var lines = new List<string>();
-        if (error.Length > 0) lines.Add(error);
-        var notice = ModelPickerCatalog.Notice(catalog.Warning, AgentAvailability.DisplayName(agent));
-        if (notice.Length > 0) lines.Add(notice);
-        if (missing) lines.Add("Your model isn't in this list. Nexus still uses it; pick another one if it stops working.");
-        _modelCatalogNotice.Text = string.Join("\n", lines);
-        _modelCatalogNotice.Visibility = _modelCatalogNotice.Text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        // Only a typed model the agent doesn't list is worth a line; list
+        // loading and fallbacks never are.
+        var missing = _modelCatalogs.TryGetValue(agent, out var catalog) && catalog.Choices.Count > 0 && selected.Length > 0 && !catalog.Choices.Any(choice => choice.ID == selected);
+        _modelCatalogNotice.Text = missing ? "Your model isn't in this list. Nexus still uses it; pick another one if it stops working." : "";
+        _modelCatalogNotice.Visibility = missing ? Visibility.Visible : Visibility.Collapsed;
         SetModelTip("Pick a model, or type a model name.");
     }
 
