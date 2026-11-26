@@ -1388,6 +1388,11 @@ public sealed partial class MainWindow : Window
         titleLine.Children.Add(new ChatStatusDot(entry.Id));
         Grid.SetColumn(title, 1);
         titleLine.Children.Add(title);
+        // "Draft" / "Queued" after the title (D5).
+        titleLine.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        var marker = new ChatRowMarker(entry.Id);
+        Grid.SetColumn(marker, 2);
+        titleLine.Children.Add(marker);
         Grid.SetRow(titleLine, 1);
         lines.Children.Add(titleLine);
 

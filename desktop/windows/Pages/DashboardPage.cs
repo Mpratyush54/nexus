@@ -237,6 +237,14 @@ public sealed class DashboardPage : NexusPage
         AppPrefs.Save();
     }
 
+    /// <summary>The composer's /clear: the next chat starts with the agent the last one used.</summary>
+    internal void PrepareNewChat(string agent)
+    {
+        if (agent.Length == 0) return;
+        RememberAgent(agent);
+        if (_startAgent.Items.OfType<ComboBoxItem>().FirstOrDefault(i => (i.Tag as string) == agent) is { } item) _startAgent.SelectedItem = item;
+    }
+
     /// <summary>New chat: a draft here, created only when the first message is sent.</summary>
     internal void FocusNewChat()
     {

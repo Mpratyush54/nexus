@@ -54,5 +54,9 @@
     <Compile Include="../windows/Core/ShortcutRegistry.cs" Link="ShortcutRegistry.cs" />
     <Compile Include="../windows/Core/PaletteRanking.cs" Link="PaletteRanking.cs" />
     <Compile Include="../windows/Core/ToastQueue.cs" Link="ToastQueue.cs" />
+    <Compile Include="../windows/Core/FuzzyMatch.cs" Link="FuzzyMatch.cs" />
+    <Compile Include="../windows/Core/ComposerCommands.cs" Link="ComposerCommands.cs" />
+    <Compile Include="../windows/Core/ComposerMentions.cs" Link="ComposerMentions.cs" />
+    <Compile Include="../windows/Core/PromptRecall.cs" Link="PromptRecall.cs" />
   </ItemGroup>
 </Project>
