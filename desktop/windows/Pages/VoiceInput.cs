@@ -225,7 +225,7 @@ internal sealed class VoiceInput
         Render();
     }
 
-    private bool Active => _state is State.Starting or State.Listening;
+    public bool Active => _state is State.Starting or State.Listening;
 
     private void Render()
     {
