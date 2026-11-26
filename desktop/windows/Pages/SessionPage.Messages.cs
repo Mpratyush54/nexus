@@ -380,23 +380,31 @@ public sealed partial class SessionPage
 
     private static readonly ConditionalWeakTable<Panel, ThinkingView> s_streamThinking = new();
 
-    /// The "Thinking… Ns" row of a live reply, above where its text will go.
-    private ThinkingView StreamThinking(TextBlock status)
+    /// The "Thinking… Ns" row of a live reply, above where its text will go,
+    /// counted from <paramref name="startedAt"/> (the thinking event's time).
+    private ThinkingView StreamThinking(TextBlock status, DateTimeOffset? startedAt = null)
     {
-        if (status.Parent is not Panel stack) return ThinkingView.Live();
-        if (s_streamThinking.TryGetValue(stack, out var existing)) return existing;
-        var view = ThinkingView.Live();
+        if (status.Parent is not Panel stack) return ThinkingView.Live(startedAt);
+        if (s_streamThinking.TryGetValue(stack, out var existing))
+        {
+            if (startedAt is { } at) existing.StartedSince(at);
+            return existing;
+        }
+        var view = ThinkingView.Live(startedAt);
         stack.Children.Insert(stack.Children.IndexOf(status), view.View);
         // The row says it; the status line would repeat it.
         status.Visibility = Visibility.Collapsed;
         s_streamThinking.AddOrUpdate(stack, view);
+        TurnStatusThinkingRow(true);
         return view;
     }
 
-    /// The reply's text started: "Thought for Ns".
-    private void FinishStreamThinking(TextBlock status)
+    /// The reply's text started (at <paramref name="at"/> when known): "Thought for Ns".
+    private void FinishStreamThinking(TextBlock status, DateTimeOffset? at = null)
     {
-        if (status.Parent is Panel stack && s_streamThinking.TryGetValue(stack, out var view)) view.Finish();
+        if (status.Parent is not Panel stack || !s_streamThinking.TryGetValue(stack, out var view) || !view.IsLive) return;
+        view.Finish(at);
+        TurnStatusThinkingRow(false);
     }
 
     /// Moves a streamed reply's thinking row into the chat at `at`, where it

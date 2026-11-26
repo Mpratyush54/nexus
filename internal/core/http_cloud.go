@@ -140,6 +140,9 @@ type CloudError struct {
 	RequestID string
 }
 
+// HTTPStatus is the server's HTTP status code.
+func (e *CloudError) HTTPStatus() int { return e.Status }
+
 func (e *CloudError) Error() string {
 	if e.RequestID != "" {
 		return e.Msg + " (ref " + e.RequestID + ")"

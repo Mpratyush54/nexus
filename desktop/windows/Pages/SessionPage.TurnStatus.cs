@@ -108,14 +108,18 @@ public sealed partial class SessionPage
     {
         if (_turnStatus is not { } s) return;
         var model = s.Model;
+        // While the live thinking row ticks "Thinking… Ns", it is the status;
+        // the line keeps only its dot and "Esc to stop".
+        var verb = model.ShowsVerb;
+        s.Verb.Visibility = s.Elapsed.Visibility = verb ? Visibility.Visible : Visibility.Collapsed;
         s.Verb.Text = model.Verb + "…";
         s.Elapsed.Text = "· " + TurnStatus.FormatElapsed(model.Elapsed);
-        s.Hint.Text = model.ShowsStopHint ? "· Esc to stop" : "";
+        s.Hint.Text = model.ShowsStopHint ? (verb ? "· Esc to stop" : "Esc to stop") : "";
         s.Dot.Fill = model.Current == TurnStatus.Phase.Approval ? NexusPalette.Amber : NexusPalette.Accent;
         s.Notice.Text = model.Notice;
         s.Notice.Visibility = model.Notice.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
         // Screen readers hear the verb change, not every second.
-        var spoken = model.Verb + (model.Notice.Length > 0 ? ". " + model.Notice : "");
+        var spoken = (verb ? model.Verb : "Thinking") + (model.Notice.Length > 0 ? ". " + model.Notice : "");
         if (spoken != s.LastSpoken)
         {
             s.LastSpoken = spoken;
@@ -168,6 +172,14 @@ public sealed partial class SessionPage
     {
         try { using var doc = JsonDocument.Parse(json); return NxJson.Text(doc.RootElement, "input"); }
         catch (JsonException) { return ""; }
+    }
+
+    /// <summary>The live thinking row appeared (true) or finished (false).</summary>
+    private void TurnStatusThinkingRow(bool shown)
+    {
+        if (_turnStatus is not { } s || s.Model.ThinkingRowShown == shown) return;
+        s.Model.ThinkingRowShown = shown;
+        RenderTurnStatus();
     }
 
     private void TurnStatusQueued()

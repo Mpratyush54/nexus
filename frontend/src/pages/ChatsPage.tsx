@@ -61,6 +61,9 @@ import {
   parseTurnText,
 } from "@/lib/harness-message";
 import { setLiveChat, useLiveChats } from "@/lib/live-chats";
+import { thinkingLive } from "@/lib/thinking";
+import { useChatLiveStatus, useMarkReadOnOpen } from "@/lib/chat-live-status";
+import { ThinkingBlock } from "@/components/ThinkingBlock";
 import { formatRelative } from "@/utils/format";
 import { useDraft, useDraftsVersion } from "@/lib/drafts";
 import {
@@ -199,6 +202,9 @@ export function ChatsPage() {
   }, [feed.data, pinnedFeed.data, search, deleting]);
   const prefs = useChatPrefs(allCards);
   const live = useLiveChats();
+  // The desktop's agent status per chat: the same dots as its sidebar.
+  const serverStatus = useChatLiveStatus();
+  useMarkReadOnOpen(id, serverStatus);
   // Filter by agent when the list mixes several (client-side, over loaded chats).
   const [agentFilter, setAgentFilter] = useState("");
   const agentsInList = [...new Set(allCards.map((c) => agentName(c.harness)))];
@@ -322,6 +328,8 @@ export function ChatsPage() {
       pinned={prefs.pinned.includes(card.session_id)}
       archived={prefs.archived.includes(card.session_id)}
       live={live.get(card.session_id)}
+      server={serverStatus.byId.get(card.session_id)}
+      serverKnown={serverStatus.known}
       onOpen={() => setParams({ chat: card.session_id })}
       onCommand={(command) => runRowCommand(card, command)}
       onRename={(title) => {
@@ -1117,6 +1125,13 @@ function Conversation({
     device?.name ||
     "your computer";
   const showJob = !!job && !responseAlreadySynced;
+  // A reply sent from here keeps its "Thought for Ns" once the saved turn
+  // replaces the live one (saved transcripts carry no thinking).
+  const thinkingFor = (turn: ChatTurn) => {
+    if (turn.role !== "assistant" || !turn.cursor_idx) return undefined;
+    const from = [job, ...earlierJobs].find((j) => j?.thinking && j.result?.answer_cursor === turn.cursor_idx);
+    return from ? <ThinkingBlock job={from} /> : undefined;
+  };
   const canReply = steerable && !busy;
 
   // The latest reply keeps its actions visible; Retry asks its prompt again.
@@ -1145,7 +1160,7 @@ function Conversation({
       job.state === "awaiting_approval" ? (
         <ApprovalWait key={job.id} computer={jobComputer} />
       ) : (
-        <ReplyStatus verb={statusVerb} startedAt={startedAt} touch={touch} />
+        <ReplyStatus verb={statusVerb} startedAt={startedAt} touch={touch} quiet={thinkingLive(job)} />
       )
     ) : undefined;
 
@@ -1382,6 +1397,7 @@ function Conversation({
                       turn={segment.turn}
                       harness={session.harness}
                       match={findQuery}
+                      thinking={thinkingFor(segment.turn)}
                       actions={
                         findQuery
                           ? undefined
@@ -1429,6 +1445,7 @@ function Conversation({
                     <ChatMessage
                       turn={{ idx: -4, role: "assistant", text_preview: j.result?.text || j.text, tool_calls: j.activities }}
                       harness={j.agent || agent}
+                      thinking={j.thinking ? <ThinkingBlock job={j} /> : undefined}
                       toolsFirst
                     />
                   </div>
@@ -1458,6 +1475,7 @@ function Conversation({
                   isNew
                   toolsFirst
                   status={liveStatus}
+                  thinking={job.thinking ? <ThinkingBlock job={job} /> : undefined}
                   actions={
                     !outgoing && isFinished(job.state)
                       ? replyActions(true, job.prompt || sentPrompt.current)

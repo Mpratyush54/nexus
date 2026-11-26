@@ -194,6 +194,7 @@ func (w *Worker) execute(parent context.Context, j desktopbridge.Job) {
 	}
 	var mu sync.Mutex
 	progress := desktopbridge.Update{Revision: j.Revision, State: "running", Status: "Starting " + j.Agent}
+	var thought thinkingClock
 	deps.ContinueProgress = func(_ string, p continuex.StreamProgress) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -202,6 +203,12 @@ func (w *Worker) execute(parent context.Context, j desktopbridge.Job) {
 			if len(p.Text) <= 512<<10 {
 				progress.Text = p.Text
 			}
+			thought.replied(time.Now())
+			progress.ThinkingMS = thought.ms(time.Now())
+		case "thinking":
+			progress.Thinking = capThinking(p.Text)
+			thought.thinking(time.Now())
+			progress.ThinkingMS = thought.ms(time.Now())
 		case "status":
 			progress.Status = p.Text
 		case "activity":
@@ -244,6 +251,7 @@ func (w *Worker) execute(parent context.Context, j desktopbridge.Job) {
 			case <-tick.C:
 			}
 			mu.Lock()
+			progress.ThinkingMS = thought.ms(time.Now())
 			snapshot := progress
 			snapshot.Activities = append([]json.RawMessage(nil), progress.Activities...)
 			mu.Unlock()
@@ -266,6 +274,8 @@ func (w *Worker) execute(parent context.Context, j desktopbridge.Job) {
 	j.Revision = progress.Revision
 	j.Text = progress.Text
 	j.Activities = progress.Activities
+	thought.replied(time.Now())
+	j.Thinking, j.ThinkingMS = progress.Thinking, thought.ms(time.Now())
 	mu.Unlock()
 	if ctx.Err() != nil {
 		w.finish(parent, j, "failed", nil, errors.New("Execution interrupted; check the workspace before retrying"))
@@ -401,7 +411,7 @@ func (w *Worker) watch(ctx context.Context, cancel context.CancelFunc, id string
 func (w *Worker) finish(parent context.Context, j desktopbridge.Job, state string, result any, e error) {
 	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
-	u := desktopbridge.Update{Revision: j.Revision, State: state, Text: j.Text, Activities: j.Activities}
+	u := desktopbridge.Update{Revision: j.Revision, State: state, Text: j.Text, Activities: j.Activities, Thinking: j.Thinking, ThinkingMS: j.ThinkingMS}
 	if e != nil {
 		u.State = "failed"
 		u.Error = e.Error()
@@ -454,4 +464,46 @@ func (w *Worker) sessionContext(ctx context.Context, deps core.Deps, id string) 
 		cursor = p.Next
 	}
 	return "", errors.New("Conversation is too large to seed safely; fork a shorter conversation first")
+}
+
+// thinkingClock times the agent's thinking: from the first thinking it
+// reports to the first words of its reply (or the end of the turn).
+type thinkingClock struct{ start, end time.Time }
+
+func (c *thinkingClock) thinking(now time.Time) {
+	if c.start.IsZero() {
+		c.start = now
+	}
+}
+
+func (c *thinkingClock) replied(now time.Time) {
+	if !c.start.IsZero() && c.end.IsZero() {
+		c.end = now
+	}
+}
+
+// ms is how long it has thought so far (0 when it has not).
+func (c *thinkingClock) ms(now time.Time) int64 {
+	if c.start.IsZero() {
+		return 0
+	}
+	end := now
+	if !c.end.IsZero() {
+		end = c.end
+	}
+	ms := end.Sub(c.start).Milliseconds()
+	if limit := int64(desktopbridge.RunLifetime / time.Millisecond); ms > limit {
+		ms = limit
+	}
+	return ms
+}
+
+// capThinking keeps thinking within what the server accepts.
+func capThinking(text string) string {
+	text = continuex.CapThinking(text)
+	if len(text) > desktopbridge.MaxThinkingBytes {
+		text = text[len(text)-desktopbridge.MaxThinkingBytes:]
+		text = strings.ToValidUTF8(text, "")
+	}
+	return text
 }
