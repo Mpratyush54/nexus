@@ -1713,6 +1713,8 @@ public sealed partial class SessionPage : NexusPage
 
     private void RenderSavedContinuations(NxResponse response, bool cloudTurnsAvailable, bool appendContext = true)
     {
+        // Restore and review cards follow the painted transcript (SessionPage.Review.cs).
+        QueueCheckpointRefresh();
         if (!response.Ok)
         {
             SetComposerStatus(response.Error is { Length: > 0 } why && !why.StartsWith(NxErrors.GenericFailure, StringComparison.Ordinal) ? why : "Nexus couldn't load the replies it saved for this chat. Reopen the chat to try again.");
