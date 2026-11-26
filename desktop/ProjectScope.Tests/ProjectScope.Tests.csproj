@@ -60,5 +60,6 @@
     <Compile Include="../windows/Core/ComposerCommands.cs" Link="ComposerCommands.cs" />
     <Compile Include="../windows/Core/ComposerMentions.cs" Link="ComposerMentions.cs" />
     <Compile Include="../windows/Core/PromptRecall.cs" Link="PromptRecall.cs" />
+    <Compile Include="../windows/Core/AgentConfigText.cs" Link="AgentConfigText.cs" />
   </ItemGroup>
 </Project>

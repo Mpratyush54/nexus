@@ -54,6 +54,8 @@ public sealed partial class AgentSetupPage : NexusPage
     private sealed record NoteRow(string Text);
     private sealed record ItemRowData(string Agent, JsonElement Item, bool ShowAgent);
     private sealed record RunRow(SubagentRuns.Run Run);
+    // A one-click action at the top of a section ("Add a tool server").
+    private sealed record ActionRow(string Title, string Hint, string Glyph, Func<Task> Run);
 
     // The left pane's "Sub-agent runs" entry uses this id in _selectedAgent.
     private const string RunsKey = "__subagent_runs";
@@ -249,7 +251,9 @@ public sealed partial class AgentSetupPage : NexusPage
         if (_agents.Count == 0) _status.Text = "Reading agent setup…";
         _workspace = await WorkspaceAsync();
         var resolved = watch.ElapsedMilliseconds;
-        var response = await Core.CallAsync(BrowseMethod, new { workspace = _workspace });
+        var rules = LoadRulesFilesAsync();
+        var response = await Core.CallAsync(BrowseMethod, new { workspace = _workspace, state_dir = StateDir });
+        await rules;
         await UiThread.Resume(DispatcherQueue);
         var browsed = watch.ElapsedMilliseconds;
         if (version != _version) return;
@@ -360,8 +364,9 @@ public sealed partial class AgentSetupPage : NexusPage
             text.Children.Add(Tiny(counts.Count > 0 ? string.Join(" · ", counts) : "No skills or tools yet"));
 
             var button = RowButton(text, id == _selectedAgent);
-            button.Click += (_, _) =>
+            button.Click += async (_, _) =>
             {
+                if (!await ConfirmLeaveEditorAsync()) return;
                 _selectedAgent = id;
                 _selectedItem = "";
                 if (_search.Text.Length > 0) _search.Text = "";
@@ -379,8 +384,9 @@ public sealed partial class AgentSetupPage : NexusPage
         runsText.Children.Add(new TextBlock { Text = "Sub-agent runs", FontSize = 12.5, FontWeight = _selectedAgent == RunsKey ? FontWeights.SemiBold : FontWeights.Normal });
         runsText.Children.Add(Tiny(_runs is { } runs ? runs.Count + " recent chats started by agents" : "Chats your agents started from a chat"));
         var runsButton = RowButton(runsText, _selectedAgent == RunsKey);
-        runsButton.Click += (_, _) =>
+        runsButton.Click += async (_, _) =>
         {
+            if (!await ConfirmLeaveEditorAsync()) return;
             _selectedAgent = RunsKey;
             _selectedItem = "";
             if (_search.Text.Length > 0) _search.Text = "";
@@ -424,11 +430,16 @@ public sealed partial class AgentSetupPage : NexusPage
                     Padding = new Thickness(9, 3, 9, 4), MinHeight = 24, CornerRadius = new CornerRadius(5), BorderThickness = new Thickness(0),
                     Background = key == _selectedSection ? SessionChatRender.SubtleFill : new SolidColorBrush(Microsoft.UI.Colors.Transparent)
                 };
-                seg.Click += (_, _) => { _selectedSection = key; _selectedItem = ""; RenderMiddle(); RenderDetail(); };
+                seg.Click += async (_, _) =>
+                {
+                    if (!await ConfirmLeaveEditorAsync()) return;
+                    _selectedSection = key; _selectedItem = ""; RenderMiddle(); RenderDetail();
+                };
                 _segments.Children.Add(seg);
             }
             var section = Sections.First(s => s.Key == _selectedSection);
             var items = Arr(agent, section.Key).ToList();
+            AddActionRows(_selectedAgent, section.Key);
             if (items.Count == 0)
             {
                 _rows.Add(new NoteRow(section.Key == "subagents" ? NoSubagents(_selectedAgent) : section.Empty));
@@ -503,6 +514,7 @@ public sealed partial class AgentSetupPage : NexusPage
         NoteRow note => Tiny(note.Text, new Thickness(6, 8, 6, 0)),
         ItemRowData row => ItemRow(row.Agent, row.Item, row.ShowAgent),
         RunRow run => RunRowView(run.Run),
+        ActionRow action => ActionRowView(action),
         _ => new Border()
     };
 
@@ -521,6 +533,7 @@ public sealed partial class AgentSetupPage : NexusPage
         var nameRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
         nameRow.Children.Add(new TextBlock { Text = NxJson.Text(item, "name"), FontSize = 12.5, FontWeight = key == _selectedItem ? FontWeights.SemiBold : FontWeights.Normal, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 250 });
         if (kind == "mcp" && NxJson.Text(item, "name") == "nexus") nameRow.Children.Add(new TextBlock { Text = "Nexus", FontSize = 10.5, Foreground = NexusPalette.Accent, VerticalAlignment = VerticalAlignment.Center });
+        if (kind == "mcp" && Flag(item, "disabled")) nameRow.Children.Add(new TextBlock { Text = "Off", FontSize = 10.5, Foreground = NexusPalette.Muted, VerticalAlignment = VerticalAlignment.Center });
         text.Children.Add(nameRow);
         var desc = kind == "mcp" ? McpSummary(item) : Flatten(NxJson.Text(item, "description"));
         if (desc.Length > 0) text.Children.Add(new TextBlock { Text = desc, FontSize = 11.5, Foreground = NexusPalette.Muted, MaxLines = 1, TextTrimming = TextTrimming.CharacterEllipsis });
@@ -535,8 +548,9 @@ public sealed partial class AgentSetupPage : NexusPage
         var button = RowButton(text, key == _selectedItem);
         button.Tag = key;
         var copy = item.Clone();
-        button.Click += (_, _) =>
+        button.Click += async (_, _) =>
         {
+            if (!await ConfirmLeaveEditorAsync()) return;
             _selectedItem = key;
             if (showAgent) _selectedAgent = agent;
             HighlightRows(key);
@@ -596,8 +610,9 @@ public sealed partial class AgentSetupPage : NexusPage
         text.Children.Add(new TextBlock { Text = string.Join("  ·  ", meta), FontSize = 10.5, Opacity = 0.5, TextTrimming = TextTrimming.CharacterEllipsis });
         var button = RowButton(text, key == _selectedItem);
         button.Tag = key;
-        button.Click += (_, _) =>
+        button.Click += async (_, _) =>
         {
+            if (!await ConfirmLeaveEditorAsync()) return;
             _selectedItem = key;
             HighlightRows(key);
             RenderRunDetail(run);
@@ -634,6 +649,8 @@ public sealed partial class AgentSetupPage : NexusPage
 
     private void RenderDetail()
     {
+        // A background refresh never replaces an open rules editor.
+        if (_editor is not null) return;
         if (_search.Text.Trim().Length == 0 && _selectedAgent == RunsKey)
         {
             if (_runs?.FirstOrDefault(r => "run|" + r.Id == _selectedItem) is { } run) { RenderRunDetail(run); return; }
@@ -653,6 +670,7 @@ public sealed partial class AgentSetupPage : NexusPage
 
     private void RenderDetail(string agent, JsonElement item)
     {
+        _editor = null;
         var version = ++_detailVersion;
         _detail.Children.Clear();
         var kind = NxJson.Text(item, "kind");
@@ -675,6 +693,7 @@ public sealed partial class AgentSetupPage : NexusPage
         _detail.Children.Add(Actions(agent, item, kind, name, path));
 
         if (kind == "mcp") _detail.Children.Add(McpFacts(item));
+        if (kind == "mcp" && CanEditMcp(agent) && name != "nexus") _detail.Children.Add(McpControls(agent, item));
 
         var contentHost = new StackPanel { Spacing = 8 };
         _detail.Children.Add(contentHost);
@@ -684,6 +703,15 @@ public sealed partial class AgentSetupPage : NexusPage
     private UIElement Actions(string agent, JsonElement item, string kind, string name, string path)
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4 };
+        if (kind == "rules" && CanEditRules(path))
+        {
+            // The one primary action for a rules file.
+            var edit = new Button { Content = "Edit", Padding = new Thickness(14, 4, 14, 5), MinHeight = 26, VerticalAlignment = VerticalAlignment.Center };
+            if (Application.Current.Resources.TryGetValue("AccentButtonStyle", out var accent) && accent is Style style) edit.Style = style;
+            ToolTipService.SetToolTip(edit, "Change this file here, with a preview of every change before it's saved");
+            edit.Click += async (_, _) => await OpenRulesEditorAsync(path);
+            row.Children.Add(edit);
+        }
         var open = FlatButton("Open file location");
         open.Click += (_, _) => OpenLocation(path);
         row.Children.Add(open);
@@ -698,14 +726,15 @@ public sealed partial class AgentSetupPage : NexusPage
         var holders = Arr(item, "shared_with").Select(s => s.GetString() ?? "").Append(agent).ToHashSet(StringComparer.OrdinalIgnoreCase);
         // Plugin items belong to their plugin; the share flow copies only user or project items.
         var plugin = NxJson.Text(item, "scope") == "plugin";
-        var targets = ShareAgents.Contains(agent) && !plugin
+        var parkedItem = Flag(item, "parked");
+        var targets = ShareAgents.Contains(agent) && !plugin && !parkedItem
             ? _installed.Where(id => !holders.Contains(id) && CanReceive(agent, kind, id)).ToList()
             : new List<string>();
         var copy = FlatButton("Copy to other agents…");
         if (targets.Count == 0)
         {
             copy.IsEnabled = false;
-            ToolTipService.SetToolTip(copy, plugin ? "Plugin items are managed by their plugin" : ShareAgents.Contains(agent) ? "Every installed agent that can take this already has it" : "Copying from this agent is not supported yet");
+            ToolTipService.SetToolTip(copy, parkedItem ? "Turn it on to copy it" : plugin ? "Plugin items are managed by their plugin" : ShareAgents.Contains(agent) ? "Every installed agent that can take this already has it" : "Copying from this agent is not supported yet");
         }
         else
         {
@@ -731,7 +760,12 @@ public sealed partial class AgentSetupPage : NexusPage
         {
             var remove = FlatButton("Remove from this agent…");
             remove.Foreground = NexusPalette.Danger;
-            remove.Click += async (_, _) => await RemoveMcpAsync(agent, name, path);
+            var parked = Flag(item, "parked");
+            remove.Click += async (_, _) =>
+            {
+                if (parked) await ForgetParkedAsync(agent, item);
+                else await RemoveMcpAsync(agent, name, path);
+            };
             row.Children.Add(remove);
         }
         return new ScrollViewer { Content = row, HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, VerticalScrollMode = ScrollMode.Disabled };
@@ -785,7 +819,7 @@ public sealed partial class AgentSetupPage : NexusPage
             host.Children.Add(Tiny("Loading content…"));
             var response = await Core.CallAsync(ReadMethod, new
             {
-                agent, kind = NxJson.Text(item, "kind"), name = NxJson.Text(item, "name"), path = NxJson.Text(item, "path"), workspace = _workspace
+                agent, kind = NxJson.Text(item, "kind"), name = NxJson.Text(item, "name"), path = NxJson.Text(item, "path"), workspace = _workspace, state_dir = StateDir
             });
             await UiThread.Resume(DispatcherQueue);
             if (version != _detailVersion) return;
@@ -884,6 +918,8 @@ public sealed partial class AgentSetupPage : NexusPage
                 continue;
             }
             if (t.Length == 0) { Flush(); continue; }
+            // HTML comments (markers, notes to the reader) are not shown.
+            if (t.StartsWith("<!--") && t.EndsWith("-->")) { Flush(); continue; }
             if (t.StartsWith('#'))
             {
                 Flush();

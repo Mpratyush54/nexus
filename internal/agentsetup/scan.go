@@ -50,6 +50,11 @@ type Item struct {
 	URL         string   `json:"url,omitempty"`
 	EnvKeys     []string `json:"env_keys,omitempty"`
 	HeaderKeys  []string `json:"header_keys,omitempty"`
+	// Disabled: the server is configured but turned off.
+	Disabled bool `json:"disabled,omitempty"`
+	// Parked: turned off by Nexus, which keeps the entry aside until it
+	// is turned on again (agents without an on/off setting).
+	Parked bool `json:"parked,omitempty"`
 	// SharedWith lists the other agents holding an item of the same kind
 	// and name (filled by Browse).
 	SharedWith []string `json:"shared_with,omitempty"`
@@ -448,6 +453,11 @@ func secretValues(v any) []string {
 }
 func redact(s string, secrets []string) string {
 	for _, v := range secrets {
+		// Flags and short values ("1", "true") are not secrets, and
+		// replacing them everywhere would garble paths and commands.
+		if len(v) < 4 {
+			continue
+		}
 		s = strings.ReplaceAll(s, v, "[redacted]")
 	}
 	return s
@@ -476,22 +486,39 @@ func (r roots) mcps(a *AgentSetup, scope, p string, projectEntry bool) {
 		if raw == nil {
 			continue
 		}
-		n := normalized(raw, a.Agent)
-		secrets := secretValues(raw)
-		i := Item{Kind: "mcp", Name: redact(name, secrets), Scope: scope, Path: p, Transport: str(n["type"]), Command: redact(str(n["command"]), secrets), Args: stringsOf(n["args"]), URL: redact(publicURL(str(n["url"])), secrets), EnvKeys: keys(object(n["env"])), HeaderKeys: keys(object(n["headers"]))}
-		for j := range i.Args {
-			i.Args[j] = redact(i.Args[j], secrets)
-			if strings.Contains(strings.ToLower(i.Args[j]), "token=") || strings.Contains(strings.ToLower(i.Args[j]), "key=") {
+		a.add(mcpItem(raw, a.Agent, scope, p, name))
+	}
+}
+
+// mcpItem lists one MCP server entry without any secret value.
+func mcpItem(raw map[string]any, agent, scope, p, name string) Item {
+	n := normalized(raw, agent)
+	secrets := secretValues(raw)
+	i := Item{Kind: "mcp", Name: redact(name, secrets), Scope: scope, Path: p, Transport: str(n["type"]), Command: redact(str(n["command"]), secrets), Args: stringsOf(n["args"]), URL: redact(publicURL(str(n["url"])), secrets), EnvKeys: keys(object(n["env"])), HeaderKeys: keys(object(n["headers"])), Disabled: !entryEnabled(raw)}
+	for j := range i.Args {
+		i.Args[j] = redact(i.Args[j], secrets)
+		if strings.Contains(strings.ToLower(i.Args[j]), "token=") || strings.Contains(strings.ToLower(i.Args[j]), "key=") {
+			i.Args[j] = "[redacted]"
+		} else if j > 0 {
+			prev := strings.ToLower(i.Args[j-1])
+			if strings.Contains(prev, "token") || strings.Contains(prev, "password") || strings.Contains(prev, "secret") || strings.Contains(prev, "api-key") {
 				i.Args[j] = "[redacted]"
-			} else if j > 0 {
-				prev := strings.ToLower(i.Args[j-1])
-				if strings.Contains(prev, "token") || strings.Contains(prev, "password") || strings.Contains(prev, "secret") || strings.Contains(prev, "api-key") {
-					i.Args[j] = "[redacted]"
-				}
 			}
 		}
-		a.add(i)
 	}
+	return i
+}
+
+// entryEnabled reads an entry's own on/off setting: "enabled" (Codex,
+// OpenCode) or "disabled" (Windsurf and others). Missing means on.
+func entryEnabled(raw map[string]any) bool {
+	if v, ok := raw["enabled"].(bool); ok && !v {
+		return false
+	}
+	if v, ok := raw["disabled"].(bool); ok && v {
+		return false
+	}
+	return true
 }
 
 // Scan tolerates missing, unreadable, malformed and oversized files independently.
