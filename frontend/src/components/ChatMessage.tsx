@@ -333,6 +333,7 @@ export function ChatMessage({
   actions,
   outgoing,
   status,
+  thinking,
   isNew = false,
   toolsFirst = false,
 }: {
@@ -345,6 +346,8 @@ export function ChatMessage({
   outgoing?: OutgoingState;
   /** A live reply's status line (elapsed time, what it's doing). */
   status?: ReactNode;
+  /** The agent's thinking, above the reply (a ThinkingBlock). */
+  thinking?: ReactNode;
   /** Fade and rise in: a message that just arrived, not history. */
   isNew?: boolean;
   /** Steps above the words (a live reply: the agent works, then writes). */
@@ -353,7 +356,7 @@ export function ChatMessage({
   const parsed = parseTurnText(turn.text_preview ?? "");
   const tools = toolViews(turn.tool_calls);
   const { text, envelopes, attachments, context, compaction } = parsed;
-  if (!text && !tools.length && !envelopes.length && !compaction && !attachments.length && !images.length && !status)
+  if (!text && !tools.length && !envelopes.length && !compaction && !attachments.length && !images.length && !status && !thinking)
     return null;
   // A user turn made only of envelopes was written by the harness, not the person.
   const isUser = turn.role === "user" && (!!text || attachments.length > 0 || images.length > 0);
@@ -379,6 +382,7 @@ export function ChatMessage({
         {outgoing?.state === "sending" && <small className="chat-sending">Sending…</small>}
       </div>
       <div className="chat-turn-body">
+      {thinking}
       {compaction && (
         <details className="chat-envelope is-summary">
           <summary>

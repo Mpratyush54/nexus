@@ -953,6 +953,9 @@ func (m *Manager) emitLocked(e map[string]any) {
 	m.seq++
 	e["seq"] = m.seq
 	if t, _ := e["type"].(string); t == "live.event" {
+		// When it happened (Unix ms), so a replay can tell how long the
+		// agent thought.
+		e["at"] = m.cfg.Now().UnixMilli()
 		if s := m.sessions[strOf(e["session_id"])]; s != nil && s.turn != nil {
 			s.turn.remember(e)
 		}
@@ -975,6 +978,11 @@ func (t *turn) remember(e map[string]any) {
 			}
 			merged["text"] = strOf(last["text"]) + strOf(e["text"])
 			merged["seq"] = e["seq"]
+			// "at" stays the first delta's time; "until" is the last one's,
+			// so the replayed thinking keeps its real length.
+			if at, ok := e["at"]; ok {
+				merged["until"] = at
+			}
 			t.log[len(t.log)-1] = merged
 			return
 		}

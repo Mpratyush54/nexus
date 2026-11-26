@@ -84,6 +84,15 @@ func TestTransitionsBoundedAndNoPublicCredential(t *testing.T) {
 	if _, e := Apply(j, Update{Revision: 1, State: "running", Text: strings.Repeat("x", (512<<10)+1)}, now); e == nil {
 		t.Fatal("oversized text")
 	}
+	if _, e := Apply(j, Update{Revision: 1, State: "running", Thinking: strings.Repeat("x", MaxThinkingBytes+1)}, now); e == nil {
+		t.Fatal("oversized thinking")
+	}
+	if _, e := Apply(j, Update{Revision: 1, State: "running", ThinkingMS: -1}, now); e == nil {
+		t.Fatal("negative thinking time")
+	}
+	if next, e := Apply(j, Update{Revision: 1, State: "running", Thinking: "Looking", ThinkingMS: 7000}, now); e != nil || next.Thinking != "Looking" || next.ThinkingMS != 7000 {
+		t.Fatalf("thinking not kept: %v %+v", e, next)
+	}
 	if _, e := Apply(j, Update{Revision: 1, State: "completed"}, now.Add(time.Hour)); e == nil {
 		t.Fatal("expired write")
 	}

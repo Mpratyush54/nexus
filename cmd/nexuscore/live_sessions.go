@@ -44,6 +44,7 @@ import (
 	"time"
 
 	"central-memory/internal/agentrun"
+	"central-memory/internal/chatstatus"
 	"central-memory/internal/continuex"
 	"central-memory/internal/core"
 	"central-memory/internal/daemon"
@@ -71,6 +72,8 @@ func acpStarter(agent string) func(context.Context, continuex.LiveOptions) (cont
 var (
 	liveMu  sync.Mutex
 	liveMgr *agentrun.Manager
+	// liveStatusStop ends the chat status publisher (see liveManager).
+	liveStatusStop context.CancelFunc
 )
 
 // liveManager returns the process-wide session manager, created on first
@@ -79,14 +82,46 @@ func liveManager() *agentrun.Manager {
 	liveMu.Lock()
 	defer liveMu.Unlock()
 	if liveMgr == nil {
-		liveMgr = agentrun.New(agentrun.Config{
+		// Chat statuses also go to the server, so the web chat list shows
+		// the sidebar's dots and can mark chats read.
+		publisher := &chatstatus.Publisher{Cloud: liveStatusCloud}
+		m := agentrun.New(agentrun.Config{
 			StateDir: liveStateDir(),
 			Start:    startLiveAgent,
 			Record:   recordLiveTurn,
-			Emit:     func(e map[string]any) { emitCoreEvent(e) },
+			Emit:     func(e map[string]any) { emitCoreEvent(e); publisher.Note(e) },
 		})
+		publisher.List = func() []chatstatus.Report { return liveStatusReports(m.List()) }
+		publisher.Read = m.Seen
+		ctx, cancel := context.WithCancel(context.Background())
+		liveStatusStop = cancel
+		go func() { defer diagnostics.Guard("chat-status")(); publisher.Run(ctx) }()
+		liveMgr = m
 	}
 	return liveMgr
+}
+
+// liveStatusCloud is the signed-in server, or nil.
+func liveStatusCloud() chatstatus.Doer {
+	nxState.mu.Lock()
+	defer nxState.mu.Unlock()
+	if cloud, ok := nxState.deps.Cloud.(*core.HTTPCloud); ok && cloud != nil && strings.TrimSpace(cloud.Token) != "" {
+		return cloud
+	}
+	return nil
+}
+
+// liveStatusReports turns live.list into the publisher's reports.
+func liveStatusReports(list map[string]any) []chatstatus.Report {
+	items, _ := list["sessions"].([]map[string]any)
+	out := make([]chatstatus.Report, 0, len(items))
+	for _, item := range items {
+		id, _ := item["session_id"].(string)
+		status, _ := item["status"].(string)
+		unread, _ := item["unread"].(bool)
+		out = append(out, chatstatus.Report{SessionID: id, Status: status, Unread: unread})
+	}
+	return out
 }
 
 func liveStateDir() string {
@@ -333,7 +368,12 @@ func closeAllLive() {
 	liveMu.Lock()
 	m := liveMgr
 	liveMgr = nil
+	stop := liveStatusStop
+	liveStatusStop = nil
 	liveMu.Unlock()
+	if stop != nil {
+		stop()
+	}
 	if m != nil {
 		m.Shutdown()
 	}

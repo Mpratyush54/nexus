@@ -30,6 +30,12 @@ internal sealed class TurnStatus
     /// <summary>A notice from the agent worth reading ("Model x isn't available; using its default").</summary>
     public string Notice { get; private set; } = "";
     public bool HasText { get; private set; }
+    /// <summary>
+    /// A live "Thinking… Ns" row is on screen. While it ticks, it is the
+    /// status: the line drops its own "Thinking" verb and time and keeps
+    /// only "Esc to stop", so the reply never says Thinking twice.
+    /// </summary>
+    public bool ThinkingRowShown { get; set; }
 
     /// <summary>Sets the start time once it is known (a reopened chat's turn started earlier).</summary>
     public void StartedSince(DateTimeOffset startedAt)
@@ -102,6 +108,9 @@ internal sealed class TurnStatus
         _ => "Working"
     };
 
+    /// <summary>False while the thinking row speaks for the line (see <see cref="ThinkingRowShown"/>).</summary>
+    public bool ShowsVerb => !(ThinkingRowShown && Current == Phase.Thinking);
+
     public TimeSpan Elapsed => _now() - StartedAt;
 
     /// <summary>"4s", "1m 05s", "1h 02m".</summary>
@@ -117,7 +126,9 @@ internal sealed class TurnStatus
     public bool ShowsStopHint => Current is not (Phase.Stopping or Phase.Approval);
 
     /// <summary>The whole line, for screen readers and tests: "Thinking · 12s · Esc to stop".</summary>
-    public string Line() => Verb + "… · " + FormatElapsed(Elapsed) + (ShowsStopHint ? " · Esc to stop" : "");
+    public string Line() => !ShowsVerb
+        ? (ShowsStopHint ? "Esc to stop" : "")
+        : Verb + "… · " + FormatElapsed(Elapsed) + (ShowsStopHint ? " · Esc to stop" : "");
 
     /// <summary>"Running npm test", "Editing Program.cs", "Reading README.md", "Searching for TODO".</summary>
     public static string DescribeTool(string tool, string inputJson)

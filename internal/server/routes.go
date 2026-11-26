@@ -60,6 +60,7 @@ func (s *Server) registerRoutes() {
 	s.registerCloudContractRoutes()
 	s.registerSessionDeleteRoutes()
 	s.registerSessionStateRoutes()
+	s.registerChatStatusRoutes()
 	s.registerOpsRoutes()
 	s.registerDesktopExecutionRoutes()
 	s.registerDiagnosticsRoutes()

@@ -13,7 +13,7 @@ import {
 import type { ChatCard } from "@/api/chats";
 import { readableChatText } from "@/lib/chat-content";
 import { agentName, chatTitle } from "@/lib/harness-message";
-import { chatStatus, type ChatStatus } from "@/lib/live-chats";
+import { chatStatus, type ChatStatus, type ServerChatStatus } from "@/lib/live-chats";
 import { hasDraft } from "@/lib/drafts";
 import { formatRelative } from "@/utils/format";
 
@@ -89,6 +89,8 @@ export function ChatRow({
   pinned,
   archived,
   live,
+  server,
+  serverKnown = false,
   onOpen,
   onCommand,
   onRename,
@@ -99,6 +101,10 @@ export function ChatRow({
   pinned: boolean;
   archived: boolean;
   live: Parameters<typeof chatStatus>[1];
+  /** What the person's desktop reports for this chat (GET /v1/chat-status). */
+  server?: ServerChatStatus;
+  /** The server answered with statuses (so the "moved recently" guess is off). */
+  serverKnown?: boolean;
   onOpen: () => void;
   onCommand: (command: RowCommand) => void;
   onRename: (title: string) => void;
@@ -119,7 +125,7 @@ export function ChatRow({
     setRenaming(true);
   };
   const name = title || chatTitle(card.title, card.summary, card.harness);
-  const status: ChatStatus | null = chatStatus(card.last_active_at, live);
+  const status: ChatStatus | null = chatStatus(card.last_active_at, live, undefined, server, serverKnown, active);
   const draft = !active && hasDraft(card.session_id);
   const items: MenuItem[] = [
     { command: "pin", label: pinned ? "Unpin" : "Pin", icon: pinned ? PinOff : Pin },
@@ -164,7 +170,7 @@ export function ChatRow({
         </form>
       ) : (
         <button
-          className={`conversation-card ${active ? "is-active" : ""}`}
+          className={`conversation-card ${active ? "is-active" : ""} ${status?.dot === "unread" ? "is-unread" : ""}`}
           aria-current={active ? "true" : undefined}
           onClick={onOpen}
           onKeyDown={(e) => {
@@ -176,6 +182,9 @@ export function ChatRow({
         >
           <span>
             <strong>
+              {status?.dot && (
+                <span className={`chat-dot is-${status.dot}`} role="img" aria-label={status.label} title={status.label} />
+              )}
               {pinned && <Pin size={11} className="conversation-pin" aria-label="Pinned" />}
               {name}
             </strong>
@@ -189,7 +198,7 @@ export function ChatRow({
           <small>
             <span>
               {agentName(card.harness)}
-              {status && <em className={`chat-status is-${status.tone}`}>{status.label}</em>}
+              {status && !status.dot && <em className={`chat-status is-${status.tone}`}>{status.label}</em>}
             </span>
             <time dateTime={card.last_active_at}>{formatRelative(card.last_active_at)}</time>
           </small>
