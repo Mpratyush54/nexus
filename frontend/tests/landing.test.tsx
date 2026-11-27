@@ -186,3 +186,247 @@ test('the Control tab shows the desktop review panel with its own caption', () =
   assert.match(panel, /shots\/desk-review-1456\.png/)
   assert.match(panel, /Nexus for Windows <span aria-hidden="true">·<\/span> Review changes/)
 })
+
+/* ---------- ambient background (src/landing/ambient.ts) ---------- */
+
+type Listener = (e: unknown) => void
+function fakeTarget() {
+  const on = new Map<string, Set<Listener>>()
+  return {
+    addEventListener: (t: string, f: Listener) => {
+      if (!on.has(t)) on.set(t, new Set())
+      on.get(t)!.add(f)
+    },
+    removeEventListener: (t: string, f: Listener) => void on.get(t)?.delete(f),
+    emit: (t: string, e: unknown = {}) => on.get(t)?.forEach((f) => f(e)),
+    count: (t: string) => on.get(t)?.size ?? 0,
+  }
+}
+
+type R = [number, number, number, number] // left, top, right, bottom in the viewport
+const rect = ([l, t, r, b]: R) => ({ getBoundingClientRect: () => ({ left: l, top: t, right: r, bottom: b, width: r - l, height: b - t }) })
+// The hero's text boxes as a browser lays them out: pill, headline, lede, buttons, note; then the pipeline's top.
+const DESK = { hero: [0, 64, 1440, 2000] as R, texts: [[530, 137, 910, 171], [349, 195, 1094, 440], [470, 460, 970, 550], [478, 581, 962, 629], [586, 645, 855, 667]] as R[], flow: 724 }
+const PHONE = { hero: [0, 65, 375, 2400] as R, texts: [[16, 93, 359, 127], [16, 148, 359, 262], [16, 278, 359, 380], [16, 408, 359, 514], [16, 530, 280, 548]] as R[], flow: 591 }
+
+/** Just enough of a browser for ambient.ts: a hero to measure, a 2D context that records its text, a frame queue, an observer. */
+function fakeBrowser({ reduce = false, cores = 8, memory = 8, page = DESK } = {}) {
+  const frames = new Map<number, (now: number) => void>()
+  let id = 0
+  let now = 0
+  let io: { cb: (e: { isIntersecting: boolean }[]) => void; observed: unknown[] } | null = null
+  const texts: string[] = []
+  const ctx = new Proxy({} as Record<string | symbol, unknown>, {
+    get: (o, k) =>
+      k in o ? o[k]
+      : k === 'measureText' ? (s: string) => ({ width: s.length * 6.3 })
+      : k === 'fillText' ? (s: string) => void texts.push(s)
+      : k === 'createLinearGradient' || k === 'createRadialGradient' ? () => ({ addColorStop() {} })
+      : () => undefined,
+    set: (o, k, v) => {
+      o[k] = v
+      return true
+    },
+  })
+  const canvas = {
+    attrs: {} as Record<string, string>,
+    className: '',
+    width: 0,
+    height: 0,
+    style: {} as Record<string, string>,
+    removed: false,
+    setAttribute(k: string, v: string) {
+      this.attrs[k] = v
+    },
+    getContext: () => ctx,
+    remove() {
+      this.removed = true
+    },
+  }
+  const classes = new Set<string>()
+  const host = {
+    classList: {
+      add: (...c: string[]) => c.forEach((x) => classes.add(x)),
+      remove: (...c: string[]) => c.forEach((x) => classes.delete(x)),
+      toggle: (c: string, on: boolean) => void (on ? classes.add(c) : classes.delete(c)),
+    },
+  }
+  const hero = {
+    ...rect(page.hero),
+    clientWidth: page.hero[2] - page.hero[0],
+    children: [] as unknown[],
+    appendChild(c: unknown) {
+      this.children.push(c)
+    },
+  }
+  const doc = {
+    ...fakeTarget(),
+    visibilityState: 'visible',
+    createElement: () => canvas,
+    querySelector: (s: string) => (s === '.nx-hero' ? hero : s === '.nx-flow' ? rect([0, page.flow, 100, page.flow + 100]) : null),
+    querySelectorAll: (s: string) => (s === '.nx-hero-copy > *' ? page.texts.map(rect) : []),
+  }
+  const win = {
+    ...fakeTarget(),
+    innerWidth: page.hero[2],
+    innerHeight: 900,
+    devicePixelRatio: 3,
+    navigator: { hardwareConcurrency: cores, deviceMemory: memory },
+    matchMedia: (q: string) => ({ matches: q.includes('reduce') ? reduce : false, ...fakeTarget() }),
+    requestAnimationFrame: (f: (now: number) => void) => {
+      frames.set(++id, f)
+      return id
+    },
+    cancelAnimationFrame: (i: number) => void frames.delete(i),
+    IntersectionObserver: class {
+      constructor(cb: (e: { isIntersecting: boolean }[]) => void) {
+        io = { cb, observed: [] }
+      }
+      observe(el: unknown) {
+        io!.observed.push(el)
+      }
+      disconnect() {}
+    },
+  }
+  /** Run animation frames for `ms` of wall time at 60 Hz. */
+  const run = (ms: number) => {
+    for (const end = now + ms; now < end; ) {
+      now += 1000 / 60
+      const due = [...frames.values()]
+      frames.clear()
+      for (const f of due) f(now)
+    }
+  }
+  return { win, doc, host, hero, canvas, classes, texts, run, pending: () => frames.size, intersect: (v: boolean) => io!.cb([{ isIntersecting: v }]), io: () => io }
+}
+
+async function ambientIn(b: ReturnType<typeof fakeBrowser>, start?: number) {
+  const { startAmbient } = await import('../src/landing/ambient')
+  return startAmbient(b.host as unknown as HTMLElement, { win: b.win as never, doc: b.doc as never, start })
+}
+
+test('the ambient layer is prerendered as decoration only: aria-hidden, no pointer events, fixed behind the page', () => {
+  assert.match(html, /<div class="nx"><div class="nx-ambient" aria-hidden="true"><\/div>/)
+  const css = read('src', 'landing', 'site.css')
+  const rule = css.match(/\.nx-ambient \{[^}]*\}/)?.[0] ?? ''
+  assert.match(rule, /position: fixed;/)
+  assert.match(rule, /z-index: -1;/)
+  assert.match(rule, /pointer-events: none;/)
+  // The scene sits behind the hero's text and takes no pointer events either.
+  const scene = css.match(/\.nx-scene \{[^}]*\}/)?.[0] ?? ''
+  assert.match(scene, /z-index: -1;/)
+  assert.match(scene, /pointer-events: none;/)
+  // No-JS fallback: a still CSS lattice the scene replaces.
+  assert.match(css, /\.nx-ambient::before \{/)
+  assert.match(css, /\.nx-ambient\.is-live::before \{ opacity: 0; \}/)
+  // Loaded lazily, after the page has loaded, as its own chunk.
+  const client = read('src', 'landing', 'client.ts')
+  assert.match(client, /import\('\.\/ambient'\)/)
+  assert.ok(!/^import .*ambient/m.test(client), 'ambient.ts must not be in the first chunk')
+})
+
+test('ambient: the scene is drawn into the hero, aria-hidden, sized to the hero above the pipeline and capped at 2x', async () => {
+  const b = fakeBrowser()
+  const amb = await ambientIn(b)
+  assert.deepEqual(b.hero.children, [b.canvas])
+  assert.equal(b.canvas.attrs['aria-hidden'], 'true')
+  assert.equal(b.canvas.className, 'nx-scene')
+  assert.equal(b.canvas.style.width, '1440px')
+  assert.equal(b.canvas.style.height, `${DESK.flow - DESK.hero[1]}px`)
+  assert.equal(b.canvas.width, 1440 * 2)
+  assert.ok(b.classes.has('is-live'))
+  assert.equal(amb.mode(), 'live')
+  assert.equal(amb.layout(), 'cards', 'wide screens get the cards round the headline')
+  amb.stop()
+  assert.ok(b.canvas.removed)
+  assert.equal(b.win.count('resize'), 0)
+  assert.equal(b.doc.count('visibilitychange'), 0)
+})
+
+test('ambient: the story uses the page’s own words and gives every agent both roles', async () => {
+  const { STORIES, AGENTS: SCENE_AGENTS } = await import('../src/landing/ambient')
+  assert.deepEqual(SCENE_AGENTS.map((a) => a.name), AGENTS.map((a) => a.name))
+  assert.equal(new Set(STORIES.map((s) => s.a)).size, AGENTS.length)
+  assert.equal(new Set(STORIES.map((s) => s.b)).size, AGENTS.length)
+  for (const s of STORIES) assert.notEqual(s.a, s.b)
+  assert.ok(STORIES.some((s) => s.secret), 'one story redacts a secret')
+  assert.ok(STORIES.some((s) => s.undo), 'one story undoes a change')
+  // Played live through all six stories, every agent shows up on screen.
+  const b = fakeBrowser()
+  const amb = await ambientIn(b)
+  b.run(16_000 * 6)
+  for (const a of AGENTS) assert.ok(b.texts.includes(a.name), `${a.name} never appeared`)
+  for (const s of ['context loaded', 'shared memory', 'why', 'Decision', 'change undone', '↳ secret redacted']) assert.ok(b.texts.includes(s), `missing "${s}"`)
+  assert.ok(!b.texts.includes('key is sk_live_51HqX9, use .env') || b.texts.some((t) => t.includes('•')), 'the key is masked once captured')
+  amb.stop()
+})
+
+test('ambient: with reduced motion it draws one still frame of the whole story and never animates', async () => {
+  const b = fakeBrowser({ reduce: true })
+  const amb = await ambientIn(b)
+  assert.equal(amb.mode(), 'static')
+  assert.equal(amb.frames(), 1)
+  assert.equal(amb.running(), false)
+  assert.equal(b.pending(), 0, 'no animation frame requested')
+  // The chat, the saved decision, the next agent with context loaded, and the line's why.
+  for (const s of ['Claude Code', 'cap retries at 3, backoff 2s', 'retries capped at 3', 'Codex', 'context loaded', ' · from Claude Code', 'why']) {
+    assert.ok(b.texts.includes(s), `still frame lacks "${s}"`)
+  }
+  b.run(2000)
+  assert.equal(amb.frames(), 1)
+  amb.stop()
+})
+
+test('ambient: about 30 fps, paused while the tab is hidden or the hero is off screen', async () => {
+  const b = fakeBrowser()
+  const amb = await ambientIn(b)
+  assert.ok(amb.running())
+  let f0 = amb.frames()
+  b.run(1000)
+  const fps = amb.frames() - f0
+  assert.ok(fps >= 28 && fps <= 31, `${fps} frames in a second`)
+
+  b.doc.visibilityState = 'hidden'
+  b.doc.emit('visibilitychange')
+  assert.equal(amb.running(), false)
+  f0 = amb.frames()
+  const t0 = amb.time()
+  b.run(1000)
+  assert.equal(amb.frames(), f0, 'drew while the tab was hidden')
+  assert.equal(amb.time(), t0, 'the story moved on while nobody watched')
+  b.doc.visibilityState = 'visible'
+  b.doc.emit('visibilitychange')
+  assert.ok(amb.running())
+
+  assert.deepEqual(b.io()!.observed, [b.canvas])
+  b.intersect(false)
+  assert.equal(amb.running(), false)
+  assert.ok(b.classes.has('is-past'), 'the lattice comes back below the hero')
+  f0 = amb.frames()
+  b.run(500)
+  assert.equal(amb.frames(), f0, 'drew while off screen')
+  b.intersect(true)
+  assert.ok(amb.running())
+  assert.ok(!b.classes.has('is-past'))
+  amb.stop()
+  assert.equal(amb.running(), false)
+})
+
+test('ambient: phones get one strip under the buttons, and low-power devices draw at 1.5x', async () => {
+  const { isLowPower } = await import('../src/landing/ambient')
+  assert.ok(isLowPower({ hardwareConcurrency: 4 }))
+  assert.ok(isLowPower({ hardwareConcurrency: 8, deviceMemory: 4 }))
+  assert.ok(!isLowPower({ hardwareConcurrency: 8, deviceMemory: 8 }))
+  const b = fakeBrowser({ cores: 4, page: PHONE })
+  const amb = await ambientIn(b, 8)
+  assert.equal(amb.layout(), 'strip')
+  assert.equal(b.canvas.width, Math.round(375 * 1.5))
+  b.run(500)
+  assert.ok(b.texts.includes('Nexus') && b.texts.includes(' · context loaded'), 'the strip tells the same story')
+  amb.stop()
+  // No room under the buttons: nothing at all rather than over the text.
+  const tight = fakeBrowser({ page: { ...PHONE, flow: 556 } })
+  const none = await ambientIn(tight)
+  assert.equal(none.layout(), 'none')
+  none.stop()
+})

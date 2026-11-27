@@ -409,6 +409,8 @@ const NAV = [
 export function LandingPage() {
   return (
     <div className="nx">
+      {/* The living background (src/landing/ambient.ts): fixed behind everything, decoration only. */}
+      <div className="nx-ambient" aria-hidden="true" />
       <a className="nx-skip" href="#main">Skip to content</a>
       <header className="nx-nav">
         <div className="nx-wrap nx-nav-in">

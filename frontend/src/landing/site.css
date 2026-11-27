@@ -112,6 +112,8 @@ html.nx-app #root > .nx { display: none; }
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow-x: clip;
+  /* Its own stacking context, so the ambient layer (z-index -1) sits above the page background and below everything else. */
+  isolation: isolate;
 }
 .nx *, .nx *::before, .nx *::after { box-sizing: border-box; }
 /* Resets use :where() so component classes always win. */
@@ -148,6 +150,36 @@ html.nx-app #root > .nx { display: none; }
 .nx :where(h2) { font-size: clamp(32px, 4.2vw, 54px); line-height: 1.04; max-width: 20ch; }
 .nx :where(h3) { font: 600 17px/1.35 var(--f-body); letter-spacing: -0.01em; }
 .nx-lede { font-size: 18px; color: var(--nx-ink-2); max-width: 58ch; text-wrap: pretty; }
+
+/* ---------- ambient background (src/landing/ambient.ts) ---------- */
+
+/* The fixed layer behind the whole page. Without JS (or until the hero scene
+   starts) a still lattice of faint points at the sides stands in; it fades
+   while the scene plays and comes back, fainter, once the hero is scrolled
+   away. The large viewport height keeps it covering the screen while a
+   phone's toolbar hides. */
+.nx-ambient {
+  position: fixed; left: 0; top: 0; z-index: -1; width: 100%; height: 100vh; height: 100lvh;
+  pointer-events: none; overflow: hidden;
+}
+.nx-ambient::before {
+  content: ''; position: absolute; inset: 0;
+  background: radial-gradient(circle, rgb(236 235 230 / 0.16) 0 1px, transparent 1.5px) 0 0 / 72px 72px;
+  -webkit-mask-image: linear-gradient(90deg, #000, transparent 26%, transparent 74%, #000), linear-gradient(#000, transparent 85%);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(90deg, #000, transparent 26%, transparent 74%, #000), linear-gradient(#000, transparent 85%);
+  mask-composite: intersect;
+  transition: opacity 1.6s var(--ease);
+}
+.nx-ambient.is-live::before { opacity: 0; }
+.nx-ambient.is-live.is-past::before { opacity: 0.5; }
+/* The scene itself: Nexus at work round the headline, drawn into the hero so it scrolls with the text. */
+.nx-scene { position: absolute; left: 0; top: 0; z-index: -1; pointer-events: none; animation: nx-scene-in 1.6s var(--ease) both; }
+@keyframes nx-scene-in { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .nx-ambient::before { transition: none; }
+  .nx-scene { animation: none; }
+}
 
 /* ---------- buttons ---------- */
 
