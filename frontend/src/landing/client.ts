@@ -1,83 +1,51 @@
+import { detectOS, type NavigatorLike } from './os'
+
 /*
  * The only script the landing page runs. No React: the markup is prerendered.
- * Theme toggle, the annotated-file demo, the sticky nav rule, the film loop
- * and the film player.
+ * The OS-aware downloads, the feature tabs, the sticky nav rule, scroll
+ * reveals, the film loop and the film player. The page is dark only, so there is no theme code.
  */
 
-const THEME_KEY = 'nx-theme'
-
-function systemDark() {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches
+/** Offer the download that fits this visitor (src/landing/os.ts); CSS swaps the buttons. */
+function initOS() {
+  document.documentElement.dataset.os = detectOS(navigator as Navigator & NavigatorLike)
 }
 
-function currentTheme(): 'light' | 'dark' {
-  const set = document.documentElement.dataset.theme
-  if (set === 'light' || set === 'dark') return set
-  return systemDark() ? 'dark' : 'light'
-}
-
-function applyThemeColor() {
-  // Only override the system-based pair once the visitor has picked a theme.
-  if (!document.documentElement.dataset.theme) return
-  const color = currentTheme() === 'dark' ? '#0e100f' : '#f4f5f2'
-  document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]').forEach((m) => (m.content = color))
-}
-
-function initTheme() {
-  const btn = document.querySelector<HTMLButtonElement>('[data-theme-toggle]')
-  if (!btn) return
-  const label = () => {
-    const next = currentTheme() === 'dark' ? 'light' : 'dark'
-    btn.setAttribute('aria-label', `Switch to ${next} theme`)
-  }
-  label()
-  btn.addEventListener('click', () => {
-    const next = currentTheme() === 'dark' ? 'light' : 'dark'
-    document.documentElement.dataset.theme = next
-    try {
-      localStorage.setItem(THEME_KEY, next)
-    } catch {
-      /* storage unavailable: theme still applies for this visit */
-    }
-    label()
-    applyThemeColor()
-  })
-}
-
-function initWhy() {
-  const lines = Array.from(document.querySelectorAll<HTMLButtonElement>('.nx-why-line'))
-  const note = document.querySelector<HTMLElement>('.nx-why-note')
-  if (!lines.length || !note) return
-  const field = (name: string) => note.querySelector<HTMLElement>(`[data-why-field="${name}"]`)
-  const select = (btn: HTMLButtonElement) => {
-    lines.forEach((l) => {
-      l.setAttribute('aria-pressed', String(l === btn))
-      l.tabIndex = l === btn ? 0 : -1
+/**
+ * The feature tabs: an ARIA tablist with roving focus (arrows, Home, End).
+ * All panels share one grid cell (see .nx-js in site.css), so switching never
+ * moves the page; without JS every panel simply shows in order.
+ */
+function initTabs() {
+  const tabs = Array.from(document.querySelectorAll<HTMLButtonElement>('.nx-tab'))
+  if (!tabs.length) return
+  const select = (tab: HTMLButtonElement, focus = false) => {
+    tabs.forEach((t) => {
+      const on = t === tab
+      t.setAttribute('aria-selected', String(on))
+      t.tabIndex = on ? 0 : -1
+      const panel = document.getElementById(t.getAttribute('aria-controls') ?? '')
+      panel?.classList.toggle('is-active', on)
+      if (panel) panel.inert = !on
     })
-    const d = btn.dataset
-    const set = (name: string, value?: string) => {
-      const el = field(name)
-      if (el && value != null) el.textContent = value
-    }
-    set('line', d.line)
-    set('agent-name', d.agentName)
-    set('session', d.session)
-    set('when', d.when)
-    set('why', d.why)
-    const agent = field('agent')
-    if (agent && d.agent) agent.dataset.agent = d.agent
+    if (focus) tab.focus()
   }
-  lines.forEach((btn, i) => {
-    btn.addEventListener('click', () => select(btn))
-    btn.addEventListener('keydown', (e) => {
-      const step = e.key === 'ArrowDown' ? 1 : e.key === 'ArrowUp' ? -1 : 0
-      if (!step) return
+  tabs.forEach((tab, i) => {
+    tab.addEventListener('click', () => select(tab))
+    tab.addEventListener('keydown', (e) => {
+      const last = tabs.length - 1
+      const next =
+        e.key === 'ArrowRight' ? (i === last ? 0 : i + 1)
+        : e.key === 'ArrowLeft' ? (i === 0 ? last : i - 1)
+        : e.key === 'Home' ? 0
+        : e.key === 'End' ? last
+        : -1
+      if (next < 0) return
       e.preventDefault()
-      const next = lines[(i + step + lines.length) % lines.length]
-      next.focus()
-      select(next)
+      select(tabs[next], true)
     })
   })
+  select(tabs.find((t) => t.getAttribute('aria-selected') === 'true') ?? tabs[0])
 }
 
 function initNav() {
@@ -102,7 +70,7 @@ const quiet = () =>
  */
 function initReveal() {
   if (quiet() || !('IntersectionObserver' in window)) return
-  const items = Array.from(document.querySelectorAll<HTMLElement>('.nx-split-grid > .nx-shot, .nx-split-grid .nx-points li'))
+  const items = Array.from(document.querySelectorAll<HTMLElement>('.nx-panels, .nx-more-grid > *, .nx-more-list li'))
   if (!items.length) return
   document.documentElement.classList.add('nx-reveal-on')
   items.forEach((el) => {
@@ -251,9 +219,8 @@ function initPlayer() {
 }
 
 export function initLanding() {
-  initTheme()
-  applyThemeColor()
-  initWhy()
+  initOS()
+  initTabs()
   initNav()
   initReveal()
   initFilmLoop()

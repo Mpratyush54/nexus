@@ -1,4 +1,26 @@
-import { ArrowRight, ChevronDown, Download, Maximize, Menu, Minimize, Moon, MousePointerClick, Pause, Play, Sun, Volume2, VolumeX, X } from 'lucide-react'
+import {
+  ArrowRight,
+  Check,
+  ChevronDown,
+  Download,
+  Feather,
+  Gauge,
+  History,
+  Maximize,
+  Menu,
+  Minimize,
+  MousePointerClick,
+  Pause,
+  Play,
+  Plug,
+  ShieldCheck,
+  Smartphone,
+  Sparkles,
+  Users,
+  Volume2,
+  VolumeX,
+  X,
+} from 'lucide-react'
 import type { CSSProperties, ReactNode } from 'react'
 import {
   AGENTS,
@@ -11,7 +33,6 @@ import {
   SIGN_IN_PATH,
   SIGN_UP_PATH,
   WEB_APP_PATH,
-  type AgentId,
 } from './content'
 import { SiteFooter } from './SiteFooter'
 
@@ -19,180 +40,180 @@ import { SiteFooter } from './SiteFooter'
  * The public landing page. Rendered to static HTML at build time
  * (scripts/prerender.tsx); the browser only runs src/landing/client.ts,
  * never React, so everything here must work as plain markup.
+ *
+ * One story: every coding agent in one app, with one shared memory.
+ * Hero with the "how it works" pipeline → tabbed showcase (Chat, Control,
+ * Memory, Live) → film and the rest → FAQ and download. Dark only (DESIGN.md).
  */
 
-const agentName = (id: AgentId) => AGENTS.find((a) => a.id === id)?.name ?? id
+/* ---------- OS-aware downloads ---------- */
 
-function AgentTag({ id, short = false }: { id: AgentId; short?: boolean }) {
+// Each variant carries data-for; CSS shows the ones matching <html data-os>
+// (set by client.ts from src/landing/os.ts). Without JS the Windows set shows.
+function DownloadCta({ size = 'lg' }: { size?: 'lg' | 'sm' }) {
+  const sm = size === 'sm'
+  const cls = `nx-btn nx-btn-primary nx-cta-dl${sm ? ' nx-btn-sm' : ''}`
+  const icon = <Download size={sm ? 15 : 17} aria-hidden="true" />
   return (
-    <span className="nx-agent" data-agent={id}>
-      <span className="nx-agent-dot" aria-hidden="true" />
-      {short ? agentName(id).split(' ')[0] : agentName(id)}
-    </span>
+    <>
+      <a className={cls} data-for="win" href={DOWNLOAD_URL} aria-label={sm ? 'Download Nexus for Windows' : undefined}>
+        {icon} {sm ? 'Download' : 'Download for Windows'}
+      </a>
+      <a className={cls} data-for="mac" href={MAC_DOWNLOAD_URL} aria-label={sm ? 'Download the Nexus macOS beta' : undefined}>
+        {icon} {sm ? 'Download' : 'Download for Mac'}
+      </a>
+      <a className={`nx-btn nx-btn-primary nx-cta-dl${sm ? ' nx-btn-sm' : ''}`} data-for="mobile other" href={DEMO_PATH}>
+        <MousePointerClick size={sm ? 15 : 16} aria-hidden="true" /> {sm ? 'Live demo' : 'Try the live demo'}
+      </a>
+    </>
   )
 }
 
-/* ---------- hero: the annotated file ---------- */
-
-type Line = { code: string; agent: AgentId; session: string; when: string; why: string }
-
-const FILE: Line[] = [
-  { code: 'export async function getToken(session: Session) {', agent: 'codex', session: 'Split auth helpers', when: '3 weeks ago', why: 'Moved token lookup out of the API client so the desktop app and the CLI share one implementation.' },
-  { code: '  const token = await store.read(session.id)', agent: 'codex', session: 'Split auth helpers', when: '3 weeks ago', why: 'Reads from the shared credential store instead of each caller keeping its own copy.' },
-  { code: '  if (!token) return signIn(session)', agent: 'cursor', session: 'Handle signed-out users', when: '9 days ago', why: 'Send people without a stored token to sign-in instead of throwing an unhandled error.' },
-  { code: '  // Refresh early: long agent runs outlive tokens.', agent: 'claude', session: 'Stop 401 loops on long runs', when: '2 days ago', why: 'Explains the 60-second margin so the next agent doesn’t “simplify” it away.' },
-  { code: '  if (token.expiresAt - Date.now() < 60_000) {', agent: 'claude', session: 'Stop 401 loops on long runs', when: '2 days ago', why: 'Refresh 60 s before expiry. Agent runs that lasted longer than a token’s life were failing mid-task with 401s.' },
-  { code: '    return refresh(token, { retries: 2 })', agent: 'opencode', session: 'Retry refresh on flaky Wi-Fi', when: 'yesterday', why: 'Two retries on network errors: a single dropped request was signing people out.' },
-  { code: '  }', agent: 'claude', session: 'Stop 401 loops on long runs', when: '2 days ago', why: 'Closes the early-refresh branch.' },
-  { code: '  return token', agent: 'codex', session: 'Split auth helpers', when: '3 weeks ago', why: 'Valid tokens are returned unchanged.' },
-  { code: '}', agent: 'codex', session: 'Split auth helpers', when: '3 weeks ago', why: 'End of getToken.' },
-]
-const SELECTED = 4
-
-const KEYWORDS = /^(export|async|function|const|await|if|return)$/
-
-function highlight(code: string): ReactNode[] {
-  const out: ReactNode[] = []
-  const re = /(\/\/.*$)|('[^']*')|(\b\d[\d_]*\b)|(\b[A-Za-z_]\w*\b)|(\s+|.)/g
-  let m: RegExpExecArray | null
-  let i = 0
-  while ((m = re.exec(code))) {
-    const [t, comment, str, num, word] = m
-    if (comment) out.push(<span key={i++} className="t-c">{t}</span>)
-    else if (str) out.push(<span key={i++} className="t-s">{t}</span>)
-    else if (num) out.push(<span key={i++} className="t-n">{t}</span>)
-    else if (word && KEYWORDS.test(word)) out.push(<span key={i++} className="t-k">{t}</span>)
-    else if (word && /^[A-Z]/.test(word)) out.push(<span key={i++} className="t-t">{t}</span>)
-    else out.push(t)
-  }
-  return out
+function CtaGroup() {
+  return (
+    <>
+      <div className="nx-cta">
+        <DownloadCta />
+        <a className="nx-btn nx-btn-secondary" data-for="win mac" href={DEMO_PATH}>
+          <MousePointerClick size={16} aria-hidden="true" /> Try the live demo
+        </a>
+      </div>
+      <p className="nx-cta-note">
+        <span data-for="win">
+          Free plan <span aria-hidden="true">·</span> Also for <a href="#mac">Mac (beta)</a> and the <a href={WEB_APP_PATH}>web</a>
+        </span>
+        <span data-for="mac">
+          Free plan <span aria-hidden="true">·</span> Apple silicon beta, <a href="#mac">install notes</a> <span aria-hidden="true">·</span> Also
+          for <a href={DOWNLOAD_URL}>Windows</a>
+        </span>
+        <span data-for="mobile">
+          Nexus runs on your computer. Get it for <a href={DOWNLOAD_URL}>Windows</a> <span aria-hidden="true">·</span>{' '}
+          <a href={MAC_DOWNLOAD_URL}>Mac</a>
+        </span>
+        <span data-for="other">
+          Desktop app for <a href={DOWNLOAD_URL}>Windows</a> <span aria-hidden="true">·</span> <a href={MAC_DOWNLOAD_URL}>Mac (beta)</a>. The{' '}
+          <a href={WEB_APP_PATH}>web app</a> works everywhere.
+        </span>
+      </p>
+    </>
+  )
 }
 
-function WhyFile() {
-  const sel = FILE[SELECTED]
+/* ---------- how it works: agents → Nexus → what you get ---------- */
+
+const OUTCOMES = [
+  { icon: Sparkles, t: 'Your next chat starts with context', d: 'Any agent picks up what the last one decided.' },
+  { icon: History, t: 'Ask why a line changed', d: 'See the agent, the chat and the reason.' },
+  { icon: Smartphone, t: 'Follow along anywhere', d: 'The same chats live on your phone and the web.' },
+  { icon: Users, t: 'Hand off to a teammate', d: 'Share a chat with its full history.' },
+]
+
+const STAGES = [
+  { t: 'Captures every chat', d: 'From the app, a terminal or your editor' },
+  { t: 'Removes secrets', d: 'Keys and passwords never get saved' },
+  { t: 'Keeps one memory', d: 'Decisions, a project brief, line history' },
+]
+
+// Curves from each item to the middle of the column next to it. The SVG
+// stretches to the row height; item centres sit at (2i + 1) / 2n of it.
+function Wires({ n, side }: { n: number; side: 'in' | 'out' }) {
   return (
-    <figure className="nx-why" aria-label="Example: a source file annotated by Nexus with the agent session behind each line">
-      <div className="nx-why-bar">
-        <span className="nx-why-file">src/auth/token.ts</span>
-        <span className="nx-why-hint">Pick a line to see why</span>
-        <span className="nx-label-chip">Example</span>
+    <svg className={`nx-wires nx-wires-${side}`} viewBox="0 0 100 120" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+      {Array.from({ length: n }, (_, i) => {
+        const y = ((2 * i + 1) / (2 * n)) * 120
+        const d = side === 'in' ? `M0 ${y} C 55 ${y}, 45 60, 100 60` : `M0 60 C 55 60, 45 ${y}, 100 ${y}`
+        return (
+          <g key={i} style={{ '--i': i } as CSSProperties}>
+            <path className="nx-wire" d={d} />
+            <path className="nx-wire-flow" d={d} />
+          </g>
+        )
+      })}
+    </svg>
+  )
+}
+
+function Pipeline() {
+  return (
+    <figure className="nx-flow" aria-labelledby="flow-title">
+      <figcaption id="flow-title" className="nx-sr">
+        How Nexus works: chats from Claude Code, Codex, Cursor, OpenCode, Gemini and Kimi flow into Nexus, which captures them, removes
+        secrets and keeps one memory. Out of it: your next chat starts with context, any agent can ask why a line changed, you can follow
+        along on your phone or the web, and you can hand off to a teammate.
+      </figcaption>
+      <div className="nx-flow-col nx-flow-agents">
+        <p className="nx-flow-h">Your agents</p>
+        <ul>
+          {AGENTS.map((a) => (
+            <li key={a.id} className="nx-flow-agent" data-agent={a.id}>
+              <span className="nx-agent-dot" aria-hidden="true" />
+              {a.name}
+            </li>
+          ))}
+        </ul>
       </div>
-      <div className="nx-why-body">
-        <ol className="nx-why-code">
-          {FILE.map((line, n) => (
-            <li key={n}>
-              <button
-                type="button"
-                className="nx-why-line"
-                aria-pressed={n === SELECTED}
-                tabIndex={n === SELECTED ? 0 : -1}
-                data-agent={line.agent}
-                data-agent-name={agentName(line.agent)}
-                data-session={line.session}
-                data-when={line.when}
-                data-why={line.why}
-                data-line={n + 1}
-              >
-                <span className="nx-why-gutter" data-agent={line.agent}>
-                  <span className="nx-agent-dot" aria-hidden="true" />
-                  <span className="nx-why-who">{agentName(line.agent).split(' ')[0]}</span>
-                </span>
-                <span className="nx-why-num" aria-hidden="true">{n + 1}</span>
-                <code>{highlight(line.code)}</code>
-              </button>
+      <Wires n={AGENTS.length} side="in" />
+      <div className="nx-flow-core">
+        <div className="nx-flow-core-head">
+          <img src="/brand/nexus-app.svg" width="36" height="36" alt="" />
+          <span>Nexus</span>
+        </div>
+        <ol>
+          {STAGES.map((s, i) => (
+            <li key={s.t} style={{ '--i': i } as CSSProperties}>
+              <span className="nx-flow-step" aria-hidden="true">{i + 1}</span>
+              <span>
+                <strong>{s.t}</strong>
+                <small>{s.d}</small>
+              </span>
             </li>
           ))}
         </ol>
-        <aside className="nx-why-note" aria-live="polite">
-          <p className="nx-why-note-head">
-            <span className="nx-mono nx-why-call">why(token.ts:<span data-why-field="line">{SELECTED + 1}</span>)</span>
-            <span className="nx-why-note-agent" data-why-field="agent" data-agent={sel.agent}>
-              <span className="nx-agent-dot" aria-hidden="true" />
-              <span data-why-field="agent-name">{agentName(sel.agent)}</span>
-            </span>
-            <span className="nx-why-note-session">
-              “<span data-why-field="session">{sel.session}</span>” · <span data-why-field="when">{sel.when}</span>
-            </span>
-          </p>
-          <p className="nx-why-note-text" data-why-field="why">{sel.why}</p>
-          <p className="nx-why-note-foot nx-mono">Tied to the line itself, not its number, so it follows the code when it moves.</p>
-        </aside>
+      </div>
+      <Wires n={OUTCOMES.length} side="out" />
+      <div className="nx-flow-col nx-flow-out">
+        <p className="nx-flow-h">What you get</p>
+        <ul>
+          {OUTCOMES.map(({ icon: Icon, t, d }) => (
+            <li key={t}>
+              <Icon size={18} strokeWidth={1.75} aria-hidden="true" />
+              <span>
+                <strong>{t}</strong>
+                <small>{d}</small>
+              </span>
+            </li>
+          ))}
+        </ul>
       </div>
     </figure>
   )
 }
 
-/* ---------- shared bits ---------- */
-
-function Section({ id, label, title, lede, children, className = '', isNew = false }: { id: string; label: string; title: ReactNode; lede?: ReactNode; children?: ReactNode; className?: string; isNew?: boolean }) {
-  return (
-    <section id={id} className={`nx-section ${className}`} aria-labelledby={`${id}-title`}>
-      <div className="nx-wrap">
-        <header className="nx-section-head">
-          <p className="nx-label">
-            {label}
-            {isNew && <span className="nx-new-chip">New</span>}
-          </p>
-          <h2 id={`${id}-title`}>{title}</h2>
-          {lede && <p className="nx-lede">{lede}</p>}
-        </header>
-        {children}
-      </div>
-    </section>
-  )
-}
-
-function Points({ items }: { items: { t: string; d: ReactNode }[] }) {
-  return (
-    <ul className="nx-points">
-      {items.map((it) => (
-        <li key={it.t}>
-          <h3>{it.t}</h3>
-          <p>{it.d}</p>
-        </li>
-      ))}
-    </ul>
-  )
-}
-
 /* ---------- product screenshots ---------- */
 
-// Real captures of Nexus for Windows, signed in to a demo workspace with
-// fictional people and projects. Every shot is cropped from a full 1800x1080
-// window to the same 5:3 frame, so they line up wherever they appear: the main
-// pane for whole pages, a closer crop for dialogs and panels. Each ships as
-// AVIF and WebP at two widths, with a PNG fallback at the larger one.
-// `focus` is the object-position used when the frame narrows to 4:3 on phones.
-// `app` names where the shot comes from (Nexus for Windows unless set).
-type ShotSpec = { name: string; w: number; h: number; small: number; label: string; focus: string; alt: string; app?: string }
+// Real captures on demo data only (a fictional team; never real chats): the
+// web app's /demo in headless Chrome at 2x (3x for the phone), and the
+// desktop review panel at 2x.
+// Each ships as AVIF and WebP at its full size and at half, with a PNG
+// fallback; the page never shows one wider than half its pixel width.
+type ShotSpec = { name: string; w: number; h: number; label: string; alt: string; app?: string }
 
 const SHOTS = {
-  chat: { name: 'chat', w: 1400, h: 840, small: 800, label: 'Chat', focus: '50% 0%', alt: 'Nexus chat with Claude Code: the request to retry failed card captures, an expanded work log with a memory search, a file read, a code search, an Explore sub-agent with its steps and findings and an Open as a chat link, then the first edits to retry.ts.' },
-  timeline: { name: 'timeline', w: 1000, h: 600, small: 800, label: 'Timeline', focus: '0% 0%', alt: 'Nexus sidebar with search and a filter above captured chats from Claude Code, Cursor, Gemini and Codex, newest first, next to the All projects composer and activity counts.' },
-  memory: { name: 'memory', w: 1140, h: 684, small: 800, label: 'Memory', focus: '0% 0%', alt: 'Memory page for the checkout-service project: a project brief with key decisions (captures retry with backoff and full jitter, one Idempotency-Key per capture) and the chats they came from, search with filters for who can see each memory and topic, and the first of eight memories.' },
-  graph: { name: 'graph', w: 1400, h: 840, small: 800, label: 'Knowledge graph', focus: '0% 0%', alt: 'Nexus 3D memory graph: memories, chats and code files connected by links, with stale memories marked and a legend.' },
-  share: { name: 'share', w: 1260, h: 756, small: 800, label: 'Share chat', focus: '50% 50%', alt: 'Share chat dialog: share with a person or team, keep their access up to date, and a list of who has access with a Remove button.' },
-  usage: { name: 'usage', w: 1000, h: 600, small: 800, label: 'Settings · Usage', focus: '0% 0%', alt: 'Usage settings: tokens for today, the last 7 and the last 30 days, each split into input and output with an estimated cost, and a tokens-per-day chart.' },
-  // Agent-app features from 0.4.4 and 0.4.5, captured the same way on a demo
-  // profile with a scripted stand-in agent and sample projects.
-  running: { name: 'running', w: 1300, h: 780, small: 800, label: 'Chats running at once', focus: '0% 0%', alt: 'Nexus with three chats going at once: two still working, shown by a spinner in the chat list, one waiting for approval, shown by an amber dot, while the open chat streams its reply after thinking for 14 seconds.' },
-  approval: { name: 'approval', w: 1400, h: 840, small: 800, label: 'Approvals in the chat', focus: '30% 50%', alt: 'Claude Code asks to run npm test inside the chat, with Allow once, Deny, Allow for this chat and Always allow npm test commands in this project, and the permission mode list open: Ask every time, Auto-approve edits and Full access.' },
-  review: { name: 'review', w: 1400, h: 840, small: 800, label: 'Review changes', focus: '50% 40%', alt: 'Review changes after a reply: docs/retries.md added and src/retry.ts changed in three places, each file and each change with its own Undo and Keep buttons.' },
-  mention: { name: 'mention', w: 1150, h: 690, small: 800, label: 'Mentions', focus: '0% 30%', alt: 'Typing @order in the composer lists a matching file, three past chats and two project memories, including that order creation is idempotent on order_key.' },
-  weblive: { name: 'weblive', w: 1176, h: 706, small: 800, label: 'Live thinking', focus: '60% 40%', app: 'Nexus on the web', alt: 'The Nexus web app with Claude Code thinking live about a retry change while it reads, edits and tests src/payments/retry.ts, and the chat list marking the chats that are still running.' },
-  mcp: { name: 'mcp', w: 1180, h: 708, small: 800, label: 'Agents · Add a tool server', focus: '50% 30%', alt: 'Add a tool server: ready-made MCP servers for files, GitHub, a browser, web pages, library docs, a notes graph, step-by-step thinking and Git, or paste JSON.' },
-  redaction: { name: 'redaction', w: 1140, h: 684, small: 800, label: 'Chat · redacted paste', focus: '50% 0%', alt: 'A captured chat where a pasted .env file is stored with its keys replaced by [REDACTED].' },
+  chat: { name: 'web-chat', w: 1600, h: 1140, label: 'Chat', alt: 'A chat with Claude Code in Nexus: the question about reusing the order key, then the agent thinking live while it reads, edits and tests src/payments/retry.ts, with Esc to stop.' },
+  // The desktop app's review panel, captured from an isolated demo instance on
+  // a sandbox repo at 2x and stitched from a few scroll positions.
+  review: { name: 'desk-review', w: 1456, h: 1012, label: 'Review changes', app: 'Nexus for Windows', alt: 'Review changes in Nexus for Windows after a reply: two files changed, docs/retries.md added and src/retry.ts edited, each file and each change with its own Undo and Keep buttons, plus Undo all and Keep all, above the diffs.' },
+  memory: { name: 'web-memory', w: 1872, h: 1337, label: 'Memory', alt: 'The Memory page for the checkout-service project: twelve memories grouped by topic, starting with the project brief and the capture retry rules, each saved by an agent and editable.' },
+  phone: { name: 'web-phone', w: 1170, h: 2400, label: 'Phone', alt: 'The same chat on a phone: Claude Code thinking live and running its steps, with a reply box and a stop button.' },
 } satisfies Record<string, ShotSpec>
 
-const SPLIT_SIZES = '(min-width: 1240px) 700px, (min-width: 980px) 56vw, calc(100vw - 32px)'
-
-function Shot({ s, sizes = SPLIT_SIZES, className = '' }: { s: ShotSpec; sizes?: string; className?: string }) {
+function Shot({ s, sizes, className = '' }: { s: ShotSpec; sizes: string; className?: string }) {
   const base = `/landing/shots/${s.name}`
-  const widths = s.small === s.w ? [s.w] : [s.small, s.w]
-  const set = (ext: string) => widths.map((w) => `${base}-${w}.${ext} ${w}w`).join(', ')
+  const half = Math.round(s.w / 2)
+  const set = (ext: string) => `${base}-${half}.${ext} ${half}w, ${base}-${s.w}.${ext} ${s.w}w`
   return (
-    <figure className={`nx-shot ${className}`} style={{ '--focus': s.focus } as CSSProperties}>
-      {/* Tapping a shot opens the full-size image, which phones can pinch-zoom. */}
+    <figure className={`nx-shot ${className}`} style={{ '--ratio': `${s.w} / ${s.h}`, '--max': `${half}px` } as CSSProperties}>
+      {/* Opens the full-size capture, which phones can pinch-zoom. */}
       <a className="nx-shot-win" href={`${base}-${s.w}.png`} target="_blank" rel="noopener">
         <picture>
           <source type="image/avif" srcSet={set('avif')} sizes={sizes} />
@@ -202,10 +223,127 @@ function Shot({ s, sizes = SPLIT_SIZES, className = '' }: { s: ShotSpec; sizes?:
       </a>
       <figcaption className="nx-shot-cap">
         <img src="/brand/nexus-app.svg" width="14" height="14" alt="" />
-        {s.app ?? 'Nexus for Windows'} <span aria-hidden="true">·</span> {s.label}
-        <span className="nx-shot-zoom" aria-hidden="true">Tap to enlarge</span>
+        <span>
+          {s.app ?? 'Nexus on the web'} <span aria-hidden="true">·</span> {s.label}
+        </span>
       </figcaption>
     </figure>
+  )
+}
+
+/* ---------- tabbed showcase (tabs wired up in client.ts) ---------- */
+
+const Kbd = ({ children }: { children: ReactNode }) => <kbd className="nx-kbd">{children}</kbd>
+const Code = ({ children }: { children: ReactNode }) => <code className="nx-inline-code">{children}</code>
+
+type Tab = { id: string; tab: string; title: string; points: ReactNode[]; shot: ShotSpec }
+
+const TABS: Tab[] = [
+  {
+    id: 'chat',
+    tab: 'Chat',
+    title: 'Pick any agent. Leave it running.',
+    shot: SHOTS.chat,
+    points: [
+      'Chats keep going in the background, several at once. You get a notification when one is done or needs you.',
+      'Approve commands right in the chat: once, for this chat, or always in this project.',
+      <>
+        <Kbd>@</Kbd> a file, chat or memory, <Kbd>/</Kbd> for commands, voice input, and <Kbd>Alt</Kbd>+<Kbd>Space</Kbd> to ask from
+        anywhere.
+      </>,
+    ],
+  },
+  {
+    id: 'control',
+    tab: 'Control',
+    title: 'Keep what’s good. Undo the rest.',
+    shot: SHOTS.review,
+    points: [
+      'After each reply, review every edit. Keep or undo a whole file or a single change.',
+      <>
+        Go back to any message, files included, or just type <Code>/rewind</Code>.
+      </>,
+      'Ask every time, approve edits automatically, or give full access. Trusted commands stop asking.',
+    ],
+  },
+  {
+    id: 'memory',
+    tab: 'Memory',
+    title: 'One memory for every agent.',
+    shot: SHOTS.memory,
+    points: [
+      'What each chat decided is saved as a memory any agent can search mid-task.',
+      'A short project brief that every agent reads first.',
+      'Memories are flagged when the code they describe changes, and every line keeps the chat behind it.',
+    ],
+  },
+  {
+    id: 'live',
+    tab: 'Live',
+    title: 'Watch it think, from anywhere.',
+    shot: SHOTS.phone,
+    points: [
+      'Replies stream in with the agent’s thinking and every step as it happens.',
+      'Open the web app on your phone and follow, or answer, the same chat.',
+      'Running chats are marked in the list, so you know what’s still going.',
+    ],
+  },
+]
+
+const SHOT_SIZES = '(min-width: 1288px) 760px, (min-width: 900px) 60vw, calc(100vw - 32px)'
+
+function Showcase() {
+  return (
+    <section id="features" className="nx-section nx-showcase" aria-labelledby="features-title">
+      <div className="nx-wrap">
+        <header className="nx-section-head nx-center">
+          <h2 id="features-title">Everything in one window.</h2>
+          <p className="nx-lede">Chat, check and undo, then pick up later, with every agent, on any screen.</p>
+        </header>
+        <div className="nx-tabs" role="tablist" aria-label="Features">
+          {TABS.map((t, i) => (
+            <button
+              key={t.id}
+              type="button"
+              role="tab"
+              id={`tab-${t.id}`}
+              className="nx-tab"
+              aria-selected={i === 0}
+              aria-controls={`panel-${t.id}`}
+              tabIndex={i === 0 ? 0 : -1}
+            >
+              {t.tab}
+            </button>
+          ))}
+        </div>
+        <div className="nx-panels">
+          {TABS.map((t, i) => (
+            <div
+              key={t.id}
+              id={`panel-${t.id}`}
+              role="tabpanel"
+              aria-labelledby={`tab-${t.id}`}
+              className={`nx-panel${i === 0 ? ' is-active' : ''}${t.id === 'live' ? ' nx-panel-phone' : ''}`}
+            >
+              <div className="nx-panel-copy">
+                <h3>{t.title}</h3>
+                <ul>
+                  {t.points.map((p, j) => (
+                    <li key={j}>
+                      <Check size={16} strokeWidth={2.25} aria-hidden="true" />
+                      <span>{p}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="nx-panel-visual">
+                <Shot s={t.shot} sizes={t.id === 'live' ? '300px' : SHOT_SIZES} className={t.id === 'live' ? 'nx-shot-phone' : t.id === 'control' ? 'nx-shot-whole' : ''} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
   )
 }
 
@@ -215,7 +353,7 @@ function FilmPlayer() {
   return (
     <dialog className="nx-player" data-player aria-label="Nexus product film">
       <div className="nx-player-stage" data-player-stage data-state="paused">
-        <video className="nx-player-video" data-player-video data-src="/landing/nexus-film-full.mp4" playsInline preload="none" poster="/landing/nexus-film-poster.jpg">
+        <video className="nx-player-video" data-player-video data-src="/landing/nexus-film-full.mp4" playsInline preload="none" poster="/landing/nexus-film-poster-1920.jpg">
           {/* Music only, no narration: the track describes the sound. */}
           <track kind="captions" srcLang="en" label="English" src="/landing/nexus-film.en.vtt" default />
         </video>
@@ -248,13 +386,22 @@ function FilmPlayer() {
   )
 }
 
-const TOOLS = [
-  { name: 'memory_search', sig: '(query)', d: 'Find decisions, conventions and facts by meaning, not just exact words.' },
-  { name: 'project_knowledge', sig: '()', d: 'The project brief and the memories an agent should read before it starts.' },
-  { name: 'related_to', sig: '(file | memory)', d: 'Memories, sessions and files linked to the thing you are touching.' },
-  { name: 'file_history', sig: '(path)', d: 'Every session that changed a file, newest first, with its summary.' },
-  { name: 'why', sig: '(path, line)', d: 'The session and the reasoning behind one line of code.' },
-  { name: 'line_history', sig: '(path, line)', d: 'Each change to a line over time, even after the line has moved.' },
+const MORE = [
+  { icon: Users, t: 'Built for teams', d: 'Share chats, group projects, take access back.' },
+  { icon: ShieldCheck, t: 'Private by default', d: 'Secrets redacted; your memory stays yours.' },
+  { icon: Plug, t: 'Agents set up in one place', d: 'Rules files and tool servers, no JSON.' },
+  { icon: Gauge, t: 'See what each agent costs', d: 'Tokens and cost per chat, agent and model.' },
+  { icon: Feather, t: 'Native and light', d: 'WinUI 3, not Electron. Starts fast.' },
+  { icon: Smartphone, t: 'Works on your phone', d: 'The web app has the same chats.' },
+]
+
+const POSTER_SET = (ext: string) => `/landing/nexus-film-poster-960.${ext} 960w, /landing/nexus-film-poster-1920.${ext} 1920w`
+const POSTER_SIZES = '(min-width: 1288px) 640px, (min-width: 980px) 52vw, calc(100vw - 32px)'
+
+const NAV = [
+  { href: '#how', label: 'How it works' },
+  { href: '#features', label: 'Features' },
+  { href: '#faq', label: 'FAQ' },
 ]
 
 /* ---------- page ---------- */
@@ -270,32 +417,20 @@ export function LandingPage() {
             <span>Nexus</span>
           </a>
           <nav className="nx-nav-links" aria-label="Main">
-            <a href="#chat">Product</a>
-            <a href="#work">What&rsquo;s new</a>
-            <a href="#memory">Memory</a>
-            <a href="#teams">Teams</a>
-            <a href="#privacy">Privacy</a>
-            <a href="#faq">FAQ</a>
+            {NAV.map((l) => (
+              <a key={l.href} href={l.href}>{l.label}</a>
+            ))}
             <a href={DEMO_PATH}>Live demo</a>
           </nav>
           <div className="nx-nav-end">
-            <button type="button" className="nx-theme" data-theme-toggle aria-label="Switch colour theme">
-              <Sun className="i-sun" size={17} aria-hidden="true" />
-              <Moon className="i-moon" size={17} aria-hidden="true" />
-            </button>
             <a className="nx-nav-signin" href={SIGN_IN_PATH}>Sign in</a>
-            <a className="nx-btn nx-btn-primary nx-btn-sm" href={DOWNLOAD_URL} aria-label="Download Nexus for Windows">
-              <Download size={15} aria-hidden="true" /> Download
-            </a>
+            <DownloadCta size="sm" />
             <details className="nx-menu">
               <summary aria-label="Menu"><Menu size={18} aria-hidden="true" /></summary>
               <nav aria-label="Mobile">
-                <a href="#chat">Product</a>
-                <a href="#work">What&rsquo;s new</a>
-                <a href="#memory">Memory</a>
-                <a href="#teams">Teams</a>
-                <a href="#privacy">Privacy</a>
-                <a href="#faq">FAQ</a>
+                {NAV.map((l) => (
+                  <a key={l.href} href={l.href}>{l.label}</a>
+                ))}
                 <a href={DEMO_PATH}>Live demo</a>
                 <a href={SIGN_IN_PATH}>Sign in</a>
               </nav>
@@ -305,406 +440,95 @@ export function LandingPage() {
       </header>
 
       <main id="main">
-        <section className="nx-hero" aria-labelledby="hero-title">
-          <div className="nx-wrap nx-hero-grid">
+        <section id="how" className="nx-hero" aria-labelledby="hero-title">
+          <div className="nx-wrap">
             <div className="nx-hero-copy">
-              <a className="nx-new-pill" href="#work">
+              <a className="nx-new-pill" href="#features">
                 <span className="nx-new-pill-tag">New in {LATEST_VERSION}</span>
-                <span className="nx-new-pill-text">Review and undo every change, /rewind, and live thinking on the web</span>
+                <span className="nx-new-pill-text">Undo any change an agent makes</span>
                 <ArrowRight size={15} aria-hidden="true" />
               </a>
-              <p className="nx-label">Windows and macOS beta · free plan</p>
-              <h1 id="hero-title">One memory for every coding agent you use.</h1>
+              <h1 id="hero-title">Every coding agent in one app, with one shared memory.</h1>
               <p className="nx-hero-lede">
-                Nexus is a native desktop app and a cloud server. Chat with Claude Code, Codex, Cursor, OpenCode, Gemini and Kimi in one
-                place, let them keep working while you do something else, and give every agent the same project memory, down to why a
-                single line of code changed.
+                Chat with Claude Code, Codex and more in one place. They keep working while you’re away, and each starts from what
+                the last one learned.
               </p>
-              <div className="nx-hero-cta">
-                <a className="nx-btn nx-btn-primary nx-cta-download" href={DOWNLOAD_URL}>
-                  <Download size={17} aria-hidden="true" /> Download for Windows
-                </a>
-                <a className="nx-btn nx-btn-secondary nx-cta-demo" href={DEMO_PATH}>
-                  <MousePointerClick size={16} aria-hidden="true" /> Try the live demo
-                </a>
-                <p className="nx-hero-note">
-                  Beta for Windows x64, and a <a href="#mac">macOS beta</a> for Apple silicon. The demo runs in your browser on sample data, no account needed.{' '}
-                  <a href={WEB_APP_PATH}>Open the web app</a>
-                </p>
-              </div>
-              <ul className="nx-hero-agents" aria-label="Supported agents">
-                {AGENTS.map((a) => (
-                  <li key={a.id}><AgentTag id={a.id} /></li>
-                ))}
-              </ul>
+              <CtaGroup />
             </div>
-            <div className="nx-hero-demo">
-              <WhyFile />
-            </div>
+            <Pipeline />
           </div>
         </section>
 
-        <section id="film" className="nx-section nx-film-section" aria-labelledby="film-title">
-          <div className="nx-wrap">
-            <header className="nx-section-head nx-section-head-row">
-              <div>
-                <p className="nx-label">see it</p>
-                <h2 id="film-title">See Nexus at work.</h2>
-              </div>
-              <p className="nx-lede">From scattered agent chats to one shared record: the app, the memory and the handoff, shown end to end.</p>
-            </header>
+        <Showcase />
+
+        <section id="more" className="nx-section nx-more" aria-labelledby="more-title">
+          <div className="nx-wrap nx-more-grid">
             <figure className="nx-film" data-film>
-              <img className="nx-film-poster" src="/landing/nexus-film-poster.jpg" alt="" width="1600" height="900" loading="lazy" decoding="async" />
+              {/* A sharp frame from the film (1920x1080), served at 1x and 2x of its displayed size. */}
+              <picture>
+                <source type="image/avif" srcSet={POSTER_SET('avif')} sizes={POSTER_SIZES} />
+                <source type="image/webp" srcSet={POSTER_SET('webp')} sizes={POSTER_SIZES} />
+                <img className="nx-film-poster" src="/landing/nexus-film-poster-1920.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" />
+              </picture>
               {/* A silent 16 s cut loops here while in view (never with reduced motion or Save-Data). */}
               <video className="nx-film-loop" data-film-loop muted loop playsInline preload="none" aria-hidden="true" tabIndex={-1}>
                 <source data-src="/landing/nexus-film.webm" type="video/webm" />
                 <source data-src="/landing/nexus-film.mp4" type="video/mp4" />
               </video>
               <button type="button" className="nx-film-open" data-film-open aria-haspopup="dialog">
-                <span className="nx-film-disc" aria-hidden="true"><Play size={30} fill="currentColor" strokeWidth={0} /></span>
-                <span className="nx-film-cta">
-                  <span>Watch the film</span>
-                  <span className="nx-film-meta">{FILM_DURATION} · with music</span>
+                <span className="nx-film-badge">
+                  <span className="nx-film-disc" aria-hidden="true"><Play size={20} fill="currentColor" strokeWidth={0} /></span>
+                  <span className="nx-film-cta">
+                    <span>Watch the film</span>
+                    <span className="nx-film-meta">{FILM_DURATION} · with music</span>
+                  </span>
                 </span>
               </button>
               <figcaption className="nx-sr">Product film showing chat, memory, the knowledge graph and session handoff in Nexus.</figcaption>
             </figure>
+            <div className="nx-more-copy">
+              <h2 id="more-title">And everything around it.</h2>
+              <ul className="nx-more-list">
+                {MORE.map(({ icon: Icon, t, d }) => (
+                  <li key={t}>
+                    <Icon size={18} strokeWidth={1.75} aria-hidden="true" />
+                    <span>
+                      <strong>{t}</strong>
+                      <small>{d}</small>
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
           </div>
         </section>
 
-        <Section
-          id="chat"
-          label="chat"
-          title="Every agent, one window."
-          lede="Talk to the agent that fits the job without switching apps. Nexus runs each one on your machine and shows its work as it happens."
-          className="nx-split"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.chat} />
-            <Points
-              items={[
-                { t: 'Six agents, one composer', d: 'Claude Code, Codex, Cursor, OpenCode, Gemini and Kimi, with a model picker for each.' },
-                { t: 'Live work log', d: 'Replies stream in with every tool call: files read, edits with their diffs, commands and results.' },
-                { t: 'Sub-agent runs you can open', d: 'When an agent delegates, the sub-run gets its own log you can step into.' },
-                { t: 'File references open in the app', d: 'Click a path in a reply to read the file without leaving the chat.' },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="work"
-          label="keeps working"
-          isNew
-          title="Start the work, then walk away."
-          lede="Agents don’t stop when you look away. Leave a chat, start another, and come back when something needs you."
-          className="nx-split nx-split-flip"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.running} />
-            <Points
-              items={[
-                { t: 'Keeps running when you leave', d: 'Switch to another chat or another page and the reply carries on in the background.' },
-                { t: 'Several chats at once', d: 'Fix a bug in one chat while another writes tests. Each runs on its own.' },
-                { t: 'Status at a glance', d: 'A spinner means working, an amber dot means it’s waiting for you, and a dot marks a new reply.' },
-                { t: 'Told when it’s done', d: 'Nexus sends a notification when an agent finishes or needs an answer.' },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="control"
-          label="approvals"
-          isNew
-          title="You decide what runs. Once."
-          lede="Agents ask before they run commands or change files. Answer right in the chat, and tell Nexus what never needs asking again."
-          className="nx-split"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.approval} />
-            <Points
-              items={[
-                { t: 'Three permission modes', d: 'Ask every time, approve edits automatically, or give full access. Pick one per chat.' },
-                { t: 'Approve inside the chat', d: 'See exactly what the agent wants to do, then allow it once, for this chat, or deny it.' },
-                {
-                  t: '“Always allow” rules',
-                  d: (
-                    <>
-                      Trust a command like <code className="nx-inline-code">npm test</code> once and the project never asks about it again.
-                    </>
-                  ),
-                },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="undo"
-          label="safety net"
-          isNew
-          title="Keep what’s good. Undo the rest."
-          lede="Every reply that touches your files gets a checkpoint, so trying an idea never costs you your work."
-          className="nx-split nx-split-flip"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.review} />
-            <Points
-              items={[
-                { t: 'Review changes', d: 'See each edit the agent made and keep or undo it, a whole file or a single change at a time.' },
-                { t: 'Restore to before this message', d: 'Go back to any point in the chat. Your files go back with it, and you can undo the restore.' },
-                {
-                  t: 'Or just type /rewind',
-                  d: (
-                    <>
-                      <code className="nx-inline-code">/rewind</code> steps back one message from the keyboard.
-                    </>
-                  ),
-                },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="composer"
-          label="composer"
-          isNew
-          title="Point the agent at what it needs."
-          lede="Type @ to bring a file, an earlier chat or something the project already learned into the conversation. Memory is part of every message."
-          className="nx-split"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.mention} />
-            <Points
-              items={[
-                { t: '@ files, chats and memories', d: 'Mention a decision from last week and the agent starts from it instead of guessing.' },
-                {
-                  t: 'Commands and recall',
-                  d: (
-                    <>
-                      Type <kbd className="nx-kbd">/</kbd> for commands, or press <kbd className="nx-kbd">↑</kbd> to bring back your last message.
-                    </>
-                  ),
-                },
-                { t: 'A model for each chat', d: 'Pick the model in the composer. Each chat remembers its own.' },
-                { t: 'Talk instead of type', d: 'Voice input works on Windows, on a Mac and in the web app.' },
-                {
-                  t: 'Quick ask from anywhere',
-                  d: (
-                    <>
-                      Press <kbd className="nx-kbd">Alt</kbd>+<kbd className="nx-kbd">Space</kbd>, or <kbd className="nx-kbd">Option</kbd>+
-                      <kbd className="nx-kbd">Space</kbd> on a Mac, and ask without opening the app.
-                    </>
-                  ),
-                },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="anywhere"
-          label="live"
-          isNew
-          title="Watch it think, from your desk or your phone."
-          lede="Replies stream in as they’re written, with the agent’s thinking shown live. Open the web app on your phone and follow the same chat."
-          className="nx-split nx-split-flip"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.weblive} />
-            <Points
-              items={[
-                { t: 'Live thinking', d: 'Follow the agent’s reasoning while it works, then fold it away. “Thought for 14s” keeps it for later.' },
-                { t: 'Every step as it happens', d: 'Files read, edits and commands appear the moment the agent runs them.' },
-                { t: 'Same chats on the web', d: 'Start on the desktop, check in from a phone. Running chats are marked in the list.' },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="capture"
-          label="capture"
-          title="Every session, captured without asking."
-          lede="Nexus quietly saves chats from all six agents, including the ones you run in a terminal or another editor, into one timeline. Only from the folders you choose."
-          className="nx-split"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.timeline} />
-            <Points
-              items={[
-                { t: 'One searchable timeline', d: 'Fast full-text search across every agent and every project.' },
-                { t: 'Filters that match how you work', d: 'Narrow by project or by agent; open any session to read it in full.' },
-                { t: 'Light by design', d: 'Capture runs inside the desktop app. There is nothing to start by hand and no extra window to keep open.' },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="memory"
-          label="memory"
-          title="Memory your agents can actually use."
-          lede="Notes in a wiki don’t help an agent mid-task. Nexus gives every agent the same memory, which it can look things up in while it works, so a new session starts where the last one stopped."
-        >
-          <div className="nx-memory">
-            <dl className="nx-tools" aria-label="What your agents can ask Nexus">
-              {TOOLS.map((t) => (
-                <div key={t.name}>
-                  <dt><code>{t.name}<span>{t.sig}</span></code></dt>
-                  <dd>{t.d}</dd>
-                </div>
+        <section id="faq" className="nx-section nx-faq-section" aria-labelledby="faq-title">
+          <div className="nx-wrap nx-faq-grid">
+            <h2 id="faq-title">Questions</h2>
+            <div className="nx-faq">
+              {FAQ.map((f) => (
+                <details key={f.q}>
+                  <summary>
+                    <h3>{f.q}</h3>
+                    <ChevronDown size={18} aria-hidden="true" />
+                  </summary>
+                  <p>{f.a}</p>
+                </details>
               ))}
-            </dl>
-            <Points
-              items={[
-                { t: 'A project brief', d: 'A short, current summary of the project that agents read first.' },
-                { t: 'Staleness tracking', d: 'When the code a memory describes changes, the memory is flagged for review instead of silently going wrong.' },
-                { t: 'Instruction files in sync', d: 'CLAUDE.md, AGENTS.md and the other agent instruction files stay the same across every agent.' },
-                { t: 'Review and history', d: 'Approve, edit or retire memories, and see every version of each one.' },
-              ]}
-            />
-          </div>
-          <Shot s={SHOTS.memory} sizes="(min-width: 1240px) 1200px, calc(100vw - 32px)" className="nx-shot-wide" />
-        </Section>
-
-        <Section
-          id="why"
-          label="why"
-          title="Know which agent changed a line, and why."
-          lede="Nexus links memories, chats and files together, and keeps a history for every line of code that follows the line when it moves."
-        >
-          <div className="nx-why-grid">
-            <Shot s={SHOTS.graph} />
-            <Points
-              items={[
-                { t: 'Code links', d: 'Every memory and session is linked to the files it touched, so related_to can walk from a file to its decisions and back.' },
-                { t: 'A 3D knowledge graph', d: 'Explore the whole project in the app: zoom, search, focus on a node’s neighbours, and spot stale knowledge.' },
-                { t: 'Per-line why', d: 'line_history and why tell you the agent, the session and the reasoning behind any line, even after it has moved.' },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="install"
-          label="agent setup"
-          title="Set up every agent from one screen."
-          lede="Nexus finds the agents on your computer, connects them to your shared memory, and lets you change how each one works. No config files to edit by hand."
-          className="nx-split"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.mcp} />
-            <Points
-              items={[
-                { t: 'One click to connect', d: 'Only the agents installed on this machine are offered, and you can disconnect any of them from the same screen.' },
-                { t: 'Rules you can read and edit', d: 'Open CLAUDE.md, AGENTS.md and the other rule files, edit them, review the change, then save. A backup is kept.' },
-                { t: 'Tool servers without the JSON', d: 'Add an MCP server from a short list or paste its JSON, test it, and switch it on or off per agent.' },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="teams"
-          label="teams"
-          title="Hand over the work, not a transcript."
-          lede="Agent sessions are usually locked to one person and one machine. In Nexus they can move with the work."
-          className="nx-split nx-split-flip"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.share} />
-            <Points
-              items={[
-                { t: 'Share sessions', d: 'Give a teammate the full conversation, tool activity and saved changes.' },
-                { t: 'Teleport', d: 'Send a session to a teammate or to another of your machines and continue it there.' },
-                { t: 'Organisations', d: 'Group projects and people, with roles that decide who sees what.' },
-                { t: 'Grants you can take back', d: 'Every share is a grant. Revoke it and access ends.' },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="usage"
-          label="usage"
-          title="See what each agent costs."
-          lede="Tokens and cost are tracked per chat, per agent and per model, so you can tell which work is worth which model."
-          className="nx-split"
-        >
-          <div className="nx-split-grid">
-            <Shot s={SHOTS.usage} />
-            <Points
-              items={[
-                { t: 'Today, 7 and 30 days', d: 'Token totals for each window, split into input and output, with an estimated cost.' },
-                { t: 'Tokens per day', d: 'A 30-day chart shows when the heavy runs happened.' },
-                { t: 'By agent and by model', d: 'Cost is what the agent reported, or an estimate from list prices. Models with no known price show tokens only.' },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <Section
-          id="privacy"
-          label="privacy"
-          title="Shared memory, private by default."
-          lede="Capturing agent sessions means capturing what you paste into them. Nexus treats that carefully."
-        >
-          <div className="nx-privacy">
-            <Shot s={SHOTS.redaction} />
-            <Points
-              items={[
-                { t: 'Secrets redacted', d: 'Keys and passwords in captured sessions are replaced before they are saved.' },
-                { t: 'Tokens masked', d: 'Access tokens show only enough to recognise them.' },
-                { t: 'Personal memory stays yours', d: 'Your private memory is visible only to you. Projects and teams see only what you share.' },
-                { t: 'You choose what is captured', d: 'Pick the workspaces Nexus watches and pause capture at any time.' },
-              ]}
-            />
-          </div>
-        </Section>
-
-        <section className="nx-native" aria-labelledby="native-title">
-          <div className="nx-wrap nx-native-in">
-            <p className="nx-label">native</p>
-            <h2 id="native-title">Built with WinUI 3. Not Electron.</h2>
-            <p>
-              Nexus Desktop uses the Windows UI stack directly, so it starts fast and stays light while it sits in the tray capturing
-              sessions. Everything else, from memory review to team settings, is also in the web app.
-            </p>
+            </div>
           </div>
         </section>
-
-        <Section id="faq" label="faq" title="Questions, answered.">
-          <div className="nx-faq">
-            {FAQ.map((f) => (
-              <details key={f.q}>
-                <summary>
-                  <h3>{f.q}</h3>
-                  <ChevronDown size={18} aria-hidden="true" />
-                </summary>
-                <p>{f.a}</p>
-              </details>
-            ))}
-          </div>
-        </Section>
 
         <section id="download" className="nx-final" aria-labelledby="final-title">
-          <div className="nx-wrap">
-            <h2 id="final-title">Give your agents a memory.</h2>
-            <p>Free to start. Install the Windows beta, connect your agents, and your next session begins with everything the last one learned.</p>
-            <div className="nx-hero-cta">
-              <a className="nx-btn nx-btn-primary nx-cta-download" href={DOWNLOAD_URL}>
-                <Download size={17} aria-hidden="true" /> Download for Windows
-              </a>
-              <a className="nx-btn nx-btn-secondary nx-cta-demo" href={DEMO_PATH}>
-                <MousePointerClick size={16} aria-hidden="true" /> Try the live demo
-              </a>
-              <a className="nx-final-link" href={SIGN_UP_PATH}>
-                Create a free account <ArrowRight size={16} aria-hidden="true" />
-              </a>
-            </div>
+          <div className="nx-wrap nx-final-in">
+            <img className="nx-final-mark" src="/brand/nexus-app.svg" width="56" height="56" alt="" />
+            <h2 id="final-title">Give every agent the same memory.</h2>
+            <p className="nx-final-lede">Free to start. Install the beta, connect your agents, and your next chat begins with what the last one learned.</p>
+            <CtaGroup />
+            <a className="nx-final-link" href={SIGN_UP_PATH}>
+              Or create a free account <ArrowRight size={16} aria-hidden="true" />
+            </a>
             <div id="mac" className="nx-mac-note">
               <p>
                 <strong>On a Mac?</strong> <a href={MAC_DOWNLOAD_URL}>Download the macOS beta</a> (Nexus.dmg, Apple silicon,

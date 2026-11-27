@@ -65,7 +65,7 @@ export type AgentId = (typeof AGENTS)[number]['id']
 export const FAQ: { q: string; a: string }[] = [
   {
     q: 'What is Nexus?',
-    a: 'Nexus is a native Windows desktop app plus a cloud server. It lets you chat with your AI coding agents in one place, captures their sessions into a searchable timeline, and turns what they learn into a shared project memory that every agent can look things up in.',
+    a: 'Nexus is a desktop app for Windows (with a macOS beta) plus a cloud server. You chat with all your AI coding agents in one place, and what they learn becomes one shared project memory that every agent can look things up in. There is a free plan; paid plans are not open yet.',
   },
   {
     q: 'Which AI coding agents does Nexus work with?',
@@ -76,35 +76,15 @@ export const FAQ: { q: string; a: string }[] = [
     a: 'With one click, Nexus connects each agent to your shared memory (using MCP, the standard way agents get extra tools). Agents can then search memory, see a file’s history and ask why a line changed, and they read a short project brief first, so a new session starts with what earlier sessions decided instead of from zero.',
   },
   {
-    q: 'Can I leave an agent working and do something else?',
-    a: 'Yes. A chat keeps running when you switch to another one, and several chats can run at the same time. A dot in the chat list shows which ones are working, which are waiting for you and which have a new reply, and Nexus can notify you when an agent is done.',
-  },
-  {
     q: 'Can I undo what an agent changed?',
     a: 'Yes. After a reply, Review changes shows every edit the agent made, and you keep or undo each file or each change inside it. You can also restore a chat to before any message, files included, or type /rewind.',
   },
   {
-    q: 'Do I have to approve every step?',
-    a: 'No. Pick a permission mode per chat: ask every time, approve edits automatically, or give full access. When an agent does ask, you answer inside the chat, and "always allow" remembers your answer for that kind of action in the project.',
-  },
-  {
-    q: 'What does "why" for a line of code mean?',
-    a: 'Nexus records which agent session changed each line and the reasoning behind it. The history is tied to the line itself rather than its line number, so it follows the code when lines move. Ask the why tool, or open a file in Nexus, and you see the session and the decision behind the change.',
-  },
-  {
     q: 'What happens to secrets and private data?',
-    a: 'Secrets are redacted and access tokens are masked before anything is stored. You choose which workspaces Nexus captures and can pause capture at any time. Personal memory stays private to you; only what you share with a project or team is visible to others, and access can be revoked.',
-  },
-  {
-    q: 'Can I use Nexus with my team?',
-    a: 'Yes. You can share sessions, create organisations, grant and revoke access, and teleport a session to a teammate or to another of your machines so the work continues with its full context.',
+    a: 'Secrets are redacted and access tokens are masked before anything is stored. You choose which workspaces Nexus captures and can pause capture at any time. Personal memory stays private to you; only what you share with a project or team is visible to others, and access can be revoked. Teams can share chats, create organisations and hand a chat to a teammate.',
   },
   {
     q: 'Is Nexus available for macOS or Linux?',
     a: 'The desktop app is a beta for Windows and for Macs with Apple silicon. Linux has no desktop app yet. The Nexus web app works in any modern browser, phones included, for chats, memory, sessions and team settings.',
-  },
-  {
-    q: 'How much does Nexus cost?',
-    a: 'There is a free plan. Paid plans are not open yet; current plan limits are shown in the web app.',
   },
 ]

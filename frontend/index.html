@@ -38,13 +38,15 @@
       (function () {
         var d = document.documentElement, home = location.pathname === '/'
         d.classList.add(home ? 'nx-home' : 'nx-app')
-        // The landing page and the web app keep separate theme choices.
-        var t = null
-        try { t = localStorage.getItem(home ? 'nx-theme' : 'nexus.theme') } catch (e) {}
+        // The landing page is dark only (src/landing/site.css); the web app keeps its own theme choice.
         if (home) {
-          if (t === 'light' || t === 'dark') d.dataset.theme = t
+          // Feature tabs stack their panels only with JS (src/landing/site.css, .nx-js).
+          d.classList.add('nx-js')
+          document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.content = '#0c0e0d' })
           return
         }
+        var t = null
+        try { t = localStorage.getItem('nexus.theme') } catch (e) {}
         // Same rule as src/lib/theme.ts, applied before first paint to avoid a flash.
         if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
         d.dataset.theme = t
@@ -56,6 +58,8 @@
       #nx-boot { position: fixed; inset: 0; z-index: 99; display: grid; place-items: center; align-content: center; gap: 18px; background: #0e100f; transition: opacity .25s ease; }
       html[data-theme='light'] #nx-boot { background: #f4f5f2; }
       html.nx-home #nx-boot { display: none; }
+      /* The landing is dark only: paint the dark background before its stylesheet loads. */
+      html.nx-home { background: #0c0e0d; color-scheme: dark; }
       #nx-boot b { display: block; width: 96px; height: 2px; border-radius: 2px; background: #2a2d2b; overflow: hidden; }
       html[data-theme='light'] #nx-boot b { background: #d9dbd5; }
       #nx-boot b i { display: block; width: 40%; height: 100%; border-radius: 2px; background: #e8bb67; }
