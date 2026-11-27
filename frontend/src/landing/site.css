@@ -153,10 +153,11 @@ html.nx-app #root > .nx { display: none; }
 
 /* ---------- ambient background (src/landing/ambient.ts) ---------- */
 
-/* Fixed behind the whole page; the opaque panels and the film band sit on top
-   of it. Without JS (or until the canvas starts) a still lattice of faint
-   points at the sides stands in; the canvas cross-fades over it. The large
-   viewport height keeps it covering the screen while a phone's toolbar hides. */
+/* The fixed layer behind the whole page. Without JS (or until the hero scene
+   starts) a still lattice of faint points at the sides stands in; it fades
+   while the scene plays and comes back, fainter, once the hero is scrolled
+   away. The large viewport height keeps it covering the screen while a
+   phone's toolbar hides. */
 .nx-ambient {
   position: fixed; left: 0; top: 0; z-index: -1; width: 100%; height: 100vh; height: 100lvh;
   pointer-events: none; overflow: hidden;
@@ -170,11 +171,14 @@ html.nx-app #root > .nx { display: none; }
   mask-composite: intersect;
   transition: opacity 1.6s var(--ease);
 }
-.nx-ambient-canvas { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; transition: opacity 1.6s var(--ease); }
 .nx-ambient.is-live::before { opacity: 0; }
-.nx-ambient.is-live .nx-ambient-canvas { opacity: 1; }
+.nx-ambient.is-live.is-past::before { opacity: 0.5; }
+/* The scene itself: Nexus at work round the headline, drawn into the hero so it scrolls with the text. */
+.nx-scene { position: absolute; left: 0; top: 0; z-index: -1; pointer-events: none; animation: nx-scene-in 1.6s var(--ease) both; }
+@keyframes nx-scene-in { from { opacity: 0; } }
 @media (prefers-reduced-motion: reduce) {
-  .nx-ambient::before, .nx-ambient-canvas { transition: none; }
+  .nx-ambient::before { transition: none; }
+  .nx-scene { animation: none; }
 }
 
 /* ---------- buttons ---------- */
