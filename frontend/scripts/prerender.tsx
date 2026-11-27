@@ -72,8 +72,8 @@ writeFileSync(shellPath, html)
 html = html.replace('</head>', `    ${head.join('\n    ')}\n  </head>`).replace('<div id="root"></div>', `<div id="root">${markup}</div>`)
 writeFileSync(htmlPath, html)
 
-// Static legal pages: the landing stylesheet and its small script (theme
-// toggle only here), no React. deploy/deploy-frontend.sh uploads each one
+// Static legal pages: the landing stylesheet (dark only, like the landing)
+// and its small script (sticky nav only here), no React. deploy/deploy-frontend.sh uploads each one
 // under its extensionless path (/privacy, /terms).
 const esc = (t: string) => t.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
 const legalPaths: string[] = []
@@ -89,9 +89,8 @@ for (const kind of ['privacy', 'terms'] as LegalKind[]) {
     <meta name="description" content="${esc(meta.description)}" />
     <link rel="canonical" href="${url}" />
     <meta name="robots" content="index, follow" />
-    <meta name="theme-color" content="#f4f5f2" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#0e100f" media="(prefers-color-scheme: dark)" />
-    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#0c0e0d" />
+    <meta name="color-scheme" content="dark" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" type="image/x-icon" href="/brand/nexus.ico" sizes="any" />
     <link rel="apple-touch-icon" href="/pwa-192.png" />
@@ -101,13 +100,6 @@ for (const kind of ['privacy', 'terms'] as LegalKind[]) {
     <meta property="og:title" content="${esc(meta.title)}" />
     <meta property="og:description" content="${esc(meta.description)}" />
     <meta property="og:image" content="${SITE_URL}/og/nexus-og.png" />
-    <script>
-      (function () {
-        var t = null
-        try { t = localStorage.getItem('nx-theme') } catch (e) {}
-        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t
-      })()
-    </script>
     ${head.filter((h) => !h.includes('ld+json')).join('\n    ')}
   </head>
   <body>

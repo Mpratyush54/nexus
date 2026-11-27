@@ -1,48 +1,8 @@
 /*
  * The only script the landing page runs. No React: the markup is prerendered.
- * Theme toggle, the annotated-file demo, the sticky nav rule, the film loop
- * and the film player.
+ * The annotated-file demo, the sticky nav rule, scroll reveals, the film loop
+ * and the film player. The page is dark only, so there is no theme code.
  */
-
-const THEME_KEY = 'nx-theme'
-
-function systemDark() {
-  return window.matchMedia('(prefers-color-scheme: dark)').matches
-}
-
-function currentTheme(): 'light' | 'dark' {
-  const set = document.documentElement.dataset.theme
-  if (set === 'light' || set === 'dark') return set
-  return systemDark() ? 'dark' : 'light'
-}
-
-function applyThemeColor() {
-  // Only override the system-based pair once the visitor has picked a theme.
-  if (!document.documentElement.dataset.theme) return
-  const color = currentTheme() === 'dark' ? '#0e100f' : '#f4f5f2'
-  document.querySelectorAll<HTMLMetaElement>('meta[name="theme-color"]').forEach((m) => (m.content = color))
-}
-
-function initTheme() {
-  const btn = document.querySelector<HTMLButtonElement>('[data-theme-toggle]')
-  if (!btn) return
-  const label = () => {
-    const next = currentTheme() === 'dark' ? 'light' : 'dark'
-    btn.setAttribute('aria-label', `Switch to ${next} theme`)
-  }
-  label()
-  btn.addEventListener('click', () => {
-    const next = currentTheme() === 'dark' ? 'light' : 'dark'
-    document.documentElement.dataset.theme = next
-    try {
-      localStorage.setItem(THEME_KEY, next)
-    } catch {
-      /* storage unavailable: theme still applies for this visit */
-    }
-    label()
-    applyThemeColor()
-  })
-}
 
 function initWhy() {
   const lines = Array.from(document.querySelectorAll<HTMLButtonElement>('.nx-why-line'))
@@ -102,7 +62,7 @@ const quiet = () =>
  */
 function initReveal() {
   if (quiet() || !('IntersectionObserver' in window)) return
-  const items = Array.from(document.querySelectorAll<HTMLElement>('.nx-split-grid > .nx-shot, .nx-split-grid .nx-points li'))
+  const items = Array.from(document.querySelectorAll<HTMLElement>('.nx-pillar .nx-shot, .nx-pillar .nx-grid li, .nx-memory-why, .nx-cards li'))
   if (!items.length) return
   document.documentElement.classList.add('nx-reveal-on')
   items.forEach((el) => {
@@ -251,8 +211,6 @@ function initPlayer() {
 }
 
 export function initLanding() {
-  initTheme()
-  applyThemeColor()
   initWhy()
   initNav()
   initReveal()

@@ -1,4 +1,4 @@
-import { ArrowLeft, Download, Moon, Sun } from 'lucide-react'
+import { ArrowLeft, Download } from 'lucide-react'
 import type { ReactNode } from 'react'
 import {
   CONTACT_EMAIL,
@@ -327,10 +327,6 @@ export function LegalPage({ kind }: { kind: LegalKind }) {
             <span>Nexus</span>
           </a>
           <div className="nx-nav-end">
-            <button type="button" className="nx-theme" data-theme-toggle aria-label="Switch colour theme">
-              <Sun className="i-sun" size={17} aria-hidden="true" />
-              <Moon className="i-moon" size={17} aria-hidden="true" />
-            </button>
             <a className="nx-legal-signin" href={SIGN_IN_PATH}>Sign in</a>
             <a className="nx-btn nx-btn-primary nx-btn-sm" href={DOWNLOAD_URL} aria-label="Download Nexus for Windows">
               <Download size={15} aria-hidden="true" /> Download

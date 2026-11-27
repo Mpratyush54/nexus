@@ -55,7 +55,7 @@ export function SiteFooter() {
             <img src="/brand/nexus-app.svg" width="26" height="26" alt="" />
             <span>Nexus</span>
           </a>
-          <p>Shared memory for AI coding agents. A native Windows app and a web app, in beta with a free plan.</p>
+          <p>Every coding agent in one app, with one shared memory. For Windows, a macOS beta and the web, with a free plan.</p>
         </div>
         <nav className="nx-foot-cols" aria-label="Footer">
           {COLUMNS.map((c) => (

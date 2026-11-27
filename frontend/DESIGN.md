@@ -2,25 +2,29 @@
 
 Applies to the public site at `/` (`src/landing/`). The signed-in web app keeps its own tokens in `src/index.css`.
 
-Direction: **an annotated source file.** Nexus's sharpest idea is that every line of code can answer "which agent changed this, and why". The site borrows the look of an editor gutter and a code-review margin: quiet neutral paper, dense mono labels, and one amber highlighter used only where Nexus adds an annotation. Product windows are shown dark, as the Windows app ships. No gradients, no glass, no stock imagery.
+Direction: **an annotated source file.** Nexus's sharpest idea is that every line of code can answer "which agent changed this, and why". The site borrows the look of an editor gutter and a code-review margin: a near-black page that matches the app windows it shows, quiet type, and one amber highlighter used only where Nexus adds an annotation. The site is **dark only**: the screenshots, film and code card are dark, so a light page around them made no sense. No decorative gradients (the film scrim is the one functional overlay), no stock imagery.
+
+One story: **every coding agent in one app, with one shared memory.** Page order: hero (headline, short lede, Download + live demo, one real screenshot) → agent strip (the six agents, named once) → three pillars, each one large screenshot with a compact grid folded under it (Chat: full-width shot + 4-up grid; Control: notes beside a tall crop; Memory: full-width shot, then the annotated file beside the notes) → film → "the rest" as six compact cards → FAQ (two columns) → final download with the macOS note.
 
 Not based on UXKIN references (not connected); built from the existing Nexus brand mark (graphite, light stone, amber) and the app's own UI.
 
 ## Color
 
-Tokens live on `.nx` in `src/landing/site.css` as `--nx-*`. Light is the default; dark follows the OS and can be set with the toggle (`html[data-theme]`).
+Tokens live on `html.nx-home, .nx` in `src/landing/site.css` as `--nx-*`, dark only (no theme toggle, no `prefers-color-scheme` switch). `html.nx-home` sets `color-scheme: dark` and the page background; `index.html` paints the same background inline so nothing flashes light before the stylesheet loads. The legal pages use the same tokens. The signed-in web app is unaffected.
 
-| Token | Light | Dark | Role |
-| --- | --- | --- | --- |
-| `--nx-paper` | `#F4F5F2` | `#0E100F` | Page background |
-| `--nx-panel` | `#FFFFFF` | `#161817` | Raised surfaces: FAQ, tables, cards |
-| `--nx-ink` | `#141617` | `#ECEBE6` | Headings and body text |
-| `--nx-ink-2` | `#4B5053` | `#A6A9A5` | Secondary text, captions (AA on paper and panel) |
-| `--nx-rule` | `#D9DBD5` | `#2A2D2B` | Hairlines, borders |
-| `--nx-amber` | `#E8BB67` | `#E8BB67` | Brand highlighter: the "why" annotation, selected line, never body text |
-| `--nx-amber-ink` | `#7A4D00` | `#F0C67A` | Amber text on paper (labels, focus ring) |
-| `--nx-cta` / `--nx-cta-ink` | `#141617` / `#F4F5F2` | `#ECEBE6` / `#0E100F` | Primary button |
-| `--nx-win-*` | fixed dark | fixed dark | Recreated app windows (`#121413` base, `#1B1E1C` raised, `#E6E4DE` text, `#9EA29D` dim) |
+| Token | Value | Role |
+| --- | --- | --- |
+| `--nx-paper` | `#0C0E0D` | Page background |
+| `--nx-panel` / `--nx-panel-2` | `#141615` / `#1A1D1B` | Cards, pills, inline code |
+| `--nx-ink` | `#ECEBE6` | Headings and body text |
+| `--nx-ink-2` | `#A9ACA7` | Secondary text, ledes (8:1 on paper) |
+| `--nx-ink-3` | `#8D918B` | Captions and small notes (6:1 on paper) |
+| `--nx-rule` / `--nx-rule-2` | `#242725` / `#343835` | Hairlines, borders |
+| `--nx-amber` | `#E8BB67` | Brand highlighter: the "why" annotation, selected line, never body text |
+| `--nx-amber-ink` | `#F0C67A` | Amber text (pillar kicker, focus ring, icons) |
+| `--nx-cta` / `--nx-cta-ink` | `#ECEBE6` / `#0C0E0D` | Primary button |
+| `--nx-scrim` / `--nx-veil` | translucent black | Film scrim, sticky nav and film badge |
+| `--nx-win-*`, `--code-*` | fixed dark | The annotated file card and its syntax colours |
 
 Agent dots in mocks (decoration only, always paired with a name): Claude Code `#D9895B`, Codex `#9AA7F0`, Cursor `#BFC5C2`, OpenCode `#7FC2A6`, Gemini `#7AA8F0`, Kimi `#C59AE6`.
 
@@ -35,7 +39,7 @@ Scale (px, line height): 14/1.5 mono label · 16/1.6 body · 18/1.6 lede · 22/1
 
 ## Spacing and layout
 
-4px base: 4, 8, 12, 16, 24, 32, 48, 64, 96, 128. Content width 1240px with a 24px gutter (16px under 600px). Sections are separated by 96-128px and a hairline rule; each opens with a mono label naming what the section is about (`chat`, `capture`, `memory`…), mirroring the MCP tool names.
+4px base: 4, 8, 12, 16, 24, 32, 48, 64, 96, 128. Content width 1240px with a 24px gutter (16px under 600px). Sections are separated by 128px (96px tablet, 80px phone) of space, not rules. Only the three pillars carry a kicker: one plain word (Chat, Control, Memory) in amber sans, no mono label or square. Vary the rhythm: never repeat the same head + list + shot template twice in a row.
 
 ## Shape and depth
 
@@ -45,10 +49,10 @@ Radius: 6px controls, 10px panels, 14px app windows. One shadow, only on app win
 
 - Buttons: primary (solid `--nx-cta`), secondary (1px rule, transparent), quiet (text with underline on hover). Height 44px, 6px radius. Focus: 2px `--nx-amber-ink` outline, 3px offset. Disabled is not used on the site.
 - Links: ink, underline offset 3px; descriptive text, never "click here".
-- Nav: sticky, paper background with a bottom rule once scrolled. Under 860px the links move into a `<details>` menu (no JS).
-- App windows: real screenshots of the WinUI app (`public/landing/shots/`), captured from an isolated demo profile signed in to a local server with fictional people and projects. Every shot is cropped from the 1800x1080 window to one 5:3 frame (the main pane for pages, a closer crop for dialogs and panels), shown in the same frame (10px radius, hairline, window shadow) with a "Nexus for Windows · <screen>" caption; phones narrow the frame to 4:3 around each shot's focus point.
+- Nav: sticky, translucent dark veil with a bottom rule once scrolled; Product, Memory, FAQ, Live demo, Sign in, Download. Under 860px the links move into a `<details>` menu (no JS).
+- App windows: real screenshots of the WinUI app (`public/landing/shots/`), captured from an isolated demo profile signed in to a local server with fictional people and projects. Few and large: four shots on the page (hero `running`, `chat`, `changes`, `memory`). Wide shots are 5:3 crops of the 1800x1080 window shown at the full content width; `changes` is a closer crop of the review panel (900x780) for the side-by-side row. All sit in the same frame (10px radius, hairline, window shadow) with a "Nexus for Windows · <screen>" caption; phones narrow wide frames to 4:3 around each shot's focus point. Only the hero shot loads eagerly.
 - Brand mark: the desktop app icon itself (`public/brand/nexus-app.svg`, dark tile + mark, same artwork as `Nexus.ico`) everywhere: landing header/footer, portal sidebar, favicon, PWA icons, OG image.
-- Film: poster with a centred play button opens the full film with sound in a modal `<dialog>` player (custom controls, keyboard, Esc closes, focus restored). A muted 16 s cut loops behind the poster while in view, except with reduced motion or Save-Data. The hero's annotated file is the one HTML recreation and keeps its "Example" label.
+- Film: poster under a dark scrim, with the play button and "Watch the film · 1:26" on a solid badge so it is legible over any frame; it opens the full film with sound in a modal `<dialog>` player (custom controls, keyboard, Esc closes, focus restored). A muted 16 s cut loops behind the poster while in view, except with reduced motion or Save-Data. The annotated file (in the Memory pillar) is the one HTML recreation and keeps its "Example" label.
 - FAQ: native `<details>`; content is also emitted as FAQPage JSON-LD from the same data.
 
 ## Imagery and icons
@@ -57,4 +61,4 @@ Lucide icons at 16-18px, 1.75 stroke. Product visuals are real screenshots of th
 
 ## Motion
 
-Only two moments: the hero gutter's selected line, and the film. Everything honours `prefers-reduced-motion` (no autoplay, no transitions).
+A short staggered rise for the hero copy and window on load, a one-time rise as shots and feature notes scroll into view, the annotated file's selected line, and the film loop. Everything honours `prefers-reduced-motion` (no animation, no autoplay, nothing hidden).
