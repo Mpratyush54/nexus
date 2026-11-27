@@ -7,6 +7,7 @@ import {
   MAC_DOWNLOAD_URL,
   FILM_DURATION,
   FAQ,
+  LATEST_VERSION,
   SIGN_IN_PATH,
   SIGN_UP_PATH,
   WEB_APP_PATH,
@@ -123,12 +124,15 @@ function WhyFile() {
 
 /* ---------- shared bits ---------- */
 
-function Section({ id, label, title, lede, children, className = '' }: { id: string; label: string; title: ReactNode; lede?: ReactNode; children?: ReactNode; className?: string }) {
+function Section({ id, label, title, lede, children, className = '', isNew = false }: { id: string; label: string; title: ReactNode; lede?: ReactNode; children?: ReactNode; className?: string; isNew?: boolean }) {
   return (
     <section id={id} className={`nx-section ${className}`} aria-labelledby={`${id}-title`}>
       <div className="nx-wrap">
         <header className="nx-section-head">
-          <p className="nx-label">{label}</p>
+          <p className="nx-label">
+            {label}
+            {isNew && <span className="nx-new-chip">New</span>}
+          </p>
           <h2 id={`${id}-title`}>{title}</h2>
           {lede && <p className="nx-lede">{lede}</p>}
         </header>
@@ -159,16 +163,24 @@ function Points({ items }: { items: { t: string; d: ReactNode }[] }) {
 // pane for whole pages, a closer crop for dialogs and panels. Each ships as
 // AVIF and WebP at two widths, with a PNG fallback at the larger one.
 // `focus` is the object-position used when the frame narrows to 4:3 on phones.
-type ShotSpec = { name: string; w: number; h: number; small: number; label: string; focus: string; alt: string }
+// `app` names where the shot comes from (Nexus for Windows unless set).
+type ShotSpec = { name: string; w: number; h: number; small: number; label: string; focus: string; alt: string; app?: string }
 
 const SHOTS = {
   chat: { name: 'chat', w: 1400, h: 840, small: 800, label: 'Chat', focus: '50% 0%', alt: 'Nexus chat with Claude Code: the request to retry failed card captures, an expanded work log with a memory search, a file read, a code search, an Explore sub-agent with its steps and findings and an Open as a chat link, then the first edits to retry.ts.' },
   timeline: { name: 'timeline', w: 1000, h: 600, small: 800, label: 'Timeline', focus: '0% 0%', alt: 'Nexus sidebar with search and a filter above captured chats from Claude Code, Cursor, Gemini and Codex, newest first, next to the All projects composer and activity counts.' },
   memory: { name: 'memory', w: 1140, h: 684, small: 800, label: 'Memory', focus: '0% 0%', alt: 'Memory page for the checkout-service project: a project brief with key decisions (captures retry with backoff and full jitter, one Idempotency-Key per capture) and the chats they came from, search with filters for who can see each memory and topic, and the first of eight memories.' },
   graph: { name: 'graph', w: 1400, h: 840, small: 800, label: 'Knowledge graph', focus: '0% 0%', alt: 'Nexus 3D memory graph: memories, chats and code files connected by links, with stale memories marked and a legend.' },
-  agents: { name: 'agents', w: 1400, h: 840, small: 800, label: 'Agents', focus: '0% 0%', alt: 'Nexus Agents page: Claude Code, Codex and Cursor connected to Nexus, Gemini CLI and OpenCode found but not yet connected, a Claude Code sub-agent open with its file, and a Connect Nexus to your agents button.' },
   share: { name: 'share', w: 1260, h: 756, small: 800, label: 'Share chat', focus: '50% 50%', alt: 'Share chat dialog: share with a person or team, keep their access up to date, and a list of who has access with a Remove button.' },
   usage: { name: 'usage', w: 1000, h: 600, small: 800, label: 'Settings · Usage', focus: '0% 0%', alt: 'Usage settings: tokens for today, the last 7 and the last 30 days, each split into input and output with an estimated cost, and a tokens-per-day chart.' },
+  // Agent-app features from 0.4.4 and 0.4.5, captured the same way on a demo
+  // profile with a scripted stand-in agent and sample projects.
+  running: { name: 'running', w: 1300, h: 780, small: 800, label: 'Chats running at once', focus: '0% 0%', alt: 'Nexus with three chats going at once: two still working, shown by a spinner in the chat list, one waiting for approval, shown by an amber dot, while the open chat streams its reply after thinking for 14 seconds.' },
+  approval: { name: 'approval', w: 1400, h: 840, small: 800, label: 'Approvals in the chat', focus: '30% 50%', alt: 'Claude Code asks to run npm test inside the chat, with Allow once, Deny, Allow for this chat and Always allow npm test commands in this project, and the permission mode list open: Ask every time, Auto-approve edits and Full access.' },
+  review: { name: 'review', w: 1400, h: 840, small: 800, label: 'Review changes', focus: '50% 40%', alt: 'Review changes after a reply: docs/retries.md added and src/retry.ts changed in three places, each file and each change with its own Undo and Keep buttons.' },
+  mention: { name: 'mention', w: 1150, h: 690, small: 800, label: 'Mentions', focus: '0% 30%', alt: 'Typing @order in the composer lists a matching file, three past chats and two project memories, including that order creation is idempotent on order_key.' },
+  weblive: { name: 'weblive', w: 1176, h: 706, small: 800, label: 'Live thinking', focus: '60% 40%', app: 'Nexus on the web', alt: 'The Nexus web app with Claude Code thinking live about a retry change while it reads, edits and tests src/payments/retry.ts, and the chat list marking the chats that are still running.' },
+  mcp: { name: 'mcp', w: 1180, h: 708, small: 800, label: 'Agents · Add a tool server', focus: '50% 30%', alt: 'Add a tool server: ready-made MCP servers for files, GitHub, a browser, web pages, library docs, a notes graph, step-by-step thinking and Git, or paste JSON.' },
   redaction: { name: 'redaction', w: 1140, h: 684, small: 800, label: 'Chat · redacted paste', focus: '50% 0%', alt: 'A captured chat where a pasted .env file is stored with its keys replaced by [REDACTED].' },
 } satisfies Record<string, ShotSpec>
 
@@ -190,7 +202,7 @@ function Shot({ s, sizes = SPLIT_SIZES, className = '' }: { s: ShotSpec; sizes?:
       </a>
       <figcaption className="nx-shot-cap">
         <img src="/brand/nexus-app.svg" width="14" height="14" alt="" />
-        Nexus for Windows <span aria-hidden="true">·</span> {s.label}
+        {s.app ?? 'Nexus for Windows'} <span aria-hidden="true">·</span> {s.label}
         <span className="nx-shot-zoom" aria-hidden="true">Tap to enlarge</span>
       </figcaption>
     </figure>
@@ -259,6 +271,7 @@ export function LandingPage() {
           </a>
           <nav className="nx-nav-links" aria-label="Main">
             <a href="#chat">Product</a>
+            <a href="#work">What&rsquo;s new</a>
             <a href="#memory">Memory</a>
             <a href="#teams">Teams</a>
             <a href="#privacy">Privacy</a>
@@ -278,6 +291,7 @@ export function LandingPage() {
               <summary aria-label="Menu"><Menu size={18} aria-hidden="true" /></summary>
               <nav aria-label="Mobile">
                 <a href="#chat">Product</a>
+                <a href="#work">What&rsquo;s new</a>
                 <a href="#memory">Memory</a>
                 <a href="#teams">Teams</a>
                 <a href="#privacy">Privacy</a>
@@ -294,12 +308,17 @@ export function LandingPage() {
         <section className="nx-hero" aria-labelledby="hero-title">
           <div className="nx-wrap nx-hero-grid">
             <div className="nx-hero-copy">
-              <p className="nx-label">Windows beta · free plan</p>
+              <a className="nx-new-pill" href="#work">
+                <span className="nx-new-pill-tag">New in {LATEST_VERSION}</span>
+                <span className="nx-new-pill-text">Review and undo every change, /rewind, and live thinking on the web</span>
+                <ArrowRight size={15} aria-hidden="true" />
+              </a>
+              <p className="nx-label">Windows and macOS beta · free plan</p>
               <h1 id="hero-title">One memory for every coding agent you use.</h1>
               <p className="nx-hero-lede">
-                Nexus is a native Windows app and a cloud server. Chat with Claude Code, Codex, Cursor, OpenCode, Gemini and Kimi in one
-                place, capture every session automatically, and give every agent the same project memory, down to why a single line of
-                code changed.
+                Nexus is a native desktop app and a cloud server. Chat with Claude Code, Codex, Cursor, OpenCode, Gemini and Kimi in one
+                place, let them keep working while you do something else, and give every agent the same project memory, down to why a
+                single line of code changed.
               </p>
               <div className="nx-hero-cta">
                 <a className="nx-btn nx-btn-primary nx-cta-download" href={DOWNLOAD_URL}>
@@ -374,11 +393,143 @@ export function LandingPage() {
         </Section>
 
         <Section
+          id="work"
+          label="keeps working"
+          isNew
+          title="Start the work, then walk away."
+          lede="Agents don’t stop when you look away. Leave a chat, start another, and come back when something needs you."
+          className="nx-split nx-split-flip"
+        >
+          <div className="nx-split-grid">
+            <Shot s={SHOTS.running} />
+            <Points
+              items={[
+                { t: 'Keeps running when you leave', d: 'Switch to another chat or another page and the reply carries on in the background.' },
+                { t: 'Several chats at once', d: 'Fix a bug in one chat while another writes tests. Each runs on its own.' },
+                { t: 'Status at a glance', d: 'A spinner means working, an amber dot means it’s waiting for you, and a dot marks a new reply.' },
+                { t: 'Told when it’s done', d: 'Nexus sends a notification when an agent finishes or needs an answer.' },
+              ]}
+            />
+          </div>
+        </Section>
+
+        <Section
+          id="control"
+          label="approvals"
+          isNew
+          title="You decide what runs. Once."
+          lede="Agents ask before they run commands or change files. Answer right in the chat, and tell Nexus what never needs asking again."
+          className="nx-split"
+        >
+          <div className="nx-split-grid">
+            <Shot s={SHOTS.approval} />
+            <Points
+              items={[
+                { t: 'Three permission modes', d: 'Ask every time, approve edits automatically, or give full access. Pick one per chat.' },
+                { t: 'Approve inside the chat', d: 'See exactly what the agent wants to do, then allow it once, for this chat, or deny it.' },
+                {
+                  t: '“Always allow” rules',
+                  d: (
+                    <>
+                      Trust a command like <code className="nx-inline-code">npm test</code> once and the project never asks about it again.
+                    </>
+                  ),
+                },
+              ]}
+            />
+          </div>
+        </Section>
+
+        <Section
+          id="undo"
+          label="safety net"
+          isNew
+          title="Keep what’s good. Undo the rest."
+          lede="Every reply that touches your files gets a checkpoint, so trying an idea never costs you your work."
+          className="nx-split nx-split-flip"
+        >
+          <div className="nx-split-grid">
+            <Shot s={SHOTS.review} />
+            <Points
+              items={[
+                { t: 'Review changes', d: 'See each edit the agent made and keep or undo it, a whole file or a single change at a time.' },
+                { t: 'Restore to before this message', d: 'Go back to any point in the chat. Your files go back with it, and you can undo the restore.' },
+                {
+                  t: 'Or just type /rewind',
+                  d: (
+                    <>
+                      <code className="nx-inline-code">/rewind</code> steps back one message from the keyboard.
+                    </>
+                  ),
+                },
+              ]}
+            />
+          </div>
+        </Section>
+
+        <Section
+          id="composer"
+          label="composer"
+          isNew
+          title="Point the agent at what it needs."
+          lede="Type @ to bring a file, an earlier chat or something the project already learned into the conversation. Memory is part of every message."
+          className="nx-split"
+        >
+          <div className="nx-split-grid">
+            <Shot s={SHOTS.mention} />
+            <Points
+              items={[
+                { t: '@ files, chats and memories', d: 'Mention a decision from last week and the agent starts from it instead of guessing.' },
+                {
+                  t: 'Commands and recall',
+                  d: (
+                    <>
+                      Type <kbd className="nx-kbd">/</kbd> for commands, or press <kbd className="nx-kbd">↑</kbd> to bring back your last message.
+                    </>
+                  ),
+                },
+                { t: 'A model for each chat', d: 'Pick the model in the composer. Each chat remembers its own.' },
+                { t: 'Talk instead of type', d: 'Voice input works on Windows, on a Mac and in the web app.' },
+                {
+                  t: 'Quick ask from anywhere',
+                  d: (
+                    <>
+                      Press <kbd className="nx-kbd">Alt</kbd>+<kbd className="nx-kbd">Space</kbd>, or <kbd className="nx-kbd">Option</kbd>+
+                      <kbd className="nx-kbd">Space</kbd> on a Mac, and ask without opening the app.
+                    </>
+                  ),
+                },
+              ]}
+            />
+          </div>
+        </Section>
+
+        <Section
+          id="anywhere"
+          label="live"
+          isNew
+          title="Watch it think, from your desk or your phone."
+          lede="Replies stream in as they’re written, with the agent’s thinking shown live. Open the web app on your phone and follow the same chat."
+          className="nx-split nx-split-flip"
+        >
+          <div className="nx-split-grid">
+            <Shot s={SHOTS.weblive} />
+            <Points
+              items={[
+                { t: 'Live thinking', d: 'Follow the agent’s reasoning while it works, then fold it away. “Thought for 14s” keeps it for later.' },
+                { t: 'Every step as it happens', d: 'Files read, edits and commands appear the moment the agent runs them.' },
+                { t: 'Same chats on the web', d: 'Start on the desktop, check in from a phone. Running chats are marked in the list.' },
+              ]}
+            />
+          </div>
+        </Section>
+
+        <Section
           id="capture"
           label="capture"
           title="Every session, captured without asking."
           lede="Nexus quietly saves chats from all six agents, including the ones you run in a terminal or another editor, into one timeline. Only from the folders you choose."
-          className="nx-split nx-split-flip"
+          className="nx-split"
         >
           <div className="nx-split-grid">
             <Shot s={SHOTS.timeline} />
@@ -439,17 +590,18 @@ export function LandingPage() {
 
         <Section
           id="install"
-          label="install"
-          title="One click to connect every agent."
-          lede="Nexus finds the agents on your computer and connects each of them to your shared memory. No config files to edit."
+          label="agent setup"
+          title="Set up every agent from one screen."
+          lede="Nexus finds the agents on your computer, connects them to your shared memory, and lets you change how each one works. No config files to edit by hand."
           className="nx-split"
         >
           <div className="nx-split-grid">
-            <Shot s={SHOTS.agents} />
+            <Shot s={SHOTS.mcp} />
             <Points
               items={[
-                { t: 'Detects what you have', d: 'Only the agents installed on this machine are offered.' },
-                { t: 'Reversible', d: 'Disconnect any agent from the same screen.' },
+                { t: 'One click to connect', d: 'Only the agents installed on this machine are offered, and you can disconnect any of them from the same screen.' },
+                { t: 'Rules you can read and edit', d: 'Open CLAUDE.md, AGENTS.md and the other rule files, edit them, review the change, then save. A backup is kept.' },
+                { t: 'Tool servers without the JSON', d: 'Add an MCP server from a short list or paste its JSON, test it, and switch it on or off per agent.' },
               ]}
             />
           </div>

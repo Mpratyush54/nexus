@@ -96,6 +96,33 @@ const quiet = () =>
   window.matchMedia('(prefers-reduced-motion: reduce)').matches ||
   (navigator as Navigator & { connection?: { saveData?: boolean } }).connection?.saveData === true
 
+/**
+ * Screenshots and their notes rise into place the first time they scroll into
+ * view. Only with motion allowed: otherwise (and without JS) nothing is hidden.
+ */
+function initReveal() {
+  if (quiet() || !('IntersectionObserver' in window)) return
+  const items = Array.from(document.querySelectorAll<HTMLElement>('.nx-split-grid > .nx-shot, .nx-split-grid .nx-points li'))
+  if (!items.length) return
+  document.documentElement.classList.add('nx-reveal-on')
+  items.forEach((el) => {
+    el.classList.add('nx-reveal')
+    // Stagger the notes in a list so they read top to bottom.
+    const li = el.closest('li')
+    if (li?.parentElement) el.style.setProperty('--i', String(Array.from(li.parentElement.children).indexOf(li)))
+  })
+  const io = new IntersectionObserver(
+    (entries) =>
+      entries.forEach((e) => {
+        if (!e.isIntersecting) return
+        e.target.classList.add('is-in')
+        io.unobserve(e.target)
+      }),
+    { rootMargin: '0px 0px -8% 0px' },
+  )
+  items.forEach((el) => io.observe(el))
+}
+
 /** The silent cut loops behind the play button while the frame is on screen. */
 function initFilmLoop() {
   const loop = document.querySelector<HTMLVideoElement>('[data-film-loop]')
@@ -228,6 +255,7 @@ export function initLanding() {
   applyThemeColor()
   initWhy()
   initNav()
+  initReveal()
   initFilmLoop()
   initPlayer()
 }

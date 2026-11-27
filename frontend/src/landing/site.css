@@ -238,7 +238,7 @@ html.nx-app #root > .nx { display: none; }
 .nx-hero { padding: 48px 0 104px; }
 /* Copy and CTAs on the left, the annotated file (the signature) on the right. */
 .nx-hero-grid { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: 56px; align-items: center; }
-.nx-hero-copy { display: grid; justify-items: start; }
+.nx-hero-copy { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: start; }
 .nx .nx-hero-copy h1 { font-size: clamp(44px, 5.2vw, 74px); line-height: 0.97; max-width: 13.5ch; margin-top: 18px; }
 .nx-hero-lede { margin-top: 24px; font-size: 18px; line-height: 1.6; color: var(--nx-ink-2); max-width: 48ch; text-wrap: pretty; }
 .nx-hero-cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-top: 28px; }
@@ -482,6 +482,62 @@ a.nx-shot-win { display: block; color: inherit; cursor: zoom-in; }
   .nx-shot-win { aspect-ratio: 4 / 3; }
   .nx-shot-zoom { display: inline; }
 }
+
+/* ---------- what's new ---------- */
+
+/* Hero pill linking to the newest features. */
+.nx-new-pill {
+  display: inline-flex; align-items: center; gap: 10px; max-width: 100%;
+  padding: 5px 12px 5px 5px; border: 1px solid var(--nx-rule); border-radius: 999px;
+  background: var(--nx-panel); color: var(--nx-ink-2); text-decoration: none;
+  font-size: 14px; line-height: 1.3;
+  transition: border-color 0.15s, color 0.15s;
+}
+.nx-new-pill:hover { border-color: var(--nx-ink-2); color: var(--nx-ink); }
+.nx-new-pill svg { flex: none; transition: transform 0.15s; }
+.nx-new-pill:hover svg { transform: translateX(2px); }
+.nx-new-pill-tag {
+  flex: none; display: inline-flex; align-items: center; gap: 7px;
+  padding: 4px 9px; border-radius: 999px; background: var(--nx-amber-wash); color: var(--nx-amber-ink);
+  font: 500 12.5px/1.2 var(--f-mono);
+}
+.nx-new-pill-tag::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--nx-amber); }
+.nx-new-pill-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nx-new-pill + .nx-label { margin-top: 22px; }
+@media (prefers-reduced-motion: no-preference) {
+  .nx-new-pill-tag::before { animation: nx-pulse 2.4s ease-in-out infinite; }
+}
+@keyframes nx-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgb(232 187 103 / 0.55); }
+  60% { box-shadow: 0 0 0 5px rgb(232 187 103 / 0); }
+}
+@media (max-width: 600px) {
+  /* Phones: the note wraps under its tag instead of being cut off. */
+  .nx-new-pill { font-size: 13px; flex-wrap: wrap; border-radius: var(--r-2); padding: 6px 12px 8px 6px; gap: 6px 10px; }
+  .nx-new-pill-text { white-space: normal; flex: 1 1 200px; }
+}
+
+/* "New" next to a section label. */
+.nx-new-chip {
+  font: 500 11px/1 var(--f-mono); letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 4px 6px; border-radius: 4px; background: var(--nx-amber-wash); color: var(--nx-amber-ink);
+}
+
+/* Keys and commands inside feature notes. */
+.nx-kbd, .nx-inline-code {
+  font: 500 0.86em/1 var(--f-mono); color: var(--nx-ink);
+  padding: 2px 6px; border-radius: 5px; background: var(--nx-panel); border: 1px solid var(--nx-rule);
+  white-space: nowrap;
+}
+.nx-kbd { border-bottom-width: 2px; }
+
+/* Scroll reveal (client.ts adds these only when motion is allowed). */
+.nx-reveal-on .nx-reveal {
+  opacity: 0; transform: translateY(18px);
+  transition: opacity 0.6s cubic-bezier(0.2, 0.7, 0.2, 1), transform 0.6s cubic-bezier(0.2, 0.7, 0.2, 1);
+  transition-delay: calc(var(--i, 0) * 70ms);
+}
+.nx-reveal-on .nx-reveal.is-in { opacity: 1; transform: none; }
 
 /* memory tools */
 .nx-memory { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 56px; align-items: start; }
