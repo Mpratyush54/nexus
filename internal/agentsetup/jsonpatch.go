@@ -236,17 +236,58 @@ func insertMember(b []byte, open, closeAt int, ms []jsonMember, name string, val
 // under the top-level key, editing only that part of the text. The result
 // is checked to decode to exactly the intended document.
 func patchServer(old []byte, key, name string, entry map[string]any, want map[string]any) ([]byte, error) {
+	return patchNested(old, []string{key}, name, entry, want)
+}
+
+// patchNested is patchServer for a servers map at any object path, such as
+// projects/<folder>/mcpServers in ~/.claude.json. Every object above the
+// last key must already exist; the last one is created when missing.
+func patchNested(old []byte, container []string, name string, entry map[string]any, want map[string]any) ([]byte, error) {
+	if len(container) == 0 {
+		return nil, errNotPatchable
+	}
 	b := old
 	bom := []byte{0xef, 0xbb, 0xbf}
 	hadBOM := bytes.HasPrefix(b, bom)
 	b = bytes.TrimPrefix(b, bom)
 	unit := indentUnit(b)
-	var out []byte
 	s := &jsoncScanner{b: b}
 	if strings.TrimSpace(string(b)) == "" || s.peek() != '{' {
 		return nil, errNotPatchable
 	}
 	open := s.i
+	for _, k := range container[:len(container)-1] {
+		ms, _, err := members(b, open)
+		if err != nil {
+			return nil, err
+		}
+		next := -1
+		for i := range ms {
+			if ms[i].key == k {
+				next = ms[i].valueStart
+			}
+		}
+		if next < 0 || b[next] != '{' {
+			return nil, errNotPatchable
+		}
+		open = next
+	}
+	out, err := patchObject(b, open, container[len(container)-1], name, entry, unit)
+	if err != nil {
+		return nil, err
+	}
+	got, err := decodeJSONC(out)
+	if err != nil || !same(got, want) {
+		return nil, errNotPatchable
+	}
+	if hadBOM {
+		out = append(append([]byte{}, bom...), out...)
+	}
+	return out, nil
+}
+
+// patchObject sets or removes obj[key][name] for the object opening at open.
+func patchObject(b []byte, open int, key, name string, entry map[string]any, unit string) ([]byte, error) {
 	top, topClose, err := members(b, open)
 	if err != nil {
 		return nil, err
@@ -259,67 +300,49 @@ func patchServer(old []byte, key, name string, entry map[string]any, want map[st
 	}
 	switch {
 	case section == nil && entry == nil:
-		out = b
+		return b, nil
 	case section == nil:
-		out, err = insertMember(b, open, topClose, top, key, map[string]any{name: entry}, unit)
-	default:
-		if b[section.valueStart] != '{' {
-			return nil, errNotPatchable
-		}
-		inner, innerClose, err2 := members(b, section.valueStart)
-		if err2 != nil {
-			return nil, err2
-		}
-		var found *jsonMember
-		for i := range inner {
-			if inner[i].key == name {
-				found = &inner[i]
-			}
-		}
-		switch {
-		case found == nil && entry == nil:
-			out = b
-		case found == nil:
-			out, err = insertMember(b, section.valueStart, innerClose, inner, name, entry, unit)
-		case entry == nil:
-			// Remove the member and its comma; if it was the last one, drop
-			// the comma before it instead.
-			start, end := found.keyStart, found.commaEnd
-			idx := 0
-			for i := range inner {
-				if inner[i].keyStart == found.keyStart {
-					idx = i
-				}
-			}
-			if found.commaEnd == found.valueEnd && idx > 0 {
-				prev := inner[idx-1]
-				start = prev.valueEnd
-			}
-			// Take the line the member was on with it.
-			lineStart := bytes.LastIndexByte(b[:start], '\n')
-			if lineStart >= 0 && len(bytes.TrimSpace(b[lineStart:start])) == 0 {
-				start = lineStart
-			}
-			out = append(append([]byte{}, b[:start]...), b[end:]...)
-		default:
-			val, err2 := encodeIndented(entry, lineIndent(b, found.keyStart), unit)
-			if err2 != nil {
-				return nil, err2
-			}
-			out = append(append(append([]byte{}, b[:found.valueStart]...), val...), b[found.valueEnd:]...)
-		}
+		return insertMember(b, open, topClose, top, key, map[string]any{name: entry}, unit)
 	}
+	if b[section.valueStart] != '{' {
+		return nil, errNotPatchable
+	}
+	inner, innerClose, err := members(b, section.valueStart)
 	if err != nil {
 		return nil, err
 	}
-	got, err := decodeJSONC(out)
-	if err != nil || !same(got, want) {
-		return nil, errNotPatchable
+	var found *jsonMember
+	idx := 0
+	for i := range inner {
+		if inner[i].key == name {
+			found, idx = &inner[i], i
+		}
 	}
-	if hadBOM {
-		out = append(append([]byte{}, bom...), out...)
+	switch {
+	case found == nil && entry == nil:
+		return b, nil
+	case found == nil:
+		return insertMember(b, section.valueStart, innerClose, inner, name, entry, unit)
+	case entry == nil:
+		// Remove the member and its comma; if it was the last one, drop
+		// the comma before it instead.
+		start, end := found.keyStart, found.commaEnd
+		if found.commaEnd == found.valueEnd && idx > 0 {
+			start = inner[idx-1].valueEnd
+		}
+		// Take the line the member was on with it.
+		lineStart := bytes.LastIndexByte(b[:start], '\n')
+		if lineStart >= 0 && len(bytes.TrimSpace(b[lineStart:start])) == 0 {
+			start = lineStart
+		}
+		return append(append([]byte{}, b[:start]...), b[end:]...), nil
+	default:
+		val, err := encodeIndented(entry, lineIndent(b, found.keyStart), unit)
+		if err != nil {
+			return nil, err
+		}
+		return append(append(append([]byte{}, b[:found.valueStart]...), val...), b[found.valueEnd:]...), nil
 	}
-	return out, nil
 }
 
 // decodeJSONC reads JSON that may carry comments and trailing commas.

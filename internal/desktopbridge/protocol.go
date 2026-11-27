@@ -58,6 +58,10 @@ type Job struct {
 	Activities []json.RawMessage `json:"activities,omitempty"`
 	Result     json.RawMessage   `json:"result,omitempty"`
 	Error      string            `json:"error,omitempty"`
+	// Thinking is the agent's thinking so far (capped, latest part kept),
+	// and ThinkingMS how long it thought before the reply's text started.
+	Thinking   string `json:"thinking,omitempty"`
+	ThinkingMS int64  `json:"thinking_ms,omitempty"`
 }
 
 type Update struct {
@@ -68,7 +72,13 @@ type Update struct {
 	Activities []json.RawMessage `json:"activities,omitempty"`
 	Result     json.RawMessage   `json:"result,omitempty"`
 	Error      string            `json:"error,omitempty"`
+	Thinking   string            `json:"thinking,omitempty"`
+	ThinkingMS int64             `json:"thinking_ms,omitempty"`
 }
+
+// MaxThinkingBytes bounds Update.Thinking. The desktop keeps the latest
+// part of longer thinking (continuex.MaxThinkingBytes, a little less).
+const MaxThinkingBytes = 32 << 10
 
 func Terminal(state string) bool {
 	return state == "completed" || state == "failed" || state == "cancelled" || state == "expired"
@@ -118,6 +128,9 @@ func Apply(job Job, update Update, now time.Time) (Job, error) {
 	if !allowed {
 		return job, ErrConflict
 	}
+	if len(update.Thinking) > MaxThinkingBytes || update.ThinkingMS < 0 || update.ThinkingMS > int64(RunLifetime/time.Millisecond) {
+		return job, errors.New("desktop thinking is too large")
+	}
 	if len(update.Text) > 512<<10 || len(update.Status) > 1000 || len(update.Error) > 4000 || len(update.Result) > 1<<20 || len(update.Activities) > 100 {
 		return job, errors.New("desktop output is too large")
 	}
@@ -133,6 +146,7 @@ func Apply(job Job, update Update, now time.Time) (Job, error) {
 		job.Expires = now.Add(RunLifetime)
 	}
 	job.State, job.Status, job.Text, job.Activities, job.Result, job.Error = update.State, update.Status, update.Text, update.Activities, update.Result, update.Error
+	job.Thinking, job.ThinkingMS = update.Thinking, update.ThinkingMS
 	job.Revision++
 	job.Updated = now
 	return job, nil

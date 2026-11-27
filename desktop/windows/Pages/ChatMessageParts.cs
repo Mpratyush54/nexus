@@ -20,8 +20,7 @@ internal sealed class ThinkingView
     private readonly Button _button;
     private readonly System.Text.StringBuilder _text = new();
     private DispatcherTimer? _tick;
-    private DateTimeOffset _started;
-    private bool _finished;
+    private ThinkingSpan? _span;
 
     public ThinkingView(string content, TimeSpan? duration = null)
     {
@@ -67,16 +66,31 @@ internal sealed class ThinkingView
 
     public bool IsExpanded => _detail.Visibility == Visibility.Visible;
 
-    /// Streaming thinking: "Thinking… Ns" ticks once a second.
-    public static ThinkingView Live()
+    /// Streaming thinking: "Thinking… Ns" ticks once a second, counted from
+    /// <paramref name="startedAt"/> (the first thinking event's time) when known.
+    public static ThinkingView Live(DateTimeOffset? startedAt = null)
     {
         var view = new ThinkingView("");
-        view._started = DateTimeOffset.Now;
-        view.SetLabel("Thinking…");
+        view._span = new ThinkingSpan(startedAt);
+        view.SetLabel(LiveLabel(view._span));
         view._tick = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        view._tick.Tick += (_, _) => view.SetLabel("Thinking… " + Seconds(DateTimeOffset.Now - view._started));
+        view._tick.Tick += (_, _) => { if (view._span is { Finished: false } span) view.SetLabel(LiveLabel(span)); };
         view._tick.Start();
         return view;
+    }
+
+    private static string LiveLabel(ThinkingSpan span) =>
+        span.Duration.TotalSeconds < 1 ? "Thinking…" : "Thinking… " + Seconds(span.Duration);
+
+    /// Still ticking ("Thinking… Ns"), not yet "Thought for Ns".
+    public bool IsLive => _span is { Finished: false };
+
+    /// A replayed event says the thinking began earlier than this row.
+    public void StartedSince(DateTimeOffset at)
+    {
+        if (_span is not { Finished: false } span) return;
+        span.StartedSince(at);
+        SetLabel(LiveLabel(span));
     }
 
     public void Append(string delta)
@@ -86,16 +100,15 @@ internal sealed class ThinkingView
         if (IsExpanded) _body.Text = _text.ToString();
     }
 
-    /// The thinking ended (the reply's text started): "Thought for Ns".
-    public void Finish(TimeSpan? duration = null)
+    /// The thinking ended (the reply's text started, at <paramref name="at"/>
+    /// when the event says so): "Thought for Ns".
+    public void Finish(DateTimeOffset? at = null)
     {
         // Once: the time is when the text started, not when the row was moved.
-        if (_finished) return;
-        _finished = true;
+        if (_span is not { } span || !span.Finish(at)) return;
         _tick?.Stop();
         _tick = null;
-        var took = duration ?? (_started == default ? (TimeSpan?)null : DateTimeOffset.Now - _started);
-        SetLabel(took is { } d ? "Thought for " + Seconds(d) : "Thought process");
+        SetLabel("Thought for " + Seconds(span.Duration));
     }
 
     private void Toggle()

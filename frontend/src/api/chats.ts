@@ -15,6 +15,13 @@ export type ChatSession = {
 }
 export type ChatTurn = { idx: number; cursor_idx?: string; role: string; text_preview?: string; tool_calls?: unknown; source_ts?: string; ts?: string }
 export type ChatPage<T> = { items: T[]; next_cursor?: string }
+/** What the person's desktop agent is doing in a chat (GET /v1/chat-status). */
+export type ChatLiveStatus = {
+  session_id: string
+  status: 'running' | 'approval' | 'queued' | 'done' | 'error' | 'interrupted' | 'idle'
+  unread: boolean
+  updated_at: string
+}
 export type ShareRecipient = { user_id: string; name: string; project_role?: string; organization_role?: string }
 
 const TURN_PAGE = 100
@@ -79,5 +86,9 @@ export const chatsApi = {
   },
   /** Owner only: deletes the chat, its turns and shares. Memories made from it stay. */
   remove(id: string) { return apiRequest(`/v1/agent-sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }) },
+  /** Desktop agent status per chat, for the list's dots. */
+  liveStatus(signal?: AbortSignal) { return apiRequest<{ items: ChatLiveStatus[] }>('/v1/chat-status', { signal }) },
+  /** The person opened the chat: its new reply is read, here and on the desktop. */
+  markRead(id: string) { return apiRequest<{ ok: boolean }>(`/v1/chat-status/${encodeURIComponent(id)}/read`, { method: 'POST', body: {} }) },
   share(id: string, userId: string) { return apiRequest(`/v1/agent-sessions/${encodeURIComponent(id)}/grants`, { method: 'POST', body: { user_id: userId } }) },
 }

@@ -647,7 +647,7 @@ public sealed partial class SessionPage : NexusPage
 
     // Set by Home's "start a chat" composer: once the new chat has loaded,
     // its first message is sent without another click.
-    internal static (string SessionId, string Prompt)? PendingStart;
+    internal static (string SessionId, string Prompt, IReadOnlyList<ComposerMention> Mentions)? PendingStart;
 
     private async Task LoadThenStartAsync(int generation, bool quiet = false)
     {
@@ -670,6 +670,7 @@ public sealed partial class SessionPage : NexusPage
         PendingStart = null;
         if (!_sessionLoaded) return;
         _prompt.Text = start.Prompt;
+        foreach (var mention in start.Mentions) AddMention(mention, animate: false);
         if (!System.IO.Directory.Exists(_workspace.Text.Trim()))
         {
             SetComposerStatus("Choose the project folder (folder button), then press Send.");
@@ -1713,6 +1714,8 @@ public sealed partial class SessionPage : NexusPage
 
     private void RenderSavedContinuations(NxResponse response, bool cloudTurnsAvailable, bool appendContext = true)
     {
+        // Restore and review cards follow the painted transcript (SessionPage.Review.cs).
+        QueueCheckpointRefresh();
         if (!response.Ok)
         {
             SetComposerStatus(response.Error is { Length: > 0 } why && !why.StartsWith(NxErrors.GenericFailure, StringComparison.Ordinal) ? why : "Nexus couldn't load the replies it saved for this chat. Reopen the chat to try again.");
@@ -1776,7 +1779,7 @@ public sealed partial class SessionPage : NexusPage
             }
             // A cloud-saved reply already lists these files: Nexus uploaded them
             // as workspace_change tool calls, rendered as its file edits.
-            if (changed.Count > 0 && showMessages) place?.Invoke(FileChangesExpander(changed, item));
+            if (changed.Count > 0 && showMessages && FileChangesExpander(changed, item) is { } filesList) place?.Invoke(filesList);
             if (appendContext && showMessages) _continuationContext += "\n\nuser: " + prompt + "\n\nassistant: " + answer;
         }
         if (_continuationContext.Length > 6000) _continuationContext = _continuationContext[^6000..];
@@ -2936,8 +2939,12 @@ public sealed partial class SessionPage : NexusPage
         if (_id == sessionID) { _savedContinuationResponse = continuations; FillActivity(files, operations, continuations); }
     }
 
-    private static Expander FileChangesExpander(IReadOnlyList<string> changes, JsonElement exchange = default)
+    /// The read-only "Files changed" list under a reply. Files with nothing
+    /// added or removed (+0 −0: touched, or no diff could be told apart) are
+    /// left out; null when no file is left.
+    private static Expander? FileChangesExpander(IReadOnlyList<string> changes, JsonElement exchange = default)
     {
+        var shown = 0;
         var paths = new StackPanel { Spacing = 8, HorizontalAlignment = HorizontalAlignment.Stretch };
         var log = new LiveActivityLog();
         if (exchange.ValueKind == JsonValueKind.Object && exchange.TryGetProperty("activities", out var activities) && activities.ValueKind == JsonValueKind.Array)
@@ -2955,11 +2962,15 @@ public sealed partial class SessionPage : NexusPage
                 file.Replace('\\', '/').EndsWith("/" + path.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)));
             if (savedDiff.Length == 0 && notice.Length == 0) savedDiff = string.Join("\n\n", matches.Select(tool => tool.Diff));
             if (savedDiff.Length == 0 && notice.Length == 0) notice = "No text diff was captured for this file; it may be outside the preview limits.";
-            paths.Children.Add(FileDiffView.Create(new FileDiffPreview(path, savedDiff, notice)));
+            var preview = new FileDiffPreview(path, savedDiff, notice);
+            if (!preview.HasChanges) continue;
+            paths.Children.Add(FileDiffView.Create(preview));
+            shown++;
         }
+        if (shown == 0) return null;
         return new Expander
         {
-            Header = "Files changed · " + changes.Count,
+            Header = "Files changed · " + shown,
             IsExpanded = true,
             Content = paths,
             HorizontalAlignment = HorizontalAlignment.Stretch,
@@ -2984,8 +2995,8 @@ public sealed partial class SessionPage : NexusPage
             {
                 using var changes = JsonDocument.Parse(text);
                 var paths = StringArray(changes.RootElement, "file_changes");
-                if (_streamFileChanges is not null && paths.Count > 0)
-                { _streamFileChanges.Child = FileChangesExpander(paths, changes.RootElement); _streamFileChanges.Visibility = Visibility.Visible; }
+                if (_streamFileChanges is not null && paths.Count > 0 && FileChangesExpander(paths, changes.RootElement) is { } filesList)
+                { _streamFileChanges.Child = filesList; _streamFileChanges.Visibility = Visibility.Visible; }
                 return;
             }
             if (kind == "activity")

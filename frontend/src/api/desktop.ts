@@ -57,6 +57,10 @@ export type DesktopJob = {
   error?: string;
   activities?: DesktopActivity[];
   result?: DesktopResult;
+  /** The agent's thinking so far (the latest part, capped by the desktop). */
+  thinking?: string;
+  /** How long it thought before its first words, in milliseconds. */
+  thinking_ms?: number;
 };
 export function isFinished(state: string) {
   return ["completed", "failed", "cancelled", "expired"].includes(state);

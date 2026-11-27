@@ -79,6 +79,21 @@ func TestDesktopExecutionRequiresOwnerCredentialAndMappedWorkspace(t *testing.T)
 	if got := call("POST", "/v1/desktop/jobs/req-1/progress", token, secret, update); got.Code != 200 {
 		t.Fatalf("worker progress: %d %s", got.Code, got.Body)
 	}
+	// The agent's thinking reaches the browser with the job.
+	thinking := desktopbridge.Update{Revision: update.Revision + 1, State: "running", Status: "Thinking…", Thinking: "Looking at the request", ThinkingMS: 1200}
+	if got := call("POST", "/v1/desktop/jobs/req-1/progress", token, secret, thinking); got.Code != 200 {
+		t.Fatalf("thinking progress: %d %s", got.Code, got.Body)
+	}
+	update.Revision = thinking.Revision
+	var seen desktopbridge.Job
+	if got := call("GET", "/v1/desktop/jobs/req-1", token, "", nil); got.Code != 200 {
+		t.Fatalf("read job: %d", got.Code)
+	} else {
+		decodeBody(t, got, &seen)
+	}
+	if seen.Thinking != "Looking at the request" || seen.ThinkingMS != 1200 {
+		t.Fatalf("thinking not passed through: %+v", seen)
+	}
 	if got := call("GET", "/v1/desktop/jobs/req-1", editor, "", nil); got.Code != 404 {
 		t.Fatalf("cross-owner read: %d", got.Code)
 	}

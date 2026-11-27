@@ -134,13 +134,18 @@ func TestSharedScannerRecursiveWatchSeesNewTranscript(t *testing.T) {
 	}), time.Hour, time.Hour)
 	s.Attach(h)
 	defer s.Detach(h)
-	time.Sleep(500 * time.Millisecond) // first reconcile
+	// The first reconcile adds the (armed) watch, then publishes stats.
+	for start := time.Now(); h.Stats().LastScanAt == ""; time.Sleep(20 * time.Millisecond) {
+		if time.Since(start) > 30*time.Second {
+			t.Fatal("first reconcile never finished")
+		}
+	}
 	if s.rwatch == nil || s.rwatch.Len() != 1 {
 		t.Fatalf("recursive watch not in use")
 	}
 	p := filepath.Join(root, "chat-0999", "subagents", "agent-0123456789abcdef.jsonl")
 	writeLines(t, p, claudeUserLine(1, "a sub-agent task"))
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		<-mu
 		n := len(got)

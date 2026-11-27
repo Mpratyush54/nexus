@@ -115,12 +115,20 @@ public sealed partial class SettingsPage
         Grid.SetColumn(toggle, 1);
         head.Children.Add(toggle);
         options.Margin = new Thickness(0, 2, 0, 0);
+        // Editing the files themselves happens on the Agents page.
+        var edit = new HyperlinkButton { Content = "Edit these files", FontSize = 12.5, Padding = new Thickness(0) };
+        ToolTipService.SetToolTip(edit, "Open CLAUDE.md, AGENTS.md and the other instruction files in the editor on the Agents page");
+        edit.Click += (_, _) =>
+        {
+            PageCache.AgentSetup.ShowRules();
+            MainWindow.Current?.ShowNav("agentsetup");
+        };
         return new Border
         {
             BorderThickness = new Thickness(0, 1, 0, 0),
             BorderBrush = NexusPalette.Hairline,
             Padding = new Thickness(0, 10, 0, 0),
-            Child = new StackPanel { Spacing = 6, Children = { head, options, status } }
+            Child = new StackPanel { Spacing = 6, Children = { head, options, status, edit } }
         };
     }
 

@@ -213,6 +213,10 @@ type streamingOutput struct {
 	lastStatus string
 	agent      string
 	cursor     cursorActivityTracker
+	// The agent's thinking, reported as "thinking" progress (throttled).
+	thinking      thinkingBuffer
+	thinkingDirty bool
+	lastThinking  time.Time
 }
 
 // os/exec copies pipe output with io.Copy. The embedded bytes.Buffer exposes
@@ -259,8 +263,27 @@ func (w *streamingOutput) Flush() {
 		w.accept(w.pending)
 		w.pending = ""
 	}
+	if w.onProgress != nil && w.thinkingDirty {
+		w.thinkingDirty = false
+		w.onProgress(StreamProgress{Kind: "thinking", Text: w.thinking.String()})
+	}
 	if w.onProgress != nil && w.shown != "" {
 		w.onProgress(StreamProgress{Kind: "text", Text: w.shown})
+	}
+}
+
+// noteThinking keeps a line's thinking and reports it at most every
+// thinkingReportEvery; Flush reports the rest.
+func (w *streamingOutput) noteThinking(line string) {
+	piece, ok := streamThinking(line)
+	if !ok || !w.thinking.add(piece) {
+		return
+	}
+	w.thinkingDirty = true
+	if w.onProgress != nil && time.Since(w.lastThinking) >= thinkingReportEvery {
+		w.thinkingDirty = false
+		w.lastThinking = time.Now()
+		w.onProgress(StreamProgress{Kind: "thinking", Text: w.thinking.String()})
 	}
 }
 
@@ -274,6 +297,7 @@ func (w *streamingOutput) accept(line string) {
 			w.onProgress(StreamProgress{Kind: "activity", Text: string(encoded)})
 		}
 	}
+	w.noteThinking(line)
 	part, delta := streamAssistantText(line)
 	if part == "" {
 		if status := streamAgentStatus(line); status != "" && status != w.lastStatus && w.onProgress != nil {
@@ -281,6 +305,12 @@ func (w *streamingOutput) accept(line string) {
 			w.onProgress(StreamProgress{Kind: "status", Text: status})
 		}
 		return
+	}
+	if w.thinkingDirty && w.onProgress != nil {
+		// The reply started: the thinking before it goes out whole first.
+		w.thinkingDirty = false
+		w.lastThinking = time.Now()
+		w.onProgress(StreamProgress{Kind: "thinking", Text: w.thinking.String()})
 	}
 	if delta {
 		w.shown += part

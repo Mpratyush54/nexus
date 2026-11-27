@@ -39,4 +39,13 @@ public class FileDiffPreviewTests
         Assert.Contains("No patch", diff.Notice);
         Assert.Equal(0, diff.Added);
     }
+
+    [Fact]
+    public void PlusZeroMinusZeroHasNoChanges()
+    {
+        Assert.True(new FileDiffPreview("a.cs", "@@ -1 +1 @@\n-old\n+new").HasChanges);
+        Assert.True(new FileDiffPreview("a.cs", "@@ -1,0 +1 @@\n+only").HasChanges);
+        Assert.False(new FileDiffPreview("a.cs", "@@ -1 +1 @@\n same").HasChanges);
+        Assert.False(new FileDiffPreview("a.cs", "", "No text diff was captured.").HasChanges);
+    }
 }

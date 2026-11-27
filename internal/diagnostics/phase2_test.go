@@ -108,14 +108,12 @@ func TestGuardRecoversHoldsReportAndRoundTrips(t *testing.T) {
 	log.SetOutput(io.Discard)
 	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
-	done := make(chan struct{})
-	Go("test-worker", func() {
-		defer close(done)
+	// Go's goroutine body, run here so the report is written before we look
+	// (no sleep: the held file exists once guarded returns).
+	guarded("test-worker", func() {
 		var m map[string]int
 		m["boom"] = 1 // nil map write panics
 	})
-	<-done
-	time.Sleep(50 * time.Millisecond) // Guard runs after close(done)
 
 	entries, err := os.ReadDir(HeldDir(base))
 	if err != nil || len(entries) != 1 {
@@ -144,6 +142,7 @@ func TestGuardRecoversHoldsReportAndRoundTrips(t *testing.T) {
 
 func TestCaptureRePanics(t *testing.T) {
 	base := t.TempDir()
+	Configure(Config{})
 	log.SetOutput(io.Discard)
 	t.Cleanup(func() { log.SetOutput(os.Stderr); Configure(Config{}) })
 	defer func() {

@@ -629,3 +629,246 @@
 .composer-tools .voice-input .voice-input-button {
   border-radius: 8px;
 }
+
+/* ---------- Thinking: "Thinking… 4s" live, then "Thought for 7s ▸" ---------- */
+.chat-thinking {
+  margin: 0 0 8px;
+  font-size: 12.5px;
+  color: var(--chat-dim);
+}
+.chat-thinking > details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px 2px 2px;
+  margin-left: -2px;
+  border-radius: 6px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.chat-thinking > details > summary::-webkit-details-marker { display: none; }
+.chat-thinking > details > summary:hover { color: var(--chat-fg); background: var(--chat-hover); }
+.chat-thinking > details > summary:focus-visible { outline: 2px solid var(--chat-accent); outline-offset: 1px; }
+.chat-thinking-label { font-variant-numeric: tabular-nums; }
+.chat-thinking.is-live .chat-thinking-label {
+  font-weight: 500;
+  background: linear-gradient(90deg, var(--chat-dim) 0%, var(--chat-fg) 40%, var(--chat-dim) 80%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: chat-shimmer 1.8s linear infinite;
+}
+.chat-thinking-preview {
+  margin: 2px 0 0 21px;
+  max-width: 640px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--chat-dim);
+  opacity: 0.85;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.chat-thinking-body {
+  margin: 4px 0 2px 7px;
+  padding: 2px 0 2px 13px;
+  border-left: 2px solid var(--chat-line);
+  max-width: 680px;
+  max-height: 360px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--chat-dim);
+}
+.chat-thinking > details[open] > .chat-thinking-body { animation: chat-thinking-open 180ms cubic-bezier(0.1, 0.9, 0.2, 1); }
+@keyframes chat-thinking-open {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: none; }
+}
+/* While the thinking row is live it is the status: the line keeps only its dot and Esc. */
+.chat-reply-status.is-quiet .chat-reply-verb { display: none; }
+
+/* ---------- Chat list status dots (same as the desktop sidebar) ---------- */
+.chat-dot {
+  flex: none;
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  vertical-align: 1px;
+}
+/* Running: a 10px accent ring with a three-quarter arc, the desktop sidebar's spinner. */
+.chat-dot.is-running {
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  margin-right: 7px;
+  vertical-align: 0;
+  border: 2px solid color-mix(in srgb, var(--chat-accent) 22%, transparent);
+  border-top-color: var(--chat-accent);
+  border-right-color: var(--chat-accent);
+  border-bottom-color: var(--chat-accent);
+  animation: chat-dot-spin 0.9s linear infinite;
+}
+.chat-dot.is-approval { background: var(--color-amber, #d99a1e); animation: chat-dot-pulse 1.2s ease-in-out infinite; }
+.chat-dot.is-unread { background: var(--chat-accent); }
+.chat-dot.is-error { background: var(--color-danger, #e5484d); }
+.chat-dot.is-queued { border: 1.5px solid var(--chat-dim); }
+.chat-dot.is-stopped { border: 1.5px solid var(--color-amber, #d99a1e); }
+@keyframes chat-dot-spin { to { transform: rotate(360deg); } }
+@keyframes chat-dot-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+.conversation-card.is-unread strong { font-weight: 700; color: var(--chat-fg); }
+@media (prefers-reduced-motion: reduce) {
+  .chat-thinking.is-live .chat-thinking-label {
+    animation: none;
+    -webkit-text-fill-color: currentColor;
+    background: none;
+  }
+  .chat-thinking > details[open] > .chat-thinking-body,
+  .chat-dot.is-running,
+  .chat-dot.is-approval { animation: none; }
+  .chat-dot.is-running { border-color: var(--chat-accent); }
+}
+
+/* ---------- "/" commands and "@" mentions above the composer ---------- */
+.conversation-composer {
+  position: relative;
+}
+.composer-popup-host {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  width: min(100%, 460px);
+  z-index: 30;
+  animation: composer-popup-in 140ms var(--nx-ease-out);
+}
+.composer-popup-host.is-closing {
+  animation: composer-popup-out 90ms ease-in forwards;
+  pointer-events: none;
+}
+@keyframes composer-popup-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+@keyframes composer-popup-out {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(4px); }
+}
+.composer-popup {
+  padding: 8px 4px 6px;
+  border: 1px solid var(--chat-line-strong);
+  border-radius: 12px;
+  background: var(--chat-surface);
+  box-shadow: 0 14px 40px var(--chat-shadow-soft);
+}
+.composer-popup-title {
+  margin: 0 10px 4px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--chat-dim);
+}
+.composer-popup ul {
+  list-style: none;
+  margin: 0;
+  padding: 0 2px 0 0;
+  max-height: 296px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+.composer-popup-group {
+  display: block;
+  margin: 8px 10px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--chat-dim);
+}
+.composer-popup li:first-child .composer-popup-group { margin-top: 0; }
+.composer-popup-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--chat-fg);
+}
+.composer-popup-row.is-selected { background: var(--chat-hover); }
+.composer-popup-icon { display: inline-flex; color: var(--chat-dim); flex: none; }
+.composer-popup-text { display: flex; align-items: baseline; gap: 8px; min-width: 0; flex: 1; }
+.composer-popup-name { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; max-width: 70%; }
+.composer-popup-name mark { background: none; color: var(--chat-accent); font-weight: 600; }
+.composer-popup-detail { font-size: 12px; color: var(--chat-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.composer-popup-badge { font-size: 11px; color: var(--chat-dim); flex: none; }
+.composer-popup-empty { margin: 6px 10px 8px; font-size: 12.5px; color: var(--chat-dim); }
+.composer-popup-hint {
+  margin: 6px 0 0;
+  padding: 5px 10px 0;
+  border-top: 1px solid var(--chat-line-strong);
+  font-size: 11px;
+  color: var(--chat-dim);
+}
+.composer-mentions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+.composer-mentions li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 280px;
+  padding: 2px 3px 2px 9px;
+  border: 1px solid color-mix(in srgb, var(--chat-accent) 40%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--chat-accent) 12%, transparent);
+  font-size: 12px;
+  color: var(--chat-fg);
+  animation: composer-popup-in 150ms var(--nx-ease-out);
+}
+.composer-mentions li > svg { color: var(--chat-accent); flex: none; }
+.composer-mentions li span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.composer-mentions button {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  color: var(--chat-dim);
+}
+.composer-mentions button:hover { background: var(--chat-hover); color: var(--chat-fg); }
+.composer-help {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--chat-line-strong);
+  border-radius: 10px;
+  background: var(--chat-hover);
+  font-size: 12.5px;
+  animation: composer-popup-in 160ms var(--nx-ease-out);
+}
+.composer-help header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.composer-help header button { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 999px; color: var(--chat-dim); }
+.composer-help dl { margin: 0; display: grid; gap: 4px; }
+.composer-help dl > div { display: grid; grid-template-columns: 110px 1fr; gap: 10px; }
+.composer-help dt { font-family: var(--font-mono, ui-monospace, monospace); color: var(--chat-accent); }
+.composer-help dd { margin: 0; color: var(--chat-dim); }
+@media (prefers-reduced-motion: reduce) {
+  .composer-popup-host,
+  .composer-popup-host.is-closing,
+  .composer-mentions li,
+  .composer-help { animation: none; }
+}

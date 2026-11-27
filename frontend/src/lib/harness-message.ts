@@ -1,3 +1,4 @@
+import { stripMentions } from './composer-commands'
 // What a person wrote, separated from the wrapper an agent harness put around
 // it. Mirrors the desktop app (desktop/windows/Core/HarnessMessage.cs and
 // ChatTitles.cs) so a chat reads the same in both places. Anything inside
@@ -426,7 +427,7 @@ const PLACEHOLDER = /^(captured\s+\S+\s+(session|snapshot)|untitled chat|new cha
 /** A human title: the stored one unless it is a placeholder or wrapper, else the first request. */
 export function chatTitle(title: string | undefined, preview: string | undefined, harness: string | undefined): string {
   const clean = (value: string | undefined) =>
-    parseTurnText(value ?? '').text.replace(/`|\*\*/g, '').replace(/(^|\s)#{1,6}\s+/g, ' ').replace(/\s+/g, ' ').trim()
+    stripMentions(parseTurnText(value ?? '').text).replace(/`|\*\*/g, '').replace(/(^|\s)#{1,6}\s+/g, ' ').replace(/\s+/g, ' ').trim()
   const stored = clean(title)
   if (stored && !PLACEHOLDER.test(stored) && !/^This session is being continued/i.test(title ?? '')) {
     return stored.length <= 80 ? stored : stored.slice(0, 79).trimEnd() + '…'

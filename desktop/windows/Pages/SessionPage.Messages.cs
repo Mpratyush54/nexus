@@ -17,10 +17,12 @@ public sealed partial class SessionPage
     partial void ComposerEditHook(string text, ref bool handled);
     partial void ComposerRetryHook(string text, ref bool handled);
 
-    private sealed class MessageInfo(string role, string text, Func<(UIElement Content, MessageActionRow Actions)> build, bool canRelease)
+    private sealed class MessageInfo(string role, string text, Func<(UIElement Content, MessageActionRow Actions)> build, bool canRelease, string? prompt = null)
     {
         public string Role { get; } = role;
         public string Text { get; } = text;
+        /// What was sent, with any chats or memories attached ("@"); Retry sends this again.
+        public string Prompt { get; } = prompt ?? text;
         public MessageActionRow Actions { get; set; } = null!;
         public bool FromUser => Role.Equals("user", StringComparison.OrdinalIgnoreCase);
         /// Builds the message's visuals (again, after they were released).
@@ -42,21 +44,35 @@ public sealed partial class SessionPage
 
     private UIElement ChatMessage(string role, string content, string? assistantAgent = null, HarnessMessage? extras = null)
     {
+        // Chats and memories sent with a message show as chips, not as their raw context text.
+        IReadOnlyList<ComposerMention> sent = Array.Empty<ComposerMention>();
+        var prompt = content;
+        var fromUser = role.Equals("user", StringComparison.OrdinalIgnoreCase);
+        if (fromUser) (content, sent) = MentionText.Extract(content);
         var strip = extras is null ? null : MessageExtras(extras);
+        if (ComposerAssist.SentContextRow(sent) is { } context)
+            strip = strip is null ? context : new StackPanel { Spacing = 6, Children = { strip, context } };
+        // Only chats/memories (no typed text): the chips with the message's
+        // actions, so Restore and Edit still work, but no empty bubble.
+        if (strip is not null && content.Trim().Length == 0 && fromUser && sent.Count > 0)
+            return ChatBubble(role, content, assistantAgent, strip, sent, prompt);
         if (strip is not null && content.Trim().Length == 0)
         {
             // Only attachments (an image sent without text): no empty bubble.
             strip.HorizontalAlignment = role.Equals("user", StringComparison.OrdinalIgnoreCase) ? HorizontalAlignment.Right : HorizontalAlignment.Left;
             return new Border { Child = strip, HorizontalAlignment = strip.HorizontalAlignment, BorderThickness = new Thickness(0) };
         }
-        return ChatBubble(role, content, assistantAgent, strip);
+        return ChatBubble(role, content, assistantAgent, strip, sent, prompt);
     }
 
     // The message (a filled bubble for the person, open text for the agent),
     // attachment chips under it, then the action row. The outer Border is the
     // anchor that find and prompt jumps highlight.
-    private UIElement ChatBubble(string role, string content, string? assistantAgent, FrameworkElement? strip = null)
+    private UIElement ChatBubble(string role, string content, string? assistantAgent, FrameworkElement? strip = null,
+        IReadOnlyList<ComposerMention>? sent = null, string? prompt = null)
     {
+        sent ??= Array.Empty<ComposerMention>();
+        var hasText = content.Trim().Length > 0;
         var fromUser = role.Equals("user", StringComparison.OrdinalIgnoreCase);
         var label = fromUser ? "You" : Nonempty(ChatTitles.AgentName(assistantAgent ?? _agent), "Assistant");
         Border root = new()
@@ -81,6 +97,7 @@ public sealed partial class SessionPage
             selectMenu.Items.Add(copySelection);
             selectMenu.Items.Add(select);
             selectMenu.Items.Add(copyItem);
+            if (fromUser) AddRestoreMenuItem(selectMenu, root);
             view.ContextFlyout = selectMenu;
             // Like T3 Code: no "You"/agent label on every turn; alignment and the
             // user block's fill say who wrote it. The name stays for screen readers.
@@ -93,16 +110,18 @@ public sealed partial class SessionPage
                 }
                 : new Border { Child = view.Root, Padding = SessionChatRender.AssistantPad, HorizontalAlignment = HorizontalAlignment.Stretch };
             var actions = new MessageActionRow(fromUser, () => content,
-                edit: fromUser ? () => EditMessage(content) : null,
+                edit: fromUser ? () => EditMessage(content, sent) : null,
                 retry: fromUser ? null : () => RetryReplyAsync(root),
-                fork: () => ForkFromMessageAsync(root));
+                fork: () => ForkFromMessageAsync(root),
+                restore: fromUser ? () => RestoreFromMessageAsync(root) : null,
+                canRestore: fromUser ? () => CanRestoreMessage(root) : null);
             // Transparent, not null: the whole message (gaps too) takes hover.
             var stack = new StackPanel { HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Stretch, Background = TransparentBrush };
-            stack.Children.Add(bubble);
+            if (hasText || strip is null) stack.Children.Add(bubble);
             if (strip is not null)
             {
                 strip.HorizontalAlignment = bubble.HorizontalAlignment;
-                strip.Margin = new Thickness(0, 6, 0, 0);
+                strip.Margin = new Thickness(0, hasText ? 6 : 0, 0, 0);
                 stack.Children.Add(strip);
             }
             stack.Children.Add(actions.View);
@@ -110,7 +129,7 @@ public sealed partial class SessionPage
             actions.Time = () => MessageTime(root);
             return (stack, actions);
         }
-        var info = new MessageInfo(role, content, Build, canRelease: strip is null);
+        var info = new MessageInfo(role, content, Build, canRelease: strip is null, prompt: prompt);
         var (first, firstActions) = Build();
         root.Child = first;
         info.Actions = firstActions;
@@ -256,14 +275,18 @@ public sealed partial class SessionPage
     // ── Actions ───────────────────────────────────────────────────────────
 
     /// Puts a sent message back in the composer to change and send again.
-    private void EditMessage(string text)
+    private void EditMessage(string text, IReadOnlyList<ComposerMention>? mentions = null)
     {
         var handled = false;
         ComposerEditHook(text, ref handled);
-        if (handled) return;
-        _prompt.Text = text;
-        _prompt.SelectionStart = text.Length;
-        _prompt.Focus(FocusState.Programmatic);
+        if (!handled)
+        {
+            _prompt.Text = text;
+            _prompt.SelectionStart = text.Length;
+            _prompt.Focus(FocusState.Programmatic);
+        }
+        // The chats and memories sent with it come back as chips.
+        foreach (var mention in mentions ?? Array.Empty<ComposerMention>()) AddMention(mention, animate: true);
     }
 
     /// Asks again with the prompt before this reply (a new turn; agents keep
@@ -274,7 +297,7 @@ public sealed partial class SessionPage
         string? prompt = null;
         for (var i = index - 1; i >= 0; i--)
         {
-            if (s_messages.TryGetValue(_chat.Children[i], out var info) && info.FromUser) { prompt = info.Text; break; }
+            if (s_messages.TryGetValue(_chat.Children[i], out var info) && info.FromUser) { prompt = info.Prompt; break; }
         }
         if (string.IsNullOrWhiteSpace(prompt)) return;
         var handled = false;
@@ -380,23 +403,31 @@ public sealed partial class SessionPage
 
     private static readonly ConditionalWeakTable<Panel, ThinkingView> s_streamThinking = new();
 
-    /// The "Thinking… Ns" row of a live reply, above where its text will go.
-    private ThinkingView StreamThinking(TextBlock status)
+    /// The "Thinking… Ns" row of a live reply, above where its text will go,
+    /// counted from <paramref name="startedAt"/> (the thinking event's time).
+    private ThinkingView StreamThinking(TextBlock status, DateTimeOffset? startedAt = null)
     {
-        if (status.Parent is not Panel stack) return ThinkingView.Live();
-        if (s_streamThinking.TryGetValue(stack, out var existing)) return existing;
-        var view = ThinkingView.Live();
+        if (status.Parent is not Panel stack) return ThinkingView.Live(startedAt);
+        if (s_streamThinking.TryGetValue(stack, out var existing))
+        {
+            if (startedAt is { } at) existing.StartedSince(at);
+            return existing;
+        }
+        var view = ThinkingView.Live(startedAt);
         stack.Children.Insert(stack.Children.IndexOf(status), view.View);
         // The row says it; the status line would repeat it.
         status.Visibility = Visibility.Collapsed;
         s_streamThinking.AddOrUpdate(stack, view);
+        TurnStatusThinkingRow(true);
         return view;
     }
 
-    /// The reply's text started: "Thought for Ns".
-    private void FinishStreamThinking(TextBlock status)
+    /// The reply's text started (at <paramref name="at"/> when known): "Thought for Ns".
+    private void FinishStreamThinking(TextBlock status, DateTimeOffset? at = null)
     {
-        if (status.Parent is Panel stack && s_streamThinking.TryGetValue(stack, out var view)) view.Finish();
+        if (status.Parent is not Panel stack || !s_streamThinking.TryGetValue(stack, out var view) || !view.IsLive) return;
+        view.Finish(at);
+        TurnStatusThinkingRow(false);
     }
 
     /// Moves a streamed reply's thinking row into the chat at `at`, where it

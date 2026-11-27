@@ -342,18 +342,23 @@ public sealed partial class SessionPage
         switch (kind)
         {
             case "text_delta":
+                // The thinking ended when the words started, even on a replay
+                // that shows the whole turn at once.
+                if (_streamText is not null) FinishStreamThinking(_streamText, ThinkingSpan.EventTime(root));
                 _liveText.Append(text);
                 QueueLiveRender();
                 break;
             case "text":
+                if (_streamText is not null) FinishStreamThinking(_streamText, ThinkingSpan.EventTime(root));
                 // Deltas already rendered this block; separate it from the next one.
                 if (!_streamHasText) _liveText.Append(text);
                 _liveText.Append("\n\n");
                 QueueLiveRender();
                 break;
             case "thinking_delta":
-                // The status line says "Thinking"; the live thinking row shows the words.
-                if (!_streamHasText && _streamText is not null) StreamThinking(_streamText).Append(text);
+                // The live thinking row shows the words and the time; the
+                // status line leaves "Thinking" to it.
+                if (!_streamHasText && _streamText is not null) StreamThinking(_streamText, ThinkingSpan.EventTime(root)).Append(text);
                 break;
             case "tool_start":
             {

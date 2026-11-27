@@ -645,6 +645,10 @@ func nx_call(method, request *C.char) (out *C.char) {
 		result, err := agentsInstallCall(context.Background(), name, args)
 		return C.CString(string(core.MarshalResult(result, err)))
 	}
+	if strings.HasPrefix(name, "agents.config.") {
+		result, err := agentsConfigCall(context.Background(), name, args)
+		return C.CString(string(core.MarshalResult(result, err)))
+	}
 	if name == "agents.setup.browse" || name == "agents.setup.read" || name == "agents.setup.mcp_remove" {
 		result, err := agentsBrowseCall(name, args)
 		return C.CString(string(core.MarshalResult(result, err)))

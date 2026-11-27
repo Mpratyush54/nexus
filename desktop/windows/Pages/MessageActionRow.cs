@@ -8,7 +8,8 @@ namespace Nexus.Pages;
 
 /// <summary>
 /// The 28 px row under a chat message: Copy, Retry (the latest reply), Edit
-/// (your messages), Fork from here, and the time. It appears on hover or
+/// and Restore to before this message (your messages), Fork from here, and
+/// the time. It appears on hover or
 /// keyboard focus (fade 120 ms in, 80 ms out) and its space is always
 /// reserved, so nothing moves. The latest reply keeps it shown.
 ///
@@ -24,6 +25,9 @@ internal sealed class MessageActionRow
     private readonly Action? _edit;
     private readonly Func<Task>? _retry;
     private readonly Func<Task>? _fork;
+    private readonly Func<Task>? _restore;
+    private readonly Func<bool>? _canRestore;
+    private Button? _restoreButton;
     private StackPanel? _buttons;
     private TextBlock? _time;
     private FontIcon? _copyIcon;
@@ -35,14 +39,17 @@ internal sealed class MessageActionRow
     private bool _focused;
     private DispatcherTimer? _copiedTimer;
 
-    public MessageActionRow(bool fromUser, Func<string> copyText, Action? edit, Func<Task>? retry, Func<Task>? fork)
+    public MessageActionRow(bool fromUser, Func<string> copyText, Action? edit, Func<Task>? retry, Func<Task>? fork,
+        Func<Task>? restore = null, Func<bool>? canRestore = null)
     {
+        _restore = restore;
+        _canRestore = canRestore;
         _fromUser = fromUser;
         _copyText = copyText;
         _edit = edit;
         _retry = retry;
         _fork = fork;
-        View = new ContentControl
+        View = new RowHost
         {
             Height = 28, Opacity = 0, IsTabStop = true, UseSystemFocusVisuals = true,
             HorizontalAlignment = fromUser ? HorizontalAlignment.Right : HorizontalAlignment.Left,
@@ -107,6 +114,15 @@ internal sealed class MessageActionRow
         }
     }
 
+    /// Builds the buttons now (still hidden until hover or focus), so a
+    /// screen reader or UI Automation finds Restore on a message that has a
+    /// checkpoint without hovering first.
+    public void Prepare()
+    {
+        Realize();
+        Refresh();
+    }
+
     /// Hover over `target` (the message and this row) reveals the row.
     public void HoverOn(UIElement target)
     {
@@ -118,6 +134,9 @@ internal sealed class MessageActionRow
     private void Refresh()
     {
         var show = _pinned || _hovered || _focused;
+        // Restore appears once the turn has a checkpoint (it can arrive later).
+        if (_restoreButton is not null)
+            _restoreButton.Visibility = _canRestore?.Invoke() == true ? Visibility.Visible : Visibility.Collapsed;
         if (_time is not null)
         {
             if ((_hovered || _focused) && Time is { } time && _time.Text.Length == 0) _time.Text = time();
@@ -150,6 +169,14 @@ internal sealed class MessageActionRow
             var edit = Action(Icon(""), "Edit message", "Edit · put this message back in the composer");
             edit.Click += (_, _) => _edit?.Invoke();
             _buttons.Children.Add(_time);
+            if (_restore is not null)
+            {
+                _restoreButton = Action(Icon(""), "Restore to before this message",
+                    "Restore to before this message · put back the files the agent changed from here on");
+                _restoreButton.Visibility = _canRestore?.Invoke() == true ? Visibility.Visible : Visibility.Collapsed;
+                _restoreButton.Click += async (_, _) => await _restore();
+                _buttons.Children.Add(_restoreButton);
+            }
             _buttons.Children.Add(edit);
             _buttons.Children.Add(fork);
             _buttons.Children.Add(_copy);
@@ -213,6 +240,21 @@ internal sealed class MessageActionRow
         ToolTipService.SetToolTip(button, tip);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(button, name);
         return button;
+    }
+
+    // A plain ContentControl left the row's buttons out of the UI Automation
+    // tree (screen readers and UIA saw an empty "Message actions" group);
+    // this peer lists the visual children, so Copy, Edit, Restore... are found.
+    private sealed class RowHost : ContentControl
+    {
+        protected override Microsoft.UI.Xaml.Automation.Peers.AutomationPeer OnCreateAutomationPeer() => new RowPeer(this);
+    }
+
+    private sealed class RowPeer(FrameworkElement owner) : Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer(owner)
+    {
+        protected override Microsoft.UI.Xaml.Automation.Peers.AutomationControlType GetAutomationControlTypeCore() =>
+            Microsoft.UI.Xaml.Automation.Peers.AutomationControlType.Group;
+        protected override string GetClassNameCore() => "MessageActionRow";
     }
 
     private static bool IsInside(DependencyObject node, DependencyObject container)

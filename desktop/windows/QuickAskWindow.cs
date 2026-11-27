@@ -30,6 +30,7 @@ internal sealed class QuickAskWindow
     private readonly TextBlock _status = new() { FontSize = NexusTokens.FontCaption, Opacity = 0.7, TextWrapping = TextWrapping.Wrap, Visibility = Visibility.Collapsed };
     private readonly Border _card;
     private bool _sending;
+    private VoiceInput? _voice;
     private bool _closing;
 
     public bool IsShowing { get; private set; }
@@ -73,6 +74,9 @@ internal sealed class QuickAskWindow
         options.Children.Add(_background);
         Grid.SetColumn(_send, 3);
         options.Children.Add(_send);
+        // The same microphone as the chat box: it goes just before Send, and
+        // its notices ("Allow microphone…") in a line under these options.
+        _voice = VoiceInput.Attach(_prompt, _send);
 
         var hint = new TextBlock
         {
@@ -88,8 +92,11 @@ internal sealed class QuickAskWindow
         {
             Child = body, Padding = new Thickness(16, 12, 14, 10),
             Background = ThemeService.Brush("NexusSurfaceBrush", NexusTokens.BrandInk),
-            BorderBrush = NexusPalette.Hairline, BorderThickness = new Thickness(1), CornerRadius = NexusTokens.RadiusLarge
+            BorderBrush = NexusPalette.Hairline, BorderThickness = new Thickness(1), CornerRadius = NexusTokens.RadiusLarge,
+            VerticalAlignment = VerticalAlignment.Top
         };
+        // A voice notice or a status line makes the card taller: grow the window to fit.
+        _card.SizeChanged += (_, _) => FitHeight();
         AutomationProperties.SetName(_card, "Quick ask");
         var root = new Grid { Background = ThemeService.Brush("NexusSurfaceBrush", NexusTokens.BrandInk), RequestedTheme = ThemeService.ElementTheme };
         root.Children.Add(_card);
@@ -153,12 +160,29 @@ internal sealed class QuickAskWindow
         }
     }
 
+    private void FitHeight()
+    {
+        if (!IsShowing || _card.ActualHeight <= 0) return;
+        try
+        {
+            var app = _window.AppWindow;
+            var scale = _card.XamlRoot?.RasterizationScale ?? 1.0;
+            var want = (int)Math.Ceiling(Math.Max(HeightDip, _card.ActualHeight) * scale);
+            if (Math.Abs(app.Size.Height - want) > 2) app.Resize(new Windows.Graphics.SizeInt32 { Width = app.Size.Width, Height = want });
+        }
+        catch (Exception ex)
+        {
+            DiagLog.Info("quickask", "resizing the window failed: " + ex.Message);
+        }
+    }
+
     public void ShowPrompt()
     {
         FillChoices();
         _status.Visibility = Visibility.Collapsed;
         Place();
         IsShowing = true;
+        FitHeight();
         _window.Activate();
 #if !HAS_UNO
         BringToFront();
@@ -173,6 +197,7 @@ internal sealed class QuickAskWindow
     {
         if (!IsShowing) return;
         IsShowing = false;
+        if (_voice is { Active: true } voice) _ = voice.StopAsync();
         try { _window.AppWindow.Hide(); }
         catch (Exception ex) { DiagLog.Info("quickask", "hide failed: " + ex.Message); }
     }
@@ -204,7 +229,13 @@ internal sealed class QuickAskWindow
 
     private void OnPromptKey(object sender, KeyRoutedEventArgs e)
     {
-        if (e.Key == VirtualKey.Escape)
+        if (e.Key == VirtualKey.Escape && _voice is { Active: true } listening)
+        {
+            // Esc first stops dictation (the words stay); a second Esc closes.
+            e.Handled = true;
+            _ = listening.StopAsync();
+        }
+        else if (e.Key == VirtualKey.Escape)
         {
             e.Handled = true;
             HidePrompt();
@@ -284,7 +315,7 @@ internal sealed class QuickAskWindow
             _prompt.Text = "";
             Status("");
             HidePrompt();
-            SessionPage.PendingStart = (id, prompt);
+            SessionPage.PendingStart = (id, prompt, Array.Empty<ComposerMention>());
             _main.OpenChatFromQuickAsk(id);
         }
         catch (Exception ex)

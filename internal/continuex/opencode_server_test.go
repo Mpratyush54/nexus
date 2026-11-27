@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -77,6 +78,10 @@ func TestOpenCodeHTTPStreamsBeforeCompletion(t *testing.T) {
 	var done atomic.Bool
 	var subscribed atomic.Bool
 	var sent atomic.Bool
+	// The rest of the reply is held back until the first words reached the
+	// caller, so "streams before completion" never depends on sleeps.
+	firstWords := make(chan struct{})
+	var firstOnce sync.Once
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, pass, auth := r.BasicAuth()
 		if !auth || user != "nexus" || pass != "test-password" {
@@ -90,9 +95,10 @@ func TestOpenCodeHTTPStreamsBeforeCompletion(t *testing.T) {
 		case "/event":
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
+			// Subscribed before the client can see the sentinel it waits for.
+			subscribed.Store(true)
 			_, _ = fmt.Fprint(w, "data: {\"type\":\"server.connected\",\"properties\":{}}\n\n")
 			w.(http.Flusher).Flush()
-			subscribed.Store(true)
 			for {
 				select {
 				case event := <-events:
@@ -111,9 +117,12 @@ func TestOpenCodeHTTPStreamsBeforeCompletion(t *testing.T) {
 				events <- `{"type":"message.updated","properties":{"info":{"id":"msg_1","sessionID":"ses_test","role":"assistant"}}}`
 				events <- `{"type":"message.part.updated","properties":{"part":{"id":"part_1","sessionID":"ses_test","messageID":"msg_1","type":"text","text":""}}}`
 				events <- `{"type":"message.part.delta","properties":{"sessionID":"ses_test","messageID":"msg_1","partID":"part_1","field":"text","delta":"Hel"}}`
-				time.Sleep(100 * time.Millisecond)
+				select {
+				case <-firstWords:
+				case <-time.After(5 * time.Second):
+					// The assertions below report the missing early text.
+				}
 				events <- `{"type":"message.part.delta","properties":{"sessionID":"ses_test","messageID":"msg_1","partID":"part_1","field":"text","delta":"lo"}}`
-				time.Sleep(100 * time.Millisecond)
 				done.Store(true)
 				events <- `{"type":"session.idle","properties":{"sessionID":"ses_test"}}`
 			}()
@@ -143,6 +152,7 @@ func TestOpenCodeHTTPStreamsBeforeCompletion(t *testing.T) {
 	result, err := runOpenCodeHTTP(ctx, server.Client(), server.URL, "test-password", openCodeInput{prompt: "Hello"}, func(p StreamProgress) {
 		if p.Kind == "text" && !done.Load() {
 			beforeFinish = append(beforeFinish, p.Text)
+			firstOnce.Do(func() { close(firstWords) })
 		}
 	})
 	if err != nil {

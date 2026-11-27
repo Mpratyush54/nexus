@@ -29,8 +29,9 @@ internal sealed class OutgoingMessage
         Interrupted
     }
 
-    public OutgoingMessage(string sessionId, string text, IReadOnlyList<string>? images = null, IReadOnlyList<string>? files = null, IReadOnlyList<string>? pastes = null)
+    public OutgoingMessage(string sessionId, string text, IReadOnlyList<string>? images = null, IReadOnlyList<string>? files = null, IReadOnlyList<string>? pastes = null, IReadOnlyList<ComposerMention>? mentions = null)
     {
+        Mentions = mentions?.ToArray() ?? Array.Empty<ComposerMention>();
         SessionId = sessionId;
         Text = text;
         Images = images?.ToArray() ?? Array.Empty<string>();
@@ -45,6 +46,8 @@ internal sealed class OutgoingMessage
     public IReadOnlyList<string> Files { get; }
     /// <summary>Large pasted blocks sent after the typed text.</summary>
     public IReadOnlyList<string> Pastes { get; }
+    /// <summary>Files, folders, chats and memories picked with "@" (see <see cref="MentionText"/>).</summary>
+    public IReadOnlyList<ComposerMention> Mentions { get; }
 
     public State Current { get; private set; } = State.Pending;
     public FailStage Stage { get; private set; }
@@ -55,6 +58,9 @@ internal sealed class OutgoingMessage
 
     /// <summary>The prompt the agent gets: the typed text, then each pasted block.</summary>
     public string Prompt => PastedText.Join(Text, Pastes);
+
+    /// <summary>The prompt with the "@" mentions in the agent's format.</summary>
+    public string PromptFor(string agent) => MentionText.Apply(Prompt, Mentions, agent);
 
     private bool Move(State from, State to)
     {

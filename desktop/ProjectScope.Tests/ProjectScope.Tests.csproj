@@ -51,8 +51,15 @@
     <Compile Include="../windows/Core/ComposerKeys.cs" Link="ComposerKeys.cs" />
     <Compile Include="../windows/Core/OutgoingMessage.cs" Link="OutgoingMessage.cs" />
     <Compile Include="../windows/Core/TurnStatus.cs" Link="TurnStatus.cs" />
+    <Compile Include="../windows/Core/ThinkingSpan.cs" Link="ThinkingSpan.cs" />
     <Compile Include="../windows/Core/ShortcutRegistry.cs" Link="ShortcutRegistry.cs" />
     <Compile Include="../windows/Core/PaletteRanking.cs" Link="PaletteRanking.cs" />
     <Compile Include="../windows/Core/ToastQueue.cs" Link="ToastQueue.cs" />
+    <Compile Include="../windows/Core/ChangeReview.cs" Link="ChangeReview.cs" />
+    <Compile Include="../windows/Core/FuzzyMatch.cs" Link="FuzzyMatch.cs" />
+    <Compile Include="../windows/Core/ComposerCommands.cs" Link="ComposerCommands.cs" />
+    <Compile Include="../windows/Core/ComposerMentions.cs" Link="ComposerMentions.cs" />
+    <Compile Include="../windows/Core/PromptRecall.cs" Link="PromptRecall.cs" />
+    <Compile Include="../windows/Core/AgentConfigText.cs" Link="AgentConfigText.cs" />
   </ItemGroup>
 </Project>

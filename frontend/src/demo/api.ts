@@ -166,6 +166,8 @@ const GET: [RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
   }],
   [/^\/memory\/([^/]+)\/shares$/, () => list([])],
   [/^\/v1\/timeline$/, (_m, r) => timeline(r.query)],
+  // The demo laptop's agents: one chat working, one with a reply not yet read.
+  [/^\/v1\/chat-status$/, () => ok({ items: demoChatStatus() })],
   [/^\/v1\/agent-sessions\/([^/]+)$/, (m) => { const c = chatById(m[1]); return c ? ok(chatSession(c)) : missing() }],
   [/^\/v1\/agent-sessions\/([^/]+)\/fetch$/, (m) => { const c = chatById(m[1]); return c ? ok({ items: chatTurns(c) }) : missing() }],
   [/^\/v1\/agent-sessions\/([^/]+)\/summary$/, (m) => ok({ summary: chatById(m[1])?.summary ?? '' })],
@@ -277,6 +279,7 @@ const WRITE: [string, RegExp, (m: RegExpMatchArray, r: Req) => Res][] = [
     CHATS.splice(CHATS.indexOf(c), 1)
     return ok({ deleted: true, session_id: c.card.session_id })
   }],
+  ['POST', /^\/v1\/chat-status\/([^/]+)\/read$/, (m) => { readChats.add(decodeURIComponent(m[1])); return ok({ ok: true }) }],
   ['PATCH', /^\/v1\/agent-sessions\/([^/]+)\/state$/, (m, r) => setChatState(m[1], (r.body ?? {}) as ChatState)],
   ['POST', /^\/v1\/agent-sessions\/([^/]+)\/fork$/, (m) => { const c = chatById(m[1]); return c ? ok(chatSession(forkChat(c))) : missing() }],
   ['POST', /^\/v1\/agent-sessions\/([^/]+)\/grants$/, (_m, r) => ok({ ok: true, user_id: (r.body as { user_id?: string } | undefined)?.user_id })],
@@ -352,6 +355,16 @@ function demoReply(req: DemoJobRequest) {
   )
 }
 
+const readChats = new Set<string>()
+function demoChatStatus() {
+  const at = new Date().toISOString()
+  const [, working, replied] = CHATS
+  return [
+    working && { session_id: working.card.session_id, status: 'running', unread: false, updated_at: at },
+    replied && !readChats.has(replied.card.session_id) && { session_id: replied.card.session_id, status: 'done', unread: true, updated_at: at },
+  ].filter(Boolean)
+}
+
 export function demoJob(id: string) {
   const j = jobs.get(id)
   if (!j) return undefined
@@ -371,6 +384,10 @@ export function demoJob(id: string) {
   ].slice(0, Math.max(0, step - 2))
   const reply = demoReply(req)
   const done = step >= STEPS.length - 1
+  // It thinks from approval until it starts writing, like a real agent.
+  const thinkingFull = 'The retry path should back off. Let me read src/payments/retry.ts first, then change the loop to use full jitter and run the payment tests to be sure nothing else moves.'
+  const thought = Math.max(0, Math.min(elapsed, STREAM_FROM) - 1500)
+  const thinking = thought > 0 ? thinkingFull.slice(0, Math.ceil((thinkingFull.length * thought) / (STREAM_FROM - 1500))) : undefined
   // While streaming, every few characters is a new revision (like the real relay).
   const shown = done ? reply.length : step === 6 ? Math.floor((reply.length * (elapsed - STREAM_FROM)) / STREAM_MS) : 0
   const text = reply.slice(0, shown)
@@ -386,6 +403,8 @@ export function demoJob(id: string) {
     revision: step * 10_000 + shown,
     text,
     activities,
+    thinking,
+    thinking_ms: thinking ? thought : undefined,
     result: done ? { text: reply, agent: req.agent, cloud_saved: true } : undefined,
   }
 }

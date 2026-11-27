@@ -15,25 +15,41 @@ export function ReplyStatus({
   verb,
   startedAt,
   touch,
+  quiet = false,
 }: {
   verb: string;
   startedAt: number;
   touch: boolean;
+  /**
+   * The live thinking block above says "Thinking… 4s": the line keeps only
+   * its dot and how to stop, so the reply never says it twice.
+   */
+  quiet?: boolean;
 }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
+    if (quiet) return;
     const t = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(t);
-  }, []);
+  }, [quiet]);
+  if (quiet && touch) return null;
   return (
-    <div className="chat-reply-status">
+    <div className={`chat-reply-status ${quiet ? "is-quiet" : ""}`}>
       <span className="chat-reply-dot" aria-hidden="true" />
       <span className="chat-reply-verb" role="status">
-        {verb}
+        {quiet ? "" : verb}
       </span>
       <span className="chat-reply-meta" aria-hidden="true">
-        {elapsedLabel(now - startedAt)}
-        {!touch && <> · <kbd>Esc</kbd> to stop</>}
+        {quiet ? (
+          <>
+            <kbd>Esc</kbd> to stop
+          </>
+        ) : (
+          <>
+            {elapsedLabel(now - startedAt)}
+            {!touch && <> · <kbd>Esc</kbd> to stop</>}
+          </>
+        )}
       </span>
     </div>
   );

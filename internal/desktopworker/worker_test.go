@@ -55,6 +55,8 @@ func (e *fakeExecutor) TurnStreaming(ctx context.Context, _ continuex.LaunchPlan
 		close(e.started)
 	}
 	if progress != nil {
+		progress(continuex.StreamProgress{Kind: "thinking", Text: "Looking at the request"})
+		time.Sleep(30 * time.Millisecond)
 		progress(continuex.StreamProgress{Kind: "text", Text: "partial text"})
 		progress(continuex.StreamProgress{Kind: "activity", Text: `{"id":"tool-1","tool":"read","status":"completed","input":"README.md"}`})
 	}
@@ -138,6 +140,10 @@ func TestApprovedBrowserTurnStreamsAndPersistsDiffs(t *testing.T) {
 			got, _ = m.Get(t.Context(), "owner", j.ID)
 			if !sawLive || got.State != "completed" || !strings.Contains(string(got.Result), "-old\\n+new") || exec.calls.Load() != 1 {
 				t.Fatalf("live=%v calls=%d job=%+v", sawLive, exec.calls.Load(), got)
+			}
+			// The thinking stays with the finished job, timed to the first words.
+			if got.Thinking != "Looking at the request" || got.ThinkingMS < 25 || got.ThinkingMS > 2000 {
+				t.Fatalf("thinking = %q, %d ms", got.Thinking, got.ThinkingMS)
 			}
 			return
 		case <-deadline:
@@ -267,5 +273,31 @@ func TestClientSendsProtocolVersion(t *testing.T) {
 	c := desktopbridge.Client{BaseURL: "https://nexus.test", Token: "t", Key: "k", HTTP: client}
 	if err := c.Call(t.Context(), "GET", "/v1/desktop/devices", nil, nil); err != nil || header != "2" {
 		t.Fatalf("protocol header %q err %v", header, err)
+	}
+}
+
+func TestThinkingClockStopsAtTheFirstWords(t *testing.T) {
+	var c thinkingClock
+	t0 := time.Date(2026, 11, 26, 9, 0, 0, 0, time.UTC)
+	if c.ms(t0) != 0 {
+		t.Fatal("no thinking yet")
+	}
+	c.replied(t0) // text before any thinking: nothing to time
+	c.thinking(t0)
+	c.thinking(t0.Add(3 * time.Second))
+	if got := c.ms(t0.Add(5 * time.Second)); got != 5000 {
+		t.Fatalf("while thinking: %d", got)
+	}
+	c.replied(t0.Add(7 * time.Second))
+	c.replied(t0.Add(9 * time.Second))
+	if got := c.ms(t0.Add(time.Minute)); got != 7000 {
+		t.Fatalf("after the reply started: %d", got)
+	}
+}
+
+func TestCapThinkingFitsTheServerLimit(t *testing.T) {
+	got := capThinking(strings.Repeat("думаю ", 20000))
+	if len(got) > desktopbridge.MaxThinkingBytes || !strings.HasPrefix(got, "…") {
+		t.Fatalf("capped to %d bytes", len(got))
 	}
 }
