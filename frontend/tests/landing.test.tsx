@@ -28,7 +28,7 @@ test('screenshots are crisp captures never shown wider than half their pixel wid
   const figs = [...html.matchAll(/--ratio:(\d+) \/ (\d+);--max:(\d+)px[\s\S]*?<img src="\/landing\/shots\/([\w-]+)-(\d+)\.png" width="(\d+)" height="(\d+)"/g)]
   assert.ok(figs.length >= 3 && figs.length <= 6, `expected a few shots, found ${figs.length}`)
   for (const [, rw, rh, max, name, file, w, h] of figs) {
-    assert.ok(name.startsWith('web-'), `${name}: use the 2x web captures`)
+    assert.ok(/^(web|desk)-/.test(name), `${name}: use the 2x captures`)
     assert.equal(file, w)
     assert.equal(Number(max), Math.round(Number(w) / 2), `${name}: shown wider than half its pixels`)
     assert.deepEqual([rw, rh], [w, h])
@@ -169,4 +169,20 @@ test('structured data describes the features and the FAQ in plain text', () => {
   assert.match(prerender, /featureList: FEATURES/)
   assert.match(prerender, /softwareVersion: LATEST_VERSION/)
   assert.equal(LATEST_VERSION, '0.4.5')
+})
+
+test('the film poster is a sharp 1920px frame served at 1x and 2x, under a scrim and a play badge', () => {
+  const film = html.match(/<figure class="nx-film"[\s\S]*?<\/figure>/)?.[0] ?? ''
+  assert.match(film, /nexus-film-poster-960\.avif 960w, \/landing\/nexus-film-poster-1920\.avif 1920w/)
+  assert.match(film, /<img class="nx-film-poster" src="\/landing\/nexus-film-poster-1920\.jpg" alt="" width="1920" height="1080"/)
+  for (const f of ['nexus-film-poster-1920.jpg', 'nexus-film-poster-1920.avif', 'nexus-film-poster-960.webp']) assert.ok(existsSync(path.join(publicDir, 'landing', f)), f)
+  assert.match(film, /class="nx-film-badge"/)
+  // Never shown wider than half the frame's pixels.
+  assert.match(read('src', 'landing', 'site.css'), /\.nx-film \{\s*position: relative; width: 100%; max-width: 960px;/)
+})
+
+test('the Control tab shows the desktop review panel with its own caption', () => {
+  const panel = html.match(/id="panel-control"[\s\S]*?<\/figure>/)?.[0] ?? ''
+  assert.match(panel, /shots\/desk-review-1456\.png/)
+  assert.match(panel, /Nexus for Windows <span aria-hidden="true">·<\/span> Review changes/)
 })

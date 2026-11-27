@@ -191,15 +191,18 @@ function Pipeline() {
 
 /* ---------- product screenshots ---------- */
 
-// Real captures of the Nexus web app on the demo's sample data (a fictional
-// team; never real chats), taken in headless Chrome at 2x (3x for the phone).
+// Real captures on demo data only (a fictional team; never real chats): the
+// web app's /demo in headless Chrome at 2x (3x for the phone), and the
+// desktop review panel at 2x.
 // Each ships as AVIF and WebP at its full size and at half, with a PNG
 // fallback; the page never shows one wider than half its pixel width.
-type ShotSpec = { name: string; w: number; h: number; label: string; alt: string }
+type ShotSpec = { name: string; w: number; h: number; label: string; alt: string; app?: string }
 
 const SHOTS = {
   chat: { name: 'web-chat', w: 1600, h: 1140, label: 'Chat', alt: 'A chat with Claude Code in Nexus: the question about reusing the order key, then the agent thinking live while it reads, edits and tests src/payments/retry.ts, with Esc to stop.' },
-  steps: { name: 'web-steps', w: 1600, h: 1140, label: 'Steps', alt: 'The Steps tab of a chat: each edit the agent made to src/payments/retry.ts shown as a diff, followed by the test file it wrote and the test command it ran.' },
+  // The desktop app's review panel, captured from an isolated demo instance on
+  // a sandbox repo at 2x and stitched from a few scroll positions.
+  review: { name: 'desk-review', w: 1456, h: 1012, label: 'Review changes', app: 'Nexus for Windows', alt: 'Review changes in Nexus for Windows after a reply: two files changed, docs/retries.md added and src/retry.ts edited, each file and each change with its own Undo and Keep buttons, plus Undo all and Keep all, above the diffs.' },
   memory: { name: 'web-memory', w: 1872, h: 1337, label: 'Memory', alt: 'The Memory page for the checkout-service project: twelve memories grouped by topic, starting with the project brief and the capture retry rules, each saved by an agent and editable.' },
   phone: { name: 'web-phone', w: 1170, h: 2400, label: 'Phone', alt: 'The same chat on a phone: Claude Code thinking live and running its steps, with a reply box and a stop button.' },
 } satisfies Record<string, ShotSpec>
@@ -221,7 +224,7 @@ function Shot({ s, sizes, className = '' }: { s: ShotSpec; sizes: string; classN
       <figcaption className="nx-shot-cap">
         <img src="/brand/nexus-app.svg" width="14" height="14" alt="" />
         <span>
-          Nexus on the web <span aria-hidden="true">·</span> {s.label}
+          {s.app ?? 'Nexus on the web'} <span aria-hidden="true">·</span> {s.label}
         </span>
       </figcaption>
     </figure>
@@ -254,9 +257,9 @@ const TABS: Tab[] = [
     id: 'control',
     tab: 'Control',
     title: 'Keep what’s good. Undo the rest.',
-    shot: SHOTS.steps,
+    shot: SHOTS.review,
     points: [
-      'Every edit shows up as a diff. Keep or undo a whole file or a single change.',
+      'After each reply, review every edit. Keep or undo a whole file or a single change.',
       <>
         Go back to any message, files included, or just type <Code>/rewind</Code>.
       </>,
@@ -334,7 +337,7 @@ function Showcase() {
                 </ul>
               </div>
               <div className="nx-panel-visual">
-                <Shot s={t.shot} sizes={t.id === 'live' ? '300px' : SHOT_SIZES} className={t.id === 'live' ? 'nx-shot-phone' : ''} />
+                <Shot s={t.shot} sizes={t.id === 'live' ? '300px' : SHOT_SIZES} className={t.id === 'live' ? 'nx-shot-phone' : t.id === 'control' ? 'nx-shot-whole' : ''} />
               </div>
             </div>
           ))}
@@ -350,7 +353,7 @@ function FilmPlayer() {
   return (
     <dialog className="nx-player" data-player aria-label="Nexus product film">
       <div className="nx-player-stage" data-player-stage data-state="paused">
-        <video className="nx-player-video" data-player-video data-src="/landing/nexus-film-full.mp4" playsInline preload="none" poster="/landing/nexus-film-poster.jpg">
+        <video className="nx-player-video" data-player-video data-src="/landing/nexus-film-full.mp4" playsInline preload="none" poster="/landing/nexus-film-poster-1920.jpg">
           {/* Music only, no narration: the track describes the sound. */}
           <track kind="captions" srcLang="en" label="English" src="/landing/nexus-film.en.vtt" default />
         </video>
@@ -391,6 +394,9 @@ const MORE = [
   { icon: Feather, t: 'Native and light', d: 'WinUI 3, not Electron. Starts fast.' },
   { icon: Smartphone, t: 'Works on your phone', d: 'The web app has the same chats.' },
 ]
+
+const POSTER_SET = (ext: string) => `/landing/nexus-film-poster-960.${ext} 960w, /landing/nexus-film-poster-1920.${ext} 1920w`
+const POSTER_SIZES = '(min-width: 1288px) 640px, (min-width: 980px) 52vw, calc(100vw - 32px)'
 
 const NAV = [
   { href: '#how', label: 'How it works' },
@@ -458,7 +464,12 @@ export function LandingPage() {
         <section id="more" className="nx-section nx-more" aria-labelledby="more-title">
           <div className="nx-wrap nx-more-grid">
             <figure className="nx-film" data-film>
-              <img className="nx-film-poster" src="/landing/nexus-film-poster.jpg" alt="" width="1600" height="900" loading="lazy" decoding="async" />
+              {/* A sharp frame from the film (1920x1080), served at 1x and 2x of its displayed size. */}
+              <picture>
+                <source type="image/avif" srcSet={POSTER_SET('avif')} sizes={POSTER_SIZES} />
+                <source type="image/webp" srcSet={POSTER_SET('webp')} sizes={POSTER_SIZES} />
+                <img className="nx-film-poster" src="/landing/nexus-film-poster-1920.jpg" alt="" width="1920" height="1080" loading="lazy" decoding="async" />
+              </picture>
               {/* A silent 16 s cut loops here while in view (never with reduced motion or Save-Data). */}
               <video className="nx-film-loop" data-film-loop muted loop playsInline preload="none" aria-hidden="true" tabIndex={-1}>
                 <source data-src="/landing/nexus-film.webm" type="video/webm" />

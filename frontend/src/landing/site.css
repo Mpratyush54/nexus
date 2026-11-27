@@ -493,8 +493,9 @@ html[data-os='other'] .nx [data-for]:not([data-for~='other']) { display: none; }
 a.nx-shot-win { display: block; cursor: zoom-in; }
 @media (max-width: 600px) {
   /* Phones crop the wide shots to their top-left, where the content is, so text stays legible. */
-  .nx-shot:not(.nx-shot-phone) .nx-shot-win { aspect-ratio: 1 / 1; }
-  .nx-shot:not(.nx-shot-phone) .nx-shot-win img { object-fit: cover; object-position: 0 0; }
+  /* The review panel stays whole: its Undo and Keep buttons sit on the right edge. */
+  .nx-shot:not(.nx-shot-phone, .nx-shot-whole) .nx-shot-win { aspect-ratio: 1 / 1; }
+  .nx-shot:not(.nx-shot-phone, .nx-shot-whole) .nx-shot-win img { object-fit: cover; object-position: 0 0; }
 }
 @media (max-width: 900px) {
   .nx-shot-phone { height: auto; max-height: none; width: min(260px, 70vw); }
@@ -521,8 +522,9 @@ a.nx-shot-win { display: block; cursor: zoom-in; }
   .nx-more-list { grid-template-columns: minmax(0, 1fr); gap: 16px; }
 }
 
+/* Never wider than half the poster's 1920px, so it stays sharp at 2x. */
 .nx-film {
-  position: relative; width: 100%; aspect-ratio: 16 / 9; border-radius: var(--r-3); overflow: hidden;
+  position: relative; width: 100%; max-width: 960px; justify-self: center; aspect-ratio: 16 / 9; border-radius: var(--r-3); overflow: hidden;
   background: var(--nx-win); box-shadow: var(--shadow-win);
 }
 .nx-film-poster, .nx-film-loop { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
