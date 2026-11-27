@@ -40,6 +40,8 @@
         d.classList.add(home ? 'nx-home' : 'nx-app')
         // The landing page is dark only (src/landing/site.css); the web app keeps its own theme choice.
         if (home) {
+          // Feature tabs stack their panels only with JS (src/landing/site.css, .nx-js).
+          d.classList.add('nx-js')
           document.querySelectorAll('meta[name="theme-color"]').forEach(function (m) { m.content = '#0c0e0d' })
           return
         }

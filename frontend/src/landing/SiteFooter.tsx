@@ -2,6 +2,7 @@ import {
   CONTACT_EMAIL,
   DEMO_PATH,
   DOWNLOAD_URL,
+  MAC_DOWNLOAD_URL,
   GITHUB_URL,
   ISSUES_URL,
   PRIVACY_PATH,
@@ -22,6 +23,7 @@ const COLUMNS: { title: string; links: { label: string; href: string }[] }[] = [
     title: 'Product',
     links: [
       { label: 'Download for Windows', href: DOWNLOAD_URL },
+      { label: 'Download for Mac (beta)', href: MAC_DOWNLOAD_URL },
       { label: 'Live demo', href: DEMO_PATH },
       { label: 'Web app', href: WEB_APP_PATH },
       { label: 'Questions', href: '/#faq' },

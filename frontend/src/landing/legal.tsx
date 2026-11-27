@@ -3,7 +3,9 @@ import type { ReactNode } from 'react'
 import {
   CONTACT_EMAIL,
   PRIVACY_EMAIL,
+  DEMO_PATH,
   DOWNLOAD_URL,
+  MAC_DOWNLOAD_URL,
   GITHUB_URL,
   ISSUES_URL,
   LEGAL_UPDATED,
@@ -328,8 +330,15 @@ export function LegalPage({ kind }: { kind: LegalKind }) {
           </a>
           <div className="nx-nav-end">
             <a className="nx-legal-signin" href={SIGN_IN_PATH}>Sign in</a>
-            <a className="nx-btn nx-btn-primary nx-btn-sm" href={DOWNLOAD_URL} aria-label="Download Nexus for Windows">
+            {/* The same OS-aware pair as the landing nav (client.ts sets html[data-os]). */}
+            <a className="nx-btn nx-btn-primary nx-btn-sm" data-for="win other" href={DOWNLOAD_URL} aria-label="Download Nexus for Windows">
               <Download size={15} aria-hidden="true" /> Download
+            </a>
+            <a className="nx-btn nx-btn-primary nx-btn-sm" data-for="mac" href={MAC_DOWNLOAD_URL} aria-label="Download the Nexus macOS beta">
+              <Download size={15} aria-hidden="true" /> Download
+            </a>
+            <a className="nx-btn nx-btn-primary nx-btn-sm" data-for="mobile" href={DEMO_PATH}>
+              Live demo
             </a>
           </div>
         </div>
