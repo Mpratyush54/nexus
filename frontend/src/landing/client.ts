@@ -3,7 +3,8 @@ import { detectOS, type NavigatorLike } from './os'
 /*
  * The only script the landing page runs. No React: the markup is prerendered.
  * The OS-aware downloads, the feature tabs, the sticky nav rule, scroll
- * reveals, the film loop and the film player. The page is dark only, so there is no theme code.
+ * reveals, the film loop and the film player, plus the ambient background
+ * (ambient.ts, loaded after first paint). The page is dark only, so there is no theme code.
  */
 
 /** Offer the download that fits this visitor (src/landing/os.ts); CSS swaps the buttons. */
@@ -218,6 +219,19 @@ function initPlayer() {
   })
 }
 
+/**
+ * The living background: its own small chunk, started once the page has
+ * loaded and the browser is idle, so it never delays the first paint.
+ */
+function initAmbient() {
+  const host = document.querySelector<HTMLElement>('.nx-ambient')
+  if (!host || !document.createElement('canvas').getContext) return
+  const go = () => void import('./ambient').then((m) => m.startAmbient(host)).catch(() => undefined)
+  const idle = () => (typeof window.requestIdleCallback === 'function' ? window.requestIdleCallback(go, { timeout: 2000 }) : setTimeout(go, 200))
+  if (document.readyState === 'complete') idle()
+  else window.addEventListener('load', idle, { once: true })
+}
+
 export function initLanding() {
   initOS()
   initTabs()
@@ -225,4 +239,5 @@ export function initLanding() {
   initReveal()
   initFilmLoop()
   initPlayer()
+  initAmbient()
 }

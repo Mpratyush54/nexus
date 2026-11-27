@@ -186,3 +186,198 @@ test('the Control tab shows the desktop review panel with its own caption', () =
   assert.match(panel, /shots\/desk-review-1456\.png/)
   assert.match(panel, /Nexus for Windows <span aria-hidden="true">·<\/span> Review changes/)
 })
+
+/* ---------- ambient background (src/landing/ambient.ts) ---------- */
+
+type Listener = (e: unknown) => void
+function fakeTarget() {
+  const on = new Map<string, Set<Listener>>()
+  return {
+    addEventListener: (t: string, f: Listener) => {
+      if (!on.has(t)) on.set(t, new Set())
+      on.get(t)!.add(f)
+    },
+    removeEventListener: (t: string, f: Listener) => void on.get(t)?.delete(f),
+    emit: (t: string, e: unknown = {}) => on.get(t)?.forEach((f) => f(e)),
+    count: (t: string) => on.get(t)?.size ?? 0,
+  }
+}
+
+/** Just enough of a browser for ambient.ts: a 2D context that draws nothing, a frame queue, an observer. */
+function fakeBrowser({ reduce = false, cores = 8, memory = 8, width = 1440, height = 900 } = {}) {
+  const frames = new Map<number, (now: number) => void>()
+  let id = 0
+  let now = 0
+  let io: { cb: (e: { isIntersecting: boolean }[]) => void; observed: unknown[] } | null = null
+  const ctx = new Proxy({} as Record<string | symbol, unknown>, {
+    get: (o, k) =>
+      k in o ? o[k]
+      : k === 'measureText' ? () => ({ width: 80 })
+      : k === 'createLinearGradient' || k === 'createRadialGradient' ? () => ({ addColorStop() {} })
+      : () => undefined,
+    set: (o, k, v) => {
+      o[k] = v
+      return true
+    },
+  })
+  const canvas = {
+    attrs: {} as Record<string, string>,
+    className: '',
+    width: 0,
+    height: 0,
+    removed: false,
+    setAttribute(k: string, v: string) {
+      this.attrs[k] = v
+    },
+    getContext: () => ctx,
+    remove() {
+      this.removed = true
+    },
+  }
+  const classes = new Set<string>()
+  const host = {
+    clientWidth: width,
+    clientHeight: height,
+    children: [] as unknown[],
+    appendChild(c: unknown) {
+      this.children.push(c)
+    },
+    classList: { add: (c: string) => void classes.add(c), remove: (c: string) => void classes.delete(c) },
+  }
+  const heading = { getBoundingClientRect: () => ({ left: 370, top: 160, right: 1070, bottom: 420, width: 700, height: 260 }) }
+  const doc = {
+    ...fakeTarget(),
+    visibilityState: 'visible',
+    createElement: () => canvas,
+    querySelector: (s: string) => (s === '.nx-hero-copy h1' ? heading : null),
+    querySelectorAll: () => [heading],
+  }
+  const win = {
+    ...fakeTarget(),
+    innerWidth: width,
+    innerHeight: height,
+    scrollY: 0,
+    devicePixelRatio: 3,
+    navigator: { hardwareConcurrency: cores, deviceMemory: memory },
+    matchMedia: (q: string) => ({ matches: q.includes('reduce') ? reduce : q.includes('fine'), ...fakeTarget() }),
+    requestAnimationFrame: (f: (now: number) => void) => {
+      frames.set(++id, f)
+      return id
+    },
+    cancelAnimationFrame: (i: number) => void frames.delete(i),
+    IntersectionObserver: class {
+      constructor(cb: (e: { isIntersecting: boolean }[]) => void) {
+        io = { cb, observed: [] }
+      }
+      observe(el: unknown) {
+        io!.observed.push(el)
+      }
+      disconnect() {}
+    },
+  }
+  /** Run animation frames for `ms` of wall time at 60 Hz. */
+  const run = (ms: number) => {
+    for (const end = now + ms; now < end; ) {
+      now += 1000 / 60
+      const due = [...frames.values()]
+      frames.clear()
+      for (const f of due) f(now)
+    }
+  }
+  return { win, doc, host, canvas, classes, run, pending: () => frames.size, intersect: (v: boolean) => io!.cb([{ isIntersecting: v }]), io: () => io }
+}
+
+async function ambientIn(b: ReturnType<typeof fakeBrowser>) {
+  const { startAmbient } = await import('../src/landing/ambient')
+  return startAmbient(b.host as unknown as HTMLElement, { win: b.win as never, doc: b.doc as never, seed: 7 })
+}
+
+test('the ambient layer is prerendered as decoration only: aria-hidden, no pointer events, fixed behind the page', () => {
+  assert.match(html, /<div class="nx"><div class="nx-ambient" aria-hidden="true"><\/div>/)
+  const css = read('src', 'landing', 'site.css')
+  const rule = css.match(/\.nx-ambient \{[^}]*\}/)?.[0] ?? ''
+  assert.match(rule, /position: fixed;/)
+  assert.match(rule, /z-index: -1;/)
+  assert.match(rule, /pointer-events: none;/)
+  // No-JS fallback: a still CSS lattice the canvas cross-fades over.
+  assert.match(css, /\.nx-ambient::before \{/)
+  assert.match(css, /\.nx-ambient\.is-live::before \{ opacity: 0; \}/)
+  // Loaded lazily, after the page has loaded, as its own chunk.
+  const client = read('src', 'landing', 'client.ts')
+  assert.match(client, /import\('\.\/ambient'\)/)
+  assert.ok(!/^import .*ambient/m.test(client), 'ambient.ts must not be in the first chunk')
+})
+
+test('ambient: the canvas it adds is aria-hidden, sized for the screen and capped at 2x', async () => {
+  const b = fakeBrowser()
+  const amb = await ambientIn(b)
+  assert.deepEqual(b.host.children, [b.canvas])
+  assert.equal(b.canvas.attrs['aria-hidden'], 'true')
+  assert.equal(b.canvas.width, 1440 * 2)
+  assert.equal(b.canvas.height, 900 * 2)
+  assert.ok(b.classes.has('is-live'))
+  assert.equal(amb.mode(), 'live')
+  amb.stop()
+  assert.ok(b.canvas.removed)
+  assert.equal(b.win.count('resize'), 0)
+  assert.equal(b.doc.count('visibilitychange'), 0)
+})
+
+test('ambient: with reduced motion it draws one still frame and never animates', async () => {
+  const b = fakeBrowser({ reduce: true })
+  const amb = await ambientIn(b)
+  assert.equal(amb.mode(), 'static')
+  assert.equal(amb.frames(), 1)
+  assert.equal(amb.running(), false)
+  assert.equal(b.pending(), 0, 'no animation frame requested')
+  b.run(2000)
+  assert.equal(amb.frames(), 1)
+  amb.stop()
+})
+
+test('ambient: about 30 fps, paused while the tab is hidden or the layer is off screen', async () => {
+  const b = fakeBrowser()
+  const amb = await ambientIn(b)
+  assert.ok(amb.running())
+  let f0 = amb.frames()
+  b.run(1000)
+  const fps = amb.frames() - f0
+  assert.ok(fps >= 28 && fps <= 31, `${fps} frames in a second`)
+
+  b.doc.visibilityState = 'hidden'
+  b.doc.emit('visibilitychange')
+  assert.equal(amb.running(), false)
+  f0 = amb.frames()
+  b.run(1000)
+  assert.equal(amb.frames(), f0, 'drew while the tab was hidden')
+  b.doc.visibilityState = 'visible'
+  b.doc.emit('visibilitychange')
+  assert.ok(amb.running())
+
+  assert.deepEqual(b.io()!.observed, [b.host])
+  b.intersect(false)
+  assert.equal(amb.running(), false)
+  f0 = amb.frames()
+  b.run(500)
+  assert.equal(amb.frames(), f0, 'drew while off screen')
+  b.intersect(true)
+  assert.ok(amb.running())
+  b.run(20_000) // a long stretch with pulses, hops and notes must not throw
+  amb.stop()
+  assert.equal(amb.running(), false)
+})
+
+test('ambient: fewer points on phones and low-power devices', async () => {
+  const { pointBudget, isLowPower } = await import('../src/landing/ambient')
+  assert.ok(isLowPower({ hardwareConcurrency: 4 }))
+  assert.ok(isLowPower({ hardwareConcurrency: 8, deviceMemory: 4 }))
+  assert.ok(!isLowPower({ hardwareConcurrency: 8, deviceMemory: 8 }))
+  const desk = pointBudget(1440, 900, false)
+  assert.ok(pointBudget(375, 812, false) < desk / 2)
+  assert.ok(pointBudget(1440, 900, true) < desk)
+  const b = fakeBrowser({ cores: 4, width: 375, height: 812 })
+  const amb = await ambientIn(b)
+  assert.equal(amb.points(), pointBudget(375, 812, true))
+  assert.equal(b.canvas.width, Math.round(375 * 1.5), 'low-power devices draw at 1.5x at most')
+  amb.stop()
+})

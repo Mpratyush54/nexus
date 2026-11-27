@@ -58,6 +58,7 @@ Radius: 6px controls, 10px panels, 14px app windows, 20px for the two big contai
 - Brand mark: the desktop app icon itself (`public/brand/nexus-app.svg`, dark tile + mark, same artwork as `Nexus.ico`) everywhere: landing header/footer, portal sidebar, favicon, PWA icons, OG image.
 - Film: poster under a dark scrim, with the play button and "Watch the film · 1:26" on a solid badge so it is legible over any frame; it opens the full film with sound in a modal `<dialog>` player (custom controls, keyboard, Esc closes, focus restored). A muted 16 s cut loops behind the poster while in view, except with reduced motion or Save-Data.
 - FAQ: native `<details>`; content is also emitted as FAQPage JSON-LD from the same data.
+- Ambient background (`src/landing/ambient.ts`, `.nx-ambient`): a fixed canvas behind the whole page. Faint points drift and link up; the six agents sit around the headline as small clusters in their dot colours, wired into it like the pipeline wires them into Nexus; amber pulses run along links and wires; now and then a tiny mono note ("decision saved", "why: retry.ts:15", "context loaded · from Codex") fades in at a node in open space and out again. It fades to 22% near text blocks (so text keeps its contrast) and to 60% once the hero is scrolled away; the opaque panels and the film band cover it. Canvas 2D at 30 fps, DPR capped at 2 (1.5 on low-power devices), its own chunk loaded once the page has loaded and the browser is idle; paused while the tab is hidden, the layer is not rendered or the film is open; fewer points on small screens and when `hardwareConcurrency` or `deviceMemory` is 4 or less. Reduced motion: one still frame. No JS: a still CSS lattice of points at the sides. A mouse pulls nearby points in slightly. `aria-hidden`, no pointer events.
 
 ## Imagery and icons
 
@@ -65,4 +66,4 @@ Lucide icons at 16-18px, 1.75 stroke. Product visuals are real screenshots only 
 
 ## Motion
 
-A short staggered rise for the hero copy and pipeline on load, the pipeline's flowing wires and stage pulse, the tab cross-fade, a one-time rise as sections scroll into view, and the film loop. Everything honours `prefers-reduced-motion` (no animation, no autoplay, nothing hidden).
+The ambient background (always on, about 30 fps, see Components), a short staggered rise for the hero copy and pipeline on load, the pipeline's flowing wires and stage pulse, the tab cross-fade, a one-time rise as sections scroll into view, and the film loop. Everything honours `prefers-reduced-motion` (no animation, no autoplay, nothing hidden).

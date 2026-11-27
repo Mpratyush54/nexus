@@ -112,6 +112,8 @@ html.nx-app #root > .nx { display: none; }
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overflow-x: clip;
+  /* Its own stacking context, so the ambient layer (z-index -1) sits above the page background and below everything else. */
+  isolation: isolate;
 }
 .nx *, .nx *::before, .nx *::after { box-sizing: border-box; }
 /* Resets use :where() so component classes always win. */
@@ -148,6 +150,32 @@ html.nx-app #root > .nx { display: none; }
 .nx :where(h2) { font-size: clamp(32px, 4.2vw, 54px); line-height: 1.04; max-width: 20ch; }
 .nx :where(h3) { font: 600 17px/1.35 var(--f-body); letter-spacing: -0.01em; }
 .nx-lede { font-size: 18px; color: var(--nx-ink-2); max-width: 58ch; text-wrap: pretty; }
+
+/* ---------- ambient background (src/landing/ambient.ts) ---------- */
+
+/* Fixed behind the whole page; the opaque panels and the film band sit on top
+   of it. Without JS (or until the canvas starts) a still lattice of faint
+   points at the sides stands in; the canvas cross-fades over it. The large
+   viewport height keeps it covering the screen while a phone's toolbar hides. */
+.nx-ambient {
+  position: fixed; left: 0; top: 0; z-index: -1; width: 100%; height: 100vh; height: 100lvh;
+  pointer-events: none; overflow: hidden;
+}
+.nx-ambient::before {
+  content: ''; position: absolute; inset: 0;
+  background: radial-gradient(circle, rgb(236 235 230 / 0.16) 0 1px, transparent 1.5px) 0 0 / 72px 72px;
+  -webkit-mask-image: linear-gradient(90deg, #000, transparent 26%, transparent 74%, #000), linear-gradient(#000, transparent 85%);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(90deg, #000, transparent 26%, transparent 74%, #000), linear-gradient(#000, transparent 85%);
+  mask-composite: intersect;
+  transition: opacity 1.6s var(--ease);
+}
+.nx-ambient-canvas { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; transition: opacity 1.6s var(--ease); }
+.nx-ambient.is-live::before { opacity: 0; }
+.nx-ambient.is-live .nx-ambient-canvas { opacity: 1; }
+@media (prefers-reduced-motion: reduce) {
+  .nx-ambient::before, .nx-ambient-canvas { transition: none; }
+}
 
 /* ---------- buttons ---------- */
 
